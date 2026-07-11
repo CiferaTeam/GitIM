@@ -59,6 +59,8 @@ fn make_state(workspace_root: std::path::PathBuf, agents: Vec<AgentInfo>) -> Sha
         activity_tx: tx,
         auth_failed: Arc::new(AtomicBool::new(false)),
         git_config: None,
+        asset_token: gitim_runtime::assets::AssetWorkspaceToken::new(),
+        initialization: None,
     };
     let mut rs = RuntimeState::default();
     rs.workspaces.insert("test".into(), ctx);

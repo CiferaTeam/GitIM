@@ -1,4 +1,6 @@
-use super::{AssetError, AssetMetadata, AssetService, AssetStore, RequestBudget};
+use super::{
+    AssetError, AssetMetadata, AssetService, AssetStore, AssetWorkspaceToken, RequestBudget,
+};
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, RawQuery, State};
 use axum::http::{header, HeaderMap, HeaderValue, Method, Request, StatusCode};
@@ -10,9 +12,10 @@ use futures::StreamExt;
 use gitim_core::types::{AssetRef, MAX_ASSET_FILENAME_BYTES, MAX_ASSET_REF_BYTES};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use tokio::sync::OwnedSemaphorePermit;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
@@ -76,6 +79,7 @@ struct UploadedAsset {
 struct WorkspaceAssetSnapshot {
     workspace_root: PathBuf,
     binding: String,
+    token: AssetWorkspaceToken,
     runtime_id: String,
     service: Arc<AssetService>,
 }
@@ -117,6 +121,47 @@ enum BrowserRoute {
     Resolve,
 }
 
+#[derive(Clone)]
+struct AssetHttpPolicy {
+    allowed_web_origins: Arc<HashSet<String>>,
+}
+
+impl AssetHttpPolicy {
+    fn from_environment() -> Self {
+        let configured = std::env::var("GITIM_WEB_ORIGINS").ok();
+        Self::new(
+            configured
+                .as_deref()
+                .into_iter()
+                .flat_map(|origins| origins.split(','))
+                .map(str::trim),
+        )
+    }
+
+    fn new(configured: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
+        let mut allowed_web_origins = [
+            "https://gitim.io",
+            "https://www.gitim.io",
+            "http://localhost:5173",
+            "http://127.0.0.1:5173",
+            "http://[::1]:5173",
+            "http://localhost:4173",
+            "http://127.0.0.1:4173",
+            "http://[::1]:4173",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+        allowed_web_origins.extend(configured.into_iter().filter_map(|origin| {
+            let origin = origin.as_ref();
+            is_canonical_origin(origin).then(|| origin.to_string())
+        }));
+        Self {
+            allowed_web_origins: Arc::new(allowed_web_origins),
+        }
+    }
+}
+
 #[derive(Default)]
 struct FetchMetadata<'a> {
     site: Option<&'a str>,
@@ -132,16 +177,36 @@ impl FetchMetadata<'_> {
 }
 
 pub fn router() -> Router<SharedRuntimeState> {
+    router_with_policy(MAX_UPLOAD_HTTP_BYTES, AssetHttpPolicy::from_environment())
+}
+
+pub(crate) fn router_with_configured_origins(
+    max_upload_bytes: usize,
+    configured_origins: Vec<String>,
+) -> Router<SharedRuntimeState> {
+    router_with_policy(max_upload_bytes, AssetHttpPolicy::new(configured_origins))
+}
+
+fn router_with_policy(
+    max_upload_bytes: usize,
+    policy: AssetHttpPolicy,
+) -> Router<SharedRuntimeState> {
     let upload = Router::new()
         .route("/assets", post(upload_assets))
-        .route_layer(middleware::from_fn(guard_upload_browser))
-        .layer(DefaultBodyLimit::max(MAX_UPLOAD_HTTP_BYTES));
+        .route_layer(middleware::from_fn_with_state(
+            policy.clone(),
+            guard_upload_browser,
+        ))
+        .layer(DefaultBodyLimit::max(max_upload_bytes));
     let resolve = Router::new()
         .route(
             "/assets/resolve/{origin}/{hash}",
             get(resolve_asset).head(resolve_asset),
         )
-        .route_layer(middleware::from_fn(guard_resolve_browser));
+        .route_layer(middleware::from_fn_with_state(
+            policy,
+            guard_resolve_browser,
+        ));
     let objects = Router::new()
         .route(
             "/assets/objects/{hash}",
@@ -177,21 +242,40 @@ pub(crate) async fn open_workspace_store(
     service: Arc<AssetService>,
     workspace_root: PathBuf,
     config: &WorkspaceConfig,
+    token: AssetWorkspaceToken,
 ) -> Result<AssetStore, AssetError> {
     let binding = workspace_binding(config)?;
-    open_store_async(service, workspace_root, binding).await
+    activate_store_async(service, workspace_root, binding, token).await
 }
 
-async fn guard_upload_browser(request: Request<Body>, next: Next) -> Response {
-    if browser_request_allowed(request.headers(), BrowserRoute::Upload, request.method()) {
+async fn guard_upload_browser(
+    State(policy): State<AssetHttpPolicy>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if browser_request_allowed(
+        request.headers(),
+        BrowserRoute::Upload,
+        request.method(),
+        &policy,
+    ) {
         next.run(request).await
     } else {
         forbidden_response()
     }
 }
 
-async fn guard_resolve_browser(request: Request<Body>, next: Next) -> Response {
-    if browser_request_allowed(request.headers(), BrowserRoute::Resolve, request.method()) {
+async fn guard_resolve_browser(
+    State(policy): State<AssetHttpPolicy>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if browser_request_allowed(
+        request.headers(),
+        BrowserRoute::Resolve,
+        request.method(),
+        &policy,
+    ) {
         next.run(request).await
     } else {
         forbidden_response()
@@ -206,7 +290,12 @@ async fn reject_browser_context(request: Request<Body>, next: Next) -> Response 
     }
 }
 
-fn browser_request_allowed(headers: &HeaderMap, route: BrowserRoute, method: &Method) -> bool {
+fn browser_request_allowed(
+    headers: &HeaderMap,
+    route: BrowserRoute,
+    method: &Method,
+    policy: &AssetHttpPolicy,
+) -> bool {
     let origin = match singleton_header(headers, header::ORIGIN.as_str()) {
         Ok(origin) => origin,
         Err(()) => return false,
@@ -216,7 +305,7 @@ fn browser_request_allowed(headers: &HeaderMap, route: BrowserRoute, method: &Me
         Err(()) => return false,
     };
     if let Some(origin) = origin {
-        return is_allowed_web_origin(origin)
+        return is_allowed_web_origin(origin, policy)
             && matches!(
                 metadata.site,
                 Some("cross-site" | "same-site" | "same-origin")
@@ -284,34 +373,8 @@ fn singleton_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a
     Ok(Some(value))
 }
 
-fn is_allowed_web_origin(raw: &str) -> bool {
-    if !is_canonical_origin(raw) {
-        return false;
-    }
-    if matches!(raw, "https://gitim.io" | "https://www.gitim.io")
-        || matches!(
-            raw,
-            "http://localhost:5173"
-                | "http://127.0.0.1:5173"
-                | "http://[::1]:5173"
-                | "http://localhost:4173"
-                | "http://127.0.0.1:4173"
-                | "http://[::1]:4173"
-        )
-    {
-        return true;
-    }
-    std::env::var("GITIM_WEB_ORIGINS")
-        .ok()
-        .into_iter()
-        .flat_map(|configured| {
-            configured
-                .split(',')
-                .map(str::trim)
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .any(|configured| configured == raw && is_canonical_origin(&configured))
+fn is_allowed_web_origin(raw: &str, policy: &AssetHttpPolicy) -> bool {
+    is_canonical_origin(raw) && policy.allowed_web_origins.contains(raw)
 }
 
 fn is_canonical_origin(raw: &str) -> bool {
@@ -351,7 +414,7 @@ async fn upload_assets(
         Ok(snapshot) => snapshot,
         Err(error) => return error.into_response(),
     };
-    let _permit = match snapshot.service.acquire_upload().await {
+    let permit = match snapshot.service.acquire_upload().await {
         Ok(permit) => permit,
         Err(error) => return asset_error_response(&snapshot.service, &slug, error),
     };
@@ -359,6 +422,7 @@ async fn upload_assets(
         Arc::clone(&snapshot.service),
         snapshot.workspace_root,
         snapshot.binding,
+        snapshot.token,
     )
     .await
     {
@@ -407,29 +471,36 @@ async fn upload_assets(
             Ok(name) => name,
             Err(error) => return asset_error_response(&snapshot.service, &slug, error),
         };
+        let request_limit = store.limits().max_request_bytes;
         let chunks = field
-            .map(|chunk| chunk.map_err(|_| std::io::Error::other("multipart asset stream failed")));
+            .map(move |chunk| chunk.map_err(|error| multipart_asset_error(&error, request_limit)));
         match store.stage_stream(name, chunks, &mut budget).await {
             Ok(asset) => staged.push(asset),
             Err(error) => return asset_error_response(&snapshot.service, &slug, error),
         }
     }
 
-    let stored = match store
-        .persist_batch_with_outcomes(&snapshot.runtime_id, staged)
-        .await
-    {
-        Ok(stored) => stored,
-        Err(error) => return asset_error_response(&snapshot.service, &slug, error),
+    let persistence = tokio::spawn(persist_upload_owned(
+        Arc::clone(&snapshot.service),
+        store,
+        permit,
+        slug.clone(),
+        snapshot.runtime_id.clone(),
+        staged,
+    ));
+    let stored = match persistence.await {
+        Ok(Ok(stored)) => stored,
+        Ok(Err(error)) => {
+            return error_response(error.status_code(), error.error_code(), &error.to_string())
+        }
+        Err(error) => {
+            let error = AssetError::Store(std::io::Error::other(format!(
+                "asset persistence task failed: {error}"
+            )));
+            record_store_failure(&snapshot.service, &slug, &error);
+            return error_response(error.status_code(), error.error_code(), &error.to_string());
+        }
     };
-    for asset in &stored {
-        emit_persistence_event(
-            &slug,
-            asset.asset_ref(),
-            asset.deduplicated(),
-            &snapshot.runtime_id,
-        );
-    }
     let refs = stored
         .into_iter()
         .map(super::store::StoredAsset::into_asset_ref)
@@ -438,24 +509,41 @@ async fn upload_assets(
     Json(UploadResponse { ok: true, assets }).into_response()
 }
 
-fn emit_persistence_event(
-    workspace: &str,
-    asset_ref: &AssetRef,
-    deduplicated: bool,
-    origin_runtime_id: &str,
-) {
-    tracing::info!(
-        event = if deduplicated {
-            "asset_dedupe"
-        } else {
-            "asset_upload"
-        },
-        workspace,
-        hash_prefix = short_hash(&asset_ref.sha256),
-        bytes = asset_ref.size,
-        origin_runtime_id,
-        "asset persistence complete"
-    );
+async fn persist_upload_owned(
+    service: Arc<AssetService>,
+    store: AssetStore,
+    permit: OwnedSemaphorePermit,
+    workspace: String,
+    runtime_id: String,
+    staged: Vec<super::store::StagedAsset>,
+) -> Result<Vec<super::store::StoredAsset>, AssetError> {
+    let _permit = permit;
+    #[cfg(feature = "test-support")]
+    service.wait_before_persist().await;
+    let stored = match store.persist_batch_with_outcomes(&runtime_id, staged).await {
+        Ok(stored) => stored,
+        Err(error) => {
+            record_store_failure(&service, &workspace, &error);
+            return Err(error);
+        }
+    };
+    for asset in &stored {
+        service.record_persistence(&workspace, asset.asset_ref(), asset.deduplicated());
+    }
+    Ok(stored)
+}
+
+fn multipart_asset_error(
+    error: &axum::extract::multipart::MultipartError,
+    request_limit: u64,
+) -> AssetError {
+    if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        AssetError::RequestTooLarge {
+            limit: request_limit,
+        }
+    } else {
+        AssetError::Invalid("invalid multipart asset upload".to_string())
+    }
 }
 
 fn sanitize_upload_name(raw: Option<&str>) -> Result<String, AssetError> {
@@ -508,7 +596,16 @@ async fn resolve_asset(
         Ok(options) => options,
         Err(()) => return invalid_ref_response(),
     };
-    serve_local(state, path.slug, path.hash, options, request).await
+    let origin_runtime_id = path.origin;
+    serve_local(
+        state,
+        path.slug,
+        path.hash,
+        options,
+        Some(origin_runtime_id),
+        request,
+    )
+    .await
 }
 
 async fn local_object(
@@ -524,6 +621,7 @@ async fn local_object(
         path.slug,
         path.hash,
         ResolveOptions::default(),
+        None,
         request,
     )
     .await
@@ -534,6 +632,7 @@ async fn serve_local(
     slug: String,
     hash: String,
     options: ResolveOptions,
+    origin_runtime_id: Option<String>,
     request: Request<Body>,
 ) -> Response {
     let snapshot = match snapshot_workspace(&state, &slug, false) {
@@ -541,10 +640,12 @@ async fn serve_local(
         Err(error) => return error.into_response(),
     };
     let service = Arc::clone(&snapshot.service);
+    let origin_runtime_id = origin_runtime_id.unwrap_or(snapshot.runtime_id.clone());
     let store = match open_store_async(
         Arc::clone(&service),
         snapshot.workspace_root,
         snapshot.binding,
+        snapshot.token,
     )
     .await
     {
@@ -579,9 +680,13 @@ async fn serve_local(
         == Some(etag.as_str())
         && if_none_match.next().is_none();
     if exact_strong_match {
+        service.record_local_hit(&slug, &hash, verified.metadata().size, &origin_runtime_id);
         return not_modified_response(&etag);
     }
     let metadata = verified.metadata().clone();
+    if request.headers().get_all(header::RANGE).iter().count() > 1 {
+        return range_not_satisfiable_response(&metadata, &etag, &options);
+    }
     let mime = match metadata.media_type.parse::<mime::Mime>() {
         Ok(mime) => mime,
         Err(_) => return asset_error_response(&service, &slug, AssetError::LocalCorruption),
@@ -605,7 +710,12 @@ async fn serve_local(
     if let Err(error) = ensure_serve_capability(Arc::clone(&verified)).await {
         return asset_error_response(&service, &slug, error);
     }
-    tracing::info!(workspace = %slug, hash = %short_hash(&hash), bytes = metadata.size, "asset local hit");
+    if matches!(
+        response.status(),
+        StatusCode::OK | StatusCode::PARTIAL_CONTENT
+    ) {
+        service.record_local_hit(&slug, &hash, metadata.size, &origin_runtime_id);
+    }
     decorate_file_response(response, &metadata, &etag, &options)
 }
 
@@ -657,6 +767,21 @@ fn decorate_file_response(
             .insert(header::CONTENT_DISPOSITION, value);
     }
     response
+}
+
+fn range_not_satisfiable_response(
+    metadata: &AssetMetadata,
+    etag: &str,
+    options: &ResolveOptions,
+) -> Response {
+    let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+    if let Ok(value) = HeaderValue::from_str(&format!("bytes */{}", metadata.size)) {
+        response.headers_mut().insert(header::CONTENT_RANGE, value);
+    }
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    decorate_file_response(response, metadata, etag, options)
 }
 
 fn inline_safe(metadata: &AssetMetadata) -> bool {
@@ -815,6 +940,7 @@ fn snapshot_workspace(
     Ok(WorkspaceAssetSnapshot {
         workspace_root: workspace.path.clone(),
         binding,
+        token: workspace.asset_token,
         runtime_id: runtime.runtime_id.clone(),
         service: Arc::clone(&runtime.assets),
     })
@@ -824,33 +950,33 @@ async fn open_store_async(
     service: Arc<AssetService>,
     workspace_root: PathBuf,
     binding: String,
+    token: AssetWorkspaceToken,
 ) -> Result<AssetStore, AssetError> {
-    tokio::task::spawn_blocking(move || service.open_store(workspace_root, binding))
+    tokio::task::spawn_blocking(move || {
+        service.open_registered_store(workspace_root, &binding, token)
+    })
+    .await
+    .map_err(|_| AssetError::Store(std::io::Error::other("asset store task failed")))?
+}
+
+async fn activate_store_async(
+    service: Arc<AssetService>,
+    workspace_root: PathBuf,
+    binding: String,
+    token: AssetWorkspaceToken,
+) -> Result<AssetStore, AssetError> {
+    tokio::task::spawn_blocking(move || service.activate_workspace(workspace_root, binding, token))
         .await
         .map_err(|_| AssetError::Store(std::io::Error::other("asset store task failed")))?
 }
 
 fn asset_error_response(service: &AssetService, workspace: &str, error: AssetError) -> Response {
-    if matches!(
-        error,
-        AssetError::Store(_)
-            | AssetError::Invariant(_)
-            | AssetError::StaleBinding
-            | AssetError::LocalCorruption
-    ) {
-        service.store_failures.fetch_add(1, Ordering::Relaxed);
-        emit_store_failure_event(workspace, error.error_code());
-    }
+    record_store_failure(service, workspace, &error);
     error_response(error.status_code(), error.error_code(), &error.to_string())
 }
 
-fn emit_store_failure_event(workspace: &str, error_code: &str) {
-    tracing::warn!(
-        event = "asset_store_failure",
-        workspace,
-        error_code,
-        "asset store operation failed"
-    );
+fn record_store_failure(service: &AssetService, workspace: &str, error: &AssetError) {
+    service.record_store_failure(workspace, error);
 }
 
 fn invalid_ref_response() -> Response {
@@ -873,56 +999,9 @@ fn error_response(status: StatusCode, error_code: &'static str, error: &str) -> 
         .into_response()
 }
 
-fn short_hash(hash: &str) -> &str {
-    hash.get(..12).unwrap_or(hash)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
-    use std::fmt;
-    use std::sync::{Arc, Mutex};
-    use tracing::field::{Field, Visit};
-    use tracing::{Event, Subscriber};
-    use tracing_subscriber::layer::{Context, SubscriberExt};
-    use tracing_subscriber::Layer;
-
-    #[derive(Clone, Default)]
-    struct EventCapture {
-        events: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
-    }
-
-    impl<S> Layer<S> for EventCapture
-    where
-        S: Subscriber,
-    {
-        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
-            let mut fields = BTreeMap::new();
-            event.record(&mut FieldCapture(&mut fields));
-            self.events
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(fields);
-        }
-    }
-
-    struct FieldCapture<'a>(&'a mut BTreeMap<String, String>);
-
-    impl Visit for FieldCapture<'_> {
-        fn record_u64(&mut self, field: &Field, value: u64) {
-            self.0.insert(field.name().to_string(), value.to_string());
-        }
-
-        fn record_str(&mut self, field: &Field, value: &str) {
-            self.0.insert(field.name().to_string(), value.to_string());
-        }
-
-        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
-            self.0
-                .insert(field.name().to_string(), format!("{value:?}"));
-        }
-    }
 
     #[test]
     fn canonical_origins_reject_normalization_and_authority_tricks() {
@@ -939,62 +1018,5 @@ mod tests {
         ] {
             assert!(!is_canonical_origin(raw), "{raw}");
         }
-    }
-
-    #[test]
-    fn persistence_events_capture_upload_and_dedupe_fields_without_paths() {
-        let capture = EventCapture::default();
-        let subscriber = tracing_subscriber::registry().with(capture.clone());
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let asset_ref = AssetRef {
-            version: 1,
-            origin_runtime_id: "24a6489c-762e-4461-9247-a824807a6080".to_string(),
-            sha256: "a".repeat(64),
-            name: "file.bin".to_string(),
-            media_type: "application/octet-stream".to_string(),
-            size: 4,
-            width: None,
-            height: None,
-        };
-        tracing::dispatcher::with_default(&dispatch, || {
-            tracing::callsite::rebuild_interest_cache();
-            emit_persistence_event("room", &asset_ref, false, &asset_ref.origin_runtime_id);
-            emit_persistence_event("room", &asset_ref, true, &asset_ref.origin_runtime_id);
-            emit_store_failure_event("room", "asset_store_failed");
-        });
-
-        let events = capture
-            .events
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (index, expected_event) in ["asset_upload", "asset_dedupe"].iter().enumerate() {
-            let event = &events[index];
-            assert_eq!(
-                event.get("event").map(String::as_str),
-                Some(*expected_event)
-            );
-            assert_eq!(event.get("workspace").map(String::as_str), Some("room"));
-            assert_eq!(
-                event.get("hash_prefix").map(String::as_str),
-                Some("aaaaaaaaaaaa")
-            );
-            assert_eq!(event.get("bytes").map(String::as_str), Some("4"));
-            assert_eq!(
-                event.get("origin_runtime_id").map(String::as_str),
-                Some("24a6489c-762e-4461-9247-a824807a6080")
-            );
-            assert!(!format!("{event:?}").contains("/workspace"));
-        }
-        let failure = &events[2];
-        assert_eq!(
-            failure.get("event").map(String::as_str),
-            Some("asset_store_failure")
-        );
-        assert_eq!(failure.get("workspace").map(String::as_str), Some("room"));
-        assert_eq!(
-            failure.get("error_code").map(String::as_str),
-            Some("asset_store_failed")
-        );
-        assert!(!format!("{failure:?}").contains("/workspace"));
     }
 }

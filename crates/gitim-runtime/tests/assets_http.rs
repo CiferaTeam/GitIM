@@ -4,6 +4,8 @@ use axum::body::{Body, Bytes};
 use axum::http::{header, Method, Request, StatusCode};
 use futures::stream;
 use gitim_core::types::{AssetRef, MAX_ASSET_REF_BYTES};
+#[cfg(feature = "test-support")]
+use gitim_runtime::assets::AssetEvent;
 use gitim_runtime::assets::{AssetLimits, AssetService, AssetSource, AssetStore};
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
 use gitim_runtime::http::recover_from_config;
@@ -52,7 +54,17 @@ fn limits() -> AssetLimits {
 
 fn fixture_with_limits(limits: AssetLimits) -> Fixture {
     let workspace = tempfile::tempdir().unwrap();
-    let (app, state) = create_router();
+    let (app, state) =
+        gitim_runtime::http::create_router_with_asset_http_config(201 * 1024 * 1024, Vec::new());
+    fixture_from_router(workspace, app, state, limits)
+}
+
+fn fixture_from_router(
+    workspace: TempDir,
+    app: axum::Router,
+    state: SharedRuntimeState,
+    limits: AssetLimits,
+) -> Fixture {
     let mut ctx = WorkspaceContext::new(
         "room".to_string(),
         "Room".to_string(),
@@ -68,10 +80,18 @@ fn fixture_with_limits(limits: AssetLimits) -> Fixture {
             github_email: None,
         },
     });
+    let service = Arc::new(AssetService::new(limits));
+    service
+        .activate_workspace(
+            workspace.path(),
+            format!("local:{CREATED_AT}"),
+            ctx.asset_token,
+        )
+        .unwrap();
     {
         let mut runtime = state.lock().unwrap();
         runtime.runtime_id = RUNTIME_ID.to_string();
-        runtime.assets = Arc::new(AssetService::new(limits));
+        runtime.assets = service;
         runtime.workspaces.insert("room".to_string(), ctx);
     }
     Fixture {
@@ -79,6 +99,23 @@ fn fixture_with_limits(limits: AssetLimits) -> Fixture {
         state,
         workspace,
     }
+}
+
+#[cfg(feature = "test-support")]
+fn fixture_with_http_limit(max_upload_bytes: usize) -> Fixture {
+    let workspace = tempfile::tempdir().unwrap();
+    let (app, state) = gitim_runtime::http::create_router_with_asset_upload_limit(max_upload_bytes);
+    fixture_from_router(workspace, app, state, limits())
+}
+
+#[cfg(feature = "test-support")]
+fn fixture_with_origins(origins: &[&str]) -> Fixture {
+    let workspace = tempfile::tempdir().unwrap();
+    let (app, state) = gitim_runtime::http::create_router_with_asset_http_config(
+        201 * 1024 * 1024,
+        origins.iter().map(|origin| (*origin).to_string()).collect(),
+    );
+    fixture_from_router(workspace, app, state, limits())
 }
 
 fn fixture() -> Fixture {
@@ -366,33 +403,10 @@ async fn allowed_origin_fetch_metadata_is_singleton_and_consistent() {
     );
 }
 
-struct EnvGuard(Option<std::ffi::OsString>);
-
-impl EnvGuard {
-    fn set(name: &str, value: &str) -> Self {
-        let previous = std::env::var_os(name);
-        std::env::set_var(name, value);
-        Self(previous)
-    }
-}
-
-impl Drop for EnvGuard {
-    fn drop(&mut self) {
-        match self.0.take() {
-            Some(value) => std::env::set_var("GITIM_WEB_ORIGINS", value),
-            None => std::env::remove_var("GITIM_WEB_ORIGINS"),
-        }
-    }
-}
-
+#[cfg(feature = "test-support")]
 #[tokio::test]
-#[serial(gitim_web_origins)]
 async fn configured_origins_are_additive_exact_and_never_wildcards() {
-    let _guard = EnvGuard::set(
-        "GITIM_WEB_ORIGINS",
-        "https://chat.example, *, https://self.example:8443",
-    );
-    let fixture = fixture();
+    let fixture = fixture_with_origins(&["https://chat.example", "*", "https://self.example:8443"]);
     for (origin, expected) in [
         ("https://chat.example", StatusCode::OK),
         ("https://self.example:8443", StatusCode::OK),
@@ -619,6 +633,71 @@ async fn upload_rejects_unknown_empty_and_more_than_ten_fields_without_persistin
         );
         assert!(object_files(fixture.workspace.path()).is_empty());
     }
+}
+
+#[tokio::test]
+async fn multipart_stream_errors_keep_client_status_and_release_staging_state() {
+    let fixture = fixture();
+    let malformed = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"broken.bin\"\r\nContent-Type: application/octet-stream\r\n\r\npartial"
+    );
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(upload_request_with_body(Body::from(malformed)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(response_json(response).await["error_code"], "invalid_asset");
+    assert!(object_files(fixture.workspace.path()).is_empty());
+    let tmp = fixture
+        .workspace
+        .path()
+        .join(".gitim-runtime/assets/v1/tmp");
+    assert_eq!(
+        std::fs::read_dir(tmp)
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        0
+    );
+    let health = fixture
+        .app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response_json(health).await["asset_store_failures"], 0);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn multipart_http_body_limit_is_413_without_store_failure_accounting() {
+    let fixture = fixture_with_http_limit(128);
+    let body = [b'x'; 129];
+    let request = allowed_upload(&[(
+        "file",
+        "too-large.bin",
+        "application/octet-stream",
+        body.as_slice(),
+    )]);
+    let response = fixture.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(object_files(fixture.workspace.path()).is_empty());
+    let health = fixture
+        .app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response_json(health).await["asset_store_failures"], 0);
 }
 
 #[tokio::test]
@@ -859,10 +938,56 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
             .await
             .unwrap();
         assert_eq!(response.status(), expected_status, "{range}");
+        if expected_status == StatusCode::RANGE_NOT_SATISFIABLE {
+            assert_eq!(
+                response.headers()[header::CONTENT_RANGE],
+                format!("bytes */{}", PNG_1X1.len()),
+                "{range}"
+            );
+            assert_eq!(
+                response.headers()[header::ACCEPT_RANGES],
+                "bytes",
+                "{range}"
+            );
+            assert_eq!(
+                response.headers()["x-content-type-options"],
+                "nosniff",
+                "{range}"
+            );
+            assert_eq!(response.headers()[header::ETAG], etag, "{range}");
+        }
         let body = response_bytes(response).await;
         if let Some(expected_len) = expected_len {
             assert_eq!(body.len(), expected_len, "{range}");
         }
+    }
+
+    for method in [Method::GET, Method::HEAD] {
+        let mut request = Request::builder()
+            .method(method.clone())
+            .uri(&uri)
+            .body(Body::empty())
+            .unwrap();
+        request
+            .headers_mut()
+            .append(header::RANGE, "bytes=0-1".parse().unwrap());
+        request
+            .headers_mut()
+            .append(header::RANGE, "bytes=2-3".parse().unwrap());
+        let response = fixture.app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers()[header::CONTENT_RANGE],
+            format!("bytes */{}", PNG_1X1.len())
+        );
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, immutable, max-age=31536000"
+        );
+        assert_eq!(response.headers()[header::ETAG], etag);
+        assert!(response_bytes(response).await.is_empty());
     }
 
     let not_modified = fixture
@@ -1333,6 +1458,56 @@ async fn startup_recovery_opens_and_caches_the_bound_asset_store() {
 }
 
 #[cfg(feature = "test-support")]
+#[tokio::test]
+#[serial(asset_recovery_home)]
+async fn startup_recovery_store_failure_uses_the_central_asset_recorder() {
+    let _home = HomeGuard::install();
+    let workspace = tempfile::tempdir().unwrap();
+    WorkspaceConfig {
+        workspace: workspace.path().to_string_lossy().into_owned(),
+        created_at: CREATED_AT.to_string(),
+        git: GitConfig {
+            provider: GitProvider::Local,
+            remote_url: None,
+            token: None,
+            github_email: None,
+        },
+    }
+    .write(workspace.path())
+    .unwrap();
+    gitim_runtime::user_config::write(&UserConfig {
+        runtime_id: RUNTIME_ID.to_string(),
+        workspaces: vec![WorkspaceEntry {
+            slug: "room".to_string(),
+            workspace_name: "Room".to_string(),
+            path: workspace.path().to_string_lossy().into_owned(),
+        }],
+        listen_port: None,
+        fleet_nodes: Vec::new(),
+    })
+    .unwrap();
+    let (_app, state) = create_router();
+    let assets = Arc::clone(&state.lock().unwrap().assets);
+    let events = Arc::new(std::sync::Mutex::new(Vec::<AssetEvent>::new()));
+    assets.set_event_observer({
+        let events = Arc::clone(&events);
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    });
+    assets.inject_activation_store_failure_once();
+
+    recover_from_config(Arc::clone(&state)).await;
+
+    assert!(state.lock().unwrap().workspaces.contains_key("room"));
+    assert!(assets.health_snapshot(workspace.path()).is_none());
+    let events = events.lock().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].event, "asset_store_failure");
+    assert_eq!(events[0].workspace_slug, "room");
+    assert_eq!(events[0].error_code, Some("asset_store_failed"));
+    assert!(!format!("{:?}", events[0]).contains(workspace.path().to_string_lossy().as_ref()));
+}
+
+#[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn health_does_not_wait_for_the_store_operation_gate() {
     let fixture = fixture();
@@ -1352,6 +1527,8 @@ async fn health_does_not_wait_for_the_store_operation_gate() {
         .await
         .unwrap();
 
+    let attempted = Arc::new(Barrier::new(2));
+    service.inject_health_snapshot_attempt(Arc::clone(&attempted));
     let health = tokio::spawn(
         fixture.app.clone().oneshot(
             Request::builder()
@@ -1360,12 +1537,292 @@ async fn health_does_not_wait_for_the_store_operation_gate() {
                 .unwrap(),
         ),
     );
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    let completed_without_store_gate = health.is_finished();
+    tokio::task::spawn_blocking(move || attempted.wait())
+        .await
+        .unwrap();
+    let health = tokio::time::timeout(std::time::Duration::from_millis(100), health)
+        .await
+        .expect("health waited for the store operation gate")
+        .unwrap()
+        .unwrap();
     tokio::task::spawn_blocking(move || resume.wait())
         .await
         .unwrap();
     persist.await.unwrap().unwrap();
-    assert_eq!(health.await.unwrap().unwrap().status(), StatusCode::OK);
-    assert!(completed_without_store_gate);
+    assert_eq!(health.status(), StatusCode::OK);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_http_snapshot_cannot_reopen_a_same_path_workspace_after_reactivation() {
+    let fixture = fixture();
+    let (service, old_token) = {
+        let runtime = fixture.state.lock().unwrap();
+        (
+            Arc::clone(&runtime.assets),
+            runtime.workspaces["room"].asset_token,
+        )
+    };
+    let old_store = service
+        .open_registered_store(
+            fixture.workspace.path(),
+            &format!("local:{CREATED_AT}"),
+            old_token,
+        )
+        .unwrap();
+    let old = old_store
+        .put_bytes(b"old", AssetSource::LocalUpload)
+        .unwrap();
+    let old_ref = AssetRef {
+        version: 1,
+        origin_runtime_id: RUNTIME_ID.to_string(),
+        sha256: old.sha256,
+        name: "old.bin".to_string(),
+        media_type: old.media_type,
+        size: old.size,
+        width: old.width,
+        height: old.height,
+    };
+
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    service.inject_before_registered_open_pause(Arc::clone(&reached), Arc::clone(&resume));
+    let request = tokio::spawn(
+        fixture.app.clone().oneshot(
+            Request::builder()
+                .uri(resolve_uri(
+                    &serde_json::json!({
+                    "ref": old_ref.to_string(),
+                            "sha256": old_ref.sha256,
+                            "name": old_ref.name,
+                            "media_type": old_ref.media_type,
+                            "size": old_ref.size,
+                        }),
+                    "",
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    tokio::task::spawn_blocking({
+        let reached = Arc::clone(&reached);
+        move || reached.wait()
+    })
+    .await
+    .unwrap();
+
+    fixture.state.lock().unwrap().workspaces.remove("room");
+    let service_for_deactivate = Arc::clone(&service);
+    tokio::task::spawn_blocking(move || service_for_deactivate.deactivate_workspace(old_token))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let new_created_at = "2026-07-12T00:00:00Z";
+    let mut recreated = WorkspaceContext::new(
+        "room".to_string(),
+        "Room".to_string(),
+        fixture.workspace.path().to_path_buf(),
+    );
+    recreated.git_config = Some(WorkspaceConfig {
+        workspace: fixture.workspace.path().to_string_lossy().into_owned(),
+        created_at: new_created_at.to_string(),
+        git: GitConfig {
+            provider: GitProvider::Local,
+            remote_url: None,
+            token: None,
+            github_email: None,
+        },
+    });
+    service
+        .activate_workspace(
+            fixture.workspace.path(),
+            format!("local:{new_created_at}"),
+            recreated.asset_token,
+        )
+        .unwrap();
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .workspaces
+        .insert("room".to_string(), recreated);
+    let orphaned = fixture
+        .workspace
+        .path()
+        .join(".gitim-runtime/orphaned-assets");
+    let quarantine_count = std::fs::read_dir(&orphaned)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+
+    tokio::task::spawn_blocking(move || resume.wait())
+        .await
+        .unwrap();
+    let response = request.await.unwrap().unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        std::fs::read_dir(&orphaned)
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        quarantine_count,
+        "resuming the stale request changed the recreated namespace"
+    );
+    assert_eq!(
+        service
+            .health_snapshot(fixture.workspace.path())
+            .unwrap()
+            .objects,
+        0
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn aborted_upload_keeps_its_permit_until_owned_persistence_settles() {
+    let fixture = fixture();
+    let (service, token) = {
+        let runtime = fixture.state.lock().unwrap();
+        (
+            Arc::clone(&runtime.assets),
+            runtime.workspaces["room"].asset_token,
+        )
+    };
+    let _store = service
+        .open_registered_store(
+            fixture.workspace.path(),
+            &format!("local:{CREATED_AT}"),
+            token,
+        )
+        .unwrap();
+    let reached = Arc::new(tokio::sync::Barrier::new(2));
+    let resume = Arc::new(tokio::sync::Barrier::new(2));
+    service.inject_before_persist_pause(Arc::clone(&reached), Arc::clone(&resume));
+
+    let upload = tokio::spawn(fixture.app.clone().oneshot(allowed_upload(&[(
+        "file",
+        "cancel.bin",
+        "application/octet-stream",
+        b"cancel-safe",
+    )])));
+    reached.wait().await;
+    assert_eq!(service.available_upload_permits(), 1);
+    upload.abort();
+    assert!(upload.await.unwrap_err().is_cancelled());
+    assert_eq!(
+        service.available_upload_permits(),
+        1,
+        "request cancellation released the upload permit before persistence settled"
+    );
+
+    resume.wait().await;
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while service.available_upload_permits() != 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(object_files(fixture.workspace.path()).len(), 1);
+    let tmp = fixture
+        .workspace
+        .path()
+        .join(".gitim-runtime/assets/v1/tmp");
+    assert_eq!(
+        std::fs::read_dir(tmp)
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        0
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn asset_event_observer_captures_handler_outcomes_without_sensitive_paths() {
+    let fixture = fixture();
+    let service = Arc::clone(&fixture.state.lock().unwrap().assets);
+    let events = Arc::new(std::sync::Mutex::new(Vec::<AssetEvent>::new()));
+    service.set_event_observer({
+        let events = Arc::clone(&events);
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    });
+
+    let first = upload_one(&fixture.app, b"observable", "first.bin").await;
+    let second = upload_one(&fixture.app, b"observable", "second.bin").await;
+    assert_eq!(first["sha256"], second["sha256"]);
+    let uri = resolve_uri(&first, "");
+    let etag = format!("\"sha256-{}\"", first["sha256"].as_str().unwrap());
+
+    for request in [
+        Request::builder().uri(&uri).body(Body::empty()).unwrap(),
+        Request::builder()
+            .method(Method::HEAD)
+            .uri(&uri)
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .uri(&uri)
+            .header(header::IF_NONE_MATCH, &etag)
+            .body(Body::empty())
+            .unwrap(),
+        Request::builder()
+            .uri(format!(
+                "/workspaces/room/assets/objects/{}",
+                first["sha256"].as_str().unwrap()
+            ))
+            .body(Body::empty())
+            .unwrap(),
+    ] {
+        let status = fixture.app.clone().oneshot(request).await.unwrap().status();
+        assert!(matches!(status, StatusCode::OK | StatusCode::NOT_MODIFIED));
+    }
+
+    let object = object_files(fixture.workspace.path()).pop().unwrap();
+    std::fs::write(object, b"corrupt").unwrap();
+    assert_eq!(
+        fixture
+            .app
+            .oneshot(Request::builder().uri(&uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+
+    let events = events.lock().unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event == "asset_upload")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event == "asset_dedupe")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event == "asset_local_hit")
+            .count(),
+        4
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event == "asset_store_failure")
+            .count(),
+        1
+    );
+    for event in events.iter() {
+        assert_eq!(event.workspace_slug, "room");
+        assert!(!format!("{event:?}").contains(fixture.workspace.path().to_string_lossy().as_ref()));
+        if event.event != "asset_store_failure" {
+            assert_eq!(event.origin_runtime_id.as_deref(), Some(RUNTIME_ID));
+            assert_eq!(event.hash_prefix.as_deref().map(str::len), Some(12));
+        }
+    }
 }

@@ -6,7 +6,7 @@ use futures::{Stream, StreamExt};
 use gitim_core::types::{AssetRef, ASSET_REF_VERSION};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -36,6 +36,10 @@ const MAX_INSPECTION_PREFIX_BYTES: usize = 64 * 1024;
 static UNIQUE_SUFFIX: AtomicUsize = AtomicUsize::new(0);
 static WORKSPACE_STATES: OnceLock<Mutex<HashMap<PathBuf, Weak<WorkspaceAssetState>>>> =
     OnceLock::new();
+#[cfg(feature = "test-support")]
+type AssetEventObserver = Arc<dyn Fn(AssetEvent) + Send + Sync>;
+#[cfg(feature = "test-support")]
+type AssetTestHook = Arc<dyn Fn() + Send + Sync>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssetLimits {
@@ -96,6 +100,32 @@ pub struct AssetHealthSnapshot {
     pub bytes: u64,
     pub objects: u64,
     pub quota_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AssetWorkspaceToken(uuid::Uuid);
+
+impl AssetWorkspaceToken {
+    pub fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssetEvent {
+    pub event: &'static str,
+    pub workspace_slug: String,
+    pub hash_prefix: Option<String>,
+    pub bytes: Option<u64>,
+    pub origin_runtime_id: Option<String>,
+    pub error_code: Option<&'static str>,
+}
+
+impl Default for AssetWorkspaceToken {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -236,10 +266,42 @@ pub struct AssetService {
     peer_slots: Arc<Semaphore>,
     workspaces: Mutex<HashMap<PathBuf, WorkspaceCacheEntry>>,
     health_workspaces: Mutex<HashMap<PathBuf, Weak<WorkspaceAssetState>>>,
+    lifecycle: Mutex<WorkspaceLifecycleRegistry>,
+    #[cfg(feature = "test-support")]
+    before_registered_open_pause: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+    #[cfg(feature = "test-support")]
+    deactivate_attempt: Mutex<Option<Arc<Barrier>>>,
+    #[cfg(feature = "test-support")]
+    before_persist_pause: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
+    #[cfg(feature = "test-support")]
+    after_activation_pause: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
+    #[cfg(feature = "test-support")]
+    after_config_write_hook: Mutex<Option<AssetTestHook>>,
+    #[cfg(feature = "test-support")]
+    event_observer: Mutex<Option<AssetEventObserver>>,
+    #[cfg(feature = "test-support")]
+    fail_next_activation_store: AtomicBool,
+    #[cfg(feature = "test-support")]
+    fail_next_activation_invariant: AtomicBool,
+    #[cfg(feature = "test-support")]
+    health_snapshot_attempt: Mutex<Option<Arc<Barrier>>>,
     pub store_failures: AtomicU64,
     pub hash_mismatches: AtomicU64,
     pub fleet_fetch_failures: AtomicU64,
     pub limits: AssetLimits,
+}
+
+#[derive(Default)]
+struct WorkspaceLifecycleRegistry {
+    active: HashMap<AssetWorkspaceToken, RegisteredWorkspace>,
+    revoked: HashSet<AssetWorkspaceToken>,
+}
+
+#[derive(Clone)]
+struct RegisteredWorkspace {
+    requested_root: PathBuf,
+    binding: String,
+    store: AssetStore,
 }
 
 #[derive(Clone)]
@@ -255,6 +317,25 @@ impl AssetService {
             peer_slots: Arc::new(Semaphore::new(limits.peer_slots)),
             workspaces: Mutex::new(HashMap::new()),
             health_workspaces: Mutex::new(HashMap::new()),
+            lifecycle: Mutex::new(WorkspaceLifecycleRegistry::default()),
+            #[cfg(feature = "test-support")]
+            before_registered_open_pause: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            deactivate_attempt: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            before_persist_pause: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            after_activation_pause: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            after_config_write_hook: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            event_observer: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            fail_next_activation_store: AtomicBool::new(false),
+            #[cfg(feature = "test-support")]
+            fail_next_activation_invariant: AtomicBool::new(false),
+            #[cfg(feature = "test-support")]
+            health_snapshot_attempt: Mutex::new(None),
             store_failures: AtomicU64::new(0),
             hash_mismatches: AtomicU64::new(0),
             fleet_fetch_failures: AtomicU64::new(0),
@@ -298,9 +379,190 @@ impl AssetService {
         Ok(store)
     }
 
+    pub fn activate_workspace(
+        &self,
+        workspace_root: impl AsRef<Path>,
+        binding: impl Into<String>,
+        token: AssetWorkspaceToken,
+    ) -> Result<AssetStore, AssetError> {
+        let requested_root = workspace_root.as_ref().to_path_buf();
+        let binding = binding.into();
+        let mut lifecycle = lock(&self.lifecycle);
+        #[cfg(feature = "test-support")]
+        if self
+            .fail_next_activation_store
+            .swap(false, Ordering::AcqRel)
+        {
+            return Err(AssetError::Store(std::io::Error::other(
+                "injected asset activation failure",
+            )));
+        }
+        #[cfg(feature = "test-support")]
+        if self
+            .fail_next_activation_invariant
+            .swap(false, Ordering::AcqRel)
+        {
+            return Err(AssetError::Invariant(
+                "injected asset activation invariant failure",
+            ));
+        }
+        if lifecycle.revoked.contains(&token) {
+            return Err(AssetError::StaleBinding);
+        }
+        if let Some(registered) = lifecycle.active.get(&token) {
+            if registered.requested_root == requested_root && registered.binding == binding {
+                return Ok(registered.store.clone());
+            }
+            return Err(AssetError::Invariant(
+                "asset workspace token is already bound to another namespace",
+            ));
+        }
+        let canonical_root = canonical_workspace_root(&requested_root)?;
+        if lifecycle
+            .active
+            .values()
+            .any(|registered| registered.store.workspace_root == canonical_root)
+        {
+            return Err(AssetError::Invariant(
+                "asset workspace path is already active under another token",
+            ));
+        }
+        let store = self.open_store(&requested_root, binding.clone())?;
+        lifecycle.active.insert(
+            token,
+            RegisteredWorkspace {
+                requested_root,
+                binding,
+                store: store.clone(),
+            },
+        );
+        Ok(store)
+    }
+
+    pub fn open_registered_store(
+        &self,
+        workspace_root: impl AsRef<Path>,
+        binding: &str,
+        token: AssetWorkspaceToken,
+    ) -> Result<AssetStore, AssetError> {
+        #[cfg(feature = "test-support")]
+        if let Some((reached, resume)) = lock(&self.before_registered_open_pause).take() {
+            reached.wait();
+            resume.wait();
+        }
+        let lifecycle = lock(&self.lifecycle);
+        let registered = lifecycle
+            .active
+            .get(&token)
+            .ok_or(AssetError::StaleBinding)?;
+        if registered.requested_root != workspace_root.as_ref() || registered.binding != binding {
+            return Err(AssetError::StaleBinding);
+        }
+        let _operation = read_lock(&registered.store.state.operation_gate);
+        registered.store.validate_generation()?;
+        Ok(registered.store.clone())
+    }
+
+    pub fn deactivate_workspace(&self, token: AssetWorkspaceToken) -> Result<bool, AssetError> {
+        let mut lifecycle = lock(&self.lifecycle);
+        lifecycle.revoked.insert(token);
+        let Some(registered) = lifecycle.active.remove(&token) else {
+            return Ok(false);
+        };
+        #[cfg(feature = "test-support")]
+        if let Some(attempted) = lock(&self.deactivate_attempt).take() {
+            attempted.wait();
+        }
+        let _operation = write_lock(&registered.store.state.operation_gate);
+        {
+            let mut accounting = lock(&registered.store.state.accounting);
+            accounting.generation = accounting
+                .generation
+                .checked_add(1)
+                .ok_or(AssetError::Invariant("asset store generation overflow"))?;
+            accounting.active_binding = None;
+            accounting.initialized = false;
+            accounting.committed = AssetUsage::default();
+            accounting.reserved = 0;
+            accounting.unmaterialized = 0;
+            accounting.objects.clear();
+            registered.store.state.health.publish(AssetUsage::default());
+        }
+        lock(&self.workspaces)
+            .retain(|_, entry| !Arc::ptr_eq(&entry.state, &registered.store.state));
+        lock(&self.health_workspaces).retain(|_, state| {
+            state
+                .upgrade()
+                .is_some_and(|state| !Arc::ptr_eq(&state, &registered.store.state))
+        });
+        Ok(true)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_before_registered_open_pause(&self, reached: Arc<Barrier>, resume: Arc<Barrier>) {
+        *lock(&self.before_registered_open_pause) = Some((reached, resume));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_deactivate_attempt(&self, attempted: Arc<Barrier>) {
+        *lock(&self.deactivate_attempt) = Some(attempted);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_before_persist_pause(
+        &self,
+        reached: Arc<tokio::sync::Barrier>,
+        resume: Arc<tokio::sync::Barrier>,
+    ) {
+        *lock(&self.before_persist_pause) = Some((reached, resume));
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn wait_before_persist(&self) {
+        let pause = lock(&self.before_persist_pause).take();
+        if let Some((reached, resume)) = pause {
+            reached.wait().await;
+            resume.wait().await;
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_after_activation_pause(
+        &self,
+        reached: Arc<tokio::sync::Barrier>,
+        resume: Arc<tokio::sync::Barrier>,
+    ) {
+        *lock(&self.after_activation_pause) = Some((reached, resume));
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) async fn wait_after_activation(&self) {
+        let pause = lock(&self.after_activation_pause).take();
+        if let Some((reached, resume)) = pause {
+            reached.wait().await;
+            resume.wait().await;
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn run_after_config_write_hook(&self) {
+        let hook = lock(&self.after_config_write_hook).take();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     /// Read the health-path snapshot without filesystem access or store locks.
     /// The key is the workspace path exactly as registered with this service.
     pub fn health_snapshot(&self, workspace_root: impl AsRef<Path>) -> Option<AssetHealthSnapshot> {
+        #[cfg(feature = "test-support")]
+        if let Some(attempted) = lock(&self.health_snapshot_attempt).take() {
+            attempted.wait();
+        }
         let path = workspace_root.as_ref();
         let state = lock(&self.health_workspaces)
             .get(path)
@@ -360,6 +622,132 @@ impl AssetService {
 
     pub fn available_peer_permits(&self) -> usize {
         self.peer_slots.available_permits()
+    }
+
+    pub(crate) fn record_store_failure(&self, workspace_slug: &str, error: &AssetError) {
+        if !matches!(
+            error,
+            AssetError::Store(_)
+                | AssetError::Invariant(_)
+                | AssetError::StaleBinding
+                | AssetError::LocalCorruption
+        ) {
+            return;
+        }
+        self.store_failures.fetch_add(1, Ordering::Relaxed);
+        tracing::warn!(
+            event = "asset_store_failure",
+            workspace_slug,
+            error_code = error.error_code(),
+            "asset store operation failed"
+        );
+        #[cfg(feature = "test-support")]
+        self.notify_event(AssetEvent {
+            event: "asset_store_failure",
+            workspace_slug: workspace_slug.to_string(),
+            hash_prefix: None,
+            bytes: None,
+            origin_runtime_id: None,
+            error_code: Some(error.error_code()),
+        });
+    }
+
+    pub(crate) fn record_persistence(
+        &self,
+        workspace_slug: &str,
+        asset_ref: &AssetRef,
+        deduplicated: bool,
+    ) {
+        let event = if deduplicated {
+            "asset_dedupe"
+        } else {
+            "asset_upload"
+        };
+        let hash_prefix = &asset_ref.sha256[..asset_ref.sha256.len().min(12)];
+        tracing::info!(
+            event,
+            workspace_slug,
+            hash_prefix,
+            bytes = asset_ref.size,
+            origin_runtime_id = asset_ref.origin_runtime_id,
+            "asset persistence complete"
+        );
+        #[cfg(feature = "test-support")]
+        self.notify_event(AssetEvent {
+            event,
+            workspace_slug: workspace_slug.to_string(),
+            hash_prefix: Some(hash_prefix.to_string()),
+            bytes: Some(asset_ref.size),
+            origin_runtime_id: Some(asset_ref.origin_runtime_id.clone()),
+            error_code: None,
+        });
+    }
+
+    pub(crate) fn record_local_hit(
+        &self,
+        workspace_slug: &str,
+        hash: &str,
+        bytes: u64,
+        origin_runtime_id: &str,
+    ) {
+        let hash_prefix = &hash[..hash.len().min(12)];
+        tracing::info!(
+            event = "asset_local_hit",
+            workspace_slug,
+            hash_prefix,
+            bytes,
+            origin_runtime_id,
+            "asset local hit"
+        );
+        #[cfg(feature = "test-support")]
+        self.notify_event(AssetEvent {
+            event: "asset_local_hit",
+            workspace_slug: workspace_slug.to_string(),
+            hash_prefix: Some(hash_prefix.to_string()),
+            bytes: Some(bytes),
+            origin_runtime_id: Some(origin_runtime_id.to_string()),
+            error_code: None,
+        });
+    }
+
+    #[cfg(feature = "test-support")]
+    fn notify_event(&self, event: AssetEvent) {
+        let observer = lock(&self.event_observer).clone();
+        if let Some(observer) = observer {
+            observer(event);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn set_event_observer(&self, observer: Arc<dyn Fn(AssetEvent) + Send + Sync>) {
+        *lock(&self.event_observer) = Some(observer);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_activation_store_failure_once(&self) {
+        self.fail_next_activation_store
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_activation_invariant_failure_once(&self) {
+        self.fail_next_activation_invariant
+            .store(true, Ordering::Release);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_health_snapshot_attempt(&self, attempted: Arc<Barrier>) {
+        *lock(&self.health_snapshot_attempt) = Some(attempted);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn set_after_config_write_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
+        *lock(&self.after_config_write_hook) = Some(hook);
     }
 }
 
@@ -805,7 +1193,7 @@ impl AssetStore {
     ) -> Result<StagedAsset, AssetError>
     where
         S: Stream<Item = Result<Bytes, E>> + Unpin,
-        E: std::error::Error + Send + Sync + 'static,
+        E: Into<AssetError>,
     {
         let mut next_budget = *budget;
         next_budget.begin_file(self.limits.max_files)?;
@@ -813,9 +1201,7 @@ impl AssetStore {
         while let Some(chunk) = chunks.next().await {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
-                Err(error) => {
-                    return Err(AssetError::Store(std::io::Error::other(error)));
-                }
+                Err(error) => return Err(error.into()),
             };
             stager.write_chunk(&chunk, &mut next_budget).await?;
         }
@@ -3199,6 +3585,67 @@ mod tests {
             .expect("persist duplicate");
         assert!(second[0].deduplicated());
         assert_eq!(first[0].asset_ref().sha256, second[0].asset_ref().sha256);
+    }
+
+    #[test]
+    fn registered_workspace_token_prevents_stale_reopen_after_same_path_recreate() {
+        let workspace = tempfile::TempDir::new().expect("temporary workspace");
+        let service = AssetService::new(test_limits(100));
+        let old_token = AssetWorkspaceToken::new();
+        let old = service
+            .activate_workspace(workspace.path(), "local:old", old_token)
+            .expect("activate old workspace");
+        old.put_bytes(b"old", AssetSource::LocalUpload)
+            .expect("persist old object");
+
+        assert!(service
+            .deactivate_workspace(old_token)
+            .expect("deactivate old workspace"));
+        assert!(matches!(
+            service.open_registered_store(workspace.path(), "local:old", old_token),
+            Err(AssetError::StaleBinding)
+        ));
+        assert!(matches!(
+            old.put_bytes(b"stale", AssetSource::LocalUpload),
+            Err(AssetError::StaleBinding)
+        ));
+
+        let new_token = AssetWorkspaceToken::new();
+        let new = service
+            .activate_workspace(workspace.path(), "local:new", new_token)
+            .expect("activate recreated workspace");
+        let current = new
+            .put_bytes(b"current", AssetSource::LocalUpload)
+            .expect("persist recreated object");
+
+        assert!(matches!(
+            service.open_registered_store(workspace.path(), "local:old", old_token),
+            Err(AssetError::StaleBinding)
+        ));
+        assert_eq!(
+            service
+                .open_registered_store(workspace.path(), "local:new", new_token)
+                .expect("open current workspace")
+                .read(&current.sha256)
+                .expect("read current object"),
+            b"current"
+        );
+    }
+
+    #[test]
+    fn deactivating_an_unactivated_token_prevents_late_activation() {
+        let workspace = tempfile::TempDir::new().expect("temporary workspace");
+        let service = AssetService::new(test_limits(100));
+        let token = AssetWorkspaceToken::new();
+
+        assert!(!service
+            .deactivate_workspace(token)
+            .expect("revoke pending workspace"));
+        assert!(matches!(
+            service.activate_workspace(workspace.path(), "local:late", token),
+            Err(AssetError::StaleBinding)
+        ));
+        assert!(!workspace.path().join(".gitim-runtime/assets").exists());
     }
 
     fn test_limits(quota: u64) -> AssetLimits {

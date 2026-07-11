@@ -4,7 +4,7 @@ use axum::{body::Bytes, http::StatusCode};
 use futures::{stream, StreamExt};
 use gitim_runtime::assets::{
     checked_dimensions, inspect_bytes, AssetError, AssetLimits, AssetService, AssetSource,
-    AssetStore, AssetUsage, HashLock, RequestBudget,
+    AssetStore, AssetUsage, AssetWorkspaceToken, HashLock, RequestBudget,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, FileTimes, OpenOptions};
@@ -1764,6 +1764,57 @@ fn asset_service_shares_reservations_across_store_handles() {
     ));
     drop(reservation);
     assert_eq!(second.reserved_bytes().unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn workspace_deactivation_waits_for_an_inflight_publish_then_invalidates_handles() {
+    let workspace = TempDir::new().unwrap();
+    let service = Arc::new(AssetService::new(limits(1024)));
+    let token = AssetWorkspaceToken::new();
+    let store = service
+        .activate_workspace(workspace.path(), "local:lifecycle", token)
+        .unwrap();
+    let staged = store
+        .stage_bytes("inflight.bin", b"inflight")
+        .await
+        .unwrap();
+    let publish_reached = Arc::new(Barrier::new(2));
+    let publish_resume = Arc::new(Barrier::new(2));
+    store.inject_before_publish_pause(Arc::clone(&publish_reached), Arc::clone(&publish_resume));
+    let persist = tokio::spawn({
+        let store = store.clone();
+        async move { store.persist_staged(staged, AssetSource::LocalUpload).await }
+    });
+    tokio::task::spawn_blocking({
+        let publish_reached = Arc::clone(&publish_reached);
+        move || publish_reached.wait()
+    })
+    .await
+    .unwrap();
+
+    let deactivate_attempted = Arc::new(Barrier::new(2));
+    service.inject_deactivate_attempt(Arc::clone(&deactivate_attempted));
+    let mut deactivate = tokio::task::spawn_blocking({
+        let service = Arc::clone(&service);
+        move || service.deactivate_workspace(token)
+    });
+    tokio::task::spawn_blocking(move || deactivate_attempted.wait())
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut deactivate)
+            .await
+            .is_err(),
+        "deactivation completed while a publish held the operation gate"
+    );
+
+    tokio::task::spawn_blocking(move || publish_resume.wait())
+        .await
+        .unwrap();
+    persist.await.unwrap().unwrap();
+    assert!(deactivate.await.unwrap().unwrap());
+    assert!(matches!(store.usage(), Err(AssetError::StaleBinding)));
+    assert!(owned_temp_files(&store).is_empty());
 }
 
 #[test]

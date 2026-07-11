@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use crate::git_config::WorkspaceConfig;
 use crate::http::{AgentActivityEvent, AgentInfo};
@@ -19,6 +19,8 @@ pub struct WorkspaceContext {
     /// one broken PAT doesn't mute sync for other workspaces.
     pub auth_failed: Arc<AtomicBool>,
     pub git_config: Option<WorkspaceConfig>,
+    pub asset_token: crate::assets::AssetWorkspaceToken,
+    pub initialization: Option<Arc<WorkspaceInitialization>>,
 }
 
 impl WorkspaceContext {
@@ -34,7 +36,57 @@ impl WorkspaceContext {
             activity_tx,
             auth_failed: Arc::new(AtomicBool::new(false)),
             git_config: None,
+            asset_token: crate::assets::AssetWorkspaceToken::new(),
+            initialization: None,
         }
+    }
+}
+
+pub struct WorkspaceInitialization {
+    finished: watch::Sender<bool>,
+    #[cfg(feature = "test-support")]
+    wait_started: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+}
+
+impl WorkspaceInitialization {
+    pub fn new() -> Self {
+        let (finished, _) = watch::channel(false);
+        Self {
+            finished,
+            #[cfg(feature = "test-support")]
+            wait_started: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub async fn wait(&self) {
+        #[cfg(feature = "test-support")]
+        let wait_started = { crate::preconditions::mutex_lock(&self.wait_started).take() };
+        #[cfg(feature = "test-support")]
+        if let Some(started) = wait_started {
+            started.wait().await;
+        }
+        let mut finished = self.finished.subscribe();
+        while !*finished.borrow_and_update() {
+            if finished.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub fn finish(&self) {
+        self.finished.send_replace(true);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_wait_started(&self, started: Arc<tokio::sync::Barrier>) {
+        *crate::preconditions::mutex_lock(&self.wait_started) = Some(started);
+    }
+}
+
+impl Default for WorkspaceInitialization {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

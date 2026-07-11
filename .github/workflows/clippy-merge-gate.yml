@@ -58,6 +58,9 @@ jobs:
       - name: cargo test (asset HTTP)
         run: cargo test -p gitim-runtime --test assets_http --locked
 
+      - name: cargo test (asset HTTP concurrency)
+        run: cargo test -p gitim-runtime --features test-support --test assets_http --locked
+
       - name: Post result
         uses: actions/github-script@v7
         if: always()
