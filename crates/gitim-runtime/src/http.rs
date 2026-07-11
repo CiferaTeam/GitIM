@@ -101,6 +101,9 @@ struct HealthResponse {
     /// `AgentSaturationLog::save` returns an error from the sampler tick.
     /// Surfaced on `/runtime/health`. Best-effort observability.
     saturation_save_failures: u64,
+    asset_store_failures: u64,
+    asset_hash_mismatches: u64,
+    asset_fleet_fetch_failures: u64,
     /// Per-workspace epoch number read from the human clone's
     /// `gitim.epoch.yaml` (1 = never rotated / pre-rotation repo). Commit
     /// counts are deliberately NOT here: health is polled hot and
@@ -113,6 +116,9 @@ struct HealthResponse {
 struct WorkspaceEpochInfo {
     slug: String,
     epoch: u32,
+    asset_bytes: u64,
+    asset_objects: u64,
+    asset_quota: u64,
 }
 
 // -----------------------------------------------------------------------------
@@ -510,9 +516,13 @@ async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse>
                 })
                 .map(|f| f.epoch)
                 .unwrap_or(1);
+            let asset_usage = s.assets.cached_usage(&w.path).unwrap_or_default();
             WorkspaceEpochInfo {
                 slug: slug.clone(),
                 epoch,
+                asset_bytes: asset_usage.bytes,
+                asset_objects: asset_usage.objects,
+                asset_quota: s.assets.limits.workspace_quota_bytes,
             }
         })
         .collect();
@@ -526,6 +536,18 @@ async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse>
             .load(std::sync::atomic::Ordering::Relaxed),
         saturation_save_failures: s
             .saturation_save_failures
+            .load(std::sync::atomic::Ordering::Relaxed),
+        asset_store_failures: s
+            .assets
+            .store_failures
+            .load(std::sync::atomic::Ordering::Relaxed),
+        asset_hash_mismatches: s
+            .assets
+            .hash_mismatches
+            .load(std::sync::atomic::Ordering::Relaxed),
+        asset_fleet_fetch_failures: s
+            .assets
+            .fleet_fetch_failures
             .load(std::sync::atomic::Ordering::Relaxed),
         workspace_epochs,
     })
@@ -5117,6 +5139,7 @@ async fn recover_single_workspace(
     workspace_name: String,
     workspace: PathBuf,
 ) {
+    let recovered_config = WorkspaceConfig::read(&workspace).ok();
     {
         let mut s = crate::preconditions::arc_mutex_lock(&state);
         if s.workspaces.contains_key(&slug) {
@@ -5128,8 +5151,27 @@ async fn recover_single_workspace(
             workspace_name,
             workspace.clone(),
         );
-        ctx.git_config = WorkspaceConfig::read(&workspace).ok();
+        ctx.git_config = recovered_config.clone();
         s.workspaces.insert(slug.clone(), ctx);
+    }
+
+    if let Some(config) = recovered_config.as_ref() {
+        let assets = {
+            let s = crate::preconditions::arc_mutex_lock(&state);
+            Arc::clone(&s.assets)
+        };
+        if let Err(error) = crate::assets::http::open_workspace_store(
+            Arc::clone(&assets),
+            workspace.clone(),
+            config,
+        )
+        .await
+        {
+            assets
+                .store_failures
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(slug = %slug, error_code = error.error_code(), "failed to recover workspace asset store");
+        }
     }
 
     let human_dir = workspace.join(".gitim-runtime/human");
@@ -5614,10 +5656,10 @@ async fn workspaces_delete(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let mut removed = {
+    let (mut removed, assets) = {
         let mut s = crate::preconditions::arc_mutex_lock(&state);
         match s.workspaces.remove(&slug) {
-            Some(ctx) => ctx,
+            Some(ctx) => (ctx, Arc::clone(&s.assets)),
             None => {
                 return (
                     StatusCode::NOT_FOUND,
@@ -5627,6 +5669,9 @@ async fn workspaces_delete(
             }
         }
     };
+    if let Err(error) = assets.evict_workspace(&removed.path) {
+        tracing::warn!(slug = %slug, error = %error, "failed to evict asset store cache");
+    }
 
     // Abort in-process agent loop tasks before killing their daemons. Mirrors
     // the cleanup `/agents/remove` and `/agents/stop` already perform — without
@@ -6126,6 +6171,31 @@ async fn workspaces_create(
         provider_for_response = config.git.provider;
     }
 
+    let assets = {
+        let s = crate::preconditions::arc_mutex_lock(&state);
+        Arc::clone(&s.assets)
+    };
+    if let Err(error) =
+        crate::assets::http::open_workspace_store(Arc::clone(&assets), workspace.clone(), &config)
+            .await
+    {
+        assets
+            .store_failures
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::preconditions::arc_mutex_lock(&state)
+            .workspaces
+            .remove(&slug);
+        cleanup_partial_workspace(&workspace);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody::with_code(
+                "workspace asset store initialization failed",
+                error.error_code(),
+            )),
+        )
+            .into_response();
+    }
+
     let workspace_entry = crate::user_config::WorkspaceEntry {
         slug: slug.clone(),
         workspace_name: workspace_name.clone(),
@@ -6136,6 +6206,9 @@ async fn workspaces_create(
         crate::preconditions::arc_mutex_lock(&state)
             .workspaces
             .remove(&slug);
+        if let Err(error) = assets.evict_workspace(&workspace) {
+            tracing::warn!(slug = %slug, error = %error, "failed to evict rolled-back asset store cache");
+        }
         cleanup_partial_workspace(&workspace);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6275,6 +6348,7 @@ pub fn create_router_with_exe(canonical_exe_path: PathBuf) -> (Router, SharedRun
 
 fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
     let ws_router = Router::new()
+        .merge(crate::assets::http::router())
         .route("/im/me", get(im_me))
         .route("/im/channels", get(im_channels))
         .route("/im/create-channel", post(im_create))

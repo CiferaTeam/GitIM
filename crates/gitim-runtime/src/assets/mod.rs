@@ -1,4 +1,5 @@
 mod error;
+pub(crate) mod http;
 mod inspect;
 mod store;
 

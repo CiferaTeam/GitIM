@@ -390,6 +390,30 @@ pub struct AssetStore {
     generation: u64,
 }
 
+/// Generation-bound capability used by the asset HTTP layer.
+///
+/// The path never leaves the `assets` module. Callers validate immediately
+/// before and after Tower opens the file; the second check prevents a store
+/// rebind or pathname replacement from turning a previously verified lookup
+/// into a response from a different namespace or inode.
+pub(super) struct VerifiedLocalAsset {
+    store: AssetStore,
+    hash: String,
+    path: PathBuf,
+    metadata: AssetMetadata,
+    file_identity: FileIdentity,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    size: u64,
+    modified_ns: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+}
+
 #[derive(Default)]
 struct WorkspaceAssetState {
     // Operations that need both locks acquire operation_gate before accounting.
@@ -650,6 +674,10 @@ impl AssetStore {
         let _operation = read_lock(&self.state.operation_gate);
         self.validate_current()?;
         Ok(lock(&self.state.accounting).committed)
+    }
+
+    pub(super) fn limits(&self) -> &AssetLimits {
+        &self.limits
     }
 
     pub fn reserved_bytes(&self) -> Result<u64, AssetError> {
@@ -1195,6 +1223,29 @@ impl AssetStore {
         let _operation = write_lock(&self.state.operation_gate);
         self.validate_current()?;
         self.refresh_metadata(hash)
+    }
+
+    pub(super) fn verified_local_asset(
+        &self,
+        hash: &str,
+    ) -> Result<VerifiedLocalAsset, AssetError> {
+        let _operation = write_lock(&self.state.operation_gate);
+        self.validate_current()?;
+        let metadata = self.refresh_metadata(hash)?;
+        let path = self.raw_object_path(hash)?;
+        let file_identity = file_identity(&path)?;
+        if file_identity.size != metadata.size
+            || file_identity.modified_ns != metadata.object_modified_ns
+        {
+            return Err(AssetError::LocalCorruption);
+        }
+        Ok(VerifiedLocalAsset {
+            store: self.clone(),
+            hash: hash.to_string(),
+            path,
+            metadata,
+            file_identity,
+        })
     }
 
     #[cfg(feature = "test-support")]
@@ -1833,6 +1884,27 @@ impl AssetStore {
         let metadata_result = self.remove_or_quarantine_metadata_entry(hash, &metadata_path);
         self.reconcile_accounting()?;
         metadata_result
+    }
+}
+
+impl VerifiedLocalAsset {
+    pub(super) fn metadata(&self) -> &AssetMetadata {
+        &self.metadata
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(super) fn ensure_current(&self) -> Result<(), AssetError> {
+        let _operation = read_lock(&self.store.state.operation_gate);
+        self.store.validate_current()?;
+        if self.store.raw_object_path(&self.hash)? != self.path
+            || file_identity(&self.path)? != self.file_identity
+        {
+            return Err(AssetError::LocalCorruption);
+        }
+        Ok(())
     }
 }
 
@@ -2481,6 +2553,30 @@ fn modified_ns(metadata: &fs::Metadata) -> Result<u64, AssetError> {
     })
 }
 
+fn file_identity(path: &Path) -> Result<FileIdentity, AssetError> {
+    let metadata = fs::symlink_metadata(path).map_err(map_missing)?;
+    if !metadata.file_type().is_file() {
+        return Err(AssetError::LocalCorruption);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Ok(FileIdentity {
+            size: metadata.len(),
+            modified_ns: modified_ns(&metadata)?,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(FileIdentity {
+            size: metadata.len(),
+            modified_ns: modified_ns(&metadata)?,
+        })
+    }
+}
+
 fn read_file_snapshot(path: &Path, limit: u64) -> Result<FileSnapshot, AssetError> {
     read_file_snapshot_with_hook(path, limit, || {})
 }
@@ -2887,6 +2983,48 @@ mod tests {
                 None
             );
         });
+    }
+
+    #[test]
+    fn verified_local_asset_capability_rejects_a_namespace_rebind() {
+        let workspace = tempfile::TempDir::new().expect("temporary workspace");
+        let store = AssetStore::open(workspace.path(), "local:first", test_limits(100))
+            .expect("open asset store");
+        let metadata = store
+            .put_bytes(b"verified", AssetSource::LocalUpload)
+            .expect("put object");
+        let capability = store
+            .verified_local_asset(&metadata.sha256)
+            .expect("verified capability");
+
+        AssetStore::open(workspace.path(), "local:second", test_limits(100)).expect("rebind store");
+
+        assert!(matches!(
+            capability.ensure_current(),
+            Err(AssetError::StaleBinding)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verified_local_asset_capability_rejects_path_replacement() {
+        let workspace = tempfile::TempDir::new().expect("temporary workspace");
+        let store = AssetStore::open(workspace.path(), "local:test", test_limits(100))
+            .expect("open asset store");
+        let metadata = store
+            .put_bytes(b"verified", AssetSource::LocalUpload)
+            .expect("put object");
+        let capability = store
+            .verified_local_asset(&metadata.sha256)
+            .expect("verified capability");
+        let replacement = workspace.path().join("replacement");
+        fs::write(&replacement, b"verified").expect("write replacement");
+        fs::rename(&replacement, capability.path()).expect("replace object pathname");
+
+        assert!(matches!(
+            capability.ensure_current(),
+            Err(AssetError::LocalCorruption)
+        ));
     }
 
     fn test_limits(quota: u64) -> AssetLimits {

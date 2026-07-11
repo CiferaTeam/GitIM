@@ -55,6 +55,9 @@ jobs:
       - name: cargo test (asset store)
         run: cargo test -p gitim-runtime --features test-support --test assets_store --locked
 
+      - name: cargo test (asset HTTP)
+        run: cargo test -p gitim-runtime --features test-support --test assets_http --locked
+
       - name: Post result
         uses: actions/github-script@v7
         if: always()
@@ -62,8 +65,8 @@ jobs:
           script: |
             const success = '${{ job.status }}' === 'success';
             const body = success
-              ? '✅ Clippy and asset store tests passed. Ready to merge.'
-              : '❌ Clippy or asset store tests failed. See job logs for details.';
+              ? '✅ Clippy and asset tests passed. Ready to merge.'
+              : '❌ Clippy or asset tests failed. See job logs for details.';
             await github.rest.issues.createComment({
               issue_number: context.issue.number,
               owner: context.repo.owner,
