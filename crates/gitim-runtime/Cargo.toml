@@ -80,7 +80,6 @@ required-features = ["test-support"]
 [[test]]
 name = "assets_http"
 path = "tests/assets_http.rs"
-required-features = ["test-support"]
 
 [dev-dependencies]
 serial_test = "3"

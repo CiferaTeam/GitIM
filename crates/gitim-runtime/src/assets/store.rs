@@ -91,6 +91,13 @@ pub struct AssetUsage {
     pub objects: u64,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct AssetHealthSnapshot {
+    pub bytes: u64,
+    pub objects: u64,
+    pub quota_bytes: u64,
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct RequestBudget {
     bytes: u64,
@@ -228,6 +235,7 @@ pub struct AssetService {
     upload_slots: Arc<Semaphore>,
     peer_slots: Arc<Semaphore>,
     workspaces: Mutex<HashMap<PathBuf, WorkspaceCacheEntry>>,
+    health_workspaces: Mutex<HashMap<PathBuf, Weak<WorkspaceAssetState>>>,
     pub store_failures: AtomicU64,
     pub hash_mismatches: AtomicU64,
     pub fleet_fetch_failures: AtomicU64,
@@ -246,6 +254,7 @@ impl AssetService {
             upload_slots: Arc::new(Semaphore::new(limits.upload_slots)),
             peer_slots: Arc::new(Semaphore::new(limits.peer_slots)),
             workspaces: Mutex::new(HashMap::new()),
+            health_workspaces: Mutex::new(HashMap::new()),
             store_failures: AtomicU64::new(0),
             hash_mismatches: AtomicU64::new(0),
             fleet_fetch_failures: AtomicU64::new(0),
@@ -258,7 +267,8 @@ impl AssetService {
         workspace_root: impl AsRef<Path>,
         binding: impl Into<String>,
     ) -> Result<AssetStore, AssetError> {
-        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
+        let requested_root = workspace_root.as_ref().to_path_buf();
+        let workspace_root = canonical_workspace_root(&requested_root)?;
         let workspace_state = {
             lock(&self.workspaces)
                 .get(&workspace_root)
@@ -281,8 +291,26 @@ impl AssetService {
                     generation: store.generation,
                 },
             );
+            let mut health_workspaces = lock(&self.health_workspaces);
+            health_workspaces.insert(requested_root, Arc::downgrade(&store.state));
+            health_workspaces.insert(store.workspace_root.clone(), Arc::downgrade(&store.state));
         }
         Ok(store)
+    }
+
+    /// Read the health-path snapshot without filesystem access or store locks.
+    /// The key is the workspace path exactly as registered with this service.
+    pub fn health_snapshot(&self, workspace_root: impl AsRef<Path>) -> Option<AssetHealthSnapshot> {
+        let path = workspace_root.as_ref();
+        let state = lock(&self.health_workspaces)
+            .get(path)
+            .and_then(Weak::upgrade)?;
+        let usage = state.health.load();
+        Some(AssetHealthSnapshot {
+            bytes: usage.bytes,
+            objects: usage.objects,
+            quota_bytes: self.limits.workspace_quota_bytes,
+        })
     }
 
     pub fn cached_usage(&self, workspace_root: impl AsRef<Path>) -> Option<AssetUsage> {
@@ -301,7 +329,15 @@ impl AssetService {
 
     pub fn evict_workspace(&self, workspace_root: impl AsRef<Path>) -> Result<bool, AssetError> {
         let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
-        Ok(lock(&self.workspaces).remove(&workspace_root).is_some())
+        let removed = lock(&self.workspaces).remove(&workspace_root);
+        if let Some(entry) = removed.as_ref() {
+            lock(&self.health_workspaces).retain(|_, state| {
+                state
+                    .upgrade()
+                    .is_some_and(|state| !Arc::ptr_eq(&state, &entry.state))
+            });
+        }
+        Ok(removed.is_some())
     }
 
     pub async fn acquire_upload(&self) -> Result<OwnedSemaphorePermit, AssetError> {
@@ -420,6 +456,7 @@ struct WorkspaceAssetState {
     // Free-space sampling and claim updates share the accounting critical section.
     accounting: Mutex<AccountingState>,
     operation_gate: RwLock<()>,
+    health: HealthUsageCache,
     #[cfg(feature = "test-support")]
     fail_next_sidecar_write: AtomicBool,
     #[cfg(feature = "test-support")]
@@ -434,6 +471,39 @@ struct WorkspaceAssetState {
     materialize_pause: Mutex<Option<MaterializePause>>,
     #[cfg(feature = "test-support")]
     after_free_space_sample_wait: Mutex<Option<FreeSpaceSampleWait>>,
+}
+
+#[derive(Default)]
+struct HealthUsageCache {
+    sequence: AtomicU64,
+    bytes: AtomicU64,
+    objects: AtomicU64,
+}
+
+impl HealthUsageCache {
+    fn publish(&self, usage: AssetUsage) {
+        self.sequence.fetch_add(1, Ordering::AcqRel);
+        self.bytes.store(usage.bytes, Ordering::Relaxed);
+        self.objects.store(usage.objects, Ordering::Relaxed);
+        self.sequence.fetch_add(1, Ordering::Release);
+    }
+
+    fn load(&self) -> AssetUsage {
+        loop {
+            let before = self.sequence.load(Ordering::Acquire);
+            if !before.is_multiple_of(2) {
+                std::hint::spin_loop();
+                continue;
+            }
+            let usage = AssetUsage {
+                bytes: self.bytes.load(Ordering::Relaxed),
+                objects: self.objects.load(Ordering::Relaxed),
+            };
+            if self.sequence.load(Ordering::Acquire) == before {
+                return usage;
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -461,6 +531,16 @@ pub struct StagedAsset {
     generation: u64,
     binding: String,
     root: PathBuf,
+}
+
+pub(super) struct StoredAsset {
+    asset_ref: AssetRef,
+    deduplicated: bool,
+}
+
+struct PersistOutcome {
+    metadata: AssetMetadata,
+    deduplicated: bool,
 }
 
 impl std::fmt::Debug for StagedAsset {
@@ -642,6 +722,7 @@ impl AssetStore {
                 accounting.active_binding = Some(binding.clone());
                 accounting.generation = generation;
                 accounting.committed = AssetUsage::default();
+                state.health.publish(AssetUsage::default());
                 accounting.reserved = 0;
                 accounting.unmaterialized = 0;
                 accounting.limits = Some(limits.clone());
@@ -762,6 +843,16 @@ impl AssetStore {
         origin_runtime_id: &str,
         staged: Vec<StagedAsset>,
     ) -> Result<Vec<AssetRef>, AssetError> {
+        self.persist_batch_with_outcomes(origin_runtime_id, staged)
+            .await
+            .map(|stored| stored.into_iter().map(|asset| asset.asset_ref).collect())
+    }
+
+    pub(super) async fn persist_batch_with_outcomes(
+        &self,
+        origin_runtime_id: &str,
+        staged: Vec<StagedAsset>,
+    ) -> Result<Vec<StoredAsset>, AssetError> {
         if staged.is_empty() {
             return Err(AssetError::Invalid(
                 "asset upload must contain at least one file".to_string(),
@@ -806,10 +897,17 @@ impl AssetStore {
                 refs.push(asset_ref);
             }
         }
-        for asset in staged {
-            self.persist_staged(asset, AssetSource::LocalUpload).await?;
+        let mut stored = Vec::with_capacity(refs.len());
+        for (asset, asset_ref) in staged.into_iter().zip(refs) {
+            let outcome = self
+                .persist_staged_outcome(asset, AssetSource::LocalUpload)
+                .await?;
+            stored.push(StoredAsset {
+                asset_ref,
+                deduplicated: outcome.deduplicated,
+            });
         }
-        Ok(refs)
+        Ok(stored)
     }
 
     pub async fn persist_staged(
@@ -817,9 +915,19 @@ impl AssetStore {
         staged: StagedAsset,
         source: AssetSource,
     ) -> Result<AssetMetadata, AssetError> {
+        self.persist_staged_outcome(staged, source)
+            .await
+            .map(|outcome| outcome.metadata)
+    }
+
+    async fn persist_staged_outcome(
+        &self,
+        staged: StagedAsset,
+        source: AssetSource,
+    ) -> Result<PersistOutcome, AssetError> {
         staged.validate_generation_for(self)?;
         let hash_lock = HashLock::acquire(self, &staged.sha256).await?;
-        self.persist_staged_with_lock(staged, source, hash_lock)
+        self.persist_staged_with_lock_outcome(staged, source, hash_lock)
             .await
     }
 
@@ -829,6 +937,17 @@ impl AssetStore {
         source: AssetSource,
         hash_lock: HashLock,
     ) -> Result<AssetMetadata, AssetError> {
+        self.persist_staged_with_lock_outcome(staged, source, hash_lock)
+            .await
+            .map(|outcome| outcome.metadata)
+    }
+
+    async fn persist_staged_with_lock_outcome(
+        &self,
+        staged: StagedAsset,
+        source: AssetSource,
+        hash_lock: HashLock,
+    ) -> Result<PersistOutcome, AssetError> {
         let store = self.clone();
         tokio::task::spawn_blocking(move || store.persist_staged_locked(staged, source, &hash_lock))
             .await
@@ -844,7 +963,7 @@ impl AssetStore {
         mut staged: StagedAsset,
         source: AssetSource,
         hash_lock: &HashLock,
-    ) -> Result<AssetMetadata, AssetError> {
+    ) -> Result<PersistOutcome, AssetError> {
         if !valid_source(&source) {
             return Err(AssetError::Invalid(
                 "fleet replica source requires a canonical runtime UUID".to_string(),
@@ -866,7 +985,10 @@ impl AssetStore {
                     .take()
                     .ok_or(AssetError::Invariant("staged asset reservation is missing"))?
                     .release()?;
-                return Ok(metadata);
+                return Ok(PersistOutcome {
+                    metadata,
+                    deduplicated: true,
+                });
             }
             DedupeOutcome::Missing | DedupeOutcome::Corrupt => {}
         }
@@ -899,7 +1021,10 @@ impl AssetStore {
                                     "staged asset reservation is missing",
                                 ))?
                                 .release()?;
-                            return Ok(metadata);
+                            return Ok(PersistOutcome {
+                                metadata,
+                                deduplicated: true,
+                            });
                         }
                         DedupeOutcome::Missing if attempt == 2 => {
                             return Err(AssetError::Store(std::io::Error::other(
@@ -949,7 +1074,10 @@ impl AssetStore {
             self.reconcile_accounting()?;
             return Err(error);
         }
-        publish_result
+        publish_result.map(|metadata| PersistOutcome {
+            metadata,
+            deduplicated: false,
+        })
     }
 
     #[cfg(test)]
@@ -1147,6 +1275,7 @@ impl AssetStore {
         let staged = self.stage_bytes_blocking("attachment", bytes)?;
         let hash_lock = HashLock::acquire_blocking(self, &staged.sha256)?;
         self.persist_staged_locked(staged, source, &hash_lock)
+            .map(|outcome| outcome.metadata)
     }
 
     fn stage_bytes_blocking(&self, name: &str, bytes: &[u8]) -> Result<StagedAsset, AssetError> {
@@ -1346,6 +1475,7 @@ impl AssetStore {
         accounting.committed = usage;
         accounting.objects = objects;
         accounting.initialized = true;
+        self.state.health.publish(usage);
         Ok(usage)
     }
 
@@ -1631,6 +1761,7 @@ impl AssetStore {
             };
         accounting.objects.insert(hash.to_string(), size);
         accounting.committed = committed;
+        self.state.health.publish(committed);
         Ok(())
     }
 
@@ -1640,6 +1771,7 @@ impl AssetStore {
         self.validate_accounting(&accounting)?;
         accounting.committed = usage;
         accounting.objects = objects;
+        self.state.health.publish(usage);
         Ok(())
     }
 
@@ -1908,6 +2040,20 @@ impl VerifiedLocalAsset {
     }
 }
 
+impl StoredAsset {
+    pub(super) fn asset_ref(&self) -> &AssetRef {
+        &self.asset_ref
+    }
+
+    pub(super) const fn deduplicated(&self) -> bool {
+        self.deduplicated
+    }
+
+    pub(super) fn into_asset_ref(self) -> AssetRef {
+        self.asset_ref
+    }
+}
+
 impl StagedAsset {
     pub fn name(&self) -> &str {
         &self.name
@@ -2144,6 +2290,7 @@ impl AssetReservation {
         if is_new {
             accounting.objects.insert(hash.to_string(), size);
         }
+        self.state.health.publish(committed);
         self.released = true;
         Ok(())
     }
@@ -3025,6 +3172,33 @@ mod tests {
             capability.ensure_current(),
             Err(AssetError::LocalCorruption)
         ));
+    }
+
+    #[tokio::test]
+    async fn batch_outcomes_distinguish_created_objects_from_verified_dedupe() {
+        let workspace = tempfile::TempDir::new().expect("temporary workspace");
+        let store = AssetStore::open(workspace.path(), "local:test", test_limits(100))
+            .expect("open asset store");
+        let first = store
+            .stage_bytes("first.bin", b"same")
+            .await
+            .expect("stage");
+        let first = store
+            .persist_batch_with_outcomes("24a6489c-762e-4461-9247-a824807a6080", vec![first])
+            .await
+            .expect("persist created object");
+        assert!(!first[0].deduplicated());
+
+        let second = store
+            .stage_bytes("second.bin", b"same")
+            .await
+            .expect("stage duplicate");
+        let second = store
+            .persist_batch_with_outcomes("24a6489c-762e-4461-9247-a824807a6080", vec![second])
+            .await
+            .expect("persist duplicate");
+        assert!(second[0].deduplicated());
+        assert_eq!(first[0].asset_ref().sha256, second[0].asset_ref().sha256);
     }
 
     fn test_limits(quota: u64) -> AssetLimits {

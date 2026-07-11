@@ -948,7 +948,7 @@ async fn failed_combined_corruption_quarantine_reconciles_usage_before_retry() {
         .await
         .unwrap_err();
 
-    assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(error.status_code(), StatusCode::INSUFFICIENT_STORAGE);
     assert!(!object.exists());
     assert_eq!(
         store.usage().unwrap(),
@@ -2741,7 +2741,7 @@ fn asset_error_status_and_code_table_is_stable() {
         ),
         (
             AssetError::Store(std::io::Error::other("disk")),
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::INSUFFICIENT_STORAGE,
             "asset_store_failed",
         ),
         (

@@ -111,6 +111,26 @@ struct ResolveOptions {
     download: bool,
 }
 
+#[derive(Clone, Copy)]
+enum BrowserRoute {
+    Upload,
+    Resolve,
+}
+
+#[derive(Default)]
+struct FetchMetadata<'a> {
+    site: Option<&'a str>,
+    mode: Option<&'a str>,
+    dest: Option<&'a str>,
+    user: Option<&'a str>,
+}
+
+impl FetchMetadata<'_> {
+    fn any(&self) -> bool {
+        self.site.is_some() || self.mode.is_some() || self.dest.is_some() || self.user.is_some()
+    }
+}
+
 pub fn router() -> Router<SharedRuntimeState> {
     let upload = Router::new()
         .route("/assets", post(upload_assets))
@@ -163,7 +183,7 @@ pub(crate) async fn open_workspace_store(
 }
 
 async fn guard_upload_browser(request: Request<Body>, next: Next) -> Response {
-    if browser_request_allowed(request.headers(), false, request.method()) {
+    if browser_request_allowed(request.headers(), BrowserRoute::Upload, request.method()) {
         next.run(request).await
     } else {
         forbidden_response()
@@ -171,7 +191,7 @@ async fn guard_upload_browser(request: Request<Body>, next: Next) -> Response {
 }
 
 async fn guard_resolve_browser(request: Request<Body>, next: Next) -> Response {
-    if browser_request_allowed(request.headers(), true, request.method()) {
+    if browser_request_allowed(request.headers(), BrowserRoute::Resolve, request.method()) {
         next.run(request).await
     } else {
         forbidden_response()
@@ -186,22 +206,40 @@ async fn reject_browser_context(request: Request<Body>, next: Next) -> Response 
     }
 }
 
-fn browser_request_allowed(headers: &HeaderMap, navigation_allowed: bool, method: &Method) -> bool {
-    let origins = headers.get_all(header::ORIGIN);
-    if origins.iter().count() > 1 {
-        return false;
+fn browser_request_allowed(headers: &HeaderMap, route: BrowserRoute, method: &Method) -> bool {
+    let origin = match singleton_header(headers, header::ORIGIN.as_str()) {
+        Ok(origin) => origin,
+        Err(()) => return false,
+    };
+    let metadata = match fetch_metadata(headers) {
+        Ok(metadata) => metadata,
+        Err(()) => return false,
+    };
+    if let Some(origin) = origin {
+        return is_allowed_web_origin(origin)
+            && matches!(
+                metadata.site,
+                Some("cross-site" | "same-site" | "same-origin")
+            )
+            && metadata.mode.is_none_or(|mode| mode == "cors")
+            && metadata.dest.is_none_or(|dest| match route {
+                BrowserRoute::Upload => dest == "empty",
+                BrowserRoute::Resolve => matches!(dest, "empty" | "image"),
+            })
+            && metadata.user.is_none();
     }
-    if let Some(origin) = origins.iter().next() {
-        return origin.to_str().ok().is_some_and(is_allowed_web_origin);
-    }
-    if !has_fetch_metadata(headers) {
+    if !metadata.any() {
         return true;
     }
-    navigation_allowed
+    matches!(route, BrowserRoute::Resolve)
         && method == Method::GET
-        && header_equals(headers, "sec-fetch-mode", "navigate")
-        && header_equals(headers, "sec-fetch-dest", "document")
-        && header_equals(headers, "sec-fetch-user", "?1")
+        && matches!(
+            metadata.site,
+            Some("none" | "cross-site" | "same-site" | "same-origin")
+        )
+        && metadata.mode == Some("navigate")
+        && metadata.dest == Some("document")
+        && metadata.user == Some("?1")
 }
 
 fn has_browser_headers(headers: &HeaderMap) -> bool {
@@ -209,20 +247,41 @@ fn has_browser_headers(headers: &HeaderMap) -> bool {
 }
 
 fn has_fetch_metadata(headers: &HeaderMap) -> bool {
-    [
-        "sec-fetch-site",
-        "sec-fetch-mode",
-        "sec-fetch-dest",
-        "sec-fetch-user",
-    ]
-    .iter()
-    .any(|name| headers.contains_key(*name))
+    FETCH_METADATA_HEADERS
+        .iter()
+        .any(|name| headers.contains_key(*name))
 }
 
-fn header_equals(headers: &HeaderMap, name: &'static str, expected: &str) -> bool {
+const FETCH_METADATA_HEADERS: [&str; 4] = [
+    "sec-fetch-site",
+    "sec-fetch-mode",
+    "sec-fetch-dest",
+    "sec-fetch-user",
+];
+
+fn fetch_metadata(headers: &HeaderMap) -> Result<FetchMetadata<'_>, ()> {
+    Ok(FetchMetadata {
+        site: singleton_header(headers, "sec-fetch-site")?,
+        mode: singleton_header(headers, "sec-fetch-mode")?,
+        dest: singleton_header(headers, "sec-fetch-dest")?,
+        user: singleton_header(headers, "sec-fetch-user")?,
+    })
+}
+
+fn singleton_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, ()> {
     let values = headers.get_all(name);
     let mut values = values.iter();
-    values.next().and_then(|value| value.to_str().ok()) == Some(expected) && values.next().is_none()
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(());
+    }
+    let value = value.to_str().map_err(|_| ())?;
+    if value.is_empty() || value.trim() != value || value.contains(',') {
+        return Err(());
+    }
+    Ok(Some(value))
 }
 
 fn is_allowed_web_origin(raw: &str) -> bool {
@@ -294,7 +353,7 @@ async fn upload_assets(
     };
     let _permit = match snapshot.service.acquire_upload().await {
         Ok(permit) => permit,
-        Err(error) => return asset_error_response(&snapshot.service, error),
+        Err(error) => return asset_error_response(&snapshot.service, &slug, error),
     };
     let store = match open_store_async(
         Arc::clone(&snapshot.service),
@@ -304,7 +363,7 @@ async fn upload_assets(
     .await
     {
         Ok(store) => store,
-        Err(error) => return asset_error_response(&snapshot.service, error),
+        Err(error) => return asset_error_response(&snapshot.service, &slug, error),
     };
     let mut multipart = match multipart {
         Ok(multipart) => multipart,
@@ -316,7 +375,7 @@ async fn upload_assets(
             } else {
                 AssetError::Invalid("invalid multipart asset upload".into())
             };
-            return asset_error_response(&snapshot.service, error);
+            return asset_error_response(&snapshot.service, &slug, error);
         }
     };
 
@@ -334,34 +393,69 @@ async fn upload_assets(
                 } else {
                     AssetError::Invalid("invalid multipart asset upload".into())
                 };
-                return asset_error_response(&snapshot.service, asset_error);
+                return asset_error_response(&snapshot.service, &slug, asset_error);
             }
         };
         if field.name() != Some("file") {
             return asset_error_response(
                 &snapshot.service,
+                &slug,
                 AssetError::Invalid("asset upload contains an unknown multipart field".into()),
             );
         }
         let name = match sanitize_upload_name(field.file_name()) {
             Ok(name) => name,
-            Err(error) => return asset_error_response(&snapshot.service, error),
+            Err(error) => return asset_error_response(&snapshot.service, &slug, error),
         };
         let chunks = field
             .map(|chunk| chunk.map_err(|_| std::io::Error::other("multipart asset stream failed")));
         match store.stage_stream(name, chunks, &mut budget).await {
             Ok(asset) => staged.push(asset),
-            Err(error) => return asset_error_response(&snapshot.service, error),
+            Err(error) => return asset_error_response(&snapshot.service, &slug, error),
         }
     }
 
-    let refs = match store.persist_batch(&snapshot.runtime_id, staged).await {
-        Ok(refs) => refs,
-        Err(error) => return asset_error_response(&snapshot.service, error),
+    let stored = match store
+        .persist_batch_with_outcomes(&snapshot.runtime_id, staged)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(error) => return asset_error_response(&snapshot.service, &slug, error),
     };
+    for asset in &stored {
+        emit_persistence_event(
+            &slug,
+            asset.asset_ref(),
+            asset.deduplicated(),
+            &snapshot.runtime_id,
+        );
+    }
+    let refs = stored
+        .into_iter()
+        .map(super::store::StoredAsset::into_asset_ref)
+        .collect::<Vec<_>>();
     let assets = refs.into_iter().map(uploaded_asset).collect::<Vec<_>>();
-    tracing::info!(workspace = %slug, files = assets.len(), bytes = budget.bytes(), "asset upload persisted");
     Json(UploadResponse { ok: true, assets }).into_response()
+}
+
+fn emit_persistence_event(
+    workspace: &str,
+    asset_ref: &AssetRef,
+    deduplicated: bool,
+    origin_runtime_id: &str,
+) {
+    tracing::info!(
+        event = if deduplicated {
+            "asset_dedupe"
+        } else {
+            "asset_upload"
+        },
+        workspace,
+        hash_prefix = short_hash(&asset_ref.sha256),
+        bytes = asset_ref.size,
+        origin_runtime_id,
+        "asset persistence complete"
+    );
 }
 
 fn sanitize_upload_name(raw: Option<&str>) -> Result<String, AssetError> {
@@ -455,7 +549,7 @@ async fn serve_local(
     .await
     {
         Ok(store) => store,
-        Err(error) => return asset_error_response(&service, error),
+        Err(error) => return asset_error_response(&service, &slug, error),
     };
     let verified = match tokio::task::spawn_blocking({
         let store = store.clone();
@@ -465,10 +559,11 @@ async fn serve_local(
     .await
     {
         Ok(Ok(verified)) => verified,
-        Ok(Err(error)) => return asset_error_response(&service, error),
+        Ok(Err(error)) => return asset_error_response(&service, &slug, error),
         Err(_) => {
             return asset_error_response(
                 &service,
+                &slug,
                 AssetError::Store(std::io::Error::other("asset lookup task failed")),
             )
         }
@@ -476,7 +571,7 @@ async fn serve_local(
     let verified = Arc::new(verified);
     let etag = format!("\"sha256-{hash}\"");
     if let Err(error) = ensure_serve_capability(Arc::clone(&verified)).await {
-        return asset_error_response(&service, error);
+        return asset_error_response(&service, &slug, error);
     }
     let if_none_match = request.headers().get_all(header::IF_NONE_MATCH);
     let mut if_none_match = if_none_match.iter();
@@ -489,7 +584,7 @@ async fn serve_local(
     let metadata = verified.metadata().clone();
     let mime = match metadata.media_type.parse::<mime::Mime>() {
         Ok(mime) => mime,
-        Err(_) => return asset_error_response(&service, AssetError::LocalCorruption),
+        Err(_) => return asset_error_response(&service, &slug, AssetError::LocalCorruption),
     };
     let mut request = request;
     request.headers_mut().remove(header::IF_MODIFIED_SINCE);
@@ -502,12 +597,13 @@ async fn serve_local(
         Err(_) => {
             return asset_error_response(
                 &service,
+                &slug,
                 AssetError::Store(std::io::Error::other("asset file open failed")),
             )
         }
     };
     if let Err(error) = ensure_serve_capability(Arc::clone(&verified)).await {
-        return asset_error_response(&service, error);
+        return asset_error_response(&service, &slug, error);
     }
     tracing::info!(workspace = %slug, hash = %short_hash(&hash), bytes = metadata.size, "asset local hit");
     decorate_file_response(response, &metadata, &etag, &options)
@@ -734,7 +830,7 @@ async fn open_store_async(
         .map_err(|_| AssetError::Store(std::io::Error::other("asset store task failed")))?
 }
 
-fn asset_error_response(service: &AssetService, error: AssetError) -> Response {
+fn asset_error_response(service: &AssetService, workspace: &str, error: AssetError) -> Response {
     if matches!(
         error,
         AssetError::Store(_)
@@ -743,12 +839,18 @@ fn asset_error_response(service: &AssetService, error: AssetError) -> Response {
             | AssetError::LocalCorruption
     ) {
         service.store_failures.fetch_add(1, Ordering::Relaxed);
-        tracing::warn!(
-            error_code = error.error_code(),
-            "asset store operation failed"
-        );
+        emit_store_failure_event(workspace, error.error_code());
     }
     error_response(error.status_code(), error.error_code(), &error.to_string())
+}
+
+fn emit_store_failure_event(workspace: &str, error_code: &str) {
+    tracing::warn!(
+        event = "asset_store_failure",
+        workspace,
+        error_code,
+        "asset store operation failed"
+    );
 }
 
 fn invalid_ref_response() -> Response {
@@ -778,6 +880,49 @@ fn short_hash(hash: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
+
+    #[derive(Clone, Default)]
+    struct EventCapture {
+        events: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    }
+
+    impl<S> Layer<S> for EventCapture
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            let mut fields = BTreeMap::new();
+            event.record(&mut FieldCapture(&mut fields));
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(fields);
+        }
+    }
+
+    struct FieldCapture<'a>(&'a mut BTreeMap<String, String>);
+
+    impl Visit for FieldCapture<'_> {
+        fn record_u64(&mut self, field: &Field, value: u64) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.0.insert(field.name().to_string(), value.to_string());
+        }
+
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+            self.0
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+    }
 
     #[test]
     fn canonical_origins_reject_normalization_and_authority_tricks() {
@@ -794,5 +939,62 @@ mod tests {
         ] {
             assert!(!is_canonical_origin(raw), "{raw}");
         }
+    }
+
+    #[test]
+    fn persistence_events_capture_upload_and_dedupe_fields_without_paths() {
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let asset_ref = AssetRef {
+            version: 1,
+            origin_runtime_id: "24a6489c-762e-4461-9247-a824807a6080".to_string(),
+            sha256: "a".repeat(64),
+            name: "file.bin".to_string(),
+            media_type: "application/octet-stream".to_string(),
+            size: 4,
+            width: None,
+            height: None,
+        };
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::callsite::rebuild_interest_cache();
+            emit_persistence_event("room", &asset_ref, false, &asset_ref.origin_runtime_id);
+            emit_persistence_event("room", &asset_ref, true, &asset_ref.origin_runtime_id);
+            emit_store_failure_event("room", "asset_store_failed");
+        });
+
+        let events = capture
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for (index, expected_event) in ["asset_upload", "asset_dedupe"].iter().enumerate() {
+            let event = &events[index];
+            assert_eq!(
+                event.get("event").map(String::as_str),
+                Some(*expected_event)
+            );
+            assert_eq!(event.get("workspace").map(String::as_str), Some("room"));
+            assert_eq!(
+                event.get("hash_prefix").map(String::as_str),
+                Some("aaaaaaaaaaaa")
+            );
+            assert_eq!(event.get("bytes").map(String::as_str), Some("4"));
+            assert_eq!(
+                event.get("origin_runtime_id").map(String::as_str),
+                Some("24a6489c-762e-4461-9247-a824807a6080")
+            );
+            assert!(!format!("{event:?}").contains("/workspace"));
+        }
+        let failure = &events[2];
+        assert_eq!(
+            failure.get("event").map(String::as_str),
+            Some("asset_store_failure")
+        );
+        assert_eq!(failure.get("workspace").map(String::as_str), Some("room"));
+        assert_eq!(
+            failure.get("error_code").map(String::as_str),
+            Some("asset_store_failed")
+        );
+        assert!(!format!("{failure:?}").contains("/workspace"));
     }
 }

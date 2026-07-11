@@ -121,6 +121,12 @@ struct WorkspaceEpochInfo {
     asset_quota: u64,
 }
 
+struct WorkspaceHealthInput {
+    slug: String,
+    path: PathBuf,
+    human_repo: Option<PathBuf>,
+}
+
 // -----------------------------------------------------------------------------
 // Typed response shapes.
 //
@@ -501,12 +507,33 @@ pub fn has_active_agents(state: &SharedRuntimeState) -> bool {
 }
 
 async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
-    let s = crate::preconditions::arc_mutex_lock(&state);
-    let workspace_epochs = s
-        .workspaces
+    let (runtime_id, usage_save_failures, saturation_save_failures, assets, workspaces) = {
+        let runtime = crate::preconditions::arc_mutex_lock(&state);
+        let workspaces = runtime
+            .workspaces
+            .iter()
+            .map(|(slug, workspace)| WorkspaceHealthInput {
+                slug: slug.clone(),
+                path: workspace.path.clone(),
+                human_repo: workspace.human_repo.clone(),
+            })
+            .collect::<Vec<_>>();
+        (
+            runtime.runtime_id.clone(),
+            runtime
+                .usage_save_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            runtime
+                .saturation_save_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            Arc::clone(&runtime.assets),
+            workspaces,
+        )
+    };
+    let workspace_epochs = workspaces
         .iter()
-        .map(|(slug, w)| {
-            let epoch = w
+        .map(|workspace| {
+            let epoch = workspace
                 .human_repo
                 .as_ref()
                 .and_then(|root| {
@@ -514,39 +541,38 @@ async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse>
                         .ok()
                         .flatten()
                 })
-                .map(|f| f.epoch)
+                .map(|file| file.epoch)
                 .unwrap_or(1);
-            let asset_usage = s.assets.cached_usage(&w.path).unwrap_or_default();
+            let asset_health = assets.health_snapshot(&workspace.path).unwrap_or(
+                crate::assets::AssetHealthSnapshot {
+                    bytes: 0,
+                    objects: 0,
+                    quota_bytes: assets.limits.workspace_quota_bytes,
+                },
+            );
             WorkspaceEpochInfo {
-                slug: slug.clone(),
+                slug: workspace.slug.clone(),
                 epoch,
-                asset_bytes: asset_usage.bytes,
-                asset_objects: asset_usage.objects,
-                asset_quota: s.assets.limits.workspace_quota_bytes,
+                asset_bytes: asset_health.bytes,
+                asset_objects: asset_health.objects,
+                asset_quota: asset_health.quota_bytes,
             }
         })
         .collect();
     Json(HealthResponse {
         service: "gitim-runtime",
         version: env!("CARGO_PKG_VERSION"),
-        workspaces_count: s.workspaces.len(),
-        runtime_id: s.runtime_id.clone(),
-        usage_save_failures: s
-            .usage_save_failures
-            .load(std::sync::atomic::Ordering::Relaxed),
-        saturation_save_failures: s
-            .saturation_save_failures
-            .load(std::sync::atomic::Ordering::Relaxed),
-        asset_store_failures: s
-            .assets
+        workspaces_count: workspaces.len(),
+        runtime_id,
+        usage_save_failures,
+        saturation_save_failures,
+        asset_store_failures: assets
             .store_failures
             .load(std::sync::atomic::Ordering::Relaxed),
-        asset_hash_mismatches: s
-            .assets
+        asset_hash_mismatches: assets
             .hash_mismatches
             .load(std::sync::atomic::Ordering::Relaxed),
-        asset_fleet_fetch_failures: s
-            .assets
+        asset_fleet_fetch_failures: assets
             .fleet_fetch_failures
             .load(std::sync::atomic::Ordering::Relaxed),
         workspace_epochs,

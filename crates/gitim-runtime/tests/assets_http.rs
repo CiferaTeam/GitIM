@@ -4,7 +4,7 @@ use axum::body::{Body, Bytes};
 use axum::http::{header, Method, Request, StatusCode};
 use futures::stream;
 use gitim_core::types::{AssetRef, MAX_ASSET_REF_BYTES};
-use gitim_runtime::assets::{AssetLimits, AssetService};
+use gitim_runtime::assets::{AssetLimits, AssetService, AssetSource, AssetStore};
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
 use gitim_runtime::http::recover_from_config;
 use gitim_runtime::http::{create_router, SharedRuntimeState};
@@ -13,9 +13,12 @@ use gitim_runtime::workspace::WorkspaceContext;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use serial_test::serial;
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+#[cfg(feature = "test-support")]
+use std::sync::Barrier;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -243,6 +246,9 @@ async fn browser_origin_allowlist_is_exact() {
         request
             .headers_mut()
             .insert(header::ORIGIN, origin.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("sec-fetch-site", "cross-site".parse().unwrap());
         let response = fixture.app.clone().oneshot(request).await.unwrap();
         assert_ne!(response.status(), StatusCode::FORBIDDEN, "{origin}");
     }
@@ -262,6 +268,9 @@ async fn browser_origin_allowlist_is_exact() {
         request
             .headers_mut()
             .insert(header::ORIGIN, origin.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("sec-fetch-site", "cross-site".parse().unwrap());
         let response = fixture.app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::FORBIDDEN, "{origin}");
     }
@@ -273,6 +282,84 @@ async fn browser_origin_allowlist_is_exact() {
     duplicate
         .headers_mut()
         .append(header::ORIGIN, "https://evil.example".parse().unwrap());
+    assert_eq!(
+        fixture.app.oneshot(duplicate).await.unwrap().status(),
+        StatusCode::FORBIDDEN
+    );
+}
+
+#[tokio::test]
+async fn allowed_origin_fetch_metadata_is_singleton_and_consistent() {
+    let fixture = fixture();
+    for (site, mode, dest, expected) in [
+        (None, Some("cors"), Some("empty"), StatusCode::FORBIDDEN),
+        (
+            Some("none"),
+            Some("cors"),
+            Some("empty"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some("bogus"),
+            Some("cors"),
+            Some("empty"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some("cross-site,same-site"),
+            Some("cors"),
+            Some("empty"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some("cross-site"),
+            Some("navigate"),
+            Some("empty"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some("cross-site"),
+            Some("cors"),
+            Some("image"),
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            Some("cross-site"),
+            Some("cors"),
+            Some("empty"),
+            StatusCode::OK,
+        ),
+    ] {
+        let mut request = upload_request(&[("file", "a.txt", "text/plain", b"a")]);
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, "https://gitim.io".parse().unwrap());
+        if let Some(site) = site {
+            request
+                .headers_mut()
+                .insert("sec-fetch-site", site.parse().unwrap());
+        }
+        if let Some(mode) = mode {
+            request
+                .headers_mut()
+                .insert("sec-fetch-mode", mode.parse().unwrap());
+        }
+        if let Some(dest) = dest {
+            request
+                .headers_mut()
+                .insert("sec-fetch-dest", dest.parse().unwrap());
+        }
+        assert_eq!(
+            fixture.app.clone().oneshot(request).await.unwrap().status(),
+            expected,
+            "site={site:?} mode={mode:?} dest={dest:?}"
+        );
+    }
+
+    let mut duplicate = allowed_upload(&[("file", "a.txt", "text/plain", b"a")]);
+    duplicate
+        .headers_mut()
+        .append("sec-fetch-site", "same-site".parse().unwrap());
     assert_eq!(
         fixture.app.oneshot(duplicate).await.unwrap().status(),
         StatusCode::FORBIDDEN
@@ -316,6 +403,9 @@ async fn configured_origins_are_additive_exact_and_never_wildcards() {
         request
             .headers_mut()
             .insert(header::ORIGIN, origin.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("sec-fetch-site", "cross-site".parse().unwrap());
         let response = fixture.app.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), expected, "{origin}");
     }
@@ -376,6 +466,64 @@ async fn only_resolve_get_accepts_exact_user_navigation_tuple() {
             .status(),
         StatusCode::FORBIDDEN
     );
+
+    for site in ["cross-site", "same-site", "same-origin"] {
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(&uri)
+            .header("sec-fetch-site", site)
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "document")
+            .header("sec-fetch-user", "?1")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            fixture.app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::OK,
+            "site={site}"
+        );
+    }
+
+    for duplicate_header in [
+        "sec-fetch-site",
+        "sec-fetch-mode",
+        "sec-fetch-dest",
+        "sec-fetch-user",
+    ] {
+        let mut request = navigation(Method::GET);
+        let duplicate_value = request.headers()[duplicate_header].clone();
+        request
+            .headers_mut()
+            .append(duplicate_header, duplicate_value);
+        assert_eq!(
+            fixture.app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "duplicate {duplicate_header}"
+        );
+    }
+
+    // Task 6's authoritative plan grants the navigation exception to GET only.
+    // HEAD remains available to allowed-origin browser fetches and originless peers.
+    for site in [None, Some("bogus"), Some("cross-site,same-origin")] {
+        let mut request = Request::builder()
+            .method(Method::GET)
+            .uri(&uri)
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "document")
+            .header("sec-fetch-user", "?1")
+            .body(Body::empty())
+            .unwrap();
+        if let Some(site) = site {
+            request
+                .headers_mut()
+                .insert("sec-fetch-site", site.parse().unwrap());
+        }
+        assert_eq!(
+            fixture.app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "site={site:?}"
+        );
+    }
 
     let mut upload_navigation = upload_request(&[("file", "a.txt", "text/plain", b"a")]);
     for (name, value) in [
@@ -1018,6 +1166,25 @@ async fn health_reports_cached_asset_usage_and_real_counters_without_rescanning(
         256 * 1024 * 1024
     );
 
+    let relocated = fixture.workspace.path().with_extension("health-relocated");
+    std::fs::rename(fixture.workspace.path(), &relocated).unwrap();
+    let health_without_workspace_path = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response_json(health_without_workspace_path).await["workspace_epochs"][0]["asset_bytes"],
+        asset["size"]
+    );
+    std::fs::rename(&relocated, fixture.workspace.path()).unwrap();
+
     let object = object_files(fixture.workspace.path()).pop().unwrap();
     std::thread::sleep(std::time::Duration::from_millis(10));
     std::fs::write(&object, b"broken").unwrap();
@@ -1048,6 +1215,56 @@ async fn health_reports_cached_asset_usage_and_real_counters_without_rescanning(
 }
 
 #[tokio::test]
+async fn local_persistence_failure_is_507_sanitized_and_returns_no_refs() {
+    let fixture = fixture();
+    upload_one(&fixture.app, b"seed", "seed.bin").await;
+    let bytes = b"persistence-failure";
+    let hash = format!("{:x}", Sha256::digest(bytes));
+    let shard = fixture
+        .workspace
+        .path()
+        .join(".gitim-runtime/assets/v1/metadata/sha256")
+        .join(&hash[..2]);
+    assert!(
+        !shard.exists(),
+        "fixture hash unexpectedly reused seed shard"
+    );
+    std::fs::write(&shard, b"not-a-directory").unwrap();
+
+    let response = fixture
+        .app
+        .clone()
+        .oneshot(allowed_upload(&[(
+            "file",
+            "failure.bin",
+            "application/octet-stream",
+            bytes,
+        )]))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INSUFFICIENT_STORAGE);
+    let body = response_json(response).await;
+    assert_eq!(body["error_code"], "asset_store_failed");
+    assert!(body.get("assets").is_none());
+    assert!(!body["error"]
+        .as_str()
+        .unwrap()
+        .contains(fixture.workspace.path().to_string_lossy().as_ref()));
+
+    let health = fixture
+        .app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response_json(health).await["asset_store_failures"], 1);
+}
+
+#[tokio::test]
 #[serial(asset_recovery_home)]
 async fn startup_recovery_opens_and_caches_the_bound_asset_store() {
     let home = HomeGuard::install();
@@ -1063,6 +1280,15 @@ async fn startup_recovery_opens_and_caches_the_bound_asset_store() {
         },
     };
     config.write(workspace.path()).unwrap();
+    let recovered_size = b"recovered".len() as u64;
+    AssetStore::open(
+        workspace.path(),
+        format!("local:{CREATED_AT}"),
+        AssetLimits::default(),
+    )
+    .unwrap()
+    .put_bytes(b"recovered", AssetSource::LocalUpload)
+    .unwrap();
     gitim_runtime::user_config::write(&UserConfig {
         runtime_id: RUNTIME_ID.to_string(),
         workspaces: vec![WorkspaceEntry {
@@ -1075,7 +1301,7 @@ async fn startup_recovery_opens_and_caches_the_bound_asset_store() {
     })
     .unwrap();
     assert!(home.path().join(".gitim/runtime.json").is_file());
-    let (_app, state) = create_router();
+    let (app, state) = create_router();
     state.lock().unwrap().runtime_id = RUNTIME_ID.to_string();
 
     recover_from_config(Arc::clone(&state)).await;
@@ -1083,10 +1309,63 @@ async fn startup_recovery_opens_and_caches_the_bound_asset_store() {
     let service = Arc::clone(&state.lock().unwrap().assets);
     assert_eq!(
         service.cached_usage(workspace.path()),
-        Some(gitim_runtime::assets::AssetUsage::default())
+        Some(gitim_runtime::assets::AssetUsage {
+            bytes: recovered_size,
+            objects: 1,
+        })
     );
     assert!(workspace
         .path()
         .join(".gitim-runtime/assets/v1/store.json")
         .is_file());
+    let health = app
+        .oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let health = response_json(health).await;
+    assert_eq!(health["workspace_epochs"][0]["asset_bytes"], recovered_size);
+    assert_eq!(health["workspace_epochs"][0]["asset_objects"], 1);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_does_not_wait_for_the_store_operation_gate() {
+    let fixture = fixture();
+    let service = Arc::clone(&fixture.state.lock().unwrap().assets);
+    let store = service
+        .open_store(fixture.workspace.path(), format!("local:{CREATED_AT}"))
+        .unwrap();
+    let staged = store.stage_bytes("gate.bin", b"gate").await.unwrap();
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    store.inject_before_publish_pause(Arc::clone(&reached), Arc::clone(&resume));
+    let persist = tokio::spawn({
+        let store = store.clone();
+        async move { store.persist_staged(staged, AssetSource::LocalUpload).await }
+    });
+    tokio::task::spawn_blocking(move || reached.wait())
+        .await
+        .unwrap();
+
+    let health = tokio::spawn(
+        fixture.app.clone().oneshot(
+            Request::builder()
+                .uri("/health")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let completed_without_store_gate = health.is_finished();
+    tokio::task::spawn_blocking(move || resume.wait())
+        .await
+        .unwrap();
+    persist.await.unwrap().unwrap();
+    assert_eq!(health.await.unwrap().unwrap().status(), StatusCode::OK);
+    assert!(completed_without_store_gate);
 }

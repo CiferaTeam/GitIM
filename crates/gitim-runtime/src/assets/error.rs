@@ -43,7 +43,7 @@ impl AssetError {
             Self::TooLarge { .. } | Self::RequestTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::TooMany { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::QuotaExceeded { .. } => StatusCode::INSUFFICIENT_STORAGE,
-            Self::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Store(_) => StatusCode::INSUFFICIENT_STORAGE,
             Self::StaleBinding => StatusCode::CONFLICT,
             Self::Invariant(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Missing => StatusCode::NOT_FOUND,
