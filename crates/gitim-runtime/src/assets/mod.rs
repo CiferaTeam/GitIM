@@ -1,6 +1,7 @@
 mod error;
 pub(crate) mod http;
 mod inspect;
+mod resolver;
 mod store;
 
 pub use error::AssetError;

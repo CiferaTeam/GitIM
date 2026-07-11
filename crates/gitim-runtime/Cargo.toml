@@ -85,6 +85,7 @@ path = "tests/assets_http.rs"
 serial_test = "3"
 mockito = "1"
 http-body-util = "0.1"
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 xattr = "1"

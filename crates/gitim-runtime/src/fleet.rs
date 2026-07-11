@@ -795,6 +795,107 @@ pub fn snapshot_workspace_peers(
     peers
 }
 
+/// Snapshot Fleet candidates eligible for an asset request in one local
+/// workspace. Asset routing requires the normalized repository identity in
+/// addition to the local slug so a stale or manually edited slug mapping
+/// cannot cross repository boundaries.
+pub fn snapshot_asset_peers(
+    state: &SharedRuntimeState,
+    local_workspace_id: &str,
+    workspace_identity: &str,
+) -> Vec<FleetPeerSnapshot> {
+    let mut peers: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .flat_map(|runtime| {
+                runtime
+                    .entry
+                    .workspace_mappings
+                    .iter()
+                    .filter(|mapping| {
+                        mapping.local_workspace_id == local_workspace_id
+                            && mapping.workspace_identity == workspace_identity
+                    })
+                    .map(|mapping| FleetPeerSnapshot {
+                        node_id: runtime.entry.node_id.clone(),
+                        runtime_id: canonical_runtime_id(runtime.entry.runtime_id.as_deref())
+                            .map(|runtime_id| runtime_id.to_string()),
+                        base_url: normalized_base_url(&runtime.entry.base_url),
+                        remote_workspace_id: mapping.remote_workspace_id.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    peers.sort_by(|a, b| {
+        a.node_id
+            .cmp(&b.node_id)
+            .then_with(|| a.remote_workspace_id.cmp(&b.remote_workspace_id))
+            .then_with(|| a.base_url.cmp(&b.base_url))
+            .then_with(|| a.runtime_id.cmp(&b.runtime_id))
+    });
+
+    let mut seen_runtime_ids = std::collections::HashSet::new();
+    peers.retain(|peer| {
+        peer.runtime_id
+            .as_deref()
+            .and_then(|runtime_id| uuid::Uuid::parse_str(runtime_id).ok())
+            .is_none_or(|runtime_id| seen_runtime_ids.insert(runtime_id))
+    });
+    peers.dedup();
+    peers
+}
+
+/// Best-effort identity discovery for legacy asset candidates. The candidate
+/// aliases are copied while the Runtime state lock is held, then every network
+/// and config operation runs after the guard has been released.
+pub async fn discover_asset_legacy_identities(
+    state: &SharedRuntimeState,
+    local_workspace_id: &str,
+    workspace_identity: &str,
+) {
+    let mut aliases: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .filter(|runtime| {
+                runtime.entry.runtime_id.is_none()
+                    && runtime.entry.workspace_mappings.iter().any(|mapping| {
+                        mapping.local_workspace_id == local_workspace_id
+                            && mapping.workspace_identity == workspace_identity
+                    })
+            })
+            .map(|runtime| normalized_node_id(&runtime.entry.node_id))
+            .collect()
+    };
+    aliases.sort();
+    aliases.dedup();
+    let results: Vec<_> = futures::stream::iter(aliases)
+        .map(|node_id| {
+            let state = state.clone();
+            async move {
+                let result = discover_legacy_runtime_id_once(&state, &node_id).await;
+                (node_id, result)
+            }
+        })
+        .buffer_unordered(LEGACY_IDENTITY_DISCOVERY_CONCURRENCY)
+        .collect()
+        .await;
+    for (node_id, result) in results {
+        if let Err(error) = result {
+            tracing::warn!(
+                event = "asset_fleet_identity_probe_failed",
+                fleet_alias = %node_id,
+                error = %error,
+                "asset Fleet identity probe failed"
+            );
+        }
+    }
+}
+
 pub async fn resolve_workspace_mappings(
     state: &SharedRuntimeState,
     mut entry: FleetNodeEntry,

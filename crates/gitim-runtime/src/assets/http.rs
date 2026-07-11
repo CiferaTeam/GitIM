@@ -79,6 +79,7 @@ struct UploadedAsset {
 struct WorkspaceAssetSnapshot {
     workspace_root: PathBuf,
     binding: String,
+    workspace_identity: Option<String>,
     token: AssetWorkspaceToken,
     runtime_id: String,
     service: Arc<AssetService>,
@@ -641,6 +642,7 @@ async fn serve_local(
         Err(error) => return error.into_response(),
     };
     let service = Arc::clone(&snapshot.service);
+    let allow_fleet = origin_runtime_id.is_some();
     let origin_runtime_id = origin_runtime_id.unwrap_or(snapshot.runtime_id.clone());
     let store = match open_store_async(
         Arc::clone(&service),
@@ -653,21 +655,66 @@ async fn serve_local(
         Ok(store) => store,
         Err(error) => return asset_error_response(&service, &slug, error),
     };
-    let verified = match tokio::task::spawn_blocking({
-        let store = store.clone();
-        let hash = hash.clone();
-        move || store.verified_local_asset(&hash)
-    })
-    .await
-    {
-        Ok(Ok(verified)) => verified,
-        Ok(Err(error)) => return asset_error_response(&service, &slug, error),
-        Err(_) => {
-            return asset_error_response(
-                &service,
-                &slug,
-                AssetError::Store(std::io::Error::other("asset lookup task failed")),
-            )
+    let mut remote_resolution = false;
+    let verified = loop {
+        let lookup = tokio::task::spawn_blocking({
+            let store = store.clone();
+            let hash = hash.clone();
+            move || store.verified_local_asset(&hash)
+        })
+        .await;
+        match lookup {
+            Ok(Ok(verified)) => break verified,
+            Ok(Err(error @ (AssetError::Missing | AssetError::LocalCorruption))) if allow_fleet => {
+                if matches!(error, AssetError::LocalCorruption) {
+                    record_store_failure(&service, &slug, &error);
+                }
+                let Some(workspace_identity) = snapshot.workspace_identity.as_deref() else {
+                    return asset_error_response(&service, &slug, AssetError::Missing);
+                };
+                if request.method() == Method::HEAD {
+                    return match super::resolver::resolve_head(
+                        &state,
+                        &service,
+                        &store,
+                        &slug,
+                        workspace_identity,
+                        &origin_runtime_id,
+                        &hash,
+                    )
+                    .await
+                    {
+                        Ok(availability) => {
+                            head_availability_response(availability, &hash, &options)
+                        }
+                        Err(error) => asset_error_response(&service, &slug, error),
+                    };
+                }
+                match super::resolver::resolve_get(
+                    &state,
+                    &service,
+                    &store,
+                    &slug,
+                    workspace_identity,
+                    &origin_runtime_id,
+                    &hash,
+                )
+                .await
+                {
+                    Ok(replica) => {
+                        remote_resolution = replica.peer.node_id != "local";
+                    }
+                    Err(error) => return asset_error_response(&service, &slug, error),
+                }
+            }
+            Ok(Err(error)) => return asset_error_response(&service, &slug, error),
+            Err(_) => {
+                return asset_error_response(
+                    &service,
+                    &slug,
+                    AssetError::Store(std::io::Error::other("asset lookup task failed")),
+                )
+            }
         }
     };
     let verified = Arc::new(verified);
@@ -681,7 +728,9 @@ async fn serve_local(
         == Some(etag.as_str())
         && if_none_match.next().is_none();
     if exact_strong_match {
-        service.record_local_hit(&slug, &hash, verified.metadata().size, &origin_runtime_id);
+        if !remote_resolution {
+            service.record_local_hit(&slug, &hash, verified.metadata().size, &origin_runtime_id);
+        }
         return not_modified_response(&etag);
     }
     let metadata = verified.metadata().clone();
@@ -714,10 +763,41 @@ async fn serve_local(
     if matches!(
         response.status(),
         StatusCode::OK | StatusCode::PARTIAL_CONTENT
-    ) {
+    ) && !remote_resolution
+    {
         service.record_local_hit(&slug, &hash, metadata.size, &origin_runtime_id);
     }
     decorate_file_response(response, &metadata, &etag, &options)
+}
+
+fn head_availability_response(
+    availability: super::resolver::HeadAvailability,
+    hash: &str,
+    options: &ResolveOptions,
+) -> Response {
+    let mut response = StatusCode::OK.into_response();
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&availability.size.to_string()) {
+        headers.insert(header::CONTENT_LENGTH, value);
+    }
+    if let Ok(value) = HeaderValue::from_str(&availability.media_type) {
+        headers.insert(header::CONTENT_TYPE, value);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(CACHE_CONTROL_VALUE),
+    );
+    if let Ok(value) = HeaderValue::from_str(&format!("\"sha256-{hash}\"")) {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    if let Ok(value) = content_disposition(false, options.name.as_deref()) {
+        headers.insert(header::CONTENT_DISPOSITION, value);
+    }
+    response
 }
 
 async fn ensure_serve_capability(
@@ -948,6 +1028,7 @@ fn snapshot_workspace(
     Ok(WorkspaceAssetSnapshot {
         workspace_root: workspace.path.clone(),
         binding,
+        workspace_identity: config.git.remote_identity(),
         token: workspace.asset_token.clone(),
         runtime_id: runtime.runtime_id.clone(),
         service: Arc::clone(&runtime.assets),

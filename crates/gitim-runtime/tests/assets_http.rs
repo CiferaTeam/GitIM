@@ -1408,7 +1408,7 @@ async fn health_reports_cached_asset_usage_and_real_counters_without_rescanning(
         )
         .await
         .unwrap();
-    assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(failed.status(), StatusCode::NOT_FOUND);
 
     let health = fixture
         .app
@@ -1860,7 +1860,7 @@ async fn asset_event_observer_captures_handler_outcomes_without_sensitive_paths(
             .await
             .unwrap()
             .status(),
-        StatusCode::INTERNAL_SERVER_ERROR
+        StatusCode::NOT_FOUND
     );
 
     let events = events.lock().unwrap();
