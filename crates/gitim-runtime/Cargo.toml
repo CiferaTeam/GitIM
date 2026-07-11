@@ -43,11 +43,7 @@ percent-encoding = "2"
 xattr = "1"
 
 [features]
-# Gates the `fake-gitim-runtime` test-support binary and the `update_e2e`
-# integration test. Without this feature, plain `cargo build --release` (or
-# `cargo install --path`) does NOT produce the fake binary — keeps test
-# helpers out of production artifacts. Enable via
-# `cargo test -p gitim-runtime --features test-support --test update_e2e`.
+# Gates test-only binaries, integration targets, and diagnostic APIs.
 test-support = []
 
 [[bin]]
@@ -73,6 +69,11 @@ required-features = ["test-support"]
 [[test]]
 name = "update_e2e"
 path = "tests/update_e2e.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "assets_store"
+path = "tests/assets_store.rs"
 required-features = ["test-support"]
 
 [dev-dependencies]

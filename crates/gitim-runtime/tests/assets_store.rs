@@ -1476,6 +1476,58 @@ fn asset_service_owns_limits_slots_usage_cache_and_metrics() {
 }
 
 #[test]
+fn asset_service_eviction_releases_workspace_state_for_disk_reinitialization() {
+    let workspace = TempDir::new().unwrap();
+    let service = AssetService::new(limits(1024));
+    let store = service
+        .open_store(workspace.path(), "github:github.com/acme/repo")
+        .unwrap();
+    let stored = store
+        .put_bytes(b"cached", AssetSource::LocalUpload)
+        .unwrap();
+    let metadata_path = store.metadata_path(&stored.sha256).unwrap();
+    drop(store);
+
+    assert!(service.evict_workspace(workspace.path()).unwrap());
+    assert_eq!(service.cached_usage(workspace.path()), None);
+    fs::remove_file(&metadata_path).unwrap();
+
+    let reopened = service
+        .open_store(workspace.path(), "github:github.com/acme/repo")
+        .unwrap();
+    assert!(metadata_path.exists());
+    assert_eq!(
+        reopened.usage().unwrap(),
+        AssetUsage {
+            bytes: 6,
+            objects: 1,
+        }
+    );
+}
+
+#[test]
+fn cached_usage_rejects_a_service_entry_staled_by_direct_rebind() {
+    let workspace = TempDir::new().unwrap();
+    let service = AssetService::new(limits(1024));
+    let old = service
+        .open_store(workspace.path(), "github:github.com/acme/old")
+        .unwrap();
+    old.put_bytes(b"old", AssetSource::LocalUpload).unwrap();
+
+    let current = AssetStore::open(
+        workspace.path(),
+        "github:github.com/acme/current",
+        limits(1024),
+    )
+    .unwrap();
+    current
+        .put_bytes(b"current", AssetSource::LocalUpload)
+        .unwrap();
+
+    assert_eq!(service.cached_usage(workspace.path()), None);
+}
+
+#[test]
 fn runtime_state_default_has_one_asset_service() {
     let state = gitim_runtime::http::RuntimeState::default();
     assert_eq!(state.assets.available_upload_permits(), 2);

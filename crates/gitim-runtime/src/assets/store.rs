@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(debug_assertions)]
+#[cfg(feature = "test-support")]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{
@@ -153,11 +153,17 @@ struct StoreManifest {
 pub struct AssetService {
     upload_slots: Arc<Semaphore>,
     peer_slots: Arc<Semaphore>,
-    workspaces: Mutex<HashMap<PathBuf, Arc<WorkspaceAssetState>>>,
+    workspaces: Mutex<HashMap<PathBuf, WorkspaceCacheEntry>>,
     pub store_failures: AtomicU64,
     pub hash_mismatches: AtomicU64,
     pub fleet_fetch_failures: AtomicU64,
     pub limits: AssetLimits,
+}
+
+#[derive(Clone)]
+struct WorkspaceCacheEntry {
+    state: Arc<WorkspaceAssetState>,
+    generation: u64,
 }
 
 impl AssetService {
@@ -180,28 +186,48 @@ impl AssetService {
     ) -> Result<AssetStore, AssetError> {
         let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         let workspace_state = {
-            let mut cache = lock(&self.workspaces);
-            cache
-                .entry(workspace_root.clone())
-                .or_insert_with(|| shared_workspace_state(&workspace_root))
-                .clone()
+            lock(&self.workspaces)
+                .get(&workspace_root)
+                .map(|entry| Arc::clone(&entry.state))
+                .unwrap_or_else(|| shared_workspace_state(&workspace_root))
         };
-        AssetStore::open_with_state(
+        let store = AssetStore::open_with_state(
             workspace_root,
             binding.into(),
             self.limits.clone(),
             workspace_state,
-        )
+        )?;
+        {
+            let _operation = read_lock(&store.state.operation_gate);
+            store.validate_current()?;
+            lock(&self.workspaces).insert(
+                store.workspace_root.clone(),
+                WorkspaceCacheEntry {
+                    state: Arc::clone(&store.state),
+                    generation: store.generation,
+                },
+            );
+        }
+        Ok(store)
     }
 
     pub fn cached_usage(&self, workspace_root: impl AsRef<Path>) -> Option<AssetUsage> {
         let workspace_root = canonical_workspace_root(workspace_root.as_ref()).ok()?;
-        let state = lock(&self.workspaces)
-            .get(&workspace_root)
-            .cloned()
-            .or_else(|| existing_workspace_state(&workspace_root))?;
-        let usage = lock(&state.accounting).committed;
-        Some(usage)
+        let entry = lock(&self.workspaces).get(&workspace_root).cloned();
+        let (state, cached_generation) = match entry {
+            Some(entry) => (entry.state, Some(entry.generation)),
+            None => (existing_workspace_state(&workspace_root)?, None),
+        };
+        let _operation = read_lock(&state.operation_gate);
+        let accounting = lock(&state.accounting);
+        (accounting.initialized
+            && cached_generation.is_none_or(|generation| generation == accounting.generation))
+        .then_some(accounting.committed)
+    }
+
+    pub fn evict_workspace(&self, workspace_root: impl AsRef<Path>) -> Result<bool, AssetError> {
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
+        Ok(lock(&self.workspaces).remove(&workspace_root).is_some())
     }
 
     pub async fn acquire_upload(&self) -> Result<OwnedSemaphorePermit, AssetError> {
@@ -233,6 +259,49 @@ impl Default for AssetService {
     }
 }
 
+/// A generation-bound interface to one workspace asset namespace.
+///
+/// Namespace paths remain internal to the store in production builds.
+///
+/// ```compile_fail
+/// use gitim_runtime::assets::AssetStore;
+///
+/// fn raw_namespace_root_is_not_available(store: &AssetStore) {
+///     let _ = store.root();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use gitim_runtime::assets::AssetStore;
+///
+/// fn raw_object_path_is_not_available(store: &AssetStore, hash: &str) {
+///     let _ = store.object_path(hash);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use gitim_runtime::assets::AssetStore;
+///
+/// fn raw_metadata_path_is_not_available(store: &AssetStore, hash: &str) {
+///     let _ = store.metadata_path(hash);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use gitim_runtime::assets::AssetStore;
+///
+/// fn raw_lock_path_is_not_available(store: &AssetStore, hash: &str) {
+///     let _ = store.lock_path(hash);
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use gitim_runtime::assets::AssetStore;
+///
+/// fn raw_temp_path_is_not_available(store: &AssetStore) {
+///     let _ = store.create_owned_temp();
+/// }
+/// ```
 pub struct AssetStore {
     workspace_root: PathBuf,
     root: PathBuf,
@@ -246,7 +315,7 @@ pub struct AssetStore {
 struct WorkspaceAssetState {
     accounting: Mutex<AccountingState>,
     operation_gate: RwLock<()>,
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-support")]
     fail_next_sidecar_write: AtomicBool,
 }
 
@@ -334,6 +403,7 @@ impl AssetStore {
         Ok(store)
     }
 
+    #[cfg(feature = "test-support")]
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -350,18 +420,21 @@ impl AssetStore {
         Ok(lock(&self.state.accounting).reserved)
     }
 
+    #[cfg(feature = "test-support")]
     pub fn object_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
         let _operation = read_lock(&self.state.operation_gate);
         self.validate_current()?;
         self.raw_object_path(hash)
     }
 
+    #[cfg(feature = "test-support")]
     pub fn metadata_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
         let _operation = read_lock(&self.state.operation_gate);
         self.validate_current()?;
         self.raw_metadata_path(hash)
     }
 
+    #[cfg(feature = "test-support")]
     pub fn lock_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
         let _operation = read_lock(&self.state.operation_gate);
         self.validate_current()?;
@@ -517,6 +590,7 @@ impl AssetStore {
         self.refresh_metadata(hash)
     }
 
+    #[cfg(feature = "test-support")]
     pub fn create_owned_temp(&self) -> Result<PathBuf, AssetError> {
         let _operation = read_lock(&self.state.operation_gate);
         self.validate_current()?;
@@ -533,7 +607,7 @@ impl AssetStore {
         Ok(path)
     }
 
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn inject_sidecar_write_failure_once(&self) {
         self.state
@@ -779,7 +853,7 @@ impl AssetStore {
     }
 
     fn write_metadata(&self, metadata: &AssetMetadata) -> Result<(), AssetError> {
-        #[cfg(debug_assertions)]
+        #[cfg(feature = "test-support")]
         if self
             .state
             .fail_next_sidecar_write
@@ -1680,6 +1754,42 @@ mod tests {
             reservation.release(),
             Err(AssetError::Invariant("asset reservation release underflow"))
         ));
+    }
+
+    #[test]
+    fn cached_usage_waits_for_generation_transition_and_rejects_uninitialized_state() {
+        let workspace = tempfile::TempDir::new().expect("temporary workspace");
+        let service = AssetService::new(test_limits(10));
+        let store = service
+            .open_store(workspace.path(), "local:test")
+            .expect("open asset store");
+        let state = Arc::clone(&store.state);
+        let operation = write_lock(&state.operation_gate);
+        {
+            let mut accounting = lock(&state.accounting);
+            accounting.generation += 1;
+            accounting.initialized = false;
+        }
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                started_tx.send(()).expect("signal cached usage start");
+                result_tx
+                    .send(service.cached_usage(workspace.path()))
+                    .expect("send cached usage result");
+            });
+            started_rx.recv().expect("wait for cached usage start");
+            assert!(result_rx.recv_timeout(Duration::from_millis(100)).is_err());
+            drop(operation);
+            assert_eq!(
+                result_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("cached usage must finish after transition"),
+                None
+            );
+        });
     }
 
     fn test_limits(quota: u64) -> AssetLimits {
