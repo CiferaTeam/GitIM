@@ -28,7 +28,7 @@ use std::sync::Barrier;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
-use tokio::sync::Notify;
+use tokio::sync::{Notify, Semaphore};
 use tower::ServiceExt;
 
 mod common;
@@ -51,6 +51,7 @@ const PNG_1X1: &[u8] = &[
 #[derive(Clone)]
 enum PeerBehavior {
     Object(Vec<u8>),
+    HeadMissingObject(Vec<u8>),
     Missing,
     Wrong(Vec<u8>),
     Malformed,
@@ -67,6 +68,7 @@ enum PeerBehavior {
         declared_size: u64,
         interval: Duration,
     },
+    StalledHead,
 }
 
 struct TransferGuard {
@@ -90,8 +92,9 @@ impl Drop for TransferGuard {
 }
 
 struct MockPeerState {
-    runtime_id: String,
+    runtime_id: Option<String>,
     behavior: PeerBehavior,
+    health_requests: AtomicUsize,
     object_gets: AtomicUsize,
     object_heads: AtomicUsize,
     inflight_gets: AtomicUsize,
@@ -101,6 +104,7 @@ struct MockPeerState {
     browser_headers_seen: AtomicBool,
     observed_slug: Mutex<Option<String>>,
     get_entered: Notify,
+    head_release: Semaphore,
 }
 
 struct MockPeer {
@@ -122,6 +126,8 @@ struct PathAwareStorePeer {
 struct StalledHealthState {
     requests: AtomicUsize,
     inflight: AtomicUsize,
+    released: AtomicBool,
+    release: Notify,
 }
 
 struct StalledHealthGuard {
@@ -145,6 +151,8 @@ impl StalledHealthPeer {
         let state = Arc::new(StalledHealthState {
             requests: AtomicUsize::new(0),
             inflight: AtomicUsize::new(0),
+            released: AtomicBool::new(false),
+            release: Notify::new(),
         });
         let app = Router::new()
             .route("/health", get(stalled_health))
@@ -168,6 +176,31 @@ impl StalledHealthPeer {
     fn inflight(&self) -> usize {
         self.state.inflight.load(Ordering::Acquire)
     }
+
+    fn release(&self) {
+        self.state.released.store(true, Ordering::Release);
+        self.state.release.notify_waiters();
+    }
+
+    async fn wait_until_idle(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut stable_rounds = 0;
+        let mut observed_requests = self.requests();
+        while std::time::Instant::now() < deadline {
+            let requests = self.requests();
+            if self.inflight() == 0 && requests == observed_requests {
+                stable_rounds += 1;
+                if stable_rounds == 100 {
+                    return;
+                }
+            } else {
+                stable_rounds = 0;
+                observed_requests = requests;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(self.inflight(), 0);
+    }
 }
 
 impl Drop for StalledHealthPeer {
@@ -180,14 +213,29 @@ async fn stalled_health(State(state): State<Arc<StalledHealthState>>) -> Respons
     state.requests.fetch_add(1, Ordering::AcqRel);
     state.inflight.fetch_add(1, Ordering::AcqRel);
     let _guard = StalledHealthGuard { state };
-    std::future::pending::<Response>().await
+    while !_guard.state.released.load(Ordering::Acquire) {
+        _guard.state.release.notified().await;
+    }
+    Response::builder()
+        .status(StatusCode::SERVICE_UNAVAILABLE)
+        .body(Body::empty())
+        .unwrap()
 }
 
 impl MockPeer {
     async fn spawn(runtime_id: &str, behavior: PeerBehavior) -> Self {
+        Self::spawn_with_runtime_id(Some(runtime_id), behavior).await
+    }
+
+    async fn spawn_unresolved(behavior: PeerBehavior) -> Self {
+        Self::spawn_with_runtime_id(None, behavior).await
+    }
+
+    async fn spawn_with_runtime_id(runtime_id: Option<&str>, behavior: PeerBehavior) -> Self {
         let state = Arc::new(MockPeerState {
-            runtime_id: runtime_id.to_string(),
+            runtime_id: runtime_id.map(str::to_string),
             behavior,
+            health_requests: AtomicUsize::new(0),
             object_gets: AtomicUsize::new(0),
             object_heads: AtomicUsize::new(0),
             inflight_gets: AtomicUsize::new(0),
@@ -197,6 +245,7 @@ impl MockPeer {
             browser_headers_seen: AtomicBool::new(false),
             observed_slug: Mutex::new(None),
             get_entered: Notify::new(),
+            head_release: Semaphore::new(0),
         });
         let app = Router::new()
             .route("/health", get(peer_health))
@@ -223,6 +272,26 @@ impl MockPeer {
 
     fn object_heads(&self) -> usize {
         self.state.object_heads.load(Ordering::Acquire)
+    }
+
+    fn health_requests(&self) -> usize {
+        self.state.health_requests.load(Ordering::Acquire)
+    }
+
+    fn inflight_heads(&self) -> usize {
+        self.state.inflight_heads.load(Ordering::Acquire)
+    }
+
+    fn release_heads(&self) {
+        self.state.head_release.add_permits(self.inflight_heads());
+    }
+
+    async fn wait_for_heads_to_finish(&self) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while self.inflight_heads() != 0 && std::time::Instant::now() < deadline {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(self.inflight_heads(), 0);
     }
 
     fn max_inflight_gets(&self) -> usize {
@@ -314,6 +383,7 @@ async fn path_aware_store_object(
 }
 
 async fn peer_health(State(state): State<Arc<MockPeerState>>) -> axum::Json<Value> {
+    state.health_requests.fetch_add(1, Ordering::AcqRel);
     axum::Json(serde_json::json!({
         "service": "gitim-runtime",
         "runtime_id": state.runtime_id,
@@ -390,6 +460,16 @@ async fn peer_object(
         PeerBehavior::Object(bytes) | PeerBehavior::Wrong(bytes) => {
             object_response(&hash, bytes, method == Method::HEAD)
         }
+        PeerBehavior::HeadMissingObject(bytes) => {
+            if method == Method::HEAD {
+                Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Body::empty())
+                    .unwrap()
+            } else {
+                object_response(&hash, bytes, false)
+            }
+        }
         PeerBehavior::HeaderDelay { bytes, delay } => {
             tokio::time::sleep(delay).await;
             object_response(&hash, bytes, method == Method::HEAD)
@@ -443,6 +523,15 @@ async fn peer_object(
                 } else {
                     Body::from_stream(stream)
                 })
+                .unwrap()
+        }
+        PeerBehavior::StalledHead => {
+            if method == Method::HEAD {
+                state.head_release.acquire().await.unwrap().forget();
+            }
+            Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::empty())
                 .unwrap()
         }
     }
@@ -821,29 +910,34 @@ async fn remote_get_verifies_persists_and_survives_origin_shutdown() {
 async fn exact_origin_tries_distinct_remote_stores_and_deduplicates_identical_endpoints() {
     let peer = PathAwareStorePeer::spawn().await;
     let fixture = fixture();
-    add_peer_mapping_url(
-        &fixture,
-        "a-duplicate",
-        &peer.base_url,
-        Some(ORIGIN_RUNTIME_ID),
-        WORKSPACE_IDENTITY,
-        "store-a",
-    );
-    add_peer_mapping_url(
-        &fixture,
-        "b-missing",
-        &peer.base_url,
-        Some(ORIGIN_RUNTIME_ID),
-        WORKSPACE_IDENTITY,
-        "store-a",
-    );
-    add_peer_mapping_url(
-        &fixture,
-        "c-object",
-        &peer.base_url,
-        Some(ORIGIN_RUNTIME_ID),
-        WORKSPACE_IDENTITY,
-        "store-b",
+    fleet::activate_node(
+        fixture.state.clone(),
+        FleetNodeEntry {
+            node_id: "origin".to_string(),
+            runtime_id: Some(ORIGIN_RUNTIME_ID.to_string()),
+            base_url: peer.base_url.clone(),
+            node_ip: None,
+            node_name: None,
+            workspaces: vec!["store-a".to_string(), "store-b".to_string()],
+            workspace_mappings: vec![
+                FleetWorkspaceMapping {
+                    remote_workspace_id: "store-a".to_string(),
+                    local_workspace_id: "room".to_string(),
+                    workspace_identity: WORKSPACE_IDENTITY.to_string(),
+                },
+                FleetWorkspaceMapping {
+                    remote_workspace_id: "store-a".to_string(),
+                    local_workspace_id: "room".to_string(),
+                    workspace_identity: WORKSPACE_IDENTITY.to_string(),
+                },
+                FleetWorkspaceMapping {
+                    remote_workspace_id: "store-b".to_string(),
+                    local_workspace_id: "room".to_string(),
+                    workspace_identity: WORKSPACE_IDENTITY.to_string(),
+                },
+            ],
+            ssh_tunnel: None,
+        },
     );
 
     let response = fixture
@@ -963,8 +1057,104 @@ async fn verified_fallback_resolves_before_large_legacy_discovery() {
     assert_eq!(verified.object_heads(), 1);
     assert_eq!(verified.object_gets(), 1);
     assert!(started.elapsed() < Duration::from_secs(10));
-    assert_eq!(stalled.requests(), 0);
-    assert_eq!(stalled.inflight(), 0);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while stalled.requests() == 0 && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(stalled.requests() > 0);
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
+    stalled.release();
+    stalled.wait_until_idle().await;
+}
+
+#[tokio::test(start_paused = true)]
+#[serial(home_env)]
+async fn repeated_verified_fallback_heads_coalesce_legacy_backfill() {
+    let _home = HomeGuard::install();
+    let stalled = StalledHealthPeer::spawn().await;
+    let verified =
+        MockPeer::spawn(FALLBACK_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "verified",
+        &verified,
+        Some(FALLBACK_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    for index in 0..32 {
+        add_peer_mapping_url(
+            &fixture,
+            &format!("legacy-{index:03}"),
+            &stalled.base_url,
+            None,
+            WORKSPACE_IDENTITY,
+            &format!("legacy-room-{index:03}"),
+        );
+    }
+    let hash = sha256(PNG_1X1);
+    let requests: Vec<_> = (0..16)
+        .map(|_| {
+            let app = fixture.app.clone();
+            let hash = hash.clone();
+            tokio::spawn(async move {
+                app.oneshot(resolve_request(Method::HEAD, ORIGIN_RUNTIME_ID, &hash))
+                    .await
+                    .unwrap()
+            })
+        })
+        .collect();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while requests.iter().any(|request| !request.is_finished())
+        && std::time::Instant::now() < deadline
+    {
+        tokio::task::yield_now().await;
+    }
+    assert!(requests.iter().all(tokio::task::JoinHandle::is_finished));
+    let responses = futures::future::join_all(requests)
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    assert!(responses
+        .iter()
+        .all(|response| response.status() == StatusCode::OK));
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while stalled.requests() == 0 && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(stalled.requests() > 0);
+    assert!(stalled.requests() <= 8, "requests={}", stalled.requests());
+    stalled.release();
+    stalled.wait_until_idle().await;
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+
+    let first_run_requests = stalled.requests();
+    let app = fixture.app.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(Method::HEAD, ORIGIN_RUNTIME_ID, &hash))
+            .await
+            .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !request.is_finished() && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(request.is_finished());
+    let response = request.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while stalled.requests() == first_run_requests && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(stalled.requests() > first_run_requests);
+    stalled.release();
+    stalled.wait_until_idle().await;
 }
 
 #[tokio::test(start_paused = true)]
@@ -984,6 +1174,94 @@ async fn legacy_only_discovery_has_one_small_aggregate_budget() {
         );
     }
     let started = tokio::time::Instant::now();
+    let app = fixture.app.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &sha256(PNG_1X1),
+        ))
+        .await
+        .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while stalled.requests() == 0 && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(stalled.requests() > 0);
+    tokio::time::advance(Duration::from_secs(8)).await;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !request.is_finished() && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(request.is_finished());
+    let response = request.await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(started.elapsed() >= Duration::from_secs(8));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(stalled.requests() <= 16, "requests={}", stalled.requests());
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
+    stalled.release();
+    stalled.wait_until_idle().await;
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn unresolved_legacy_peer_remains_a_get_and_head_fallback() {
+    let _home = HomeGuard::install();
+    let peer = MockPeer::spawn_unresolved(PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let fixture = fixture();
+    add_peer(&fixture, "legacy", &peer, None, WORKSPACE_IDENTITY);
+    let hash = sha256(PNG_1X1);
+
+    let head = fixture
+        .app
+        .clone()
+        .oneshot(resolve_request(Method::HEAD, ORIGIN_RUNTIME_ID, &hash))
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::OK);
+    assert!(response_bytes(head).await.is_empty());
+
+    let get = fixture
+        .app
+        .oneshot(resolve_request(Method::GET, ORIGIN_RUNTIME_ID, &hash))
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::OK);
+    assert_eq!(response_bytes(get).await.as_ref(), PNG_1X1);
+    assert_eq!(peer.object_heads(), 2);
+    assert_eq!(peer.object_gets(), 1);
+    assert!(peer.health_requests() >= 2);
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn verified_exact_origin_wins_endpoint_dedup_over_earlier_legacy_alias() {
+    let _home = HomeGuard::install();
+    let peer = MockPeer::spawn_unresolved(PeerBehavior::HeadMissingObject(PNG_1X1.to_vec())).await;
+    let fixture = fixture();
+    add_peer_mapping_url(
+        &fixture,
+        "a-legacy",
+        &peer.base_url,
+        None,
+        WORKSPACE_IDENTITY,
+        "remote-room",
+    );
+    add_peer_mapping_url(
+        &fixture,
+        "z-origin",
+        &peer.base_url,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+        "remote-room",
+    );
+
     let response = fixture
         .app
         .oneshot(resolve_request(
@@ -994,16 +1272,80 @@ async fn legacy_only_discovery_has_one_small_aggregate_budget() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(started.elapsed() >= Duration::from_secs(8));
-    assert!(started.elapsed() < Duration::from_secs(10));
-    tokio::task::yield_now().await;
-    assert!(stalled.requests() <= 16, "requests={}", stalled.requests());
-    assert_eq!(stalled.inflight(), 0);
-    assert_eq!(
-        fixture.service.available_peer_permits(),
-        limits().peer_slots
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_bytes(response).await.as_ref(), PNG_1X1);
+    assert_eq!(peer.object_gets(), 1);
+    assert_eq!(peer.object_heads(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn fast_positive_fallback_starts_get_before_slow_head_batch_drains() {
+    let fast = MockPeer::spawn(FALLBACK_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let stalled = MockPeer::spawn(
+        "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        PeerBehavior::StalledHead,
+    )
+    .await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "a-fast",
+        &fast,
+        Some(FALLBACK_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
     );
+    for index in 0..12 {
+        add_peer_mapping_url(
+            &fixture,
+            &format!("b-stalled-{index:02}"),
+            &stalled.base_url,
+            Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            WORKSPACE_IDENTITY,
+            &format!("stalled-room-{index:02}"),
+        );
+    }
+    let app = fixture.app.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &sha256(PNG_1X1),
+        ))
+        .await
+        .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while (fast.object_heads() == 0 || stalled.inflight_heads() == 0)
+        && std::time::Instant::now() < deadline
+    {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(fast.object_heads(), 1);
+    assert!(stalled.inflight_heads() > 0);
+    let started = tokio::time::Instant::now();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !request.is_finished() && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(request.is_finished());
+    let response = request.await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "fast_heads={} fast_gets={} stalled_heads={} elapsed={:?}",
+        fast.object_heads(),
+        fast.object_gets(),
+        stalled.object_heads(),
+        started.elapsed()
+    );
+    assert_eq!(response_bytes(response).await.as_ref(), PNG_1X1);
+    assert_eq!(fast.object_gets(), 1);
+    assert_eq!(stalled.object_gets(), 0);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert!(stalled.max_inflight_heads() <= 8);
+    stalled.release_heads();
+    stalled.wait_for_heads_to_finish().await;
 }
 
 #[tokio::test]

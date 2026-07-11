@@ -661,7 +661,7 @@ async fn serve_local(
         if request.method() == Method::HEAD {
             let etag = format!("\"sha256-{hash}\"");
             let not_modified = exact_strong_if_none_match(request.headers(), &etag);
-            return match super::resolver::resolve_head(
+            let availability = match super::resolver::resolve_head(
                 &state,
                 &service,
                 &store,
@@ -672,39 +672,34 @@ async fn serve_local(
             )
             .await
             {
-                Ok(availability) => {
-                    if availability.peer.node_id == "local" {
-                        service.record_local_hit(
-                            &slug,
-                            &hash,
-                            availability.size,
-                            &origin_runtime_id,
-                        );
-                    }
-                    if request.headers().get_all(header::RANGE).iter().count() > 1 {
-                        head_range_not_satisfiable_response(availability, &hash, &options)
-                    } else {
-                        head_availability_response(availability, &hash, &options, not_modified)
-                    }
-                }
-                Err(error) => resolver_error_response(error),
+                Ok(availability) => availability,
+                Err(error) => return resolver_error_response(error),
             };
-        }
-        match super::resolver::resolve_get(
-            &state,
-            &service,
-            &store,
-            &slug,
-            workspace_identity,
-            &origin_runtime_id,
-            &hash,
-        )
-        .await
-        {
-            Ok(replica) => {
-                remote_resolution = replica.peer.node_id != "local";
+            if availability.peer.node_id != "local" {
+                return if request.headers().get_all(header::RANGE).iter().count() > 1 {
+                    head_range_not_satisfiable_response(availability, &hash, &options)
+                } else {
+                    head_availability_response(availability, &hash, &options, not_modified)
+                };
             }
-            Err(error) => return resolver_error_response(error),
+        }
+        if request.method() != Method::HEAD {
+            match super::resolver::resolve_get(
+                &state,
+                &service,
+                &store,
+                &slug,
+                workspace_identity,
+                &origin_runtime_id,
+                &hash,
+            )
+            .await
+            {
+                Ok(replica) => {
+                    remote_resolution = replica.peer.node_id != "local";
+                }
+                Err(error) => return resolver_error_response(error),
+            }
         }
     };
     let lookup = tokio::task::spawn_blocking({

@@ -94,6 +94,19 @@ struct ResolutionRecorder {
     fleet_recorded: Arc<AtomicBool>,
 }
 
+struct LegacyDiscoveryGuard {
+    service: Arc<AssetService>,
+    workspace_slug: String,
+    workspace_identity: String,
+}
+
+impl Drop for LegacyDiscoveryGuard {
+    fn drop(&mut self) {
+        self.service
+            .finish_fleet_discovery(&self.workspace_slug, &self.workspace_identity);
+    }
+}
+
 impl ResolutionRecorder {
     fn new(service: &Arc<AssetService>, workspace_slug: &str, hash: &str, origin: &str) -> Self {
         Self {
@@ -410,6 +423,33 @@ fn local_replica(metadata: AssetMetadata, workspace_slug: &str) -> ResolvedRepli
     }
 }
 
+fn start_legacy_discovery(
+    state: &SharedRuntimeState,
+    service: &Arc<AssetService>,
+    workspace_slug: &str,
+    workspace_identity: &str,
+) {
+    if !service.begin_fleet_discovery(workspace_slug, workspace_identity) {
+        return;
+    }
+    let guard = LegacyDiscoveryGuard {
+        service: Arc::clone(service),
+        workspace_slug: workspace_slug.to_string(),
+        workspace_identity: workspace_identity.to_string(),
+    };
+    let state = Arc::clone(state);
+    let workspace_slug = workspace_slug.to_string();
+    let workspace_identity = workspace_identity.to_string();
+    tokio::spawn(async move {
+        let _guard = guard;
+        let _ = tokio::time::timeout(
+            LEGACY_DISCOVERY_TIMEOUT,
+            fleet::discover_asset_legacy_identities(&state, &workspace_slug, &workspace_identity),
+        )
+        .await;
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn fetch_candidates(
     state: &SharedRuntimeState,
@@ -463,30 +503,24 @@ async fn fetch_candidates(
         })
         .cloned()
         .collect();
-    let mut available = probe_fallbacks(
+    if let Some(resolved) = fetch_fallbacks(
+        service,
+        store,
         client,
         fallbacks,
-        hash,
-        store.limits().max_file_bytes,
+        request,
         budgets,
         summary,
-        service,
         workspace_slug,
         origin,
+        hash_lock,
     )
-    .await?;
-    available.sort_by_key(|(index, _)| *index);
-    for (_, peer) in available {
-        match download_candidate(service, store, client, &peer, request, hash_lock).await {
-            Ok(metadata) => return Ok((metadata, peer)),
-            Err(error) => {
-                record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                summary.observe(error)?;
-                if hash_lock.is_none() {
-                    return Err(summary.final_error());
-                }
-            }
+    .await?
+    {
+        if has_legacy {
+            start_legacy_discovery(state, service, workspace_slug, workspace_identity);
         }
+        return Ok(resolved);
     }
 
     if has_legacy {
@@ -528,35 +562,24 @@ async fn fetch_candidates(
         let discovered_fallbacks: Vec<_> = peers
             .into_iter()
             .filter(|peer| {
-                peer.runtime_id.is_some()
-                    && peer.runtime_id.as_deref() != Some(origin)
-                    && attempted.insert(peer_key(peer))
+                peer.runtime_id.as_deref() != Some(origin) && attempted.insert(peer_key(peer))
             })
             .collect();
-        let mut available = probe_fallbacks(
+        if let Some(resolved) = fetch_fallbacks(
+            service,
+            store,
             client,
             discovered_fallbacks,
-            hash,
-            store.limits().max_file_bytes,
+            request,
             budgets,
             summary,
-            service,
             workspace_slug,
             origin,
+            hash_lock,
         )
-        .await?;
-        available.sort_by_key(|(index, _)| *index);
-        for (_, peer) in available {
-            match download_candidate(service, store, client, &peer, request, hash_lock).await {
-                Ok(metadata) => return Ok((metadata, peer)),
-                Err(error) => {
-                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                    summary.observe(error)?;
-                    if hash_lock.is_none() {
-                        return Err(summary.final_error());
-                    }
-                }
-            }
+        .await?
+        {
+            return Ok(resolved);
         }
     }
     Err(summary.final_error())
@@ -565,7 +588,7 @@ async fn fetch_candidates(
 #[allow(clippy::too_many_arguments)]
 async fn probe_candidates(
     state: &SharedRuntimeState,
-    service: &AssetService,
+    service: &Arc<AssetService>,
     client: &reqwest::Client,
     workspace_slug: &str,
     workspace_identity: &str,
@@ -609,7 +632,12 @@ async fn probe_candidates(
     .buffer_unordered(HEAD_CONCURRENCY);
     while let Some((peer, result)) = probes.next().await {
         match result {
-            Ok(availability) => return Ok(availability),
+            Ok(availability) => {
+                if has_legacy {
+                    start_legacy_discovery(state, service, workspace_slug, workspace_identity);
+                }
+                return Ok(availability);
+            }
             Err(error) => {
                 record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
                 summary.observe(error)?;
@@ -652,9 +680,7 @@ async fn probe_candidates(
         let discovered_fallbacks: Vec<_> = peers
             .into_iter()
             .filter(|peer| {
-                peer.runtime_id.is_some()
-                    && peer.runtime_id.as_deref() != Some(origin)
-                    && attempted.insert(peer_key(peer))
+                peer.runtime_id.as_deref() != Some(origin) && attempted.insert(peer_key(peer))
             })
             .collect();
         let mut probes =
@@ -703,35 +729,59 @@ fn peer_key(peer: &AssetPeer) -> (String, String) {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn probe_fallbacks(
+async fn fetch_fallbacks(
+    service: &Arc<AssetService>,
+    store: &AssetStore,
     client: &reqwest::Client,
     peers: Vec<AssetPeer>,
-    hash: &str,
-    max_file_bytes: u64,
+    request: CandidateRequest<'_>,
     budgets: ResolverBudgets,
     summary: &mut AttemptSummary,
-    service: &AssetService,
     workspace_slug: &str,
     origin: &str,
-) -> Result<Vec<(usize, AssetPeer)>, AssetError> {
-    let mut probes = futures::stream::iter(peers.into_iter().enumerate().map(
-        |(index, peer)| async move {
-            let result = probe_candidate(client, &peer, hash, max_file_bytes, budgets).await;
-            (index, peer, result)
-        },
-    ))
+    hash_lock: &mut Option<HashLock>,
+) -> Result<Option<(AssetMetadata, AssetPeer)>, AssetError> {
+    let max_file_bytes = store.limits().max_file_bytes;
+    let mut probes = futures::stream::iter(peers.into_iter().map(|peer| async move {
+        let result = probe_candidate(client, &peer, request.hash, max_file_bytes, budgets).await;
+        (peer, result)
+    }))
     .buffer_unordered(HEAD_CONCURRENCY);
-    let mut available = Vec::new();
-    while let Some((index, peer, result)) = probes.next().await {
+    while let Some((peer, result)) = probes.next().await {
         match result {
-            Ok(_) => available.push((index, peer)),
+            Ok(_) => {
+                match download_candidate(service, store, client, &peer, request, hash_lock).await {
+                    Ok(metadata) => return Ok(Some((metadata, peer))),
+                    Err(error) => {
+                        record_candidate_failure(
+                            service,
+                            workspace_slug,
+                            request.hash,
+                            origin,
+                            &peer,
+                            &error,
+                        );
+                        summary.observe(error)?;
+                        if hash_lock.is_none() {
+                            return Err(summary.final_error());
+                        }
+                    }
+                }
+            }
             Err(error) => {
-                record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
+                record_candidate_failure(
+                    service,
+                    workspace_slug,
+                    request.hash,
+                    origin,
+                    &peer,
+                    &error,
+                );
                 summary.observe(error)?;
             }
         }
     }
-    Ok(available)
+    Ok(None)
 }
 
 async fn probe_candidate(

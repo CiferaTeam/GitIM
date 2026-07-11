@@ -1424,14 +1424,10 @@ async fn parallel_legacy_backfills_preserve_concurrent_runtime_config_mutation()
     fleet::activate_node(state.clone(), first.clone());
     fleet::activate_node(state.clone(), second.clone());
 
-    let first_state = state.clone();
-    let first_discovery =
-        tokio::spawn(
-            async move { fleet::discover_legacy_runtime_id_once(&first_state, "first").await },
-        );
-    let second_state = state.clone();
-    let second_discovery = tokio::spawn(async move {
-        fleet::discover_legacy_runtime_id_once(&second_state, "second").await
+    let discovery_state = state.clone();
+    let discovery = tokio::spawn(async move {
+        fleet::discover_asset_legacy_identities(&discovery_state, "room", "github.com/org/repo")
+            .await
     });
     tokio::time::timeout(Duration::from_secs(2), first_entered.notified())
         .await
@@ -1460,14 +1456,7 @@ async fn parallel_legacy_backfills_preserve_concurrent_runtime_config_mutation()
 
     second_release.notify_one();
     first_release.notify_one();
-    assert_eq!(
-        first_discovery.await.unwrap().unwrap().as_deref(),
-        Some(REMOTE_RUNTIME_ID)
-    );
-    assert_eq!(
-        second_discovery.await.unwrap().unwrap().as_deref(),
-        Some(REMOTE_RUNTIME_ID)
-    );
+    discovery.await.unwrap();
 
     let disk = user_config::read_from(Some(&runtime_path));
     assert_eq!(disk.listen_port, Some(19090));

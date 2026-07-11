@@ -1001,7 +1001,49 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         head.headers()[header::CONTENT_LENGTH],
         PNG_1X1.len().to_string()
     );
+    assert!(head.headers()[header::CONTENT_DISPOSITION]
+        .to_str()
+        .unwrap()
+        .starts_with("inline;"));
     assert!(response_bytes(head).await.is_empty());
+
+    for (range, expected_status, expected_content_range) in [
+        (
+            "bytes=0-7",
+            StatusCode::PARTIAL_CONTENT,
+            format!("bytes 0-7/{}", PNG_1X1.len()),
+        ),
+        (
+            "garbage",
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            format!("bytes */{}", PNG_1X1.len()),
+        ),
+    ] {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(Method::HEAD)
+                    .uri(&uri)
+                    .header(header::RANGE, range)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), expected_status, "{range}");
+        assert_eq!(
+            response.headers()[header::CONTENT_RANGE],
+            expected_content_range,
+            "{range}"
+        );
+        assert!(response.headers()[header::CONTENT_DISPOSITION]
+            .to_str()
+            .unwrap()
+            .starts_with("inline;"));
+        assert!(response_bytes(response).await.is_empty());
+    }
 
     for (range, expected_status, expected_len) in [
         ("bytes=0-7", StatusCode::PARTIAL_CONTENT, Some(8)),
@@ -1073,6 +1115,22 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         assert_eq!(response.headers()[header::ETAG], etag);
         assert!(response_bytes(response).await.is_empty());
     }
+
+    let mut conditional_head = Request::builder()
+        .method(Method::HEAD)
+        .uri(&uri)
+        .header(header::IF_NONE_MATCH, &etag)
+        .body(Body::empty())
+        .unwrap();
+    conditional_head
+        .headers_mut()
+        .append(header::RANGE, "bytes=0-1".parse().unwrap());
+    conditional_head
+        .headers_mut()
+        .append(header::RANGE, "bytes=2-3".parse().unwrap());
+    let conditional_head = fixture.app.clone().oneshot(conditional_head).await.unwrap();
+    assert_eq!(conditional_head.status(), StatusCode::NOT_MODIFIED);
+    assert!(response_bytes(conditional_head).await.is_empty());
 
     let not_modified = fixture
         .app

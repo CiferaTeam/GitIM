@@ -837,10 +837,6 @@ pub fn snapshot_asset_peers(
             .then_with(|| a.runtime_id.cmp(&b.runtime_id))
     });
 
-    let mut seen_endpoints = std::collections::HashSet::new();
-    peers.retain(|peer| {
-        seen_endpoints.insert((peer.base_url.clone(), peer.remote_workspace_id.clone()))
-    });
     peers
 }
 

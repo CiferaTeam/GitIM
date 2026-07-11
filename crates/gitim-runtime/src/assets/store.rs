@@ -6,7 +6,7 @@ use futures::{Stream, StreamExt};
 use gitim_core::types::{AssetRef, ASSET_REF_VERSION};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -300,6 +300,7 @@ pub struct AssetService {
     workspaces: Mutex<HashMap<PathBuf, WorkspaceCacheEntry>>,
     health_workspaces: Mutex<HashMap<PathBuf, Weak<WorkspaceAssetState>>>,
     lifecycle: Mutex<WorkspaceLifecycleRegistry>,
+    fleet_discoveries: Mutex<HashSet<(String, String)>>,
     #[cfg(feature = "test-support")]
     before_registered_open_pause: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
     #[cfg(feature = "test-support")]
@@ -406,6 +407,7 @@ impl AssetService {
             workspaces: Mutex::new(HashMap::new()),
             health_workspaces: Mutex::new(HashMap::new()),
             lifecycle: Mutex::new(WorkspaceLifecycleRegistry::default()),
+            fleet_discoveries: Mutex::new(HashSet::new()),
             #[cfg(feature = "test-support")]
             before_registered_open_pause: Mutex::new(None),
             #[cfg(feature = "test-support")]
@@ -1039,6 +1041,14 @@ impl AssetService {
             .acquire_owned()
             .await
             .map_err(|_| AssetError::Invariant("asset upload semaphore closed"))
+    }
+
+    pub(crate) fn begin_fleet_discovery(&self, workspace: &str, identity: &str) -> bool {
+        lock(&self.fleet_discoveries).insert((workspace.to_string(), identity.to_string()))
+    }
+
+    pub(crate) fn finish_fleet_discovery(&self, workspace: &str, identity: &str) {
+        lock(&self.fleet_discoveries).remove(&(workspace.to_string(), identity.to_string()));
     }
 
     pub async fn acquire_peer(&self) -> Result<OwnedSemaphorePermit, AssetError> {
