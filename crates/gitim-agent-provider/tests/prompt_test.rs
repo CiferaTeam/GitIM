@@ -238,6 +238,8 @@ fn prompts_expose_quick_session_turn_contract() {
     assert!(api.contains("exact session id, attempt id, and input line"));
     assert!(api.contains("Set the title before the first reply"));
     assert!(api.contains("rejects stale attempts"));
+    assert!(api.contains("commands. Pass"));
+    assert!(api.contains("reply. The"));
 }
 
 #[test]

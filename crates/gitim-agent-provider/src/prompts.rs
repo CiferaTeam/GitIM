@@ -408,8 +408,8 @@ sse 推送、commit + push 时机。你看到 `channels/foo.thread`、`users/<x>
 
 ### Quick Session turns
 
-When the runtime prompt says this is a Quick Session turn, use only the supplied `gitim session` commands.\
-Pass the exact session id, attempt id, and input line from the prompt. Set the title before the first reply.\
+When the runtime prompt says this is a Quick Session turn, use only the supplied `gitim session` commands. \
+Pass the exact session id, attempt id, and input line from the prompt. Set the title before the first reply. \
 The daemon rejects stale attempts.
 
 - `gitim session title <session-id> <title> --attempt-id <attempt-id>`
