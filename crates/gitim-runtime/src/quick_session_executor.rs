@@ -422,6 +422,7 @@ impl QuickSessionExecutor {
                 return self.failed_outcome(session_id).await;
             }
         };
+        let session_abort_guard = session.abort_on_drop();
         let mut reset_requested = false;
         let mut turn_text = String::new();
         while let Some(event) = session.events.recv().await {
@@ -508,7 +509,10 @@ impl QuickSessionExecutor {
             }
         }
         let result = match session.result.await {
-            Ok(result) => result,
+            Ok(result) => {
+                session_abort_guard.disarm();
+                result
+            }
             Err(_) => {
                 let marked = self
                     .mark_claim_error(session_id, &attempt_id, "provider result channel closed")

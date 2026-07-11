@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -47,6 +48,11 @@ enum ProviderAction {
     WaitThenComplete {
         entered: Arc<Notify>,
         release: Arc<Notify>,
+    },
+    DetachedSession {
+        release: Arc<Notify>,
+        exited: Arc<Notify>,
+        writes: Arc<AtomicUsize>,
     },
 }
 
@@ -447,6 +453,41 @@ impl Provider for RecordingProvider {
             .push((self.config.clone(), prompt.to_string(), opts.clone()));
         let attempt = value_after(prompt, "Attempt: ");
         let input_line: u64 = value_after(prompt, "Input line: L").parse().unwrap();
+        if let ProviderAction::DetachedSession {
+            release,
+            exited,
+            writes,
+        } = &self.action
+        {
+            let (event_tx, event_rx) = tokio::sync::mpsc::channel(1);
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            let release = release.clone();
+            let exited = exited.clone();
+            let writes = writes.clone();
+            let task = tokio::spawn(async move {
+                struct ExitSignal(Arc<Notify>);
+                impl Drop for ExitSignal {
+                    fn drop(&mut self) {
+                        self.0.notify_one();
+                    }
+                }
+                let _exit_signal = ExitSignal(exited);
+                let _ = event_tx
+                    .send(gitim_agent_provider::Event::Status {
+                        status: "provider-session-ready".to_string(),
+                    })
+                    .await;
+                release.notified().await;
+                writes.fetch_add(1, Ordering::SeqCst);
+                drop(result_tx);
+            });
+            return Ok(Session::new(
+                event_rx,
+                result_rx,
+                task.abort_handle(),
+                tokio_util::sync::CancellationToken::new(),
+            ));
+        }
         if let ProviderAction::WaitThenComplete { entered, release } = &self.action {
             entered.notify_one();
             release.notified().await;
@@ -1141,6 +1182,42 @@ async fn cancelled_executor_clears_active_attempt_ownership() {
 
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Running);
+    assert_eq!(
+        QuickSessionRuntimeState::load(temp.path(), SESSION_ID)
+            .unwrap()
+            .active_attempt_id,
+        None
+    );
+}
+
+#[tokio::test]
+async fn cancellation_after_session_return_aborts_provider_before_late_write() {
+    let release = Arc::new(Notify::new());
+    let exited = Arc::new(Notify::new());
+    let writes = Arc::new(AtomicUsize::new(0));
+    let (temp, backend, _factory, executor, mut rx) = harness(
+        ProviderAction::DetachedSession {
+            release: release.clone(),
+            exited: exited.clone(),
+            writes: writes.clone(),
+        },
+        false,
+    );
+    let task = tokio::spawn(async move { executor.execute(SESSION_ID).await });
+    loop {
+        let event = rx.recv().await.unwrap();
+        if event.event_type == "status" && event.detail == "provider-session-ready" {
+            break;
+        }
+    }
+
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    release.notify_waiters();
+    exited.notified().await;
+
+    assert_eq!(writes.load(Ordering::SeqCst), 0);
     assert_eq!(backend.detail().meta.status, QuickSessionStatus::Running);
     assert_eq!(
         QuickSessionRuntimeState::load(temp.path(), SESSION_ID)

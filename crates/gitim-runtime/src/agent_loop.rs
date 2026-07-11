@@ -1046,6 +1046,7 @@ impl AgentLoop {
                 return Err(primary_error);
             }
         };
+        let session_abort_guard = session.abort_on_drop();
 
         // Drain events with periodic steering check
         let mut steering_check = tokio::time::interval(Duration::from_secs(5));
@@ -1159,7 +1160,10 @@ impl AgentLoop {
 
         // Await final result
         let exec_result = match session.result.await {
-            Ok(result) => result,
+            Ok(result) => {
+                session_abort_guard.disarm();
+                result
+            }
             Err(_) => {
                 let primary_error =
                     RuntimeError::ProviderFailed("result channel closed".to_string());

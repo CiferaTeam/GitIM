@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -45,7 +46,9 @@ fn make_changes(entries: Vec<(&str, &str)>) -> Vec<ChannelChange> {
 }
 
 #[derive(Default)]
-struct FailingRecoveryBackend;
+struct FailingRecoveryBackend {
+    list_calls: Arc<AtomicUsize>,
+}
 
 #[async_trait]
 impl QuickSessionBackend for FailingRecoveryBackend {
@@ -55,6 +58,7 @@ impl QuickSessionBackend for FailingRecoveryBackend {
         _actionable: bool,
         _status: Option<QuickSessionStatus>,
     ) -> Result<ListQuickSessionsResponse, String> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
         Err("injected recovery scan failure".to_string())
     }
 
@@ -172,10 +176,11 @@ async fn polled_primary_batch_executes_once_when_recovery_scan_fails() {
     agent_loop.replace_provider_for_test(Box::new(RecordingPrimaryProvider {
         prompts: prompts.clone(),
     }));
-    agent_loop.set_quick_session_backend_for_test(Arc::new(FailingRecoveryBackend));
+    let recovery = Arc::new(FailingRecoveryBackend::default());
+    agent_loop.set_quick_session_backend_for_test(recovery.clone());
 
-    agent_loop.init().await.unwrap();
     assert!(agent_loop.run_once().await.unwrap());
+    assert!(recovery.list_calls.load(Ordering::SeqCst) > 0);
     assert!(!agent_loop.run_once().await.unwrap());
 
     let prompts = prompts.lock().unwrap();
