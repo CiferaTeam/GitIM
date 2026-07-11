@@ -578,7 +578,7 @@ async fn meta_only_transition_restores_exact_bytes_on_commit_failure() {
 }
 
 #[tokio::test]
-async fn older_agent_reply_is_stale_after_a_new_attempt_is_claimed() {
+async fn completed_reply_retry_stays_idempotent_while_new_attempt_rejects_stale_target() {
     let (_tmp, state) = setup_repo_alice_bob().await;
     data::<CreateQuickSessionResponse>(
         create(state.clone(), SESSION_ID, "bob", "first", "alice").await,
@@ -587,17 +587,31 @@ async fn older_agent_reply_is_stale_after_a_new_attempt_is_claimed() {
     data::<gitim_core::responses::SetQuickSessionTitleResponse>(
         set_title(state.clone(), ATTEMPT_ID, "bob").await,
     );
-    data::<SendQuickSessionMessageResponse>(
-        send_agent(state.clone(), "first reply", 1, ATTEMPT_ID, "bob").await,
-    );
+    let first_reply: SendQuickSessionMessageResponse =
+        data(send_agent(state.clone(), "first reply", 1, ATTEMPT_ID, "bob").await);
     data::<SendQuickSessionMessageResponse>(
         send_human(state.clone(), "new input", "req-new", "alice").await,
     );
-    data::<ClaimQuickSessionTurnResponse>(claim(state.clone(), 3, OTHER_ATTEMPT_ID, "bob").await);
+    let new_claim: ClaimQuickSessionTurnResponse =
+        data(claim(state.clone(), 3, OTHER_ATTEMPT_ID, "bob").await);
     let session_dir = state.repo_root.join(format!("quick-sessions/{SESSION_ID}"));
     let meta_before = std::fs::read(session_dir.join("session.meta.yaml")).unwrap();
     let thread_before = std::fs::read(session_dir.join("discussion.thread")).unwrap();
     let head_before = state.git_storage.rev_parse("HEAD").unwrap();
+
+    let exact_retry: SendQuickSessionMessageResponse =
+        data(send_agent(state.clone(), "first reply", 1, ATTEMPT_ID, "bob").await);
+    assert_eq!(exact_retry.line_number, first_reply.line_number);
+    assert_eq!(exact_retry.revision, new_claim.revision);
+    assert_eq!(
+        std::fs::read(session_dir.join("session.meta.yaml")).unwrap(),
+        meta_before
+    );
+    assert_eq!(
+        std::fs::read(session_dir.join("discussion.thread")).unwrap(),
+        thread_before
+    );
+    assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head_before);
 
     let response = handle_request(
         Request::SendQuickSessionMessage {

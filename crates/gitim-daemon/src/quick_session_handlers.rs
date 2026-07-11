@@ -585,7 +585,10 @@ pub async fn handle_send_quick_session_message(
             "quick_session_stale_attempt",
         );
     }
-    if is_agent && meta.status == QuickSessionStatus::Running {
+    let completed_retry = is_agent
+        && attempt_id.as_deref() == meta.last_completed_attempt_id.as_deref()
+        && reply_to == meta.last_completed_input_line;
+    if is_agent && !completed_retry && meta.status == QuickSessionStatus::Running {
         let requested_attempt = attempt_id.as_deref().unwrap_or_default();
         if let Err(error) = validate_quick_session_attempt_id(requested_attempt) {
             return error_response(error);
@@ -594,9 +597,6 @@ pub async fn handle_send_quick_session_message(
             return error_response(QuickSessionError::StaleAttempt);
         }
     }
-    let completed_retry = is_agent
-        && attempt_id.as_deref() == meta.last_completed_attempt_id.as_deref()
-        && reply_to == meta.last_completed_input_line;
     if is_agent && !completed_retry && reply_to != meta.processing_input_line {
         return error_response(QuickSessionError::InputLineMismatch);
     }
