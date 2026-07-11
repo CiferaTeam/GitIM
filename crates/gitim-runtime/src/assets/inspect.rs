@@ -2,6 +2,8 @@ use super::AssetError;
 use serde::{Deserialize, Serialize};
 
 const MAX_INSPECTION_BYTES: usize = 64 * 1024;
+const MAX_INLINE_IMAGE_AXIS: u32 = 32_768;
+const MAX_INLINE_IMAGE_PIXELS: u64 = 100_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetInspection {
@@ -33,7 +35,7 @@ pub fn inspect_bytes(bytes: &[u8], _filename: &str) -> Result<AssetInspection, A
         media_type: media_type.to_string(),
         width: dimensions.map(|value| value.0),
         height: dimensions.map(|value| value.1),
-        inline_safe: supported_inline && dimensions.is_some(),
+        inline_safe: supported_inline && dimensions.is_some_and(inline_dimensions_safe),
     })
 }
 
@@ -63,41 +65,16 @@ fn detect_media_type(bytes: &[u8]) -> &'static str {
     mime::APPLICATION_OCTET_STREAM.as_ref()
 }
 
-fn dimensions(bytes: &[u8], media_type: &str) -> Option<(u32, u32)> {
+fn dimensions(bytes: &[u8], _media_type: &str) -> Option<(u32, u32)> {
     imagesize::blob_size(bytes)
         .ok()
         .and_then(|size| checked_dimensions(size.width, size.height))
-        .or_else(|| {
-            (media_type == "image/avif")
-                .then(|| avif_dimensions(bytes))
-                .flatten()
-        })
 }
 
-fn avif_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    if bytes.len() < 12 || &bytes[4..8] != b"ftyp" {
-        return None;
-    }
-    let brand = &bytes[8..12];
-    if !matches!(brand, b"avif" | b"avis" | b"MA1A" | b"MA1B") {
-        return None;
-    }
-
-    for tag_offset in 4..bytes.len().saturating_sub(15) {
-        if &bytes[tag_offset..tag_offset + 4] != b"ispe" {
-            continue;
-        }
-        let size_offset = tag_offset - 4;
-        let box_size = u32::from_be_bytes(bytes[size_offset..tag_offset].try_into().ok()?) as usize;
-        let box_end = size_offset.checked_add(box_size)?;
-        if box_size < 20 || box_end > bytes.len() {
-            continue;
-        }
-        let width = u32::from_be_bytes(bytes[tag_offset + 8..tag_offset + 12].try_into().ok()?);
-        let height = u32::from_be_bytes(bytes[tag_offset + 12..tag_offset + 16].try_into().ok()?);
-        if width > 0 && height > 0 {
-            return Some((width, height));
-        }
-    }
-    None
+fn inline_dimensions_safe((width, height): (u32, u32)) -> bool {
+    width <= MAX_INLINE_IMAGE_AXIS
+        && height <= MAX_INLINE_IMAGE_AXIS
+        && u64::from(width)
+            .checked_mul(u64::from(height))
+            .is_some_and(|pixels| pixels <= MAX_INLINE_IMAGE_PIXELS)
 }

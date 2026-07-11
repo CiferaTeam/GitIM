@@ -6,11 +6,14 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+#[cfg(debug_assertions)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{
+    Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tempfile::NamedTempFile;
-use tokio::sync::Semaphore;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const STORE_SCHEMA_VERSION: u32 = 1;
 const SIDECAR_SCHEMA_VERSION: u32 = 1;
@@ -23,8 +26,10 @@ const DEFAULT_TEMP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_UPLOAD_SLOTS: usize = 2;
 const DEFAULT_PEER_SLOTS: usize = 4;
 static UNIQUE_SUFFIX: AtomicUsize = AtomicUsize::new(0);
+static WORKSPACE_STATES: OnceLock<Mutex<HashMap<PathBuf, Weak<WorkspaceAssetState>>>> =
+    OnceLock::new();
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssetLimits {
     pub workspace_quota_bytes: u64,
     pub min_free_bytes: u64,
@@ -133,6 +138,12 @@ pub struct AssetMetadata {
     pub source: AssetSource,
 }
 
+struct FileSnapshot {
+    bytes: Vec<u8>,
+    size: u64,
+    modified_ns: u64,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct StoreManifest {
     schema_version: u32,
@@ -140,8 +151,8 @@ struct StoreManifest {
 }
 
 pub struct AssetService {
-    pub upload_slots: Arc<Semaphore>,
-    pub peer_slots: Arc<Semaphore>,
+    upload_slots: Arc<Semaphore>,
+    peer_slots: Arc<Semaphore>,
     workspaces: Mutex<HashMap<PathBuf, Arc<WorkspaceAssetState>>>,
     pub store_failures: AtomicU64,
     pub hash_mismatches: AtomicU64,
@@ -167,12 +178,12 @@ impl AssetService {
         workspace_root: impl AsRef<Path>,
         binding: impl Into<String>,
     ) -> Result<AssetStore, AssetError> {
-        let workspace_root = workspace_root.as_ref().to_path_buf();
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
         let workspace_state = {
             let mut cache = lock(&self.workspaces);
             cache
                 .entry(workspace_root.clone())
-                .or_insert_with(|| Arc::new(WorkspaceAssetState::default()))
+                .or_insert_with(|| shared_workspace_state(&workspace_root))
                 .clone()
         };
         AssetStore::open_with_state(
@@ -184,10 +195,35 @@ impl AssetService {
     }
 
     pub fn cached_usage(&self, workspace_root: impl AsRef<Path>) -> Option<AssetUsage> {
-        let cache = lock(&self.workspaces);
-        cache
-            .get(workspace_root.as_ref())
-            .map(|state| *lock(&state.usage))
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref()).ok()?;
+        let state = lock(&self.workspaces)
+            .get(&workspace_root)
+            .cloned()
+            .or_else(|| existing_workspace_state(&workspace_root))?;
+        let usage = lock(&state.accounting).committed;
+        Some(usage)
+    }
+
+    pub async fn acquire_upload(&self) -> Result<OwnedSemaphorePermit, AssetError> {
+        Arc::clone(&self.upload_slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| AssetError::Invariant("asset upload semaphore closed"))
+    }
+
+    pub async fn acquire_peer(&self) -> Result<OwnedSemaphorePermit, AssetError> {
+        Arc::clone(&self.peer_slots)
+            .acquire_owned()
+            .await
+            .map_err(|_| AssetError::Invariant("asset peer semaphore closed"))
+    }
+
+    pub fn available_upload_permits(&self) -> usize {
+        self.upload_slots.available_permits()
+    }
+
+    pub fn available_peer_permits(&self) -> usize {
+        self.peer_slots.available_permits()
     }
 }
 
@@ -203,13 +239,26 @@ pub struct AssetStore {
     binding: String,
     limits: AssetLimits,
     state: Arc<WorkspaceAssetState>,
+    generation: u64,
 }
 
 #[derive(Default)]
 struct WorkspaceAssetState {
-    usage: Mutex<AssetUsage>,
-    reserved: Mutex<u64>,
-    binding_lock: Mutex<()>,
+    accounting: Mutex<AccountingState>,
+    operation_gate: RwLock<()>,
+    #[cfg(debug_assertions)]
+    fail_next_sidecar_write: AtomicBool,
+}
+
+#[derive(Default)]
+struct AccountingState {
+    active_binding: Option<String>,
+    generation: u64,
+    committed: AssetUsage,
+    reserved: u64,
+    limits: Option<AssetLimits>,
+    initialized: bool,
+    objects: HashMap<String, u64>,
 }
 
 impl AssetStore {
@@ -218,12 +267,9 @@ impl AssetStore {
         binding: impl Into<String>,
         limits: AssetLimits,
     ) -> Result<Self, AssetError> {
-        Self::open_with_state(
-            workspace_root.as_ref().to_path_buf(),
-            binding.into(),
-            limits,
-            Arc::new(WorkspaceAssetState::default()),
-        )
+        let workspace_root = canonical_workspace_root(workspace_root.as_ref())?;
+        let state = shared_workspace_state(&workspace_root);
+        Self::open_with_state(workspace_root, binding.into(), limits, state)
     }
 
     fn open_with_state(
@@ -238,15 +284,53 @@ impl AssetStore {
             ));
         }
         let root = workspace_root.join(".gitim-runtime/assets/v1");
-        prepare_namespace(&workspace_root, &root, &binding)?;
+        let _operation = write_lock(&state.operation_gate);
+        let generation = {
+            let mut accounting = lock(&state.accounting);
+            if accounting.initialized {
+                let existing_limits = accounting.limits.as_ref().ok_or(AssetError::Invariant(
+                    "initialized asset store is missing limits",
+                ))?;
+                if existing_limits != &limits {
+                    return Err(AssetError::Invalid(
+                        "asset store is already open with incompatible limits".to_string(),
+                    ));
+                }
+            }
+            let same_initialized_binding = accounting.initialized
+                && accounting.active_binding.as_deref() == Some(binding.as_str());
+            if same_initialized_binding {
+                validate_store_layout(&root)?;
+            }
+            if same_initialized_binding && manifest_matches(&root.join("store.json"), &binding) {
+                accounting.generation
+            } else {
+                let generation = accounting
+                    .generation
+                    .checked_add(1)
+                    .ok_or(AssetError::Invariant("asset store generation overflow"))?;
+                accounting.active_binding = Some(binding.clone());
+                accounting.generation = generation;
+                accounting.committed = AssetUsage::default();
+                accounting.reserved = 0;
+                accounting.limits = Some(limits.clone());
+                accounting.initialized = false;
+                accounting.objects.clear();
+                generation
+            }
+        };
         let store = Self {
             workspace_root,
             root,
             binding,
             limits,
-            state,
+            state: Arc::clone(&state),
+            generation,
         };
-        store.recover()?;
+        if !lock(&store.state.accounting).initialized {
+            prepare_namespace(&store.workspace_root, &store.root, &store.binding)?;
+            store.recover_under_gate()?;
+        }
         Ok(store)
     }
 
@@ -254,26 +338,33 @@ impl AssetStore {
         &self.root
     }
 
-    pub fn usage(&self) -> AssetUsage {
-        *lock(&self.state.usage)
+    pub fn usage(&self) -> Result<AssetUsage, AssetError> {
+        let _operation = read_lock(&self.state.operation_gate);
+        self.validate_current()?;
+        Ok(lock(&self.state.accounting).committed)
     }
 
-    pub fn reserved_bytes(&self) -> u64 {
-        *lock(&self.state.reserved)
+    pub fn reserved_bytes(&self) -> Result<u64, AssetError> {
+        let _operation = read_lock(&self.state.operation_gate);
+        self.validate_current()?;
+        Ok(lock(&self.state.accounting).reserved)
     }
 
     pub fn object_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
-        self.ensure_binding()?;
+        let _operation = read_lock(&self.state.operation_gate);
+        self.validate_current()?;
         self.raw_object_path(hash)
     }
 
     pub fn metadata_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
-        self.ensure_binding()?;
+        let _operation = read_lock(&self.state.operation_gate);
+        self.validate_current()?;
         self.raw_metadata_path(hash)
     }
 
     pub fn lock_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
-        self.ensure_binding()?;
+        let _operation = read_lock(&self.state.operation_gate);
+        self.validate_current()?;
         validate_hash(hash)?;
         let shard = self.root.join("locks/sha256").join(&hash[..2]);
         validate_hash_shard(&shard)?;
@@ -281,7 +372,8 @@ impl AssetStore {
     }
 
     pub fn reserve(&self, incoming: u64) -> Result<AssetReservation, AssetError> {
-        self.ensure_binding()?;
+        let _operation = read_lock(&self.state.operation_gate);
+        self.validate_current()?;
         let available = fs2::available_space(&self.root)?;
         let total = fs2::total_space(&self.root)?;
         self.reserve_with_space(incoming, available, total)
@@ -293,14 +385,16 @@ impl AssetStore {
         available: u64,
         total: u64,
     ) -> Result<AssetReservation, AssetError> {
-        let used = self.usage().bytes;
-        let mut reserved = lock(&self.state.reserved);
-        let committed_and_reserved =
-            used.checked_add(*reserved)
-                .ok_or(AssetError::QuotaExceeded {
-                    used: u64::MAX,
-                    quota: self.limits.workspace_quota_bytes,
-                })?;
+        let mut accounting = lock(&self.state.accounting);
+        self.validate_accounting(&accounting)?;
+        let committed_and_reserved = accounting
+            .committed
+            .bytes
+            .checked_add(accounting.reserved)
+            .ok_or(AssetError::QuotaExceeded {
+                used: u64::MAX,
+                quota: self.limits.workspace_quota_bytes,
+            })?;
         let prospective =
             committed_and_reserved
                 .checked_add(incoming)
@@ -314,17 +408,20 @@ impl AssetStore {
                 quota: self.limits.workspace_quota_bytes,
             });
         }
-        let pending = reserved
-            .checked_add(incoming)
-            .ok_or(AssetError::QuotaExceeded {
-                used: committed_and_reserved,
-                quota: self.limits.workspace_quota_bytes,
-            })?;
+        let pending =
+            accounting
+                .reserved
+                .checked_add(incoming)
+                .ok_or(AssetError::QuotaExceeded {
+                    used: committed_and_reserved,
+                    quota: self.limits.workspace_quota_bytes,
+                })?;
         self.check_free_space(pending, committed_and_reserved, available, total)?;
-        *reserved = pending;
+        accounting.reserved = pending;
         Ok(AssetReservation {
             bytes: incoming,
             state: Arc::clone(&self.state),
+            generation: self.generation,
             released: false,
         })
     }
@@ -334,7 +431,8 @@ impl AssetStore {
         bytes: &[u8],
         source: AssetSource,
     ) -> Result<AssetMetadata, AssetError> {
-        self.ensure_binding()?;
+        let _operation = write_lock(&self.state.operation_gate);
+        self.validate_current()?;
         if !valid_source(&source) {
             return Err(AssetError::Invalid(
                 "fleet replica source requires a canonical runtime UUID".to_string(),
@@ -349,13 +447,13 @@ impl AssetStore {
             });
         }
         let hash = sha256_hex(bytes);
-        match self.refresh_metadata(&hash) {
-            Ok(metadata) => return Ok(metadata),
-            Err(AssetError::Missing | AssetError::HashMismatch) => {}
-            Err(error) => return Err(error),
+        if let Some(metadata) = self.force_verify_dedupe(&hash, &source)? {
+            return Ok(metadata);
         }
 
-        let reservation = self.reserve(size)?;
+        let available = fs2::available_space(&self.root)?;
+        let total = fs2::total_space(&self.root)?;
+        let reservation = self.reserve_with_space(size, available, total)?;
         let object_path = self.raw_object_path(&hash)?;
         create_private_dir(
             object_path
@@ -363,39 +461,65 @@ impl AssetStore {
                 .ok_or_else(|| invalid_path(&object_path))?,
         )?;
         atomic_write(&object_path, bytes)?;
-        let metadata = self.metadata_from_object(&hash, source)?;
-        self.write_metadata(&metadata)?;
-        {
-            let mut usage = lock(&self.state.usage);
-            usage.bytes = usage
-                .bytes
-                .checked_add(size)
-                .ok_or(AssetError::QuotaExceeded {
-                    used: usage.bytes,
-                    quota: self.limits.workspace_quota_bytes,
-                })?;
-            usage.objects = usage.objects.checked_add(1).ok_or_else(|| {
-                AssetError::Store(std::io::Error::other("asset object count overflow"))
-            })?;
+        let metadata = match self.metadata_from_object(&hash, source) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                self.reconcile_accounting()?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.write_metadata(&metadata) {
+            if let Err(accounting_error) = reservation.commit(&hash, size) {
+                self.reconcile_accounting()?;
+                return Err(accounting_error);
+            }
+            return Err(error);
         }
-        drop(reservation);
+        if let Err(error) = reservation.commit(&hash, size) {
+            self.reconcile_accounting()?;
+            return Err(error);
+        }
         Ok(metadata)
     }
 
     pub fn read(&self, hash: &str) -> Result<Vec<u8>, AssetError> {
-        self.ensure_binding()?;
-        self.refresh_metadata(hash)?;
-        let path = self.raw_object_path(hash)?;
-        read_regular_file(&path)
+        let _operation = write_lock(&self.state.operation_gate);
+        self.validate_current()?;
+        let object_path = self.raw_object_path(hash)?;
+        let snapshot = match read_file_snapshot(&object_path, self.limits.max_file_bytes) {
+            Ok(snapshot) => snapshot,
+            Err(AssetError::TooLarge { .. }) => {
+                self.quarantine_corrupt(hash, &object_path)?;
+                return Err(AssetError::LocalCorruption);
+            }
+            Err(error) => return Err(error),
+        };
+        let metadata_path = self.raw_metadata_path(hash)?;
+        let existing_sidecar = read_sidecar(&metadata_path).ok();
+        if !existing_sidecar.as_ref().is_some_and(|sidecar| {
+            valid_sidecar(sidecar, hash, snapshot.size, snapshot.modified_ns)
+        }) {
+            self.rebuild_metadata_from_snapshot(
+                hash,
+                &object_path,
+                &metadata_path,
+                existing_sidecar.as_ref(),
+                None,
+                &snapshot,
+            )?;
+        }
+        Ok(snapshot.bytes)
     }
 
     pub fn inspect(&self, hash: &str) -> Result<AssetMetadata, AssetError> {
-        self.ensure_binding()?;
+        let _operation = write_lock(&self.state.operation_gate);
+        self.validate_current()?;
         self.refresh_metadata(hash)
     }
 
     pub fn create_owned_temp(&self) -> Result<PathBuf, AssetError> {
-        self.ensure_binding()?;
+        let _operation = read_lock(&self.state.operation_gate);
+        self.validate_current()?;
         let tmp = self.root.join("tmp");
         create_private_dir(&tmp)?;
         let tempfile = tempfile::Builder::new()
@@ -409,28 +533,59 @@ impl AssetStore {
         Ok(path)
     }
 
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn inject_sidecar_write_failure_once(&self) {
+        self.state
+            .fail_next_sidecar_write
+            .store(true, Ordering::Release);
+    }
+
     pub fn recover(&self) -> Result<AssetUsage, AssetError> {
-        self.ensure_binding()?;
+        let _operation = write_lock(&self.state.operation_gate);
+        self.validate_current()?;
+        self.recover_under_gate()
+    }
+
+    fn recover_under_gate(&self) -> Result<AssetUsage, AssetError> {
+        create_store_layout(&self.root)?;
+        set_path_file_mode(&self.root.join("store.json"))?;
         self.cleanup_owned_temps()?;
-        let usage = self.recover_objects()?;
+        self.cleanup_atomic_write_temps()?;
+        self.recover_objects()?;
         self.remove_orphan_sidecars()?;
-        *lock(&self.state.usage) = usage;
+        let (usage, objects) = self.scan_regular_object_ledger()?;
+        let mut accounting = lock(&self.state.accounting);
+        if accounting.generation != self.generation {
+            return Err(AssetError::StaleBinding);
+        }
+        accounting.committed = usage;
+        accounting.objects = objects;
+        accounting.initialized = true;
         Ok(usage)
     }
 
-    fn ensure_binding(&self) -> Result<(), AssetError> {
-        if manifest_matches(&self.root.join("store.json"), &self.binding) {
-            validate_store_layout(&self.root)?;
-            return Ok(());
+    fn validate_current(&self) -> Result<(), AssetError> {
+        {
+            let accounting = lock(&self.state.accounting);
+            self.validate_accounting(&accounting)?;
         }
-        let _guard = lock(&self.state.binding_lock);
-        if manifest_matches(&self.root.join("store.json"), &self.binding) {
-            validate_store_layout(&self.root)?;
-            return Ok(());
+        validate_store_layout(&self.root)?;
+        if !manifest_matches(&self.root.join("store.json"), &self.binding) {
+            return Err(AssetError::StaleBinding);
         }
-        prepare_namespace(&self.workspace_root, &self.root, &self.binding)?;
-        *lock(&self.state.usage) = AssetUsage::default();
         Ok(())
+    }
+
+    fn validate_accounting(&self, accounting: &AccountingState) -> Result<(), AssetError> {
+        if accounting.initialized
+            && accounting.generation == self.generation
+            && accounting.active_binding.as_deref() == Some(self.binding.as_str())
+        {
+            Ok(())
+        } else {
+            Err(AssetError::StaleBinding)
+        }
     }
 
     fn raw_object_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
@@ -476,9 +631,7 @@ impl AssetStore {
         set_path_file_mode(&object_path)?;
         if object_metadata.len() > self.limits.max_file_bytes {
             self.quarantine_corrupt(hash, &object_path)?;
-            return Err(AssetError::TooLarge {
-                limit: self.limits.max_file_bytes,
-            });
+            return Err(AssetError::LocalCorruption);
         }
         let modified_ns = modified_ns(&object_metadata)?;
         let metadata_path = self.raw_metadata_path(hash)?;
@@ -490,21 +643,98 @@ impl AssetStore {
             }
         }
 
-        let bytes = read_regular_file(&object_path)?;
-        if sha256_hex(&bytes) != hash {
-            self.quarantine_corrupt(hash, &object_path)?;
-            return Err(AssetError::HashMismatch);
+        let snapshot = match read_file_snapshot(&object_path, self.limits.max_file_bytes) {
+            Ok(snapshot) => snapshot,
+            Err(AssetError::TooLarge { .. }) => {
+                self.quarantine_corrupt(hash, &object_path)?;
+                return Err(AssetError::LocalCorruption);
+            }
+            Err(error) => return Err(error),
+        };
+        self.rebuild_metadata_from_snapshot(
+            hash,
+            &object_path,
+            &metadata_path,
+            existing_sidecar.as_ref(),
+            None,
+            &snapshot,
+        )
+    }
+
+    fn rebuild_metadata_from_snapshot(
+        &self,
+        hash: &str,
+        object_path: &Path,
+        metadata_path: &Path,
+        existing_sidecar: Option<&AssetMetadata>,
+        fallback_source: Option<&AssetSource>,
+        snapshot: &FileSnapshot,
+    ) -> Result<AssetMetadata, AssetError> {
+        if sha256_hex(&snapshot.bytes) != hash {
+            self.quarantine_corrupt(hash, object_path)?;
+            return Err(AssetError::LocalCorruption);
         }
         let source = existing_sidecar
-            .as_ref()
             .map(|sidecar| &sidecar.source)
             .filter(|source| valid_source(source))
             .cloned()
-            .or_else(|| read_recoverable_source(&metadata_path))
+            .or_else(|| read_recoverable_source(metadata_path))
+            .or_else(|| {
+                fallback_source
+                    .filter(|source| valid_source(source))
+                    .cloned()
+            })
             .unwrap_or(AssetSource::LocalUpload);
-        let metadata = metadata_for_bytes(hash, &bytes, modified_ns, source)?;
+        let metadata = metadata_for_bytes(hash, &snapshot.bytes, snapshot.modified_ns, source)?;
         self.write_metadata(&metadata)?;
         Ok(metadata)
+    }
+
+    fn force_verify_dedupe(
+        &self,
+        hash: &str,
+        source: &AssetSource,
+    ) -> Result<Option<AssetMetadata>, AssetError> {
+        let object_path = self.raw_object_path(hash)?;
+        let snapshot = match read_file_snapshot(&object_path, self.limits.max_file_bytes) {
+            Ok(snapshot) => snapshot,
+            Err(AssetError::Missing) => return Ok(None),
+            Err(AssetError::TooLarge { .. }) => {
+                self.quarantine_corrupt(hash, &object_path)?;
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        if sha256_hex(&snapshot.bytes) != hash {
+            self.quarantine_corrupt(hash, &object_path)?;
+            return Ok(None);
+        }
+        let metadata_path = self.raw_metadata_path(hash)?;
+        let existing_sidecar = read_sidecar(&metadata_path).ok();
+        let metadata = if existing_sidecar.as_ref().is_some_and(|sidecar| {
+            valid_sidecar(sidecar, hash, snapshot.size, snapshot.modified_ns)
+        }) {
+            existing_sidecar.ok_or(AssetError::Invariant(
+                "asset sidecar disappeared during dedupe verification",
+            ))?
+        } else {
+            match self.rebuild_metadata_from_snapshot(
+                hash,
+                &object_path,
+                &metadata_path,
+                existing_sidecar.as_ref(),
+                Some(source),
+                &snapshot,
+            ) {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    self.register_existing_object(hash, snapshot.size)?;
+                    return Err(error);
+                }
+            }
+        };
+        self.register_existing_object(hash, snapshot.size)?;
+        Ok(Some(metadata))
     }
 
     fn metadata_from_object(
@@ -513,12 +743,52 @@ impl AssetStore {
         source: AssetSource,
     ) -> Result<AssetMetadata, AssetError> {
         let object_path = self.raw_object_path(hash)?;
-        let object_metadata = fs::symlink_metadata(&object_path)?;
-        let bytes = read_regular_file(&object_path)?;
-        metadata_for_bytes(hash, &bytes, modified_ns(&object_metadata)?, source)
+        let snapshot = read_file_snapshot(&object_path, self.limits.max_file_bytes)?;
+        metadata_for_bytes(hash, &snapshot.bytes, snapshot.modified_ns, source)
+    }
+
+    fn register_existing_object(&self, hash: &str, size: u64) -> Result<(), AssetError> {
+        let mut accounting = lock(&self.state.accounting);
+        self.validate_accounting(&accounting)?;
+        if accounting.objects.contains_key(hash) {
+            return Ok(());
+        }
+        let committed =
+            AssetUsage {
+                bytes: accounting
+                    .committed
+                    .bytes
+                    .checked_add(size)
+                    .ok_or(AssetError::Invariant("asset committed byte count overflow"))?,
+                objects: accounting.committed.objects.checked_add(1).ok_or(
+                    AssetError::Invariant("asset committed object count overflow"),
+                )?,
+            };
+        accounting.objects.insert(hash.to_string(), size);
+        accounting.committed = committed;
+        Ok(())
+    }
+
+    fn reconcile_accounting(&self) -> Result<(), AssetError> {
+        let (usage, objects) = self.scan_regular_object_ledger()?;
+        let mut accounting = lock(&self.state.accounting);
+        self.validate_accounting(&accounting)?;
+        accounting.committed = usage;
+        accounting.objects = objects;
+        Ok(())
     }
 
     fn write_metadata(&self, metadata: &AssetMetadata) -> Result<(), AssetError> {
+        #[cfg(debug_assertions)]
+        if self
+            .state
+            .fail_next_sidecar_write
+            .swap(false, Ordering::AcqRel)
+        {
+            return Err(AssetError::Store(std::io::Error::other(
+                "injected asset sidecar write failure",
+            )));
+        }
         let path = self.raw_metadata_path(&metadata.sha256)?;
         let parent = path.parent().ok_or_else(|| invalid_path(&path))?;
         create_private_dir(parent)?;
@@ -527,8 +797,7 @@ impl AssetStore {
         atomic_write(&path, &bytes)
     }
 
-    fn recover_objects(&self) -> Result<AssetUsage, AssetError> {
-        let mut usage = AssetUsage::default();
+    fn recover_objects(&self) -> Result<(), AssetError> {
         let objects_root = self.root.join("objects/sha256");
         for shard in read_dir_or_empty(&objects_root)? {
             let shard = shard?;
@@ -554,16 +823,9 @@ impl AssetStore {
                 }
                 set_path_file_mode(&object.path())?;
                 match self.refresh_metadata(&hash) {
-                    Ok(metadata) => {
-                        usage.bytes = usage.bytes.checked_add(metadata.size).ok_or_else(|| {
-                            AssetError::Store(std::io::Error::other("asset usage overflow"))
-                        })?;
-                        usage.objects = usage.objects.checked_add(1).ok_or_else(|| {
-                            AssetError::Store(std::io::Error::other("asset object count overflow"))
-                        })?;
-                    }
+                    Ok(_) => {}
                     Err(
-                        AssetError::HashMismatch
+                        AssetError::LocalCorruption
                         | AssetError::Missing
                         | AssetError::TooLarge { .. },
                     ) => {}
@@ -571,11 +833,12 @@ impl AssetStore {
                 }
             }
         }
-        Ok(usage)
+        Ok(())
     }
 
-    fn scan_regular_object_usage(&self) -> Result<AssetUsage, AssetError> {
+    fn scan_regular_object_ledger(&self) -> Result<(AssetUsage, HashMap<String, u64>), AssetError> {
         let mut usage = AssetUsage::default();
+        let mut objects = HashMap::new();
         let objects_root = self.root.join("objects/sha256");
         for shard in read_dir_or_empty(&objects_root)? {
             let shard = shard?;
@@ -601,9 +864,10 @@ impl AssetStore {
                 usage.objects = usage.objects.checked_add(1).ok_or_else(|| {
                     AssetError::Store(std::io::Error::other("asset object count overflow"))
                 })?;
+                objects.insert(hash, metadata.len());
             }
         }
-        Ok(usage)
+        Ok((usage, objects))
     }
 
     fn remove_orphan_sidecars(&self) -> Result<(), AssetError> {
@@ -663,17 +927,65 @@ impl AssetStore {
         Ok(())
     }
 
+    fn cleanup_atomic_write_temps(&self) -> Result<(), AssetError> {
+        let now = SystemTime::now();
+        self.cleanup_atomic_write_temps_in(&self.root, now)?;
+        for root in [
+            self.root.join("objects/sha256"),
+            self.root.join("metadata/sha256"),
+        ] {
+            for shard in read_dir_or_empty(&root)? {
+                let shard = shard?;
+                let shard_name = shard.file_name().to_string_lossy().into_owned();
+                if !shard.file_type()?.is_dir() || !valid_shard(&shard_name) {
+                    continue;
+                }
+                self.cleanup_atomic_write_temps_in(&shard.path(), now)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn cleanup_atomic_write_temps_in(
+        &self,
+        directory: &Path,
+        now: SystemTime,
+    ) -> Result<(), AssetError> {
+        for entry in read_dir_or_empty(directory)? {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("gitim-atomic-") || !name.ends_with(".tmp") {
+                continue;
+            }
+            let metadata = entry.metadata()?;
+            let age = now.duration_since(metadata.modified()?).unwrap_or_default();
+            if age > self.limits.temp_ttl {
+                fs::remove_file(entry.path())?;
+            } else {
+                set_path_file_mode(&entry.path())?;
+            }
+        }
+        Ok(())
+    }
+
     fn quarantine_corrupt(&self, hash: &str, object_path: &Path) -> Result<(), AssetError> {
         let root = self
             .workspace_root
             .join(".gitim-runtime/orphaned-assets/corrupt-objects");
         create_private_dir(&root)?;
-        let destination = unique_path(&root, &format!("corrupt-{hash}"));
-        fs::rename(object_path, destination)?;
+        quarantine_rename(object_path, &root, &format!("corrupt-{hash}"))?;
         let metadata_path = self.raw_metadata_path(hash)?;
         remove_file_if_exists(&metadata_path)?;
-        let usage = self.scan_regular_object_usage()?;
-        *lock(&self.state.usage) = usage;
+        let (usage, objects) = self.scan_regular_object_ledger()?;
+        let mut accounting = lock(&self.state.accounting);
+        if accounting.generation == self.generation {
+            accounting.committed = usage;
+            accounting.objects = objects;
+        }
         Ok(())
     }
 }
@@ -681,27 +993,72 @@ impl AssetStore {
 pub struct AssetReservation {
     bytes: u64,
     state: Arc<WorkspaceAssetState>,
+    generation: u64,
     released: bool,
 }
 
 impl AssetReservation {
-    pub fn release(mut self) {
-        self.release_inner();
+    pub fn release(mut self) -> Result<(), AssetError> {
+        self.release_inner()
     }
 
-    fn release_inner(&mut self) {
-        if self.released {
-            return;
+    fn commit(mut self, hash: &str, size: u64) -> Result<(), AssetError> {
+        let mut accounting = lock(&self.state.accounting);
+        if accounting.generation != self.generation {
+            self.released = true;
+            return Err(AssetError::StaleBinding);
         }
-        let mut reserved = lock(&self.state.reserved);
-        *reserved = reserved.saturating_sub(self.bytes);
+        let reserved = accounting
+            .reserved
+            .checked_sub(self.bytes)
+            .ok_or(AssetError::Invariant("asset reservation commit underflow"))?;
+        let is_new = !accounting.objects.contains_key(hash);
+        let committed = if is_new {
+            AssetUsage {
+                bytes: accounting
+                    .committed
+                    .bytes
+                    .checked_add(size)
+                    .ok_or(AssetError::Invariant("asset committed byte count overflow"))?,
+                objects: accounting.committed.objects.checked_add(1).ok_or(
+                    AssetError::Invariant("asset committed object count overflow"),
+                )?,
+            }
+        } else {
+            accounting.committed
+        };
+        accounting.reserved = reserved;
+        accounting.committed = committed;
+        if is_new {
+            accounting.objects.insert(hash.to_string(), size);
+        }
         self.released = true;
+        Ok(())
+    }
+
+    fn release_inner(&mut self) -> Result<(), AssetError> {
+        if self.released {
+            return Ok(());
+        }
+        let mut accounting = lock(&self.state.accounting);
+        if accounting.generation != self.generation {
+            self.released = true;
+            return Ok(());
+        }
+        accounting.reserved = accounting
+            .reserved
+            .checked_sub(self.bytes)
+            .ok_or(AssetError::Invariant("asset reservation release underflow"))?;
+        self.released = true;
+        Ok(())
     }
 }
 
 impl Drop for AssetReservation {
     fn drop(&mut self) {
-        self.release_inner();
+        if let Err(error) = self.release_inner() {
+            tracing::error!(error = %error, "asset reservation release invariant failed");
+        }
     }
 }
 
@@ -777,23 +1134,60 @@ fn namespace_has_data(root: &Path) -> Result<bool, AssetError> {
 fn quarantine_namespace(workspace_root: &Path, root: &Path) -> Result<(), AssetError> {
     let orphaned = workspace_root.join(".gitim-runtime/orphaned-assets");
     create_private_dir(&orphaned)?;
-    let destination = unique_path(&orphaned, "assets-v1");
-    fs::rename(root, destination)?;
-    sync_parent_best_effort(&orphaned);
+    quarantine_rename(root, &orphaned, "assets-v1")?;
     Ok(())
 }
 
-fn unique_path(parent: &Path, label: &str) -> PathBuf {
+fn quarantine_rename(
+    source: &Path,
+    destination_parent: &Path,
+    label: &str,
+) -> Result<PathBuf, AssetError> {
+    let source_parent = source.parent().ok_or_else(|| invalid_path(source))?;
+    let source_is_dir = fs::symlink_metadata(source)?.file_type().is_dir();
     loop {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
         let sequence = UNIQUE_SUFFIX.fetch_add(1, Ordering::Relaxed);
-        let candidate = parent.join(format!("{label}-{nanos}-{}-{sequence}", std::process::id()));
-        if fs::symlink_metadata(&candidate).is_err() {
-            return candidate;
+        let candidate =
+            destination_parent.join(format!("{label}-{nanos}-{}-{sequence}", std::process::id()));
+        let reserved = if source_is_dir {
+            fs::create_dir(&candidate).and_then(|()| {
+                set_dir_mode(&candidate).map_err(|error| match error {
+                    AssetError::Store(error) => error,
+                    other => std::io::Error::other(other.to_string()),
+                })
+            })
+        } else {
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+                .and_then(|file| {
+                    set_file_mode(&file).map_err(|error| match error {
+                        AssetError::Store(error) => error,
+                        other => std::io::Error::other(other.to_string()),
+                    })
+                })
+        };
+        match reserved {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(AssetError::Store(error)),
         }
+        if let Err(error) = fs::rename(source, &candidate) {
+            if source_is_dir {
+                let _ = fs::remove_dir(&candidate);
+            } else {
+                let _ = fs::remove_file(&candidate);
+            }
+            return Err(AssetError::Store(error));
+        }
+        sync_parent_best_effort(source_parent);
+        sync_parent_best_effort(destination_parent);
+        return Ok(candidate);
     }
 }
 
@@ -898,14 +1292,17 @@ fn set_file_mode(_file: &File) -> Result<(), AssetError> {
 }
 
 fn set_path_file_mode(path: &Path) -> Result<(), AssetError> {
-    let file = open_options_no_follow(path, true)?;
+    let file = open_options_no_follow(path, false)?;
     set_file_mode(&file)
 }
 
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
     let parent = path.parent().ok_or_else(|| invalid_path(path))?;
     create_private_dir(parent)?;
-    let mut temp = NamedTempFile::new_in(parent)?;
+    let mut temp = tempfile::Builder::new()
+        .prefix("gitim-atomic-")
+        .suffix(".tmp")
+        .tempfile_in(parent)?;
     set_file_mode(temp.as_file())?;
     temp.write_all(bytes)?;
     temp.flush()?;
@@ -1026,33 +1423,62 @@ fn modified_ns(metadata: &fs::Metadata) -> Result<u64, AssetError> {
     })
 }
 
-fn read_regular_file(path: &Path) -> Result<Vec<u8>, AssetError> {
+fn read_file_snapshot(path: &Path, limit: u64) -> Result<FileSnapshot, AssetError> {
+    read_file_snapshot_with_hook(path, limit, || {})
+}
+
+fn read_file_snapshot_with_hook(
+    path: &Path,
+    limit: u64,
+    after_open: impl FnOnce(),
+) -> Result<FileSnapshot, AssetError> {
     let mut file = open_options_no_follow(path, false).map_err(map_missing)?;
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() {
+    let before = file.metadata()?;
+    if !before.file_type().is_file() {
         return Err(AssetError::Missing);
     }
-    let capacity = usize::try_from(metadata.len())
-        .map_err(|_| AssetError::Invalid("asset size cannot fit address space".to_string()))?;
+    if before.len() > limit {
+        return Err(AssetError::TooLarge { limit });
+    }
+    set_file_mode(&file)?;
+    let before_modified_ns = modified_ns(&before)?;
+    after_open();
+    let capacity = usize::try_from(before.len().min(64 * 1024)).map_err(|_| {
+        AssetError::Invalid("asset snapshot capacity cannot fit address space".to_string())
+    })?;
     let mut bytes = Vec::with_capacity(capacity);
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    (&mut file)
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if u64::try_from(bytes.len()).map_or(true, |length| length > limit) {
+        return Err(AssetError::TooLarge { limit });
+    }
+    let after = file.metadata()?;
+    let byte_len = u64::try_from(bytes.len())
+        .map_err(|_| AssetError::Invalid("asset size cannot fit u64".to_string()))?;
+    if !after.file_type().is_file()
+        || before.len() != after.len()
+        || byte_len != after.len()
+        || before_modified_ns != modified_ns(&after)?
+    {
+        return Err(AssetError::LocalCorruption);
+    }
+    Ok(FileSnapshot {
+        bytes,
+        size: byte_len,
+        modified_ns: before_modified_ns,
+    })
 }
 
 fn read_bounded_regular_file(path: &Path, limit: u64) -> Result<Vec<u8>, AssetError> {
-    let mut file = open_options_no_follow(path, false).map_err(map_missing)?;
-    let metadata = file.metadata()?;
-    if !metadata.file_type().is_file() || metadata.len() > limit {
-        return Err(AssetError::Invalid(format!(
-            "asset metadata file exceeds the {limit}-byte limit or is not regular"
-        )));
-    }
-    let capacity = usize::try_from(metadata.len()).map_err(|_| {
-        AssetError::Invalid("asset metadata size cannot fit address space".to_string())
-    })?;
-    let mut bytes = Vec::with_capacity(capacity);
-    file.read_to_end(&mut bytes)?;
-    Ok(bytes)
+    read_file_snapshot(path, limit)
+        .map(|snapshot| snapshot.bytes)
+        .map_err(|error| match error {
+            AssetError::TooLarge { .. } | AssetError::LocalCorruption => AssetError::Invalid(
+                format!("asset metadata file exceeds the {limit}-byte limit or changed while read"),
+            ),
+            other => other,
+        })
 }
 
 fn open_options_no_follow(path: &Path, write: bool) -> std::io::Result<File> {
@@ -1121,8 +1547,8 @@ fn map_missing(error: std::io::Error) -> AssetError {
     }
 }
 
-fn invalid_path(path: &Path) -> AssetError {
-    AssetError::Invalid(format!("asset path has no parent: {}", path.display()))
+fn invalid_path(_path: &Path) -> AssetError {
+    AssetError::Invalid("asset store path is invalid".to_string())
 }
 
 fn invalid_directory(path: &Path) -> AssetError {
@@ -1135,9 +1561,49 @@ fn invalid_directory(path: &Path) -> AssetError {
     ))
 }
 
+fn canonical_workspace_root(path: &Path) -> Result<PathBuf, AssetError> {
+    let canonical = fs::canonicalize(path).map_err(AssetError::Store)?;
+    if fs::symlink_metadata(&canonical)?.file_type().is_dir() {
+        Ok(canonical)
+    } else {
+        Err(AssetError::Invalid(
+            "asset workspace root must be an existing directory".to_string(),
+        ))
+    }
+}
+
+fn shared_workspace_state(workspace_root: &Path) -> Arc<WorkspaceAssetState> {
+    let registry = WORKSPACE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut states = lock(registry);
+    states.retain(|_, state| state.strong_count() > 0);
+    if let Some(state) = states.get(workspace_root).and_then(Weak::upgrade) {
+        return state;
+    }
+    let state = Arc::new(WorkspaceAssetState::default());
+    states.insert(workspace_root.to_path_buf(), Arc::downgrade(&state));
+    state
+}
+
+fn existing_workspace_state(workspace_root: &Path) -> Option<Arc<WorkspaceAssetState>> {
+    let registry = WORKSPACE_STATES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut states = lock(registry);
+    states.retain(|_, state| state.strong_count() > 0);
+    states.get(workspace_root).and_then(Weak::upgrade)
+}
+
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
+    lock.read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn write_lock<T>(lock: &RwLock<T>) -> RwLockWriteGuard<'_, T> {
+    lock.write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
@@ -1169,5 +1635,63 @@ mod tests {
             Err(AssetError::QuotaExceeded { .. })
         ));
         drop(first);
+    }
+
+    #[test]
+    fn bounded_snapshot_rejects_growth_after_open() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let path = directory.path().join("object");
+        fs::write(&path, b"abc").expect("write object");
+        let result = read_file_snapshot_with_hook(&path, 3, || {
+            let mut file = OpenOptions::new()
+                .append(true)
+                .open(&path)
+                .expect("open growing object");
+            file.write_all(b"d").expect("grow object");
+        });
+        assert!(matches!(
+            result,
+            Err(AssetError::TooLarge { limit: 3 }) | Err(AssetError::LocalCorruption)
+        ));
+    }
+
+    #[test]
+    fn bounded_snapshot_keeps_the_opened_inode_when_path_is_replaced() {
+        let directory = tempfile::TempDir::new().expect("temporary directory");
+        let path = directory.path().join("object");
+        let replacement = directory.path().join("replacement");
+        fs::write(&path, b"good").expect("write object");
+        fs::write(&replacement, b"evil").expect("write replacement");
+        let snapshot = read_file_snapshot_with_hook(&path, 4, || {
+            fs::rename(&replacement, &path).expect("replace path");
+        })
+        .expect("read stable opened inode");
+        assert_eq!(snapshot.bytes, b"good");
+    }
+
+    #[test]
+    fn same_generation_reservation_underflow_is_reported() {
+        let workspace = tempfile::TempDir::new().expect("temporary workspace");
+        let store = AssetStore::open(workspace.path(), "local:test", test_limits(10))
+            .expect("open asset store");
+        let reservation = store.reserve(5).expect("reserve bytes");
+        lock(&store.state.accounting).reserved = 0;
+        assert!(matches!(
+            reservation.release(),
+            Err(AssetError::Invariant("asset reservation release underflow"))
+        ));
+    }
+
+    fn test_limits(quota: u64) -> AssetLimits {
+        AssetLimits {
+            workspace_quota_bytes: quota,
+            min_free_bytes: 0,
+            max_file_bytes: 1_000,
+            max_request_bytes: 1_000,
+            max_files: 10,
+            temp_ttl: Duration::from_secs(60),
+            upload_slots: 2,
+            peer_slots: 4,
+        }
     }
 }
