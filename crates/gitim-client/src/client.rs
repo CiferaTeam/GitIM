@@ -5,8 +5,11 @@ use chrono::{DateTime, Utc};
 use gitim_core::auth_payload::AuthPayload;
 use gitim_core::me_json::MeJson;
 use gitim_core::responses::{
+    ArchiveQuickSessionResponse, ClaimQuickSessionTurnResponse, CreateQuickSessionResponse,
     CronDetail, CronRunEntry, CronSummary, HistoryCronResponse, ListCronsResponse,
-    ToggleCronResponse,
+    ListQuickSessionsResponse, MarkQuickSessionErrorResponse, ReadQuickSessionResponse,
+    SendQuickSessionMessageResponse, SetQuickSessionSummaryResponse, SetQuickSessionTitleResponse,
+    ToggleCronResponse, UnarchiveQuickSessionResponse,
 };
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -324,6 +327,175 @@ impl GitimClient {
 
     pub async fn poll(&self, since: Option<&str>) -> Result<ApiResponse, ClientError> {
         self.request("poll", json!({ "since": since })).await
+    }
+
+    // ===== Quick Sessions (docs/plans/quick-sessions/) =====
+
+    pub async fn create_quick_session(
+        &self,
+        session_id: &str,
+        agent_id: &str,
+        first_message: &str,
+    ) -> Result<CreateQuickSessionResponse, ClientError> {
+        let resp = self
+            .request(
+                "create_quick_session",
+                json!({
+                    "session_id": session_id,
+                    "agent_id": agent_id,
+                    "first_message": first_message,
+                }),
+            )
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn list_quick_sessions(
+        &self,
+        archived: bool,
+        agent_id: Option<&str>,
+        actionable: bool,
+        limit: Option<usize>,
+    ) -> Result<ListQuickSessionsResponse, ClientError> {
+        let mut params = serde_json::Map::new();
+        params.insert("archived".to_string(), json!(archived));
+        params.insert("actionable".to_string(), json!(actionable));
+        if let Some(agent_id) = agent_id {
+            params.insert("agent_id".to_string(), json!(agent_id));
+        }
+        if let Some(limit) = limit {
+            params.insert("limit".to_string(), json!(limit));
+        }
+        let resp = self
+            .request("list_quick_sessions", Value::Object(params))
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn read_quick_session(
+        &self,
+        session_id: &str,
+        limit: Option<usize>,
+        since: Option<u64>,
+    ) -> Result<ReadQuickSessionResponse, ClientError> {
+        let mut params = serde_json::Map::new();
+        params.insert("session_id".to_string(), json!(session_id));
+        if let Some(limit) = limit {
+            params.insert("limit".to_string(), json!(limit));
+        }
+        if let Some(since) = since {
+            params.insert("since".to_string(), json!(since));
+        }
+        let resp = self
+            .request("read_quick_session", Value::Object(params))
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn send_quick_session_message(
+        &self,
+        session_id: &str,
+        body: &str,
+        reply_to: Option<u64>,
+        request_id: Option<&str>,
+        attempt_id: Option<&str>,
+    ) -> Result<SendQuickSessionMessageResponse, ClientError> {
+        let mut params = serde_json::Map::new();
+        params.insert("session_id".to_string(), json!(session_id));
+        params.insert("body".to_string(), json!(body));
+        if let Some(reply_to) = reply_to {
+            params.insert("reply_to".to_string(), json!(reply_to));
+        }
+        if let Some(request_id) = request_id {
+            params.insert("request_id".to_string(), json!(request_id));
+        }
+        if let Some(attempt_id) = attempt_id {
+            params.insert("attempt_id".to_string(), json!(attempt_id));
+        }
+        let resp = self
+            .request("send_quick_session_message", Value::Object(params))
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn set_quick_session_title(
+        &self,
+        session_id: &str,
+        title: &str,
+        attempt_id: &str,
+    ) -> Result<SetQuickSessionTitleResponse, ClientError> {
+        let resp = self
+            .request(
+                "set_quick_session_title",
+                json!({"session_id": session_id, "title": title, "attempt_id": attempt_id}),
+            )
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn set_quick_session_summary(
+        &self,
+        session_id: &str,
+        summary: &str,
+        attempt_id: &str,
+    ) -> Result<SetQuickSessionSummaryResponse, ClientError> {
+        let resp = self
+            .request(
+                "set_quick_session_summary",
+                json!({"session_id": session_id, "summary": summary, "attempt_id": attempt_id}),
+            )
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn claim_quick_session_turn(
+        &self,
+        session_id: &str,
+        input_line: u64,
+        attempt_id: &str,
+    ) -> Result<ClaimQuickSessionTurnResponse, ClientError> {
+        let resp = self
+            .request(
+                "claim_quick_session_turn",
+                json!({"session_id": session_id, "input_line": input_line, "attempt_id": attempt_id}),
+            )
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn mark_quick_session_error(
+        &self,
+        session_id: &str,
+        attempt_id: &str,
+        error: &str,
+    ) -> Result<MarkQuickSessionErrorResponse, ClientError> {
+        let resp = self
+            .request(
+                "mark_quick_session_error",
+                json!({"session_id": session_id, "attempt_id": attempt_id, "error": error}),
+            )
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn archive_quick_session(
+        &self,
+        session_id: &str,
+    ) -> Result<ArchiveQuickSessionResponse, ClientError> {
+        let resp = self
+            .request("archive_quick_session", json!({"session_id": session_id}))
+            .await?;
+        decode_typed(resp)
+    }
+
+    pub async fn unarchive_quick_session(
+        &self,
+        session_id: &str,
+    ) -> Result<UnarchiveQuickSessionResponse, ClientError> {
+        let resp = self
+            .request("unarchive_quick_session", json!({"session_id": session_id}))
+            .await?;
+        decode_typed(resp)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -998,14 +1170,181 @@ fn decode_unit(resp: ApiResponse) -> Result<(), ClientError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gitim_core::responses::{
+        ArchiveQuickSessionResponse, ClaimQuickSessionTurnResponse, CreateQuickSessionResponse,
+        ListQuickSessionsResponse, MarkQuickSessionErrorResponse, QuickSessionDetail,
+        ReadQuickSessionResponse, SendQuickSessionMessageResponse, SetQuickSessionSummaryResponse,
+        SetQuickSessionTitleResponse, UnarchiveQuickSessionResponse,
+    };
+    use gitim_core::types::{QuickSessionMeta, QuickSessionStatus};
     use std::fs;
     use tempfile::TempDir;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixListener;
 
     fn write_me_json(repo_root: &Path, body: &str) {
         let dir = repo_root.join(".gitim");
         fs::create_dir_all(&dir).unwrap();
         fs::write(dir.join("me.json"), body).unwrap();
+    }
+
+    fn quick_session_meta() -> QuickSessionMeta {
+        QuickSessionMeta::new(
+            "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string(),
+            "bob".to_string(),
+            "alice".to_string(),
+            "2026-07-11T00:00:00Z".to_string(),
+        )
+    }
+
+    #[tokio::test]
+    async fn quick_session_methods_use_exact_wire_contract() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join(".gitim/run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let listener = UnixListener::bind(run_dir.join("gitim.sock")).unwrap();
+        let meta = quick_session_meta();
+        let session = QuickSessionDetail {
+            meta: meta.clone(),
+            entries: Vec::new(),
+            archived: false,
+        };
+        let responses = vec![
+            serde_json::to_value(CreateQuickSessionResponse {
+                session: session.clone(),
+                line_number: 1,
+                r#ref: "session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string(),
+            })
+            .unwrap(),
+            serde_json::to_value(ListQuickSessionsResponse { sessions: vec![] }).unwrap(),
+            serde_json::to_value(ReadQuickSessionResponse { session }).unwrap(),
+            serde_json::to_value(SendQuickSessionMessageResponse {
+                session_id: meta.id.clone(),
+                line_number: 2,
+                status: QuickSessionStatus::Running,
+                revision: 3,
+                r#ref: format!("session:{}:L000002", meta.id),
+            })
+            .unwrap(),
+            serde_json::to_value(SetQuickSessionTitleResponse {
+                session_id: meta.id.clone(),
+                title: "Investigate auth".to_string(),
+                status: QuickSessionStatus::Running,
+                revision: 2,
+            })
+            .unwrap(),
+            serde_json::to_value(SetQuickSessionSummaryResponse {
+                session_id: meta.id.clone(),
+                summary: "Auth findings".to_string(),
+                status: QuickSessionStatus::Running,
+                revision: 3,
+            })
+            .unwrap(),
+            serde_json::to_value(ClaimQuickSessionTurnResponse {
+                session_id: meta.id.clone(),
+                input_line: 1,
+                attempt_id: "qa-01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string(),
+                status: QuickSessionStatus::Running,
+                revision: 2,
+            })
+            .unwrap(),
+            serde_json::to_value(MarkQuickSessionErrorResponse {
+                session_id: meta.id.clone(),
+                status: QuickSessionStatus::Error,
+                revision: 3,
+            })
+            .unwrap(),
+            serde_json::to_value(ArchiveQuickSessionResponse {
+                session_id: meta.id.clone(),
+                status: QuickSessionStatus::Archived,
+                revision: 4,
+                archived_at: "2026-07-11T00:01:00Z".to_string(),
+            })
+            .unwrap(),
+            serde_json::to_value(UnarchiveQuickSessionResponse {
+                session_id: meta.id.clone(),
+                status: QuickSessionStatus::Active,
+                revision: 5,
+            })
+            .unwrap(),
+        ];
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for data in responses {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                requests.push(serde_json::from_str::<Value>(&line).unwrap());
+                let response = json!({"ok": true, "data": data});
+                writer
+                    .write_all(format!("{response}\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+
+        let client = GitimClient::new(tmp.path());
+        let session_id = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+        let attempt_id = "qa-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+        client
+            .create_quick_session(session_id, "bob", "hello")
+            .await
+            .unwrap();
+        client
+            .list_quick_sessions(false, Some("bob"), true, Some(25))
+            .await
+            .unwrap();
+        client
+            .read_quick_session(session_id, Some(20), Some(4))
+            .await
+            .unwrap();
+        client
+            .send_quick_session_message(
+                session_id,
+                "reply",
+                Some(1),
+                Some("req-1"),
+                Some(attempt_id),
+            )
+            .await
+            .unwrap();
+        client
+            .set_quick_session_title(session_id, "Investigate auth", attempt_id)
+            .await
+            .unwrap();
+        client
+            .set_quick_session_summary(session_id, "Auth findings", attempt_id)
+            .await
+            .unwrap();
+        client
+            .claim_quick_session_turn(session_id, 1, attempt_id)
+            .await
+            .unwrap();
+        client
+            .mark_quick_session_error(session_id, attempt_id, "provider failed")
+            .await
+            .unwrap();
+        client.archive_quick_session(session_id).await.unwrap();
+        client.unarchive_quick_session(session_id).await.unwrap();
+
+        assert_eq!(
+            server.await.unwrap(),
+            vec![
+                json!({"method":"create_quick_session","session_id":session_id,"agent_id":"bob","first_message":"hello"}),
+                json!({"method":"list_quick_sessions","archived":false,"agent_id":"bob","actionable":true,"limit":25}),
+                json!({"method":"read_quick_session","session_id":session_id,"limit":20,"since":4}),
+                json!({"method":"send_quick_session_message","session_id":session_id,"body":"reply","reply_to":1,"request_id":"req-1","attempt_id":attempt_id}),
+                json!({"method":"set_quick_session_title","session_id":session_id,"title":"Investigate auth","attempt_id":attempt_id}),
+                json!({"method":"set_quick_session_summary","session_id":session_id,"summary":"Auth findings","attempt_id":attempt_id}),
+                json!({"method":"claim_quick_session_turn","session_id":session_id,"input_line":1,"attempt_id":attempt_id}),
+                json!({"method":"mark_quick_session_error","session_id":session_id,"attempt_id":attempt_id,"error":"provider failed"}),
+                json!({"method":"archive_quick_session","session_id":session_id}),
+                json!({"method":"unarchive_quick_session","session_id":session_id}),
+            ]
+        );
     }
 
     #[test]
