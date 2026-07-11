@@ -12,9 +12,9 @@ use gitim_core::responses::{
     SetQuickSessionSummaryResponse, SetQuickSessionTitleResponse, UnarchiveQuickSessionResponse,
 };
 use gitim_core::types::{
-    apply_quick_session_transition, validate_quick_session_id, validate_quick_session_meta,
-    Handler, QuickSessionError, QuickSessionMeta, QuickSessionStatus, QuickSessionTransition,
-    ThreadEntry, TransitionOutcome,
+    apply_quick_session_transition, validate_quick_session_attempt_id, validate_quick_session_id,
+    validate_quick_session_meta, Handler, QuickSessionError, QuickSessionMeta, QuickSessionStatus,
+    QuickSessionTransition, ThreadEntry, TransitionOutcome,
 };
 use gitim_core::validator::compliance::validate_append;
 use std::io::Write;
@@ -584,6 +584,15 @@ pub async fn handle_send_quick_session_message(
             "agent messages require attempt_id",
             "quick_session_stale_attempt",
         );
+    }
+    if is_agent && meta.status == QuickSessionStatus::Running {
+        let requested_attempt = attempt_id.as_deref().unwrap_or_default();
+        if let Err(error) = validate_quick_session_attempt_id(requested_attempt) {
+            return error_response(error);
+        }
+        if meta.attempt_id.as_deref() != Some(requested_attempt) {
+            return error_response(QuickSessionError::StaleAttempt);
+        }
     }
     let completed_retry = is_agent
         && attempt_id.as_deref() == meta.last_completed_attempt_id.as_deref()

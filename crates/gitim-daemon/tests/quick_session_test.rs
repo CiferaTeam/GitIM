@@ -551,6 +551,84 @@ async fn send_and_unarchive_restore_exact_bytes_on_commit_failure() {
 }
 
 #[tokio::test]
+async fn meta_only_transition_restores_exact_bytes_on_commit_failure() {
+    let (_tmp, state) = setup_repo_alice_bob().await;
+    data::<CreateQuickSessionResponse>(
+        create(state.clone(), SESSION_ID, "bob", "first", "alice").await,
+    );
+    data::<ClaimQuickSessionTurnResponse>(claim(state.clone(), 1, ATTEMPT_ID, "bob").await);
+    let meta_path = state
+        .repo_root
+        .join(format!("quick-sessions/{SESSION_ID}/session.meta.yaml"));
+    let meta_before = std::fs::read(&meta_path).unwrap();
+    let head_before = state.git_storage.rev_parse("HEAD").unwrap();
+    install_rejecting_hook(&state);
+
+    let response = set_title(state.clone(), ATTEMPT_ID, "bob").await;
+
+    assert!(!response.ok);
+    assert_eq!(std::fs::read(&meta_path).unwrap(), meta_before);
+    assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head_before);
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&state.repo_root)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
+}
+
+#[tokio::test]
+async fn older_agent_reply_is_stale_after_a_new_attempt_is_claimed() {
+    let (_tmp, state) = setup_repo_alice_bob().await;
+    data::<CreateQuickSessionResponse>(
+        create(state.clone(), SESSION_ID, "bob", "first", "alice").await,
+    );
+    data::<ClaimQuickSessionTurnResponse>(claim(state.clone(), 1, ATTEMPT_ID, "bob").await);
+    data::<gitim_core::responses::SetQuickSessionTitleResponse>(
+        set_title(state.clone(), ATTEMPT_ID, "bob").await,
+    );
+    data::<SendQuickSessionMessageResponse>(
+        send_agent(state.clone(), "first reply", 1, ATTEMPT_ID, "bob").await,
+    );
+    data::<SendQuickSessionMessageResponse>(
+        send_human(state.clone(), "new input", "req-new", "alice").await,
+    );
+    data::<ClaimQuickSessionTurnResponse>(claim(state.clone(), 3, OTHER_ATTEMPT_ID, "bob").await);
+    let session_dir = state.repo_root.join(format!("quick-sessions/{SESSION_ID}"));
+    let meta_before = std::fs::read(session_dir.join("session.meta.yaml")).unwrap();
+    let thread_before = std::fs::read(session_dir.join("discussion.thread")).unwrap();
+    let head_before = state.git_storage.rev_parse("HEAD").unwrap();
+
+    let response = handle_request(
+        Request::SendQuickSessionMessage {
+            session_id: SESSION_ID.to_string(),
+            body: "late reply".to_string(),
+            reply_to: Some(3),
+            request_id: Some("req-looking-valid".to_string()),
+            attempt_id: Some(ATTEMPT_ID.to_string()),
+            author: Some("bob".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+
+    assert!(!response.ok);
+    assert_eq!(
+        response.error_code.as_deref(),
+        Some("quick_session_stale_attempt")
+    );
+    assert_eq!(
+        std::fs::read(session_dir.join("session.meta.yaml")).unwrap(),
+        meta_before
+    );
+    assert_eq!(
+        std::fs::read(session_dir.join("discussion.thread")).unwrap(),
+        thread_before
+    );
+    assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head_before);
+}
+
+#[tokio::test]
 async fn list_filters_actionability_and_read_pagination() {
     let (_tmp, state) = setup_repo_alice_bob().await;
     data::<CreateQuickSessionResponse>(
