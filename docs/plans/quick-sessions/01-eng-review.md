@@ -94,7 +94,7 @@ The archive operation stores the prior stable status in metadata. Archiving a ru
 
 ### 3. Actionability is derived from the transcript
 
-A session is actionable when a creator-authored line is newer than `last_completed_input_line` and its status is `needs_title` or `active`. The runtime claims the highest current creator line as the inclusive input-batch boundary. The daemon rejects a second claim, validates the agent reply against the claim, and marks an incomplete or stale claim as `error`; creator messages appended during a running turn remain queued for the next claim.
+A session is actionable when a creator-authored line is newer than `last_completed_input_line` and its status is `needs_title` or `active`. The runtime claims the highest current creator line as the inclusive input-batch boundary. The daemon rejects a second claim and validates the agent reply against the claim. An incomplete or stale claim enters `error` when no newer creator line exists; otherwise it retains error diagnostics and returns to the title-derived actionable state so creator messages appended during the running turn remain queued for the next claim.
 
 Transcript-derived actionability survives runtime-state loss and cross-node sync. The durable claim prevents concurrent or crash-induced duplicate execution, and local line markers preserve context continuity.
 

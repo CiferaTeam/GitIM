@@ -362,16 +362,29 @@ pub fn validate_quick_session_meta(meta: &QuickSessionMeta) -> Result<(), QuickS
         _ => {}
     }
 
-    match (meta.status, meta.error.as_deref(), meta.archived_from) {
-        (QuickSessionStatus::Error, Some(error), _)
-        | (QuickSessionStatus::Archived, Some(error), Some(QuickSessionStatus::Error))
-            if !error.trim().is_empty() => {}
-        (QuickSessionStatus::Error, _, _)
-        | (QuickSessionStatus::Archived, _, Some(QuickSessionStatus::Error)) => {
-            return invalid_meta("error state requires an error message");
-        }
-        (_, None, _) => {}
-        _ => return invalid_meta("error message requires error state"),
+    if meta
+        .error
+        .as_deref()
+        .is_some_and(|error| error.trim().is_empty())
+    {
+        return invalid_meta("error message cannot be empty");
+    }
+    let requires_error = meta.status == QuickSessionStatus::Error
+        || matches!(
+            (meta.status, meta.archived_from),
+            (
+                QuickSessionStatus::Archived,
+                Some(QuickSessionStatus::Error)
+            )
+        );
+    if requires_error && meta.error.is_none() {
+        return invalid_meta("error state requires an error message");
+    }
+    if meta.status == QuickSessionStatus::Running && meta.error.is_some() {
+        return invalid_meta("running status cannot retain error diagnostics");
+    }
+    if meta.error.is_some() && !requires_error && meta.last_failed_attempt_id.is_none() {
+        return invalid_meta("actionable error diagnostics require a failed attempt id");
     }
 
     let completed_count = usize::from(meta.last_completed_attempt_id.is_some())
@@ -410,15 +423,8 @@ pub fn validate_quick_session_meta(meta: &QuickSessionMeta) -> Result<(), QuickS
     }
     if let Some(attempt_id) = meta.last_failed_attempt_id.as_deref() {
         validate_quick_session_attempt_id(attempt_id)?;
-        if !matches!(
-            (meta.status, meta.archived_from),
-            (QuickSessionStatus::Error, _)
-                | (
-                    QuickSessionStatus::Archived,
-                    Some(QuickSessionStatus::Error)
-                )
-        ) {
-            return invalid_meta("failed attempt id requires error state");
+        if meta.error.is_none() || meta.status == QuickSessionStatus::Running {
+            return invalid_meta("failed attempt id requires retained error diagnostics");
         }
     }
     Ok(())
@@ -609,7 +615,17 @@ fn apply_transition(
             if error.is_empty() {
                 return Err(QuickSessionError::EmptyError);
             }
-            meta.status = QuickSessionStatus::Error;
+            let claimed_input_line = meta
+                .processing_input_line
+                .ok_or(QuickSessionError::InvalidState)?;
+            let has_queued_input = meta
+                .last_human_line
+                .is_some_and(|line_number| line_number > claimed_input_line);
+            meta.status = if has_queued_input {
+                title_derived_status(meta)
+            } else {
+                QuickSessionStatus::Error
+            };
             meta.error = Some(error);
             meta.last_failed_attempt_id = Some(attempt_id);
             clear_claim(meta);

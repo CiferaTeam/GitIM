@@ -664,6 +664,85 @@ fn quick_session_mark_error_retry_is_idempotent() {
     .is_err());
 }
 
+fn fail_with_queued_human_input(title_value: Option<&str>) -> QuickSessionMeta {
+    let mut meta = meta_fixture();
+    accept_human(&mut meta, 1);
+    apply_quick_session_transition(&mut meta, claim(1, ATTEMPT_ID, "2026-07-11T00:00:01Z"))
+        .unwrap();
+    if let Some(title_value) = title_value {
+        apply_quick_session_transition(
+            &mut meta,
+            title(ATTEMPT_ID, title_value, "2026-07-11T00:00:02Z"),
+        )
+        .unwrap();
+    }
+    apply_quick_session_transition(
+        &mut meta,
+        human(2, Some("request-2"), "2026-07-11T00:00:03Z"),
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut meta,
+        QuickSessionTransition::MarkError {
+            actor: "alice".to_string(),
+            attempt_id: ATTEMPT_ID.to_string(),
+            error: "provider exited".to_string(),
+            now: "2026-07-11T00:00:04Z".to_string(),
+        },
+    )
+    .unwrap();
+    meta
+}
+
+#[test]
+fn quick_session_failed_untitled_turn_preserves_queued_input() {
+    let mut meta = fail_with_queued_human_input(None);
+    assert_eq!(meta.status, QuickSessionStatus::NeedsTitle);
+    assert_eq!(meta.error.as_deref(), Some("provider exited"));
+    assert_eq!(meta.last_failed_attempt_id.as_deref(), Some(ATTEMPT_ID));
+
+    let revision = meta.revision;
+    assert_eq!(
+        apply_quick_session_transition(
+            &mut meta,
+            QuickSessionTransition::MarkError {
+                actor: "alice".to_string(),
+                attempt_id: ATTEMPT_ID.to_string(),
+                error: "provider exited".to_string(),
+                now: "2026-07-11T00:00:05Z".to_string(),
+            },
+        )
+        .unwrap(),
+        TransitionOutcome::Duplicate { line_number: None }
+    );
+    assert_eq!(meta.revision, revision);
+
+    apply_quick_session_transition(
+        &mut meta,
+        claim(2, "qa-01JYYYYYYYYYYYYYYYYYYYYYYY", "2026-07-11T00:00:06Z"),
+    )
+    .unwrap();
+    assert_eq!(meta.status, QuickSessionStatus::Running);
+    assert_eq!(meta.processing_input_line, Some(2));
+    assert_eq!(meta.error, None);
+    assert_eq!(meta.last_failed_attempt_id, None);
+}
+
+#[test]
+fn quick_session_failed_titled_turn_preserves_queued_input() {
+    let mut meta = fail_with_queued_human_input(Some("Investigate flaky test"));
+    assert_eq!(meta.status, QuickSessionStatus::Active);
+    assert_eq!(meta.error.as_deref(), Some("provider exited"));
+
+    apply_quick_session_transition(
+        &mut meta,
+        claim(2, "qa-01JYYYYYYYYYYYYYYYYYYYYYYY", "2026-07-11T00:00:05Z"),
+    )
+    .unwrap();
+    assert_eq!(meta.status, QuickSessionStatus::Running);
+    assert_eq!(meta.processing_input_line, Some(2));
+}
+
 #[test]
 fn quick_session_transition_wire_shape_is_shared_with_wasm() {
     let transition = human(7, Some("request-7"), "2026-07-11T00:00:07Z");

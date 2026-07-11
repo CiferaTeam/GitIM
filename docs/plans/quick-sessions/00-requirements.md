@@ -34,7 +34,7 @@ The daemon creates the durable object and initial human-authored thread entry in
 
 The selected agent must set a concise title through `gitim session title <session-id> <title>` before its first reply. The daemon rejects an agent reply while the title is absent with `quick_session_title_required`. A successful title write changes the persisted status to `active` and records `title_source: api_set`.
 
-The runtime treats a completed provider turn without both a title and an agent-authored reply as a failed session turn. It records a durable error state and stops automatic retries for the same input. A new human message clears that error and creates a new actionable turn.
+The runtime treats a completed provider turn without both a title and an agent-authored reply as a failed session turn. It records durable error diagnostics and stops automatic retries for the same input. When newer human input queued during the failed turn, the session immediately returns to its title-derived actionable state; otherwise it enters `error` until a new human message arrives.
 
 ## Durable object model
 
