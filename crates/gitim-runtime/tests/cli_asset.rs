@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::get;
@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_stream::wrappers::ReceiverStream;
 
 const RUNTIME_ID: &str = "24a6489c-762e-4461-9247-a824807a6080";
 const CREATED_AT: &str = "2026-07-12T00:00:00Z";
@@ -896,5 +897,473 @@ async fn binary_asset_get_preserves_exit_code_classes() {
     )
     .await;
     assert_eq!(output.status.code(), Some(3));
+    server.await.unwrap();
+}
+
+async fn spawn_error_body_server(
+    status: StatusCode,
+    body: Body,
+) -> (Client, tokio::task::JoinHandle<()>) {
+    let response = Arc::new(Mutex::new(Some(
+        axum::response::Response::builder()
+            .status(status)
+            .body(body)
+            .unwrap(),
+    )));
+    let route_response = Arc::clone(&response);
+    let app = Router::new().route(
+        "/error",
+        get(move || {
+            let response = route_response.lock().unwrap().take().unwrap();
+            async move { response }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    (Client::new(format!("http://{addr}")), server)
+}
+
+#[tokio::test]
+async fn oversized_error_bodies_return_bounded_status_errors() {
+    for (status, exit_code) in [
+        (StatusCode::PAYLOAD_TOO_LARGE, 2),
+        (StatusCode::INTERNAL_SERVER_ERROR, 3),
+    ] {
+        let (client, server) =
+            spawn_error_body_server(status, Body::from(vec![b'x'; 256 * 1024])).await;
+        let error = tokio::time::timeout(Duration::from_secs(1), client.get_binary("/error"))
+            .await
+            .expect("oversized error response is bounded")
+            .expect_err("non-success must fail");
+        match &error {
+            CliError::HttpStatus(code, excerpt) => {
+                assert_eq!(*code, status.as_u16());
+                assert!(excerpt.len() <= 515, "excerpt was {} bytes", excerpt.len());
+            }
+            other => panic!("expected bounded HttpStatus, got {other:?}"),
+        }
+        assert_eq!(gitim_runtime::cli::from_cli_error(&error), exit_code);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn oversized_asset_error_creates_no_destination_or_temp() {
+    let asset_ref = reference_for(b"content", "output.bin");
+    let response = axum::response::Response::builder()
+        .status(StatusCode::PAYLOAD_TOO_LARGE)
+        .body(Body::from(vec![b'x'; 256 * 1024]))
+        .unwrap();
+    let (client, server) = spawn_download_server(&asset_ref, response).await;
+    let directory = tempfile::tempdir().unwrap();
+    let error = cmd_asset::get(
+        &client,
+        cmd_asset::GetArgs {
+            workspace: None,
+            asset_ref: asset_ref.to_string(),
+            output: Some(directory.path().join("output.bin")),
+            force: false,
+        },
+    )
+    .await
+    .expect_err("oversized error must fail before staging");
+    assert!(matches!(error, CliError::HttpStatus(413, _)));
+    assert_eq!(gitim_runtime::cli::from_cli_error(&error), 2);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
+    server.abort();
+}
+
+#[tokio::test]
+async fn infinite_fast_error_body_is_dropped_after_bound() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0_u8; 1024];
+        let _ = socket.read(&mut request).await.unwrap();
+        socket
+            .write_all(
+                b"HTTP/1.1 500 Internal Server Error\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let chunk = vec![b'x'; 1024];
+        loop {
+            if socket.write_all(b"400\r\n").await.is_err()
+                || socket.write_all(&chunk).await.is_err()
+                || socket.write_all(b"\r\n").await.is_err()
+            {
+                break;
+            }
+        }
+    });
+    let client = Client::new(format!("http://{addr}"));
+    let error = tokio::time::timeout(Duration::from_secs(1), client.get_binary("/error"))
+        .await
+        .expect("infinite error body is bounded")
+        .expect_err("500 must fail");
+    assert!(matches!(error, CliError::HttpStatus(500, _)), "{error:?}");
+    assert_eq!(gitim_runtime::cli::from_cli_error(&error), 3);
+    tokio::time::timeout(Duration::from_secs(1), server)
+        .await
+        .expect("dropping response closes producer")
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dot_and_dotdot_default_names_become_attachment() {
+    for name in [".", ".."] {
+        let bytes = b"content";
+        let asset_ref = reference_for(bytes, name);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\ncontent",
+            bytes.len()
+        )
+        .into_bytes();
+        let (_, addr, server) = spawn_raw_asset_server(&asset_ref, response).await;
+        let output_dir = tempfile::tempdir().unwrap();
+        let output = run_cli(
+            addr,
+            output_dir.path().to_path_buf(),
+            vec![
+                "asset".into(),
+                "get".into(),
+                "--ref".into(),
+                asset_ref.to_string(),
+            ],
+        )
+        .await;
+        let body = stdout_json(&output);
+        assert_eq!(body["path"], "attachment");
+        assert_eq!(
+            std::fs::read(output_dir.path().join("attachment")).unwrap(),
+            bytes
+        );
+        server.await.unwrap();
+    }
+}
+
+async fn controlled_download(
+    asset_ref: &AssetRef,
+) -> (
+    Client,
+    tokio::sync::mpsc::Sender<Result<Bytes, std::io::Error>>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    let response = axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(
+            axum::http::header::CONTENT_LENGTH,
+            asset_ref.size.to_string(),
+        )
+        .body(Body::from_stream(ReceiverStream::new(receiver)))
+        .unwrap();
+    let (client, server) = spawn_download_server(asset_ref, response).await;
+    (client, sender, server)
+}
+
+async fn wait_for_entry_count(directory: &Path, expected: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let count = std::fs::read_dir(directory).unwrap().count();
+        if count == expected {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "entry count {count}, expected {expected}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn cancelling_partial_get_removes_staging_and_preserves_old_file() {
+    let asset_ref = reference_for(b"abcdef", "output.bin");
+    let (client, sender, server) = controlled_download(&asset_ref).await;
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("output.bin");
+    write(&destination, b"old");
+    let task_destination = destination.clone();
+    let task = tokio::spawn(async move {
+        cmd_asset::get(
+            &client,
+            cmd_asset::GetArgs {
+                workspace: None,
+                asset_ref: asset_ref.to_string(),
+                output: Some(task_destination),
+                force: true,
+            },
+        )
+        .await
+    });
+    sender.send(Ok(Bytes::from_static(b"abc"))).await.unwrap();
+    wait_for_entry_count(directory.path(), 2).await;
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    drop(sender);
+    wait_for_entry_count(directory.path(), 1).await;
+    assert_eq!(std::fs::read(&destination).unwrap(), b"old");
+    server.abort();
+}
+
+async fn run_destination_race(force: bool) -> Result<i32, CliError> {
+    let asset_ref = reference_for(b"abcdef", "output.bin");
+    let (client, sender, server) = controlled_download(&asset_ref).await;
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("output.bin");
+    let task_destination = destination.clone();
+    let task = tokio::spawn(async move {
+        cmd_asset::get(
+            &client,
+            cmd_asset::GetArgs {
+                workspace: None,
+                asset_ref: asset_ref.to_string(),
+                output: Some(task_destination),
+                force,
+            },
+        )
+        .await
+    });
+    sender.send(Ok(Bytes::from_static(b"abc"))).await.unwrap();
+    wait_for_entry_count(directory.path(), 1).await;
+    write(&destination, b"raced");
+    sender.send(Ok(Bytes::from_static(b"def"))).await.unwrap();
+    drop(sender);
+    let result = task.await.unwrap();
+    if force {
+        assert_eq!(std::fs::read(&destination).unwrap(), b"abcdef");
+    } else {
+        assert_eq!(std::fs::read(&destination).unwrap(), b"raced");
+    }
+    wait_for_entry_count(directory.path(), 1).await;
+    server.abort();
+    result
+}
+
+#[tokio::test]
+async fn no_force_destination_race_preserves_raced_file() {
+    let error = run_destination_race(false)
+        .await
+        .expect_err("noclobber must lose to raced destination");
+    assert!(matches!(error, CliError::InvalidConfig(_)));
+}
+
+#[tokio::test]
+async fn force_destination_race_atomically_replaces_raced_file() {
+    assert_eq!(run_destination_race(true).await.unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_directory_and_fifo_destinations_are_safe() {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::symlink;
+
+    let bytes = b"content";
+    let asset_ref = reference_for(bytes, "output.bin");
+    let directory = tempfile::tempdir().unwrap();
+    let target = directory.path().join("target.bin");
+    let link = directory.path().join("link.bin");
+    write(&target, b"target");
+    symlink(&target, &link).unwrap();
+    let dead_client = Client::new("http://127.0.0.1:1".to_string());
+    let error = cmd_asset::get(
+        &dead_client,
+        cmd_asset::GetArgs {
+            workspace: Some("room".to_string()),
+            asset_ref: asset_ref.to_string(),
+            output: Some(link.clone()),
+            force: false,
+        },
+    )
+    .await
+    .expect_err("no-force symlink must refuse");
+    assert!(matches!(error, CliError::InvalidConfig(_)));
+    assert_eq!(std::fs::read(&target).unwrap(), b"target");
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\ncontent",
+        bytes.len()
+    )
+    .into_bytes();
+    let (client, _, server) = spawn_raw_asset_server(&asset_ref, response).await;
+    cmd_asset::get(
+        &client,
+        cmd_asset::GetArgs {
+            workspace: None,
+            asset_ref: asset_ref.to_string(),
+            output: Some(link.clone()),
+            force: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(std::fs::read(&link).unwrap(), bytes);
+    assert_eq!(std::fs::read(&target).unwrap(), b"target");
+    assert!(!std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    server.await.unwrap();
+
+    let output_directory = directory.path().join("existing-dir");
+    std::fs::create_dir(&output_directory).unwrap();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\ncontent",
+        bytes.len()
+    )
+    .into_bytes();
+    let (client, _, server) = spawn_raw_asset_server(&asset_ref, response).await;
+    let error = cmd_asset::get(
+        &client,
+        cmd_asset::GetArgs {
+            workspace: None,
+            asset_ref: asset_ref.to_string(),
+            output: Some(output_directory.clone()),
+            force: true,
+        },
+    )
+    .await
+    .expect_err("force cannot replace a directory");
+    assert!(matches!(error, CliError::InvalidConfig(_)));
+    assert!(output_directory.is_dir());
+    server.await.unwrap();
+
+    let fifo = directory.path().join("destination.fifo");
+    let fifo_c = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) }, 0);
+    let error = cmd_asset::get(
+        &dead_client,
+        cmd_asset::GetArgs {
+            workspace: Some("room".to_string()),
+            asset_ref: asset_ref.to_string(),
+            output: Some(fifo.clone()),
+            force: false,
+        },
+    )
+    .await
+    .expect_err("no-force FIFO must refuse");
+    assert!(matches!(error, CliError::InvalidConfig(_)));
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\ncontent",
+        bytes.len()
+    )
+    .into_bytes();
+    let (client, _, server) = spawn_raw_asset_server(&asset_ref, response).await;
+    cmd_asset::get(
+        &client,
+        cmd_asset::GetArgs {
+            workspace: None,
+            asset_ref: asset_ref.to_string(),
+            output: Some(fifo.clone()),
+            force: true,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(std::fs::metadata(&fifo).unwrap().is_file());
+    assert_eq!(std::fs::read(&fifo).unwrap(), bytes);
+    server.await.unwrap();
+}
+
+async fn spawn_target_capture_server(
+    asset_ref: &AssetRef,
+    bytes: &'static [u8],
+) -> (
+    Client,
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let expected_origin = asset_ref.origin_runtime_id.clone();
+    let expected_hash = asset_ref.sha256.clone();
+    let server = tokio::spawn(async move {
+        let mut sender = Some(sender);
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 2048];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            let target = request
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap();
+            if target == "/workspaces" {
+                let body = r#"{"workspaces":[{"slug":"room"}]}"#;
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            } else {
+                assert!(target.contains(&expected_origin));
+                assert!(target.contains(&expected_hash));
+                sender.take().unwrap().send(target.to_string()).unwrap();
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            bytes.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                socket.write_all(bytes).await.unwrap();
+            }
+            socket.shutdown().await.unwrap();
+        }
+    });
+    (Client::new(format!("http://{addr}")), receiver, server)
+}
+
+#[tokio::test]
+async fn resolver_target_percent_encodes_name_and_download_exactly() {
+    let bytes = b"content";
+    let asset_ref = reference_for(bytes, "报告 #1+%.txt");
+    let (client, target, server) = spawn_target_capture_server(&asset_ref, bytes).await;
+    let directory = tempfile::tempdir().unwrap();
+    cmd_asset::get(
+        &client,
+        cmd_asset::GetArgs {
+            workspace: None,
+            asset_ref: asset_ref.to_string(),
+            output: Some(directory.path().join("output.bin")),
+            force: false,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        target.await.unwrap(),
+        format!(
+            "/workspaces/room/assets/resolve/{}/{}?name=%E6%8A%A5%E5%91%8A%20%231%2B%25.txt&download=1",
+            asset_ref.origin_runtime_id, asset_ref.sha256
+        )
+    );
     server.await.unwrap();
 }

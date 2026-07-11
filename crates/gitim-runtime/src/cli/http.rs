@@ -24,6 +24,7 @@
 
 use std::time::Duration;
 
+use futures::StreamExt;
 use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
@@ -34,6 +35,10 @@ use crate::user_config;
 /// blow stderr up to multi-megabyte log lines. 512 bytes is enough to keep a
 /// JSON error payload mostly intact for debugging.
 const BODY_EXCERPT_BYTES: usize = 512;
+
+/// Maximum non-success response body retained for structured classification.
+/// Successful binary responses remain fully streaming.
+const ERROR_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 /// Default per-request timeout, applied via the reqwest client builder. Sized
 /// for the fast verbs (`status`, `runtime-id`, `workspaces`, `list-agents`,
@@ -353,10 +358,25 @@ impl Client {
         }
 
         let status = response.status();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|error| CliError::Transport(error.to_string()))?;
+        let initial_capacity = response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .unwrap_or(0)
+            .min(ERROR_BODY_LIMIT_BYTES);
+        let mut bytes = Vec::with_capacity(initial_capacity);
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|error| CliError::Transport(error.to_string()))?;
+            let remaining = ERROR_BODY_LIMIT_BYTES - bytes.len();
+            if chunk.len() > remaining {
+                bytes.extend_from_slice(&chunk[..remaining]);
+                return Err(CliError::HttpStatus(
+                    status.as_u16(),
+                    bytes_to_excerpt(&bytes),
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
         match process_response_inner(status, &bytes) {
             Err(error) => Err(error),
             Ok(_) => Err(CliError::HttpStatus(

@@ -75,9 +75,14 @@ pub async fn get(client: &Client, args: GetArgs) -> Result<i32, CliError> {
     let asset: AssetRef = args.asset_ref.parse().map_err(|error| {
         CliError::InvalidConfig(format!("invalid canonical asset reference: {error}"))
     })?;
-    let destination = args
-        .output
-        .unwrap_or_else(|| PathBuf::from(asset.name.clone()));
+    let destination = args.output.unwrap_or_else(|| {
+        let name = if matches!(asset.name.as_str(), "." | "..") {
+            "attachment"
+        } else {
+            &asset.name
+        };
+        PathBuf::from(name)
+    });
     validate_destination(&destination, args.force)?;
 
     let parent = destination
