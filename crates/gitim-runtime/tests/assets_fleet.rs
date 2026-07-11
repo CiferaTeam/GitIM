@@ -21,7 +21,7 @@ use sha2::{Digest, Sha256};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-support")]
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 #[cfg(feature = "test-support")]
 use std::sync::Barrier;
@@ -159,6 +159,18 @@ impl Drop for StalledObjectGuard {
     }
 }
 
+async fn wait_for_release(released: &AtomicBool, release: &Notify) {
+    loop {
+        let notified = release.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if released.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
+    }
+}
+
 struct StalledHealthPeer {
     base_url: String,
     state: Arc<StalledHealthState>,
@@ -270,9 +282,7 @@ async fn stalled_health(State(state): State<Arc<StalledHealthState>>) -> Respons
     state.requests.fetch_add(1, Ordering::AcqRel);
     state.inflight.fetch_add(1, Ordering::AcqRel);
     let _guard = StalledHealthGuard { state };
-    while !_guard.state.released.load(Ordering::Acquire) {
-        _guard.state.release.notified().await;
-    }
+    wait_for_release(&_guard.state.released, &_guard.state.release).await;
     Response::builder()
         .status(StatusCode::SERVICE_UNAVAILABLE)
         .body(Body::empty())
@@ -283,8 +293,8 @@ async fn stalled_object(State(state): State<Arc<StalledHealthState>>) -> Respons
     state.object_requests.fetch_add(1, Ordering::AcqRel);
     state.object_inflight.fetch_add(1, Ordering::AcqRel);
     let _guard = StalledObjectGuard { state };
-    while _guard.state.hold_objects && !_guard.state.objects_released.load(Ordering::Acquire) {
-        _guard.state.object_release.notified().await;
+    if _guard.state.hold_objects {
+        wait_for_release(&_guard.state.objects_released, &_guard.state.object_release).await;
     }
     Response::builder()
         .status(StatusCode::NOT_FOUND)
@@ -897,14 +907,44 @@ fn workspace_store(fixture: &Fixture) -> gitim_runtime::assets::AssetStore {
 }
 
 #[cfg(feature = "test-support")]
+struct ResolverChild(Option<Child>);
+
+#[cfg(feature = "test-support")]
+impl ResolverChild {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.0
+            .as_mut()
+            .expect("resolver child already consumed")
+            .try_wait()
+    }
+
+    fn wait_with_output(&mut self) -> std::io::Result<Output> {
+        self.0
+            .take()
+            .expect("resolver child already consumed")
+            .wait_with_output()
+    }
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for ResolverChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(feature = "test-support")]
 fn spawn_resolver_child(
     workspace: &Path,
     base_url: &str,
     hash: &str,
     start: &Path,
     ready: &Path,
-) -> Child {
-    Command::new(std::env::current_exe().unwrap())
+) -> ResolverChild {
+    let child = Command::new(std::env::current_exe().unwrap())
         .arg("--exact")
         .arg("fleet_resolver_child")
         .arg("--ignored")
@@ -918,17 +958,33 @@ fn spawn_resolver_child(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .unwrap()
+        .unwrap();
+    ResolverChild(Some(child))
 }
 
 #[cfg(feature = "test-support")]
-fn wait_for_child_marker(child: &mut Child, marker: &Path) {
+fn wait_for_child_marker(child: &mut ResolverChild, marker: &Path) {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while !marker.exists() {
         assert!(child.try_wait().unwrap().is_none());
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+#[cfg(feature = "test-support")]
+async fn wait_for_resolver_child(child: &mut ResolverChild) -> Output {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("resolver child did not exit within the parent deadline");
+    child.wait_with_output().unwrap()
 }
 
 #[tokio::test]
@@ -1728,14 +1784,8 @@ async fn cross_process_resolvers_share_filesystem_singleflight() {
     wait_for_child_marker(&mut child_b, &ready_b);
     std::fs::write(&start, b"start").unwrap();
 
-    let output_a = tokio::task::spawn_blocking(move || child_a.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
-    let output_b = tokio::task::spawn_blocking(move || child_b.wait_with_output())
-        .await
-        .unwrap()
-        .unwrap();
+    let output_a = wait_for_resolver_child(&mut child_a).await;
+    let output_b = wait_for_resolver_child(&mut child_b).await;
 
     assert!(
         output_a.status.success(),
