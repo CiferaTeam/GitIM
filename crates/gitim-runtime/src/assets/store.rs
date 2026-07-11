@@ -262,46 +262,50 @@ impl Default for AssetService {
 /// A generation-bound interface to one workspace asset namespace.
 ///
 /// Namespace paths remain internal to the store in production builds.
-///
-/// ```compile_fail
-/// use gitim_runtime::assets::AssetStore;
-///
-/// fn raw_namespace_root_is_not_available(store: &AssetStore) {
-///     let _ = store.root();
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use gitim_runtime::assets::AssetStore;
-///
-/// fn raw_object_path_is_not_available(store: &AssetStore, hash: &str) {
-///     let _ = store.object_path(hash);
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use gitim_runtime::assets::AssetStore;
-///
-/// fn raw_metadata_path_is_not_available(store: &AssetStore, hash: &str) {
-///     let _ = store.metadata_path(hash);
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use gitim_runtime::assets::AssetStore;
-///
-/// fn raw_lock_path_is_not_available(store: &AssetStore, hash: &str) {
-///     let _ = store.lock_path(hash);
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use gitim_runtime::assets::AssetStore;
-///
-/// fn raw_temp_path_is_not_available(store: &AssetStore) {
-///     let _ = store.create_owned_temp();
-/// }
-/// ```
+#[cfg_attr(
+    not(feature = "test-support"),
+    doc = r#"
+```compile_fail
+use gitim_runtime::assets::AssetStore;
+
+fn raw_namespace_root_is_not_available(store: &AssetStore) {
+    let _ = store.root();
+}
+```
+
+```compile_fail
+use gitim_runtime::assets::AssetStore;
+
+fn raw_object_path_is_not_available(store: &AssetStore, hash: &str) {
+    let _ = store.object_path(hash);
+}
+```
+
+```compile_fail
+use gitim_runtime::assets::AssetStore;
+
+fn raw_metadata_path_is_not_available(store: &AssetStore, hash: &str) {
+    let _ = store.metadata_path(hash);
+}
+```
+
+```compile_fail
+use gitim_runtime::assets::AssetStore;
+
+fn raw_lock_path_is_not_available(store: &AssetStore, hash: &str) {
+    let _ = store.lock_path(hash);
+}
+```
+
+```compile_fail
+use gitim_runtime::assets::AssetStore;
+
+fn raw_temp_path_is_not_available(store: &AssetStore) {
+    let _ = store.create_owned_temp();
+}
+```
+"#
+)]
 pub struct AssetStore {
     workspace_root: PathBuf,
     root: PathBuf,
