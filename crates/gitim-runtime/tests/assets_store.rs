@@ -115,6 +115,15 @@ fn orphaned_asset_trees(workspace: &Path) -> Vec<PathBuf> {
     entries
 }
 
+fn corrupt_metadata_entries(workspace: &Path) -> Vec<PathBuf> {
+    let path = workspace.join(".gitim-runtime/orphaned-assets/corrupt-metadata");
+    let mut entries: Vec<PathBuf> = fs::read_dir(path)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    entries.sort();
+    entries
+}
+
 fn write_object_only(store: &AssetStore, bytes: &[u8]) -> String {
     let hash = sha256_hex(bytes);
     let path = store.object_path(&hash).unwrap();
@@ -778,6 +787,117 @@ async fn dedupe_replaces_a_sidecar_symlink_without_touching_its_target() {
 
     assert_eq!(fs::read(outside).unwrap(), b"outside-sidecar");
     assert!(fs::symlink_metadata(sidecar).unwrap().file_type().is_file());
+}
+
+#[test]
+fn recovery_quarantines_a_metadata_directory_and_rebuilds_a_private_sidecar() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let stored = store
+        .put_bytes(b"metadata-directory", AssetSource::LocalUpload)
+        .unwrap();
+    let sidecar = store.metadata_path(&stored.sha256).unwrap();
+    fs::remove_file(&sidecar).unwrap();
+    fs::create_dir(&sidecar).unwrap();
+    fs::write(sidecar.join("preserve.txt"), b"preserved evidence").unwrap();
+
+    store.recover().unwrap();
+
+    assert!(fs::symlink_metadata(&sidecar)
+        .unwrap()
+        .file_type()
+        .is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(store.read(&stored.sha256).unwrap(), b"metadata-directory");
+    let quarantined = corrupt_metadata_entries(workspace.path());
+    assert_eq!(quarantined.len(), 1);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(
+                workspace
+                    .path()
+                    .join(".gitim-runtime/orphaned-assets/corrupt-metadata")
+            )
+            .unwrap()
+            .permissions()
+            .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&quarantined[0]).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+    }
+    assert_eq!(
+        fs::read(quarantined[0].join("preserve.txt")).unwrap(),
+        b"preserved evidence"
+    );
+
+    drop(store);
+    let reopened = open_store(workspace.path(), 1024);
+    assert_eq!(
+        reopened.read(&stored.sha256).unwrap(),
+        b"metadata-directory"
+    );
+}
+
+#[test]
+fn recovery_quarantines_an_orphan_metadata_directory_without_deleting_evidence() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let hash = sha256_hex(b"missing-object");
+    let sidecar = store.metadata_path(&hash).unwrap();
+    fs::create_dir_all(&sidecar).unwrap();
+    fs::write(sidecar.join("evidence.txt"), b"keep orphan evidence").unwrap();
+
+    store.recover().unwrap();
+
+    assert!(!sidecar.exists());
+    let quarantined = corrupt_metadata_entries(workspace.path());
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(
+        fs::read(quarantined[0].join("evidence.txt")).unwrap(),
+        b"keep orphan evidence"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn recovery_atomically_replaces_a_metadata_fifo_without_blocking() {
+    use std::os::unix::ffi::OsStrExt;
+
+    let workspace = TempDir::new().unwrap();
+    let store = Arc::new(open_store(workspace.path(), 1024));
+    let stored = store
+        .put_bytes(b"metadata-fifo", AssetSource::LocalUpload)
+        .unwrap();
+    let sidecar = store.metadata_path(&stored.sha256).unwrap();
+    fs::remove_file(&sidecar).unwrap();
+    let path = std::ffi::CString::new(sidecar.as_os_str().as_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+    let recovery_store = Arc::clone(&store);
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        tokio::task::spawn_blocking(move || recovery_store.recover()),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .unwrap();
+
+    assert!(fs::symlink_metadata(sidecar).unwrap().file_type().is_file());
+    assert_eq!(store.read(&stored.sha256).unwrap(), b"metadata-fifo");
 }
 
 #[tokio::test]

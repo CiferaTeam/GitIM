@@ -1608,7 +1608,28 @@ impl AssetStore {
         create_private_dir(parent)?;
         let bytes = serde_json::to_vec_pretty(metadata)
             .map_err(|error| std::io::Error::other(format!("serialize asset metadata: {error}")))?;
+        self.prepare_metadata_target(&metadata.sha256, &path)?;
         atomic_write(&path, &bytes)
+    }
+
+    fn prepare_metadata_target(&self, hash: &str, path: &Path) -> Result<(), AssetError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata_entry_is_atomically_replaceable(&metadata.file_type()) => {
+                Ok(())
+            }
+            Ok(_) => self.quarantine_metadata_entry(hash, path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AssetError::Store(error)),
+        }
+    }
+
+    fn quarantine_metadata_entry(&self, hash: &str, path: &Path) -> Result<(), AssetError> {
+        let root = self
+            .workspace_root
+            .join(".gitim-runtime/orphaned-assets/corrupt-metadata");
+        create_private_dir(&root)?;
+        quarantine_rename(path, &root, &format!("corrupt-{hash}.json"))?;
+        Ok(())
     }
 
     fn recover_objects(&self) -> Result<(), AssetError> {
@@ -1695,14 +1716,15 @@ impl AssetStore {
             for sidecar in read_dir_or_empty(&shard.path())? {
                 let sidecar = sidecar?;
                 let file_type = sidecar.file_type()?;
-                if !file_type.is_file() && !file_type.is_symlink() {
-                    continue;
-                }
                 let name = sidecar.file_name().to_string_lossy().into_owned();
                 let Some(hash) = name.strip_suffix(".json") else {
                     continue;
                 };
                 if validate_hash(hash).is_err() {
+                    continue;
+                }
+                if !metadata_entry_is_atomically_replaceable(&file_type) {
+                    self.quarantine_metadata_entry(hash, &sidecar.path())?;
                     continue;
                 }
                 let object_path = self.raw_object_path(hash)?;
@@ -2161,7 +2183,7 @@ fn quarantine_rename(
 ) -> Result<PathBuf, AssetError> {
     let source_parent = source.parent().ok_or_else(|| invalid_path(source))?;
     let source_is_dir = fs::symlink_metadata(source)?.file_type().is_dir();
-    loop {
+    for _ in 0..32 {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -2201,10 +2223,20 @@ fn quarantine_rename(
             }
             return Err(AssetError::Store(error));
         }
+        let privacy_result = if source_is_dir {
+            set_dir_mode(&candidate)
+        } else {
+            Ok(())
+        };
         sync_parent_best_effort(source_parent);
         sync_parent_best_effort(destination_parent);
+        privacy_result?;
         return Ok(candidate);
     }
+    Err(AssetError::Store(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "asset quarantine name collisions exceeded the retry limit",
+    )))
 }
 
 fn create_store_layout(root: &Path) -> Result<(), AssetError> {
@@ -2631,6 +2663,21 @@ fn valid_shard(shard: &str) -> bool {
             .as_bytes()
             .iter()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+fn metadata_entry_is_atomically_replaceable(file_type: &fs::FileType) -> bool {
+    if file_type.is_file() || file_type.is_symlink() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        file_type.is_fifo()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 fn read_dir_or_empty(
