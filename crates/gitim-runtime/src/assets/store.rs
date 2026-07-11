@@ -78,14 +78,47 @@ pub struct AssetUsage {
     pub objects: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AssetSource {
     LocalUpload,
     FleetReplica { origin_runtime_id: String },
 }
 
+impl<'de> Deserialize<'de> for AssetSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct SourceWire {
+            kind: String,
+            #[serde(default)]
+            origin_runtime_id: Option<String>,
+        }
+
+        let source = SourceWire::deserialize(deserializer)?;
+        match (source.kind.as_str(), source.origin_runtime_id) {
+            ("local_upload", None) => Ok(Self::LocalUpload),
+            ("fleet_replica", Some(origin_runtime_id)) => {
+                Ok(Self::FleetReplica { origin_runtime_id })
+            }
+            ("local_upload", Some(_)) => Err(serde::de::Error::custom(
+                "local_upload source cannot include origin_runtime_id",
+            )),
+            ("fleet_replica", None) => Err(serde::de::Error::custom(
+                "fleet_replica source requires origin_runtime_id",
+            )),
+            (kind, _) => Err(serde::de::Error::custom(format!(
+                "unknown asset source kind: {kind}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AssetMetadata {
     pub schema_version: u32,
     pub sha256: String,
@@ -302,6 +335,11 @@ impl AssetStore {
         source: AssetSource,
     ) -> Result<AssetMetadata, AssetError> {
         self.ensure_binding()?;
+        if !valid_source(&source) {
+            return Err(AssetError::Invalid(
+                "fleet replica source requires a canonical runtime UUID".to_string(),
+            ));
+        }
         let size = u64::try_from(bytes.len()).map_err(|_| AssetError::TooLarge {
             limit: self.limits.max_file_bytes,
         })?;
@@ -437,28 +475,32 @@ impl AssetStore {
         }
         set_path_file_mode(&object_path)?;
         if object_metadata.len() > self.limits.max_file_bytes {
-            self.quarantine_corrupt(hash, &object_path, object_metadata.len())?;
+            self.quarantine_corrupt(hash, &object_path)?;
             return Err(AssetError::TooLarge {
                 limit: self.limits.max_file_bytes,
             });
         }
         let modified_ns = modified_ns(&object_metadata)?;
         let metadata_path = self.raw_metadata_path(hash)?;
-        if let Ok(sidecar) = read_sidecar(&metadata_path) {
-            if valid_sidecar(&sidecar, hash, object_metadata.len(), modified_ns) {
+        let existing_sidecar = read_sidecar(&metadata_path).ok();
+        if let Some(sidecar) = &existing_sidecar {
+            if valid_sidecar(sidecar, hash, object_metadata.len(), modified_ns) {
                 set_path_file_mode(&metadata_path)?;
-                return Ok(sidecar);
+                return Ok(sidecar.clone());
             }
         }
 
         let bytes = read_regular_file(&object_path)?;
         if sha256_hex(&bytes) != hash {
-            self.quarantine_corrupt(hash, &object_path, object_metadata.len())?;
+            self.quarantine_corrupt(hash, &object_path)?;
             return Err(AssetError::HashMismatch);
         }
-        let source = read_sidecar(&metadata_path)
-            .ok()
-            .map(|sidecar| sidecar.source)
+        let source = existing_sidecar
+            .as_ref()
+            .map(|sidecar| &sidecar.source)
+            .filter(|source| valid_source(source))
+            .cloned()
+            .or_else(|| read_recoverable_source(&metadata_path))
             .unwrap_or(AssetSource::LocalUpload);
         let metadata = metadata_for_bytes(hash, &bytes, modified_ns, source)?;
         self.write_metadata(&metadata)?;
@@ -532,6 +574,38 @@ impl AssetStore {
         Ok(usage)
     }
 
+    fn scan_regular_object_usage(&self) -> Result<AssetUsage, AssetError> {
+        let mut usage = AssetUsage::default();
+        let objects_root = self.root.join("objects/sha256");
+        for shard in read_dir_or_empty(&objects_root)? {
+            let shard = shard?;
+            let shard_name = shard.file_name();
+            let shard_name = shard_name.to_string_lossy();
+            let shard_metadata = fs::symlink_metadata(shard.path())?;
+            if !shard_metadata.file_type().is_dir() || !valid_shard(&shard_name) {
+                continue;
+            }
+            for object in read_dir_or_empty(&shard.path())? {
+                let object = object?;
+                let hash = object.file_name().to_string_lossy().into_owned();
+                if validate_hash(&hash).is_err() || !hash.starts_with(&*shard_name) {
+                    continue;
+                }
+                let metadata = fs::symlink_metadata(object.path())?;
+                if !metadata.file_type().is_file() || metadata.len() > self.limits.max_file_bytes {
+                    continue;
+                }
+                usage.bytes = usage.bytes.checked_add(metadata.len()).ok_or_else(|| {
+                    AssetError::Store(std::io::Error::other("asset usage overflow"))
+                })?;
+                usage.objects = usage.objects.checked_add(1).ok_or_else(|| {
+                    AssetError::Store(std::io::Error::other("asset object count overflow"))
+                })?;
+            }
+        }
+        Ok(usage)
+    }
+
     fn remove_orphan_sidecars(&self) -> Result<(), AssetError> {
         let metadata_root = self.root.join("metadata/sha256");
         for shard in read_dir_or_empty(&metadata_root)? {
@@ -589,12 +663,7 @@ impl AssetStore {
         Ok(())
     }
 
-    fn quarantine_corrupt(
-        &self,
-        hash: &str,
-        object_path: &Path,
-        object_size: u64,
-    ) -> Result<(), AssetError> {
+    fn quarantine_corrupt(&self, hash: &str, object_path: &Path) -> Result<(), AssetError> {
         let root = self
             .workspace_root
             .join(".gitim-runtime/orphaned-assets/corrupt-objects");
@@ -603,11 +672,8 @@ impl AssetStore {
         fs::rename(object_path, destination)?;
         let metadata_path = self.raw_metadata_path(hash)?;
         remove_file_if_exists(&metadata_path)?;
-        let mut usage = lock(&self.state.usage);
-        if usage.objects > 0 && usage.bytes >= object_size {
-            usage.objects -= 1;
-            usage.bytes -= object_size;
-        }
+        let usage = self.scan_regular_object_usage()?;
+        *lock(&self.state.usage) = usage;
         Ok(())
     }
 }
@@ -867,27 +933,48 @@ fn read_sidecar(path: &Path) -> Result<AssetMetadata, AssetError> {
         .map_err(|error| AssetError::Invalid(format!("invalid asset metadata: {error}")))
 }
 
+fn read_recoverable_source(path: &Path) -> Option<AssetSource> {
+    let bytes = read_bounded_regular_file(path, 64 * 1024).ok()?;
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes).ok()?;
+    let source = serde_json::from_value::<AssetSource>(value.get("source")?.clone()).ok()?;
+    valid_source(&source).then_some(source)
+}
+
+fn valid_source(source: &AssetSource) -> bool {
+    match source {
+        AssetSource::LocalUpload => true,
+        AssetSource::FleetReplica { origin_runtime_id } => uuid::Uuid::parse_str(origin_runtime_id)
+            .is_ok_and(|runtime_id| runtime_id.to_string() == *origin_runtime_id),
+    }
+}
+
+fn canonical_media_type(value: &str) -> Option<mime::Mime> {
+    if value.len() > 127 || value.bytes().any(|byte| byte.is_ascii_uppercase()) {
+        return None;
+    }
+    let media_type = value.parse::<mime::Mime>().ok()?;
+    if media_type.essence_str() != value || media_type.params().next().is_some() {
+        return None;
+    }
+    Some(media_type)
+}
+
 fn valid_sidecar(sidecar: &AssetMetadata, hash: &str, size: u64, modified_ns: u64) -> bool {
+    let Some(media_type) = canonical_media_type(&sidecar.media_type) else {
+        return false;
+    };
     let dimensions_valid = match (sidecar.width, sidecar.height) {
         (None, None) => true,
-        (Some(width), Some(height)) => width > 0 && height > 0,
+        (Some(width), Some(height)) => width > 0 && height > 0 && media_type.type_() == mime::IMAGE,
         _ => false,
-    };
-    let source_valid = match &sidecar.source {
-        AssetSource::LocalUpload => true,
-        AssetSource::FleetReplica { origin_runtime_id } => {
-            !origin_runtime_id.trim().is_empty() && origin_runtime_id.len() <= 128
-        }
     };
     sidecar.schema_version == SIDECAR_SCHEMA_VERSION
         && sidecar.sha256 == hash
         && sidecar.size == size
         && sidecar.object_modified_ns == modified_ns
-        && sidecar.media_type.len() <= 127
-        && sidecar.media_type.parse::<mime::Mime>().is_ok()
         && chrono::DateTime::parse_from_rfc3339(&sidecar.stored_at).is_ok()
         && dimensions_valid
-        && source_valid
+        && valid_source(&sidecar.source)
 }
 
 fn metadata_for_bytes(
@@ -896,6 +983,11 @@ fn metadata_for_bytes(
     object_modified_ns: u64,
     source: AssetSource,
 ) -> Result<AssetMetadata, AssetError> {
+    if !valid_source(&source) {
+        return Err(AssetError::Invalid(
+            "fleet replica source requires a canonical runtime UUID".to_string(),
+        ));
+    }
     let inspection = inspect_bytes(bytes, "")?;
     let size = u64::try_from(bytes.len())
         .map_err(|_| AssetError::Invalid("asset size cannot fit u64".to_string()))?;

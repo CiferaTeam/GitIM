@@ -31,6 +31,8 @@ const AVIF_1X1: &[u8] = &[
     b'f', b'm', b'i', b'f', b'1', 0, 0, 0, 20, b'i', b's', b'p', b'e', 0, 0, 0, 0, 0, 0, 0, 1, 0,
     0, 0, 1,
 ];
+const RUNTIME_ID_1: &str = "550e8400-e29b-41d4-a716-446655440000";
+const RUNTIME_ID_2: &str = "6ba7b810-9dad-41d1-80b4-00c04fd430c8";
 
 fn limits(quota: u64) -> AssetLimits {
     AssetLimits {
@@ -72,6 +74,32 @@ fn write_object_only(store: &AssetStore, bytes: &[u8]) -> String {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(path, bytes).unwrap();
     hash
+}
+
+fn read_sidecar_json(store: &AssetStore, hash: &str) -> serde_json::Value {
+    serde_json::from_slice(&fs::read(store.metadata_path(hash).unwrap()).unwrap()).unwrap()
+}
+
+fn write_sidecar_json(store: &AssetStore, hash: &str, value: &serde_json::Value) {
+    fs::write(
+        store.metadata_path(hash).unwrap(),
+        serde_json::to_vec(value).unwrap(),
+    )
+    .unwrap();
+}
+
+fn assert_sidecar_mutation_is_rebuilt(mutator: impl FnOnce(&mut serde_json::Value)) {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let stored = store.put_bytes(PNG_1X1, AssetSource::LocalUpload).unwrap();
+    let mut sidecar = read_sidecar_json(&store, &stored.sha256);
+    mutator(&mut sidecar);
+    write_sidecar_json(&store, &stored.sha256, &sidecar);
+
+    store.recover().unwrap();
+    let repaired = store.inspect(&stored.sha256).unwrap();
+    assert_eq!(repaired.media_type, "image/png");
+    assert_eq!((repaired.width, repaired.height), (Some(1), Some(1)));
 }
 
 #[test]
@@ -321,7 +349,7 @@ fn dedupe_counts_once_across_local_and_replica_sources() {
         .put_bytes(
             b"abc",
             AssetSource::FleetReplica {
-                origin_runtime_id: "runtime-1".to_string(),
+                origin_runtime_id: RUNTIME_ID_1.to_string(),
             },
         )
         .unwrap();
@@ -480,6 +508,63 @@ fn hot_read_rehashes_when_object_metadata_changes() {
 }
 
 #[test]
+fn quarantine_recounts_usage_after_counted_object_length_changes() {
+    for corrupt in [b"x".as_slice(), b"corrupt-and-longer".as_slice()] {
+        let workspace = TempDir::new().unwrap();
+        let store = open_store(workspace.path(), 1024);
+        let stored = store.put_bytes(b"good", AssetSource::LocalUpload).unwrap();
+        let path = store.object_path(&stored.sha256).unwrap();
+        let modified = fs::metadata(&path).unwrap().modified().unwrap();
+        fs::write(&path, corrupt).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified + Duration::from_secs(1)))
+            .unwrap();
+
+        assert!(matches!(
+            store.inspect(&stored.sha256),
+            Err(AssetError::HashMismatch)
+        ));
+        assert_eq!(store.usage(), AssetUsage::default());
+        assert!(!path.exists());
+    }
+}
+
+#[test]
+fn quarantine_recount_preserves_remaining_regular_object_usage() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let kept = store.put_bytes(b"kept", AssetSource::LocalUpload).unwrap();
+    let corrupt = store
+        .put_bytes(b"doomed", AssetSource::LocalUpload)
+        .unwrap();
+    let corrupt_path = store.object_path(&corrupt.sha256).unwrap();
+    let modified = fs::metadata(&corrupt_path).unwrap().modified().unwrap();
+    fs::write(&corrupt_path, b"x").unwrap();
+    OpenOptions::new()
+        .write(true)
+        .open(&corrupt_path)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(modified + Duration::from_secs(1)))
+        .unwrap();
+
+    assert!(matches!(
+        store.read(&corrupt.sha256),
+        Err(AssetError::HashMismatch)
+    ));
+    assert_eq!(
+        store.usage(),
+        AssetUsage {
+            bytes: 4,
+            objects: 1
+        }
+    );
+    assert_eq!(store.read(&kept.sha256).unwrap(), b"kept");
+}
+
+#[test]
 fn recovery_quarantines_corrupt_object_and_does_not_count_it() {
     let workspace = TempDir::new().unwrap();
     let store = open_store(workspace.path(), 1024);
@@ -518,7 +603,7 @@ fn sidecar_schema_records_source_without_filename() {
         .put_bytes(
             PNG_1X1,
             AssetSource::FleetReplica {
-                origin_runtime_id: "runtime-2".to_string(),
+                origin_runtime_id: RUNTIME_ID_2.to_string(),
             },
         )
         .unwrap();
@@ -527,8 +612,130 @@ fn sidecar_schema_records_source_without_filename() {
             .unwrap();
     assert_eq!(json["schema_version"], 1);
     assert_eq!(json["source"]["kind"], "fleet_replica");
-    assert_eq!(json["source"]["origin_runtime_id"], "runtime-2");
+    assert_eq!(json["source"]["origin_runtime_id"], RUNTIME_ID_2);
     assert!(json.get("filename").is_none());
+}
+
+#[test]
+fn unknown_sidecar_fields_are_removed_by_atomic_rebuild() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let stored = store
+        .put_bytes(
+            PNG_1X1,
+            AssetSource::FleetReplica {
+                origin_runtime_id: RUNTIME_ID_1.to_string(),
+            },
+        )
+        .unwrap();
+    let mut sidecar = read_sidecar_json(&store, &stored.sha256);
+    sidecar["filename"] = "must-not-survive.png".into();
+    write_sidecar_json(&store, &stored.sha256, &sidecar);
+
+    store.recover().unwrap();
+    let rebuilt = read_sidecar_json(&store, &stored.sha256);
+    assert!(rebuilt.get("filename").is_none());
+    assert_eq!(rebuilt["source"]["kind"], "fleet_replica");
+    assert_eq!(rebuilt["source"]["origin_runtime_id"], RUNTIME_ID_1);
+
+    let second_workspace = TempDir::new().unwrap();
+    let second = open_store(second_workspace.path(), 1024);
+    let stored = second.put_bytes(PNG_1X1, AssetSource::LocalUpload).unwrap();
+    let mut sidecar = read_sidecar_json(&second, &stored.sha256);
+    sidecar["source"]["unexpected"] = true.into();
+    write_sidecar_json(&second, &stored.sha256, &sidecar);
+    second.recover().unwrap();
+    let rebuilt = read_sidecar_json(&second, &stored.sha256);
+    assert!(rebuilt["source"].get("unexpected").is_none());
+}
+
+#[test]
+fn put_rejects_noncanonical_replica_runtime_ids_even_on_dedupe() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    store.put_bytes(b"same", AssetSource::LocalUpload).unwrap();
+
+    for invalid in [
+        "",
+        "not-a-uuid",
+        "550E8400-E29B-41D4-A716-446655440000",
+        "550e8400e29b41d4a716446655440000",
+    ] {
+        assert!(matches!(
+            store.put_bytes(
+                b"same",
+                AssetSource::FleetReplica {
+                    origin_runtime_id: invalid.to_string(),
+                },
+            ),
+            Err(AssetError::Invalid(_))
+        ));
+    }
+}
+
+#[test]
+fn invalid_replica_sources_rebuild_once_as_local_upload() {
+    for invalid in ["", "not-a-uuid", "550E8400-E29B-41D4-A716-446655440000"] {
+        let workspace = TempDir::new().unwrap();
+        let store = open_store(workspace.path(), 1024);
+        let stored = store.put_bytes(PNG_1X1, AssetSource::LocalUpload).unwrap();
+        let mut sidecar = read_sidecar_json(&store, &stored.sha256);
+        sidecar["source"] = serde_json::json!({
+            "kind": "fleet_replica",
+            "origin_runtime_id": invalid,
+        });
+        write_sidecar_json(&store, &stored.sha256, &sidecar);
+
+        store.recover().unwrap();
+        let first_rebuild = fs::read(store.metadata_path(&stored.sha256).unwrap()).unwrap();
+        assert!(matches!(
+            store.inspect(&stored.sha256).unwrap().source,
+            AssetSource::LocalUpload
+        ));
+        store.recover().unwrap();
+        let second_recovery = fs::read(store.metadata_path(&stored.sha256).unwrap()).unwrap();
+        assert_eq!(second_recovery, first_rebuild);
+    }
+}
+
+#[test]
+fn sidecar_mime_and_dimension_fields_require_canonical_semantics() {
+    assert_sidecar_mutation_is_rebuilt(|sidecar| {
+        sidecar["media_type"] = "IMAGE/PNG".into();
+    });
+    assert_sidecar_mutation_is_rebuilt(|sidecar| {
+        sidecar["media_type"] = "image/png; charset=utf-8".into();
+    });
+    assert_sidecar_mutation_is_rebuilt(|sidecar| {
+        sidecar["media_type"] = format!("application/{}", "a".repeat(116)).into();
+    });
+    assert_sidecar_mutation_is_rebuilt(|sidecar| {
+        sidecar["height"] = serde_json::Value::Null;
+    });
+    assert_sidecar_mutation_is_rebuilt(|sidecar| {
+        sidecar["media_type"] = "text/plain".into();
+    });
+}
+
+#[test]
+fn hot_path_trusts_schema_valid_sidecar_with_matching_length_and_mtime() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let stored = store.put_bytes(PNG_1X1, AssetSource::LocalUpload).unwrap();
+    let mut sidecar = read_sidecar_json(&store, &stored.sha256);
+    sidecar["media_type"] = "image/jpeg".into();
+    sidecar["width"] = serde_json::Value::Null;
+    sidecar["height"] = serde_json::Value::Null;
+    write_sidecar_json(&store, &stored.sha256, &sidecar);
+    let before = fs::read(store.metadata_path(&stored.sha256).unwrap()).unwrap();
+
+    let trusted = store.inspect(&stored.sha256).unwrap();
+    assert_eq!(trusted.media_type, "image/jpeg");
+    assert_eq!((trusted.width, trusted.height), (None, None));
+    assert_eq!(
+        fs::read(store.metadata_path(&stored.sha256).unwrap()).unwrap(),
+        before
+    );
 }
 
 #[test]
