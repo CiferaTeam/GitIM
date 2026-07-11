@@ -1,16 +1,19 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use axum::http::StatusCode;
+use axum::{body::Bytes, http::StatusCode};
+use futures::stream;
 use gitim_runtime::assets::{
     checked_dimensions, inspect_bytes, AssetError, AssetLimits, AssetService, AssetSource,
-    AssetStore, AssetUsage,
+    AssetStore, AssetUsage, HashLock, RequestBudget,
 };
 use sha2::{Digest, Sha256};
 use std::fs::{self, FileTimes, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
 
 const PNG_1X1: &[u8] = &[
@@ -132,6 +135,54 @@ fn write_sidecar_json(store: &AssetStore, hash: &str, value: &serde_json::Value)
     .unwrap();
 }
 
+fn owned_temp_files(store: &AssetStore) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = fs::read_dir(store.root().join("tmp"))
+        .unwrap()
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("gitim-asset-") && name.ends_with(".tmp")
+        })
+        .map(|entry| entry.path())
+        .collect();
+    paths.sort();
+    paths
+}
+
+fn spawn_hash_lock_child(workspace: &Path, hash: &str, mode: &str, marker: Option<&Path>) -> Child {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .arg("--exact")
+        .arg("hash_lock_child")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env("GITIM_ASSET_LOCK_CHILD", mode)
+        .env("GITIM_ASSET_LOCK_WORKSPACE", workspace)
+        .env("GITIM_ASSET_LOCK_HASH", hash)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(marker) = marker {
+        command.env("GITIM_ASSET_LOCK_MARKER", marker);
+    }
+    command.spawn().unwrap()
+}
+
+fn wait_for_marker(child: &mut Child, marker: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "lock holder exited before publishing its marker"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for lock marker"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn assert_sidecar_mutation_is_rebuilt(mutator: impl FnOnce(&mut serde_json::Value)) {
     let workspace = TempDir::new().unwrap();
     let store = open_store(workspace.path(), 1024);
@@ -144,6 +195,556 @@ fn assert_sidecar_mutation_is_rebuilt(mutator: impl FnOnce(&mut serde_json::Valu
     let repaired = store.inspect(&stored.sha256).unwrap();
     assert_eq!(repaired.media_type, "image/png");
     assert_eq!((repaired.width, repaired.height), (Some(1), Some(1)));
+}
+
+#[tokio::test]
+async fn streaming_staging_hashes_ordered_chunks_and_inspects_only_the_prefix() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let mut budget = RequestBudget::default();
+    let chunks = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(b"ab")),
+        Ok(Bytes::from_static(b"c")),
+    ]);
+
+    let staged = store
+        .stage_stream("a.txt", chunks, &mut budget)
+        .await
+        .unwrap();
+
+    assert_eq!(staged.size(), 3);
+    assert_eq!(staged.sha256(), sha256_hex(b"abc"));
+    assert_eq!(staged.media_type(), "application/octet-stream");
+    assert_eq!(budget.bytes(), 3);
+    assert_eq!(budget.files(), 1);
+    assert_eq!(owned_temp_files(&store).len(), 1);
+    drop(staged);
+    assert!(owned_temp_files(&store).is_empty());
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn streaming_limits_stop_before_polling_or_writing_later_chunks() {
+    let workspace = TempDir::new().unwrap();
+    let mut constrained = limits(1024);
+    constrained.max_file_bytes = 3;
+    let store = AssetStore::open(workspace.path(), "local:stream", constrained).unwrap();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let stream_polls = Arc::clone(&polls);
+    let chunks = stream::poll_fn(move |_| {
+        let poll = stream_polls.fetch_add(1, Ordering::SeqCst);
+        match poll {
+            0 => std::task::Poll::Ready(Some(Ok::<_, std::io::Error>(Bytes::from_static(
+                b"toolong",
+            )))),
+            1 => panic!("stream was polled after the file limit was known"),
+            _ => std::task::Poll::Ready(None),
+        }
+    });
+    let mut budget = RequestBudget::default();
+
+    let error = store
+        .stage_stream("large.bin", chunks, &mut budget)
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, AssetError::TooLarge { limit: 3 }));
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
+    assert_eq!((budget.files(), budget.bytes()), (0, 0));
+    assert!(owned_temp_files(&store).is_empty());
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn streaming_enforces_aggregate_bytes_and_file_count_incrementally() {
+    let workspace = TempDir::new().unwrap();
+    let mut constrained = limits(1024);
+    constrained.max_request_bytes = 5;
+    constrained.max_files = 2;
+    let store = AssetStore::open(workspace.path(), "local:batch-limits", constrained).unwrap();
+    let mut budget = RequestBudget::default();
+    let first = store
+        .stage_stream(
+            "one.bin",
+            stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"abc"))]),
+            &mut budget,
+        )
+        .await
+        .unwrap();
+    let aggregate_error = store
+        .stage_stream(
+            "two.bin",
+            stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"def"))]),
+            &mut budget,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        aggregate_error,
+        AssetError::RequestTooLarge { limit: 5 }
+    ));
+    assert_eq!((budget.files(), budget.bytes()), (1, 3));
+
+    let second = store
+        .stage_stream(
+            "two.bin",
+            stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"de"))]),
+            &mut budget,
+        )
+        .await
+        .unwrap();
+    let count_error = store
+        .stage_stream(
+            "three.bin",
+            stream::empty::<Result<Bytes, std::io::Error>>(),
+            &mut budget,
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(count_error, AssetError::TooMany { limit: 2 }));
+    assert_eq!((budget.files(), budget.bytes()), (2, 5));
+    drop((first, second));
+    assert!(owned_temp_files(&store).is_empty());
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn streaming_transport_error_releases_request_quota_and_tempfile() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let mut budget = RequestBudget::default();
+    let chunks = stream::iter(vec![
+        Ok(Bytes::from_static(b"partial")),
+        Err(std::io::Error::new(
+            std::io::ErrorKind::ConnectionReset,
+            "stream reset",
+        )),
+    ]);
+
+    let error = store
+        .stage_stream("reset.bin", chunks, &mut budget)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), "asset_store_failed");
+    assert_eq!((budget.files(), budget.bytes()), (0, 0));
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+    assert!(owned_temp_files(&store).is_empty());
+}
+
+#[tokio::test]
+async fn batch_validates_every_reference_before_persisting_any_object() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let mut budget = RequestBudget::default();
+    let valid = store
+        .stage_stream(
+            "ok.txt",
+            stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"ok"))]),
+            &mut budget,
+        )
+        .await
+        .unwrap();
+    let invalid = store
+        .stage_stream(
+            &"界".repeat(100),
+            stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(b"later"))]),
+            &mut budget,
+        )
+        .await
+        .unwrap();
+
+    let error = store
+        .persist_batch(RUNTIME_ID_1, vec![valid, invalid])
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), "invalid_asset");
+    assert_eq!(store.usage().unwrap(), AssetUsage::default());
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+    assert!(owned_temp_files(&store).is_empty());
+}
+
+#[tokio::test]
+async fn batch_rechecks_aggregate_size_for_independently_staged_files() {
+    let workspace = TempDir::new().unwrap();
+    let mut constrained = limits(1024);
+    constrained.max_request_bytes = 5;
+    let store = AssetStore::open(workspace.path(), "local:batch-total", constrained).unwrap();
+    let first = store.stage_bytes("one.bin", b"abc").await.unwrap();
+    let second = store.stage_bytes("two.bin", b"def").await.unwrap();
+
+    let error = store
+        .persist_batch(RUNTIME_ID_1, vec![first, second])
+        .await
+        .unwrap_err();
+
+    assert!(matches!(error, AssetError::RequestTooLarge { limit: 5 }));
+    assert_eq!(store.usage().unwrap(), AssetUsage::default());
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+    assert!(owned_temp_files(&store).is_empty());
+}
+
+#[tokio::test]
+async fn batch_persistence_error_returns_no_refs_and_retry_converges() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let staged = store.stage_bytes("retry.txt", b"durable").await.unwrap();
+    let hash = staged.sha256().to_string();
+    store.inject_sidecar_write_failure_once();
+
+    let error = store
+        .persist_batch(RUNTIME_ID_1, vec![staged])
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), "asset_store_failed");
+    assert_eq!(store.read(&hash).unwrap(), b"durable");
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 7,
+            objects: 1,
+        }
+    );
+
+    let retry = store.stage_bytes("retry.txt", b"durable").await.unwrap();
+    let refs = store
+        .persist_batch(RUNTIME_ID_1, vec![retry])
+        .await
+        .unwrap();
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].sha256, hash);
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+    assert!(owned_temp_files(&store).is_empty());
+}
+
+#[tokio::test]
+async fn failure_after_no_clobber_publish_registers_the_object_before_returning() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 8);
+    let staged = store.stage_bytes("published.txt", b"four").await.unwrap();
+    let hash = staged.sha256().to_string();
+    store.inject_after_publish_failure_once();
+
+    let error = store
+        .persist_staged(staged, AssetSource::LocalUpload)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), "asset_store_failed");
+    assert_eq!(store.read(&hash).unwrap(), b"four");
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 4,
+            objects: 1,
+        }
+    );
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+    assert!(matches!(
+        store.put_bytes(b"12345", AssetSource::LocalUpload),
+        Err(AssetError::QuotaExceeded { .. })
+    ));
+}
+
+#[tokio::test]
+async fn concurrent_staged_dedupe_publishes_one_object_and_counts_it_once() {
+    let workspace = TempDir::new().unwrap();
+    let store = Arc::new(open_store(workspace.path(), 1024));
+    let staged_a = store.stage_bytes("a.txt", b"same").await.unwrap();
+    let staged_b = store.stage_bytes("b.txt", b"same").await.unwrap();
+    let first_store = Arc::clone(&store);
+    let second_store = Arc::clone(&store);
+    let first = tokio::spawn(async move {
+        first_store
+            .persist_staged(staged_a, AssetSource::LocalUpload)
+            .await
+    });
+    let second = tokio::spawn(async move {
+        second_store
+            .persist_staged(staged_b, AssetSource::LocalUpload)
+            .await
+    });
+
+    let (first, second) = tokio::join!(first, second);
+    let first = first.unwrap().unwrap();
+    let second = second.unwrap().unwrap();
+    assert_eq!(first.sha256, second.sha256);
+    assert_eq!(store.read(&first.sha256).unwrap(), b"same");
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 4,
+            objects: 1,
+        }
+    );
+    assert!(owned_temp_files(&store).is_empty());
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn no_clobber_publish_keeps_a_valid_object_that_wins_the_link_race() {
+    use std::os::unix::fs::MetadataExt;
+
+    let workspace = TempDir::new().unwrap();
+    let store = Arc::new(open_store(workspace.path(), 1024));
+    let staged = store.stage_bytes("race.txt", b"winner").await.unwrap();
+    let hash = staged.sha256().to_string();
+    let object = store.object_path(&hash).unwrap();
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    store.inject_before_publish_pause(Arc::clone(&reached), Arc::clone(&resume));
+    let persist_store = Arc::clone(&store);
+    let persist = tokio::spawn(async move {
+        persist_store
+            .persist_staged(staged, AssetSource::LocalUpload)
+            .await
+    });
+
+    reached.wait();
+    fs::create_dir_all(object.parent().unwrap()).unwrap();
+    fs::write(&object, b"winner").unwrap();
+    let winning_inode = fs::metadata(&object).unwrap().ino();
+    resume.wait();
+
+    let stored = persist.await.unwrap().unwrap();
+    assert_eq!(stored.sha256, hash);
+    assert_eq!(fs::metadata(&object).unwrap().ino(), winning_inode);
+    assert_eq!(store.read(&hash).unwrap(), b"winner");
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 6,
+            objects: 1,
+        }
+    );
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+}
+
+#[tokio::test]
+async fn staged_dedupe_repairs_same_length_corruption_before_discarding_known_good_bytes() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let original = store.put_bytes(b"good", AssetSource::LocalUpload).unwrap();
+    fs::write(store.object_path(&original.sha256).unwrap(), b"evil").unwrap();
+    let staged = store.stage_bytes("repair.txt", b"good").await.unwrap();
+
+    let repaired = store
+        .persist_staged(staged, AssetSource::LocalUpload)
+        .await
+        .unwrap();
+
+    assert_eq!(repaired.sha256, original.sha256);
+    assert_eq!(store.read(&original.sha256).unwrap(), b"good");
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 4,
+            objects: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn same_process_hash_lock_blocks_until_the_holder_drops() {
+    let workspace = TempDir::new().unwrap();
+    let store = Arc::new(open_store(workspace.path(), 1024));
+    let hash = sha256_hex(b"locked");
+    let first = HashLock::acquire(&store, &hash).await.unwrap();
+    let second_store = Arc::clone(&store);
+    let second_hash = hash.clone();
+    let second = tokio::spawn(async move { HashLock::acquire(&second_store, &second_hash).await });
+
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert!(!second.is_finished());
+    drop(first);
+    tokio::time::timeout(Duration::from_secs(2), second)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn hash_lock_is_released_when_a_task_returns_an_error() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let hash = sha256_hex(b"release");
+    let result: Result<(), AssetError> = async {
+        let _lock = HashLock::acquire(&store, &hash).await?;
+        Err(AssetError::Invalid("injected task failure".to_string()))
+    }
+    .await;
+    assert!(result.is_err());
+
+    tokio::time::timeout(Duration::from_secs(2), HashLock::acquire(&store, &hash))
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn simultaneous_processes_share_one_filesystem_hash_lock() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let hash = sha256_hex(b"cross-process-lock");
+    let marker = workspace.path().join("holder.marker");
+    let mut holder = spawn_hash_lock_child(workspace.path(), &hash, "hold", Some(&marker));
+    wait_for_marker(&mut holder, &marker);
+
+    let contender = spawn_hash_lock_child(workspace.path(), &hash, "measure", None);
+    let output = contender.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "contender failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let blocked_ms = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("blocked_ms="))
+        .unwrap_or_else(|| panic!("missing elapsed marker in {stdout:?}"))
+        .parse::<u128>()
+        .unwrap();
+    assert!(
+        blocked_ms >= 250,
+        "contender only blocked for {blocked_ms}ms"
+    );
+    assert!(holder.wait().unwrap().success());
+    drop(store);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn direct_put_uses_the_same_cross_process_hash_lock() {
+    let workspace = TempDir::new().unwrap();
+    let store = Arc::new(open_store(workspace.path(), 1024));
+    let bytes = b"direct-put-lock";
+    let hash = sha256_hex(bytes);
+    let marker = workspace.path().join("direct-put-holder.marker");
+    let mut holder = spawn_hash_lock_child(workspace.path(), &hash, "hold", Some(&marker));
+    wait_for_marker(&mut holder, &marker);
+    let started = Instant::now();
+    let put_store = Arc::clone(&store);
+    let put =
+        tokio::task::spawn_blocking(move || put_store.put_bytes(bytes, AssetSource::LocalUpload));
+
+    let stored = put.await.unwrap().unwrap();
+
+    assert!(started.elapsed() >= Duration::from_millis(250));
+    assert_eq!(stored.sha256, hash);
+    assert!(holder.wait().unwrap().success());
+}
+
+#[tokio::test]
+async fn staged_and_lock_capabilities_become_stale_after_namespace_rebind() {
+    let workspace = TempDir::new().unwrap();
+    let old = open_store(workspace.path(), 1024);
+    let staged = old.stage_bytes("old.txt", b"old").await.unwrap();
+    let hash = staged.sha256().to_string();
+    let lock = HashLock::acquire(&old, &hash).await.unwrap();
+    let current = AssetStore::open(workspace.path(), "local:new", limits(1024)).unwrap();
+    let untouched_hash = sha256_hex(b"stale-lock-must-not-create");
+    let current_lock_path = current.lock_path(&untouched_hash).unwrap();
+
+    assert_eq!(
+        lock.ensure_current().unwrap_err().error_code(),
+        "asset_store_stale"
+    );
+    assert_eq!(
+        HashLock::acquire(&old, &untouched_hash)
+            .await
+            .unwrap_err()
+            .error_code(),
+        "asset_store_stale"
+    );
+    assert!(!current_lock_path.exists());
+    assert_eq!(
+        old.persist_staged(staged, AssetSource::LocalUpload)
+            .await
+            .unwrap_err()
+            .error_code(),
+        "asset_store_stale"
+    );
+    assert_eq!(current.usage().unwrap(), AssetUsage::default());
+    assert_eq!(current.reserved_bytes().unwrap(), 0);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hash_lock_rejects_symlinks_and_nonregular_paths() {
+    use std::os::unix::fs::symlink;
+
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let symlink_hash = sha256_hex(b"symlink-lock");
+    let symlink_path = store.lock_path(&symlink_hash).unwrap();
+    fs::create_dir_all(symlink_path.parent().unwrap()).unwrap();
+    let outside = workspace.path().join("outside-lock");
+    fs::write(&outside, b"outside").unwrap();
+    symlink(&outside, &symlink_path).unwrap();
+    assert!(HashLock::acquire(&store, &symlink_hash).await.is_err());
+    assert_eq!(fs::read(&outside).unwrap(), b"outside");
+
+    let directory_hash = sha256_hex(b"directory-lock");
+    let directory_path = store.lock_path(&directory_hash).unwrap();
+    fs::create_dir_all(&directory_path).unwrap();
+    assert!(HashLock::acquire(&store, &directory_hash).await.is_err());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn hash_lock_files_and_shards_are_private() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let hash = sha256_hex(b"private-lock");
+    let lock_path = store.lock_path(&hash).unwrap();
+    HashLock::acquire(&store, &hash).await.unwrap();
+
+    assert_eq!(
+        fs::metadata(lock_path.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(lock_path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
+#[test]
+#[ignore = "child-process helper"]
+fn hash_lock_child() {
+    let Ok(mode) = std::env::var("GITIM_ASSET_LOCK_CHILD") else {
+        return;
+    };
+    let workspace = PathBuf::from(std::env::var_os("GITIM_ASSET_LOCK_WORKSPACE").unwrap());
+    let hash = std::env::var("GITIM_ASSET_LOCK_HASH").unwrap();
+    let store = open_store(&workspace, 1024);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let started = Instant::now();
+    let lock = runtime.block_on(HashLock::acquire(&store, &hash)).unwrap();
+    match mode.as_str() {
+        "hold" => {
+            let marker = PathBuf::from(std::env::var_os("GITIM_ASSET_LOCK_MARKER").unwrap());
+            fs::write(marker, b"locked").unwrap();
+            std::thread::sleep(Duration::from_millis(600));
+        }
+        "measure" => {
+            let mut stdout = std::io::stdout().lock();
+            writeln!(&mut stdout, "blocked_ms={}", started.elapsed().as_millis()).unwrap();
+        }
+        other => panic!("unknown lock child mode: {other}"),
+    }
+    drop(lock);
 }
 
 #[test]

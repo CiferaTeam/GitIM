@@ -1,5 +1,9 @@
 use super::{inspect_bytes, AssetError};
+use axum::body::Bytes;
 use chrono::Utc;
+use fs2::FileExt;
+use futures::{Stream, StreamExt};
+use gitim_core::types::{AssetRef, ASSET_REF_VERSION};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -9,10 +13,13 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "test-support")]
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+#[cfg(feature = "test-support")]
+use std::sync::Barrier;
 use std::sync::{
     Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const STORE_SCHEMA_VERSION: u32 = 1;
@@ -25,6 +32,7 @@ const DEFAULT_MAX_FILES: usize = 10;
 const DEFAULT_TEMP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const DEFAULT_UPLOAD_SLOTS: usize = 2;
 const DEFAULT_PEER_SLOTS: usize = 4;
+const MAX_INSPECTION_PREFIX_BYTES: usize = 64 * 1024;
 static UNIQUE_SUFFIX: AtomicUsize = AtomicUsize::new(0);
 static WORKSPACE_STATES: OnceLock<Mutex<HashMap<PathBuf, Weak<WorkspaceAssetState>>>> =
     OnceLock::new();
@@ -81,6 +89,58 @@ fn positive_env(read: &mut impl FnMut(&str) -> Option<String>, name: &str, fallb
 pub struct AssetUsage {
     pub bytes: u64,
     pub objects: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct RequestBudget {
+    bytes: u64,
+    files: usize,
+}
+
+impl RequestBudget {
+    pub const fn bytes(&self) -> u64 {
+        self.bytes
+    }
+
+    pub const fn files(&self) -> usize {
+        self.files
+    }
+
+    fn begin_file(&mut self, limit: usize) -> Result<(), AssetError> {
+        let files = self
+            .files
+            .checked_add(1)
+            .ok_or(AssetError::TooMany { limit })?;
+        if files > limit {
+            return Err(AssetError::TooMany { limit });
+        }
+        self.files = files;
+        Ok(())
+    }
+
+    fn add_bytes(&mut self, incoming: u64, limit: u64) -> Result<(), AssetError> {
+        let bytes = self
+            .bytes
+            .checked_add(incoming)
+            .ok_or(AssetError::RequestTooLarge { limit })?;
+        if bytes > limit {
+            return Err(AssetError::RequestTooLarge { limit });
+        }
+        self.bytes = bytes;
+        Ok(())
+    }
+
+    fn rollback_file(&mut self, bytes: u64) -> Result<(), AssetError> {
+        self.files = self
+            .files
+            .checked_sub(1)
+            .ok_or(AssetError::Invariant("asset request file count underflow"))?;
+        self.bytes = self
+            .bytes
+            .checked_sub(bytes)
+            .ok_or(AssetError::Invariant("asset request byte count underflow"))?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -140,6 +200,13 @@ pub struct AssetMetadata {
 
 struct FileSnapshot {
     bytes: Vec<u8>,
+    size: u64,
+    modified_ns: u64,
+}
+
+struct FileDigestSnapshot {
+    sha256: String,
+    inspection_prefix: Vec<u8>,
     size: u64,
     modified_ns: u64,
 }
@@ -306,6 +373,7 @@ fn raw_temp_path_is_not_available(store: &AssetStore) {
 ```
 "#
 )]
+#[derive(Clone)]
 pub struct AssetStore {
     workspace_root: PathBuf,
     root: PathBuf,
@@ -321,6 +389,10 @@ struct WorkspaceAssetState {
     operation_gate: RwLock<()>,
     #[cfg(feature = "test-support")]
     fail_next_sidecar_write: AtomicBool,
+    #[cfg(feature = "test-support")]
+    fail_after_publish: AtomicBool,
+    #[cfg(feature = "test-support")]
+    before_publish_pause: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
 }
 
 #[derive(Default)]
@@ -332,6 +404,141 @@ struct AccountingState {
     limits: Option<AssetLimits>,
     initialized: bool,
     objects: HashMap<String, u64>,
+}
+
+pub struct StagedAsset {
+    name: String,
+    sha256: String,
+    size: u64,
+    media_type: String,
+    width: Option<u32>,
+    height: Option<u32>,
+    path: Option<PathBuf>,
+    reservation: Option<AssetReservation>,
+    state: Arc<WorkspaceAssetState>,
+    generation: u64,
+    binding: String,
+    root: PathBuf,
+}
+
+impl std::fmt::Debug for StagedAsset {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StagedAsset")
+            .field("name", &self.name)
+            .field("sha256", &self.sha256)
+            .field("size", &self.size)
+            .field("media_type", &self.media_type)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for StagedAsset {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            if let Err(error) = remove_file_if_exists(&path) {
+                tracing::warn!(error = %error, "failed to remove unfinished asset staging file");
+            }
+        }
+    }
+}
+
+struct AssetStager<'a> {
+    store: &'a AssetStore,
+    name: String,
+    path: Option<PathBuf>,
+    file: Option<tokio::fs::File>,
+    hasher: Sha256,
+    size: u64,
+    inspection_prefix: Vec<u8>,
+    reservation: Option<AssetReservation>,
+}
+
+pub struct HashLock {
+    file: File,
+    state: Arc<WorkspaceAssetState>,
+    generation: u64,
+    binding: String,
+    root: PathBuf,
+    hash: String,
+}
+
+impl std::fmt::Debug for HashLock {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HashLock")
+            .field("generation", &self.generation)
+            .field("binding", &self.binding)
+            .field("hash", &self.hash)
+            .finish_non_exhaustive()
+    }
+}
+
+impl HashLock {
+    pub async fn acquire(store: &AssetStore, hash: &str) -> Result<Self, AssetError> {
+        let file = store.open_hash_lock_file(hash)?;
+        let file = tokio::task::spawn_blocking(move || lock_hash_file(file))
+            .await
+            .map_err(|error| {
+                AssetError::Store(std::io::Error::other(format!(
+                    "asset hash lock task failed: {error}"
+                )))
+            })??;
+        let lock = Self {
+            file,
+            state: Arc::clone(&store.state),
+            generation: store.generation,
+            binding: store.binding.clone(),
+            root: store.root.clone(),
+            hash: hash.to_string(),
+        };
+        lock.ensure_current()?;
+        Ok(lock)
+    }
+
+    fn acquire_blocking(store: &AssetStore, hash: &str) -> Result<Self, AssetError> {
+        let file = lock_hash_file(store.open_hash_lock_file(hash)?)?;
+        let lock = Self {
+            file,
+            state: Arc::clone(&store.state),
+            generation: store.generation,
+            binding: store.binding.clone(),
+            root: store.root.clone(),
+            hash: hash.to_string(),
+        };
+        lock.ensure_current()?;
+        Ok(lock)
+    }
+
+    pub fn ensure_current(&self) -> Result<(), AssetError> {
+        let accounting = lock(&self.state.accounting);
+        if !accounting.initialized
+            || accounting.generation != self.generation
+            || accounting.active_binding.as_deref() != Some(self.binding.as_str())
+            || !manifest_matches(&self.root.join("store.json"), &self.binding)
+        {
+            return Err(AssetError::StaleBinding);
+        }
+        Ok(())
+    }
+
+    fn matches(&self, store: &AssetStore, hash: &str) -> bool {
+        Arc::ptr_eq(&self.state, &store.state)
+            && self.generation == store.generation
+            && self.binding == store.binding
+            && self.root == store.root
+            && self.hash == hash
+    }
+}
+
+impl Drop for HashLock {
+    fn drop(&mut self) {
+        if let Err(error) = FileExt::unlock(&self.file) {
+            tracing::warn!(error = %error, "failed to release asset hash lock");
+        }
+    }
 }
 
 impl AssetStore {
@@ -442,10 +649,7 @@ impl AssetStore {
     pub fn lock_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
         let _operation = read_lock(&self.state.operation_gate);
         self.validate_current()?;
-        validate_hash(hash)?;
-        let shard = self.root.join("locks/sha256").join(&hash[..2]);
-        validate_hash_shard(&shard)?;
-        Ok(shard.join(format!("{hash}.lock")))
+        self.raw_lock_path(hash)
     }
 
     pub fn reserve(&self, incoming: u64) -> Result<AssetReservation, AssetError> {
@@ -454,6 +658,244 @@ impl AssetStore {
         let available = fs2::available_space(&self.root)?;
         let total = fs2::total_space(&self.root)?;
         self.reserve_with_space(incoming, available, total)
+    }
+
+    pub async fn stage_stream<S, E>(
+        &self,
+        name: impl Into<String>,
+        mut chunks: S,
+        budget: &mut RequestBudget,
+    ) -> Result<StagedAsset, AssetError>
+    where
+        S: Stream<Item = Result<Bytes, E>> + Unpin,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        budget.begin_file(self.limits.max_files)?;
+        let mut stager = match AssetStager::new(self, name.into()) {
+            Ok(stager) => stager,
+            Err(error) => {
+                budget.rollback_file(0)?;
+                return Err(error);
+            }
+        };
+        while let Some(chunk) = chunks.next().await {
+            let chunk = match chunk {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let size = stager.size;
+                    drop(stager);
+                    budget.rollback_file(size)?;
+                    return Err(AssetError::Store(std::io::Error::other(error)));
+                }
+            };
+            if let Err(error) = stager.write_chunk(&chunk, budget).await {
+                let size = stager.size;
+                drop(stager);
+                budget.rollback_file(size)?;
+                return Err(error);
+            }
+        }
+        let size = stager.size;
+        match stager.finish().await {
+            Ok(staged) => Ok(staged),
+            Err(error) => {
+                budget.rollback_file(size)?;
+                Err(error)
+            }
+        }
+    }
+
+    pub async fn stage_bytes(
+        &self,
+        name: impl Into<String>,
+        bytes: &[u8],
+    ) -> Result<StagedAsset, AssetError> {
+        let mut budget = RequestBudget::default();
+        self.stage_stream(
+            name,
+            futures::stream::iter([Ok::<Bytes, std::io::Error>(Bytes::copy_from_slice(bytes))]),
+            &mut budget,
+        )
+        .await
+    }
+
+    pub async fn persist_batch(
+        &self,
+        origin_runtime_id: &str,
+        staged: Vec<StagedAsset>,
+    ) -> Result<Vec<AssetRef>, AssetError> {
+        if staged.is_empty() {
+            return Err(AssetError::Invalid(
+                "asset upload must contain at least one file".to_string(),
+            ));
+        }
+        if staged.len() > self.limits.max_files {
+            return Err(AssetError::TooMany {
+                limit: self.limits.max_files,
+            });
+        }
+        let aggregate_size = staged.iter().try_fold(0_u64, |total, asset| {
+            total
+                .checked_add(asset.size)
+                .ok_or(AssetError::RequestTooLarge {
+                    limit: self.limits.max_request_bytes,
+                })
+        })?;
+        if aggregate_size > self.limits.max_request_bytes {
+            return Err(AssetError::RequestTooLarge {
+                limit: self.limits.max_request_bytes,
+            });
+        }
+        let mut refs = Vec::with_capacity(staged.len());
+        {
+            let _operation = read_lock(&self.state.operation_gate);
+            self.validate_current()?;
+            for asset in &staged {
+                asset.validate_file_for(self)?;
+                let asset_ref = AssetRef {
+                    version: ASSET_REF_VERSION,
+                    origin_runtime_id: origin_runtime_id.to_string(),
+                    sha256: asset.sha256.clone(),
+                    name: asset.name.clone(),
+                    media_type: asset.media_type.clone(),
+                    size: asset.size,
+                    width: asset.width,
+                    height: asset.height,
+                };
+                asset_ref
+                    .validate()
+                    .map_err(|error| AssetError::Invalid(error.to_string()))?;
+                refs.push(asset_ref);
+            }
+        }
+        for asset in staged {
+            self.persist_staged(asset, AssetSource::LocalUpload).await?;
+        }
+        Ok(refs)
+    }
+
+    pub async fn persist_staged(
+        &self,
+        staged: StagedAsset,
+        source: AssetSource,
+    ) -> Result<AssetMetadata, AssetError> {
+        staged.validate_generation_for(self)?;
+        let hash_lock = HashLock::acquire(self, &staged.sha256).await?;
+        self.persist_staged_with_lock(staged, source, hash_lock)
+            .await
+    }
+
+    pub async fn persist_staged_with_lock(
+        &self,
+        staged: StagedAsset,
+        source: AssetSource,
+        hash_lock: HashLock,
+    ) -> Result<AssetMetadata, AssetError> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.persist_staged_locked(staged, source, &hash_lock))
+            .await
+            .map_err(|error| {
+                AssetError::Store(std::io::Error::other(format!(
+                    "asset persistence task failed: {error}"
+                )))
+            })?
+    }
+
+    fn persist_staged_locked(
+        &self,
+        mut staged: StagedAsset,
+        source: AssetSource,
+        hash_lock: &HashLock,
+    ) -> Result<AssetMetadata, AssetError> {
+        if !valid_source(&source) {
+            return Err(AssetError::Invalid(
+                "fleet replica source requires a canonical runtime UUID".to_string(),
+            ));
+        }
+        staged.validate_generation_for(self)?;
+        if !hash_lock.matches(self, &staged.sha256) {
+            return Err(AssetError::StaleBinding);
+        }
+        hash_lock.ensure_current()?;
+        let _operation = write_lock(&self.state.operation_gate);
+        self.validate_current()?;
+        staged.validate_file_for(self)?;
+
+        if let Some(metadata) = self.force_verify_dedupe(&staged.sha256, &source)? {
+            staged
+                .reservation
+                .take()
+                .ok_or(AssetError::Invariant("staged asset reservation is missing"))?
+                .release()?;
+            return Ok(metadata);
+        }
+
+        #[cfg(feature = "test-support")]
+        if let Some((reached, resume)) = lock(&self.state.before_publish_pause).take() {
+            reached.wait();
+            resume.wait();
+        }
+
+        let object_path = self.raw_object_path(&staged.sha256)?;
+        let object_parent = object_path
+            .parent()
+            .ok_or_else(|| invalid_path(&object_path))?;
+        create_private_dir(object_parent)?;
+        let temp_path = staged
+            .path
+            .as_ref()
+            .ok_or(AssetError::Invariant("staged asset path is missing"))?;
+        loop {
+            match fs::hard_link(temp_path, &object_path) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if let Some(metadata) = self.force_verify_dedupe(&staged.sha256, &source)? {
+                        staged
+                            .reservation
+                            .take()
+                            .ok_or(AssetError::Invariant("staged asset reservation is missing"))?
+                            .release()?;
+                        return Ok(metadata);
+                    }
+                }
+                Err(error) => return Err(AssetError::Store(error)),
+            }
+        }
+        let reservation = staged
+            .reservation
+            .take()
+            .ok_or(AssetError::Invariant("staged asset reservation is missing"))?;
+        let publish_result = (|| {
+            #[cfg(feature = "test-support")]
+            if self.state.fail_after_publish.swap(false, Ordering::AcqRel) {
+                return Err(AssetError::Store(std::io::Error::other(
+                    "injected failure after asset object publication",
+                )));
+            }
+            set_path_file_mode(&object_path)?;
+            open_options_no_follow(&object_path, false)?.sync_all()?;
+            sync_parent_best_effort(object_parent);
+
+            let object_metadata = fs::symlink_metadata(&object_path)?;
+            let metadata = AssetMetadata {
+                schema_version: SIDECAR_SCHEMA_VERSION,
+                sha256: staged.sha256.clone(),
+                size: staged.size,
+                media_type: staged.media_type.clone(),
+                width: staged.width,
+                height: staged.height,
+                object_modified_ns: modified_ns(&object_metadata)?,
+                stored_at: Utc::now().to_rfc3339(),
+                source,
+            };
+            self.write_metadata(&metadata)?;
+            Ok(metadata)
+        })();
+        if let Err(error) = reservation.commit(&staged.sha256, staged.size) {
+            self.reconcile_accounting()?;
+            return Err(error);
+        }
+        publish_result
     }
 
     fn reserve_with_space(
@@ -503,18 +945,80 @@ impl AssetStore {
         })
     }
 
+    fn extend_reservation(
+        &self,
+        reservation: &mut AssetReservation,
+        incoming: u64,
+    ) -> Result<(), AssetError> {
+        let _operation = read_lock(&self.state.operation_gate);
+        self.validate_current()?;
+        if !Arc::ptr_eq(&reservation.state, &self.state)
+            || reservation.generation != self.generation
+            || reservation.released
+        {
+            return Err(AssetError::StaleBinding);
+        }
+        let available = fs2::available_space(&self.root)?;
+        let total = fs2::total_space(&self.root)?;
+        let mut accounting = lock(&self.state.accounting);
+        self.validate_accounting(&accounting)?;
+        let committed_and_reserved = accounting
+            .committed
+            .bytes
+            .checked_add(accounting.reserved)
+            .ok_or(AssetError::QuotaExceeded {
+                used: u64::MAX,
+                quota: self.limits.workspace_quota_bytes,
+            })?;
+        let prospective =
+            committed_and_reserved
+                .checked_add(incoming)
+                .ok_or(AssetError::QuotaExceeded {
+                    used: committed_and_reserved,
+                    quota: self.limits.workspace_quota_bytes,
+                })?;
+        if prospective > self.limits.workspace_quota_bytes {
+            return Err(AssetError::QuotaExceeded {
+                used: committed_and_reserved,
+                quota: self.limits.workspace_quota_bytes,
+            });
+        }
+        let reserved =
+            accounting
+                .reserved
+                .checked_add(incoming)
+                .ok_or(AssetError::QuotaExceeded {
+                    used: committed_and_reserved,
+                    quota: self.limits.workspace_quota_bytes,
+                })?;
+        self.check_free_space(reserved, committed_and_reserved, available, total)?;
+        reservation.bytes =
+            reservation
+                .bytes
+                .checked_add(incoming)
+                .ok_or(AssetError::Invariant(
+                    "asset reservation byte count overflow",
+                ))?;
+        accounting.reserved = reserved;
+        Ok(())
+    }
+
     pub fn put_bytes(
         &self,
         bytes: &[u8],
         source: AssetSource,
     ) -> Result<AssetMetadata, AssetError> {
-        let _operation = write_lock(&self.state.operation_gate);
-        self.validate_current()?;
         if !valid_source(&source) {
             return Err(AssetError::Invalid(
                 "fleet replica source requires a canonical runtime UUID".to_string(),
             ));
         }
+        let staged = self.stage_bytes_blocking("attachment", bytes)?;
+        let hash_lock = HashLock::acquire_blocking(self, &staged.sha256)?;
+        self.persist_staged_locked(staged, source, &hash_lock)
+    }
+
+    fn stage_bytes_blocking(&self, name: &str, bytes: &[u8]) -> Result<StagedAsset, AssetError> {
         let size = u64::try_from(bytes.len()).map_err(|_| AssetError::TooLarge {
             limit: self.limits.max_file_bytes,
         })?;
@@ -523,40 +1027,35 @@ impl AssetStore {
                 limit: self.limits.max_file_bytes,
             });
         }
-        let hash = sha256_hex(bytes);
-        if let Some(metadata) = self.force_verify_dedupe(&hash, &source)? {
-            return Ok(metadata);
-        }
-
-        let available = fs2::available_space(&self.root)?;
-        let total = fs2::total_space(&self.root)?;
-        let reservation = self.reserve_with_space(size, available, total)?;
-        let object_path = self.raw_object_path(&hash)?;
-        create_private_dir(
-            object_path
-                .parent()
-                .ok_or_else(|| invalid_path(&object_path))?,
-        )?;
-        atomic_write(&object_path, bytes)?;
-        let metadata = match self.metadata_from_object(&hash, source) {
-            Ok(metadata) => metadata,
-            Err(error) => {
-                self.reconcile_accounting()?;
-                return Err(error);
-            }
-        };
-        if let Err(error) = self.write_metadata(&metadata) {
-            if let Err(accounting_error) = reservation.commit(&hash, size) {
-                self.reconcile_accounting()?;
-                return Err(accounting_error);
-            }
-            return Err(error);
-        }
-        if let Err(error) = reservation.commit(&hash, size) {
-            self.reconcile_accounting()?;
-            return Err(error);
-        }
-        Ok(metadata)
+        let reservation = self.reserve(size)?;
+        let tmp = self.root.join("tmp");
+        create_private_dir(&tmp)?;
+        let mut tempfile = tempfile::Builder::new()
+            .prefix("gitim-asset-")
+            .suffix(".tmp")
+            .tempfile_in(tmp)?;
+        set_file_mode(tempfile.as_file())?;
+        tempfile.write_all(bytes)?;
+        tempfile.flush()?;
+        tempfile.as_file().sync_all()?;
+        let inspection = inspect_bytes(bytes, name)?;
+        let (_file, path) = tempfile
+            .keep()
+            .map_err(|error| AssetError::Store(error.error))?;
+        Ok(StagedAsset {
+            name: name.to_string(),
+            sha256: sha256_hex(bytes),
+            size,
+            media_type: inspection.media_type,
+            width: inspection.width,
+            height: inspection.height,
+            path: Some(path),
+            reservation: Some(reservation),
+            state: Arc::clone(&self.state),
+            generation: self.generation,
+            binding: self.binding.clone(),
+            root: self.root.clone(),
+        })
     }
 
     pub fn read(&self, hash: &str) -> Result<Vec<u8>, AssetError> {
@@ -619,6 +1118,18 @@ impl AssetStore {
             .store(true, Ordering::Release);
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_after_publish_failure_once(&self) {
+        self.state.fail_after_publish.store(true, Ordering::Release);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_before_publish_pause(&self, reached: Arc<Barrier>, resume: Arc<Barrier>) {
+        *lock(&self.state.before_publish_pause) = Some((reached, resume));
+    }
+
     pub fn recover(&self) -> Result<AssetUsage, AssetError> {
         let _operation = write_lock(&self.state.operation_gate);
         self.validate_current()?;
@@ -678,6 +1189,21 @@ impl AssetStore {
         let shard = self.root.join("metadata/sha256").join(&hash[..2]);
         validate_hash_shard(&shard)?;
         Ok(shard.join(format!("{hash}.json")))
+    }
+
+    fn raw_lock_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
+        validate_hash(hash)?;
+        let shard = self.root.join("locks/sha256").join(&hash[..2]);
+        validate_hash_shard(&shard)?;
+        Ok(shard.join(format!("{hash}.lock")))
+    }
+
+    fn open_hash_lock_file(&self, hash: &str) -> Result<File, AssetError> {
+        let _operation = read_lock(&self.state.operation_gate);
+        self.validate_current()?;
+        let path = self.raw_lock_path(hash)?;
+        create_private_dir(path.parent().ok_or_else(|| invalid_path(&path))?)?;
+        open_hash_lock_file(&path)
     }
 
     fn check_free_space(
@@ -774,7 +1300,7 @@ impl AssetStore {
         source: &AssetSource,
     ) -> Result<Option<AssetMetadata>, AssetError> {
         let object_path = self.raw_object_path(hash)?;
-        let snapshot = match read_file_snapshot(&object_path, self.limits.max_file_bytes) {
+        let snapshot = match read_file_digest(&object_path, self.limits.max_file_bytes) {
             Ok(snapshot) => snapshot,
             Err(AssetError::Missing) => return Ok(None),
             Err(AssetError::TooLarge { .. }) => {
@@ -783,7 +1309,7 @@ impl AssetStore {
             }
             Err(error) => return Err(error),
         };
-        if sha256_hex(&snapshot.bytes) != hash {
+        if snapshot.sha256 != hash {
             self.quarantine_corrupt(hash, &object_path)?;
             return Ok(None);
         }
@@ -796,9 +1322,8 @@ impl AssetStore {
                 "asset sidecar disappeared during dedupe verification",
             ))?
         } else {
-            match self.rebuild_metadata_from_snapshot(
+            match self.rebuild_metadata_from_digest(
                 hash,
-                &object_path,
                 &metadata_path,
                 existing_sidecar.as_ref(),
                 Some(source),
@@ -815,14 +1340,39 @@ impl AssetStore {
         Ok(Some(metadata))
     }
 
-    fn metadata_from_object(
+    fn rebuild_metadata_from_digest(
         &self,
         hash: &str,
-        source: AssetSource,
+        metadata_path: &Path,
+        existing_sidecar: Option<&AssetMetadata>,
+        fallback_source: Option<&AssetSource>,
+        snapshot: &FileDigestSnapshot,
     ) -> Result<AssetMetadata, AssetError> {
-        let object_path = self.raw_object_path(hash)?;
-        let snapshot = read_file_snapshot(&object_path, self.limits.max_file_bytes)?;
-        metadata_for_bytes(hash, &snapshot.bytes, snapshot.modified_ns, source)
+        let source = existing_sidecar
+            .map(|sidecar| &sidecar.source)
+            .filter(|source| valid_source(source))
+            .cloned()
+            .or_else(|| read_recoverable_source(metadata_path))
+            .or_else(|| {
+                fallback_source
+                    .filter(|source| valid_source(source))
+                    .cloned()
+            })
+            .unwrap_or(AssetSource::LocalUpload);
+        let inspection = inspect_bytes(&snapshot.inspection_prefix, "")?;
+        let metadata = AssetMetadata {
+            schema_version: SIDECAR_SCHEMA_VERSION,
+            sha256: hash.to_string(),
+            size: snapshot.size,
+            media_type: inspection.media_type,
+            width: inspection.width,
+            height: inspection.height,
+            object_modified_ns: snapshot.modified_ns,
+            stored_at: Utc::now().to_rfc3339(),
+            source,
+        };
+        self.write_metadata(&metadata)?;
+        Ok(metadata)
     }
 
     fn register_existing_object(&self, hash: &str, size: u64) -> Result<(), AssetError> {
@@ -1065,6 +1615,179 @@ impl AssetStore {
             accounting.objects = objects;
         }
         Ok(())
+    }
+}
+
+impl StagedAsset {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn sha256(&self) -> &str {
+        &self.sha256
+    }
+
+    pub const fn size(&self) -> u64 {
+        self.size
+    }
+
+    pub fn media_type(&self) -> &str {
+        &self.media_type
+    }
+
+    pub const fn width(&self) -> Option<u32> {
+        self.width
+    }
+
+    pub const fn height(&self) -> Option<u32> {
+        self.height
+    }
+
+    fn validate_generation_for(&self, store: &AssetStore) -> Result<(), AssetError> {
+        if !Arc::ptr_eq(&self.state, &store.state)
+            || self.generation != store.generation
+            || self.binding != store.binding
+            || self.root != store.root
+        {
+            return Err(AssetError::StaleBinding);
+        }
+        let accounting = lock(&self.state.accounting);
+        store.validate_accounting(&accounting)?;
+        Ok(())
+    }
+
+    fn validate_file_for(&self, store: &AssetStore) -> Result<(), AssetError> {
+        self.validate_generation_for(store)?;
+        let path = self
+            .path
+            .as_ref()
+            .ok_or(AssetError::Invariant("staged asset path is missing"))?;
+        if path.parent() != Some(store.root.join("tmp").as_path()) {
+            return Err(AssetError::Invalid(
+                "asset staging path escaped its workspace".to_string(),
+            ));
+        }
+        let metadata = fs::symlink_metadata(path).map_err(map_missing)?;
+        if !metadata.file_type().is_file() || metadata.len() != self.size {
+            return Err(AssetError::Invalid(
+                "asset staging file changed before persistence".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl<'a> AssetStager<'a> {
+    fn new(store: &'a AssetStore, name: String) -> Result<Self, AssetError> {
+        let _operation = read_lock(&store.state.operation_gate);
+        store.validate_current()?;
+        let tmp = store.root.join("tmp");
+        create_private_dir(&tmp)?;
+        let tempfile = tempfile::Builder::new()
+            .prefix("gitim-asset-")
+            .suffix(".tmp")
+            .tempfile_in(tmp)?;
+        set_file_mode(tempfile.as_file())?;
+        let (file, path) = tempfile
+            .keep()
+            .map_err(|error| AssetError::Store(error.error))?;
+        Ok(Self {
+            store,
+            name,
+            path: Some(path),
+            file: Some(tokio::fs::File::from_std(file)),
+            hasher: Sha256::new(),
+            size: 0,
+            inspection_prefix: Vec::with_capacity(MAX_INSPECTION_PREFIX_BYTES),
+            reservation: Some(AssetReservation {
+                bytes: 0,
+                state: Arc::clone(&store.state),
+                generation: store.generation,
+                released: false,
+            }),
+        })
+    }
+
+    async fn write_chunk(
+        &mut self,
+        chunk: &[u8],
+        budget: &mut RequestBudget,
+    ) -> Result<(), AssetError> {
+        let incoming = u64::try_from(chunk.len()).map_err(|_| AssetError::TooLarge {
+            limit: self.store.limits.max_file_bytes,
+        })?;
+        let size = self
+            .size
+            .checked_add(incoming)
+            .ok_or(AssetError::TooLarge {
+                limit: self.store.limits.max_file_bytes,
+            })?;
+        if size > self.store.limits.max_file_bytes {
+            return Err(AssetError::TooLarge {
+                limit: self.store.limits.max_file_bytes,
+            });
+        }
+        let previous_budget_bytes = budget.bytes;
+        budget.add_bytes(incoming, self.store.limits.max_request_bytes)?;
+        let reservation = self
+            .reservation
+            .as_mut()
+            .ok_or(AssetError::Invariant("asset stager reservation is missing"))?;
+        if let Err(error) = self.store.extend_reservation(reservation, incoming) {
+            budget.bytes = previous_budget_bytes;
+            return Err(error);
+        }
+        let file = self
+            .file
+            .as_mut()
+            .ok_or(AssetError::Invariant("asset staging file is closed"))?;
+        if let Err(error) = file.write_all(chunk).await {
+            budget.bytes = previous_budget_bytes;
+            return Err(AssetError::Store(error));
+        }
+        self.hasher.update(chunk);
+        let prefix_remaining = MAX_INSPECTION_PREFIX_BYTES - self.inspection_prefix.len();
+        self.inspection_prefix
+            .extend_from_slice(&chunk[..chunk.len().min(prefix_remaining)]);
+        self.size = size;
+        Ok(())
+    }
+
+    async fn finish(mut self) -> Result<StagedAsset, AssetError> {
+        let mut file = self
+            .file
+            .take()
+            .ok_or(AssetError::Invariant("asset staging file is closed"))?;
+        file.flush().await?;
+        file.sync_all().await?;
+        drop(file);
+        let inspection = inspect_bytes(&self.inspection_prefix, &self.name)?;
+        let sha256 = format!("{:x}", self.hasher.clone().finalize());
+        Ok(StagedAsset {
+            name: self.name.clone(),
+            sha256,
+            size: self.size,
+            media_type: inspection.media_type,
+            width: inspection.width,
+            height: inspection.height,
+            path: self.path.take(),
+            reservation: self.reservation.take(),
+            state: Arc::clone(&self.store.state),
+            generation: self.store.generation,
+            binding: self.store.binding.clone(),
+            root: self.store.root.clone(),
+        })
+    }
+}
+
+impl Drop for AssetStager<'_> {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        if let Some(path) = self.path.take() {
+            if let Err(error) = remove_file_if_exists(&path) {
+                tracing::warn!(error = %error, "failed to remove asset staging file");
+            }
+        }
     }
 }
 
@@ -1505,6 +2228,53 @@ fn read_file_snapshot(path: &Path, limit: u64) -> Result<FileSnapshot, AssetErro
     read_file_snapshot_with_hook(path, limit, || {})
 }
 
+fn read_file_digest(path: &Path, limit: u64) -> Result<FileDigestSnapshot, AssetError> {
+    let mut file = open_options_no_follow(path, false).map_err(map_missing)?;
+    let before = file.metadata()?;
+    if !before.file_type().is_file() {
+        return Err(AssetError::Missing);
+    }
+    if before.len() > limit {
+        return Err(AssetError::TooLarge { limit });
+    }
+    let before_modified_ns = modified_ns(&before)?;
+    let mut hasher = Sha256::new();
+    let mut inspection_prefix = Vec::with_capacity(MAX_INSPECTION_PREFIX_BYTES);
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let read_u64 = u64::try_from(read).map_err(|_| AssetError::TooLarge { limit })?;
+        size = size
+            .checked_add(read_u64)
+            .ok_or(AssetError::TooLarge { limit })?;
+        if size > limit {
+            return Err(AssetError::TooLarge { limit });
+        }
+        hasher.update(&buffer[..read]);
+        let remaining = MAX_INSPECTION_PREFIX_BYTES - inspection_prefix.len();
+        inspection_prefix.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+    let after = file.metadata()?;
+    if after.len() != before.len()
+        || after.len() != size
+        || modified_ns(&after)? != before_modified_ns
+    {
+        return Err(AssetError::Invalid(
+            "asset object changed while it was being verified".to_string(),
+        ));
+    }
+    Ok(FileDigestSnapshot {
+        sha256: format!("{:x}", hasher.finalize()),
+        inspection_prefix,
+        size,
+        modified_ns: before_modified_ns,
+    })
+}
+
 fn read_file_snapshot_with_hook(
     path: &Path,
     limit: u64,
@@ -1568,6 +2338,39 @@ fn open_options_no_follow(path: &Path, write: bool) -> std::io::Result<File> {
         options.custom_flags(libc::O_NOFOLLOW);
     }
     options.open(path)
+}
+
+fn open_hash_lock_file(path: &Path) -> Result<File, AssetError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(AssetError::Invalid(
+                "asset hash lock path is not a regular file".to_string(),
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(AssetError::Store(error)),
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(AssetError::Invalid(
+            "asset hash lock path is not a regular file".to_string(),
+        ));
+    }
+    set_file_mode(&file)?;
+    Ok(file)
+}
+
+fn lock_hash_file(file: File) -> Result<File, AssetError> {
+    FileExt::lock_exclusive(&file)?;
+    Ok(file)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
