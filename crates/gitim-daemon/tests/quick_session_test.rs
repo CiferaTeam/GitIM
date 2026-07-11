@@ -870,6 +870,7 @@ async fn list_filters_actionability_and_read_pagination() {
                 archived: false,
                 agent_id: Some("bob".to_string()),
                 actionable: true,
+                status: None,
                 limit: Some(1000),
             },
             state.clone(),
@@ -878,6 +879,23 @@ async fn list_filters_actionability_and_read_pagination() {
     );
     assert_eq!(listed.sessions.len(), 1);
     assert_eq!(listed.sessions[0].id, SESSION_ID);
+
+    data::<ClaimQuickSessionTurnResponse>(claim(state.clone(), 1, ATTEMPT_ID, "bob").await);
+    let running: ListQuickSessionsResponse = data(
+        handle_request(
+            Request::ListQuickSessions {
+                archived: false,
+                agent_id: Some("bob".to_string()),
+                actionable: false,
+                status: Some(QuickSessionStatus::Running),
+                limit: Some(100),
+            },
+            state.clone(),
+        )
+        .await,
+    );
+    assert_eq!(running.sessions.len(), 1);
+    assert_eq!(running.sessions[0].id, SESSION_ID);
 
     let page: ReadQuickSessionResponse = data(
         handle_request(

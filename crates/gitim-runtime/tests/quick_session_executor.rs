@@ -39,6 +39,8 @@ enum ProviderAction {
     CompleteAndReset,
     BumpGeneration,
     ReplaceAttempt,
+    CompleteThenFlood,
+    ArchiveThenUnarchive,
 }
 
 #[derive(Default)]
@@ -92,17 +94,20 @@ impl QuickSessionBackend for FakeBackend {
         &self,
         _agent_id: &str,
         actionable: bool,
+        status: Option<QuickSessionStatus>,
     ) -> Result<ListQuickSessionsResponse, String> {
         let guard = self.inner.lock().unwrap();
         let sessions = guard
             .detail
             .iter()
             .filter(|detail| {
-                !actionable
-                    || (matches!(
-                        detail.meta.status,
-                        QuickSessionStatus::NeedsTitle | QuickSessionStatus::Active
-                    ) && detail.meta.last_human_line > detail.meta.last_completed_input_line)
+                status.is_none_or(|status| detail.meta.status == status)
+                    && (!actionable
+                        || (matches!(
+                            detail.meta.status,
+                            QuickSessionStatus::NeedsTitle | QuickSessionStatus::Active
+                        ) && detail.meta.last_human_line
+                            > detail.meta.last_completed_input_line))
             })
             .map(|detail| QuickSessionListItem::from_meta(&detail.meta, detail.archived))
             .collect();
@@ -110,9 +115,26 @@ impl QuickSessionBackend for FakeBackend {
     }
 
     async fn read(&self, _session_id: &str) -> Result<ReadQuickSessionResponse, String> {
-        Ok(ReadQuickSessionResponse {
-            session: self.detail(),
-        })
+        let mut session = self.detail();
+        let drain = session.entries.len().saturating_sub(24);
+        session.entries.drain(..drain);
+        Ok(ReadQuickSessionResponse { session })
+    }
+
+    async fn read_since(
+        &self,
+        _session_id: &str,
+        since: u64,
+        limit: usize,
+    ) -> Result<ReadQuickSessionResponse, String> {
+        let mut session = self.detail();
+        session.entries = session
+            .entries
+            .into_iter()
+            .filter(|entry| entry.line_number() > since)
+            .take(limit)
+            .collect();
+        Ok(ReadQuickSessionResponse { session })
     }
 
     async fn claim(
@@ -153,6 +175,110 @@ impl QuickSessionBackend for FakeBackend {
                 attempt_id: attempt_id.to_string(),
                 error: error.to_string(),
                 now: "2026-07-11T00:00:20Z".to_string(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        Ok(MarkQuickSessionErrorResponse {
+            session_id: session_id.to_string(),
+            status: detail.meta.status,
+            revision: detail.meta.revision,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct CrowdedBackend {
+    completed: Arc<Vec<QuickSessionDetail>>,
+    actionable: QuickSessionDetail,
+    running: Arc<Mutex<QuickSessionDetail>>,
+    mark_error_calls: Arc<Mutex<usize>>,
+}
+
+#[async_trait]
+impl QuickSessionBackend for CrowdedBackend {
+    async fn list(
+        &self,
+        _agent_id: &str,
+        actionable: bool,
+        status: Option<QuickSessionStatus>,
+    ) -> Result<ListQuickSessionsResponse, String> {
+        let sessions = if status == Some(QuickSessionStatus::Running) {
+            vec![QuickSessionListItem::from_meta(
+                &self.running.lock().unwrap().meta,
+                false,
+            )]
+        } else if actionable {
+            vec![QuickSessionListItem::from_meta(
+                &self.actionable.meta,
+                false,
+            )]
+        } else {
+            self.completed
+                .iter()
+                .take(100)
+                .map(|detail| QuickSessionListItem::from_meta(&detail.meta, false))
+                .collect()
+        };
+        Ok(ListQuickSessionsResponse { sessions })
+    }
+
+    async fn read(&self, session_id: &str) -> Result<ReadQuickSessionResponse, String> {
+        let session = if self.actionable.meta.id == session_id {
+            self.actionable.clone()
+        } else if self.running.lock().unwrap().meta.id == session_id {
+            self.running.lock().unwrap().clone()
+        } else {
+            self.completed
+                .iter()
+                .find(|detail| detail.meta.id == session_id)
+                .cloned()
+                .ok_or_else(|| "missing crowded session".to_string())?
+        };
+        Ok(ReadQuickSessionResponse { session })
+    }
+
+    async fn read_since(
+        &self,
+        session_id: &str,
+        since: u64,
+        limit: usize,
+    ) -> Result<ReadQuickSessionResponse, String> {
+        let mut response = self.read(session_id).await?;
+        response.session.entries = response
+            .session
+            .entries
+            .into_iter()
+            .filter(|entry| entry.line_number() > since)
+            .take(limit)
+            .collect();
+        Ok(response)
+    }
+
+    async fn claim(
+        &self,
+        _session_id: &str,
+        _input_line: u64,
+        _attempt_id: &str,
+    ) -> Result<ClaimQuickSessionTurnResponse, String> {
+        Err("claim not expected during recovery".to_string())
+    }
+
+    async fn mark_error(
+        &self,
+        session_id: &str,
+        attempt_id: &str,
+        error: &str,
+    ) -> Result<MarkQuickSessionErrorResponse, String> {
+        *self.mark_error_calls.lock().unwrap() += 1;
+        let mut detail = self.running.lock().unwrap();
+        assert_eq!(detail.meta.id, session_id);
+        apply_quick_session_transition(
+            &mut detail.meta,
+            QuickSessionTransition::MarkError {
+                actor: "bob".to_string(),
+                attempt_id: attempt_id.to_string(),
+                error: error.to_string(),
+                now: "2026-07-11T00:10:00Z".to_string(),
             },
         )
         .map_err(|error| error.to_string())?;
@@ -245,6 +371,16 @@ impl Provider for RecordingProvider {
             let detail = guard.detail.as_mut().unwrap();
             detail.meta.attempt_id = Some("qa-01K00000000000000000000000".to_string());
             detail.meta.revision += 1;
+        } else if matches!(self.action, ProviderAction::ArchiveThenUnarchive) {
+            let mut guard = self.backend.inner.lock().unwrap();
+            let detail = guard.detail.as_mut().unwrap();
+            detail.meta.status = QuickSessionStatus::NeedsTitle;
+            detail.meta.attempt_id = None;
+            detail.meta.processing_input_line = None;
+            detail.meta.processing_started_at = None;
+            detail.meta.archived_at = None;
+            detail.meta.archived_from = None;
+            detail.meta.revision += 2;
         } else {
             if !matches!(self.action, ProviderAction::MissingTitle) {
                 self.backend.transition(QuickSessionTransition::SetTitle {
@@ -291,6 +427,20 @@ impl Provider for RecordingProvider {
                     preview: "done".to_string(),
                     now: "2026-07-11T00:00:15Z".to_string(),
                 });
+                if matches!(self.action, ProviderAction::CompleteThenFlood) {
+                    for index in 0..30 {
+                        let body = format!("queued-{index}");
+                        let line = self.backend.append_message("alice", 0, &body);
+                        self.backend
+                            .transition(QuickSessionTransition::HumanMessage {
+                                actor: "alice".to_string(),
+                                line_number: line,
+                                request_id: Some(format!("flood-{index}")),
+                                preview: body,
+                                now: "2026-07-11T00:00:16Z".to_string(),
+                            });
+                    }
+                }
             }
         }
         let output = if matches!(self.action, ProviderAction::CompleteAndReset) {
@@ -353,6 +503,36 @@ fn initial_detail() -> QuickSessionDetail {
         entries: vec![message(1, 0, "alice", "Check auth")],
         archived: false,
     }
+}
+
+fn completed_detail(index: usize) -> QuickSessionDetail {
+    let id = format!("qs-{index:026}");
+    let mut detail = initial_detail();
+    detail.meta.id = id;
+    detail.meta.title = Some("Completed".to_string());
+    detail.meta.title_source = gitim_core::types::QuickSessionTitleSource::ApiSet;
+    detail.meta.status = QuickSessionStatus::Active;
+    detail.meta.last_completed_attempt_id = Some("qa-01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string());
+    detail.meta.last_completed_input_line = Some(1);
+    detail.meta.last_completed_line = Some(2);
+    detail.entries.push(message(2, 1, "bob", "done"));
+    detail
+}
+
+fn running_detail() -> QuickSessionDetail {
+    let mut detail = initial_detail();
+    detail.meta.id = "qs-01K00000000000000000000000".to_string();
+    apply_quick_session_transition(
+        &mut detail.meta,
+        QuickSessionTransition::Claim {
+            actor: "bob".to_string(),
+            input_line: 1,
+            attempt_id: "qa-01K00000000000000000000000".to_string(),
+            now: "2026-07-11T00:00:02Z".to_string(),
+        },
+    )
+    .unwrap();
+    detail
 }
 
 fn harness(
@@ -468,6 +648,27 @@ async fn prompt_is_bounded_and_names_exact_claim_context() {
 }
 
 #[tokio::test]
+async fn oversized_claimed_message_stays_meaningfully_present_in_bounded_prompt() {
+    let (_temp, backend, factory, executor, _rx) = harness(ProviderAction::Complete, false);
+    let marker = "CLAIMED-CONTENT-MARKER";
+    let body = format!("{marker} {}", "x".repeat(64 * 1024));
+    {
+        let mut guard = backend.inner.lock().unwrap();
+        let detail = guard.detail.as_mut().unwrap();
+        detail.entries = vec![message(1, 0, "alice", &body)];
+        detail.meta.last_message_preview = marker.to_string();
+    }
+
+    executor.execute(SESSION_ID).await.unwrap();
+    let calls = factory.calls.lock().unwrap();
+    let prompt = &calls[0].1;
+    assert!(prompt.contains("L1 @alice:"));
+    assert!(prompt.contains(marker));
+    assert!(prompt.contains("[truncated]"));
+    assert!(prompt.chars().count() <= 12_000);
+}
+
+#[tokio::test]
 async fn title_and_reply_complete_the_claim_and_emit_scoped_events() {
     let (_temp, backend, _factory, executor, mut rx) = harness(ProviderAction::Complete, false);
     let outcome = executor.execute(SESSION_ID).await.unwrap();
@@ -569,6 +770,43 @@ async fn late_attempt_or_generation_is_discarded() {
 }
 
 #[tokio::test]
+async fn completion_verification_survives_more_than_twenty_four_queued_messages() {
+    let (temp, backend, _factory, executor, _rx) =
+        harness(ProviderAction::CompleteThenFlood, false);
+    assert_eq!(
+        executor.execute(SESSION_ID).await.unwrap(),
+        QuickSessionRunOutcome::Completed { requeue: true }
+    );
+    let local = QuickSessionRuntimeState::load(temp.path(), SESSION_ID).unwrap();
+    assert!(local.session_token.is_some());
+    assert_eq!(
+        local.last_completed_line,
+        backend.detail().meta.last_completed_line
+    );
+    assert!(local.session_usage.is_some());
+}
+
+#[tokio::test]
+async fn archive_then_unarchive_discards_late_result_without_state_acceptance() {
+    let (temp, backend, _factory, executor, _rx) =
+        harness(ProviderAction::ArchiveThenUnarchive, false);
+    let original = QuickSessionRuntimeState {
+        session_token: Some("original-token".to_string()),
+        context_generation: 7,
+        ..QuickSessionRuntimeState::default()
+    };
+    original.save(temp.path(), SESSION_ID).unwrap();
+
+    assert_eq!(
+        executor.execute(SESSION_ID).await.unwrap(),
+        QuickSessionRunOutcome::Discarded
+    );
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 0);
+    let local = QuickSessionRuntimeState::load(temp.path(), SESSION_ID).unwrap();
+    assert_eq!(local, original);
+}
+
+#[tokio::test]
 async fn usage_and_reset_change_only_quick_state() {
     let (temp, _backend, _factory, executor, _rx) =
         harness(ProviderAction::CompleteAndReset, false);
@@ -656,4 +894,42 @@ async fn stale_running_claim_becomes_error_without_execution() {
     assert_eq!(backend.detail().meta.status, QuickSessionStatus::Error);
     assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 1);
     assert!(factory.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn recovery_finds_old_actionable_and_running_behind_completed_sessions() {
+    let temp = tempfile::tempdir().unwrap();
+    let fake = FakeBackend::with_detail(initial_detail());
+    let factory = RecordingFactory::new(fake, ProviderAction::Complete, temp.path().to_path_buf());
+    let backend = CrowdedBackend {
+        completed: Arc::new((0..101).map(completed_detail).collect()),
+        actionable: initial_detail(),
+        running: Arc::new(Mutex::new(running_detail())),
+        mark_error_calls: Arc::new(Mutex::new(0)),
+    };
+    let config = QuickSessionExecutorConfig {
+        repo_root: temp.path().join("agent"),
+        workspace_root: temp.path().to_path_buf(),
+        workspace_id: "workspace".to_string(),
+        handler: "bob".to_string(),
+        provider_type: "mock".to_string(),
+        provider_config: ProviderConfig::default(),
+        model: None,
+        effort: None,
+        custom_system_prompt: None,
+        activity_tx: None,
+    };
+    let executor = QuickSessionExecutor::with_dependencies(
+        config,
+        Arc::new(backend.clone()),
+        Arc::new(factory),
+    );
+
+    let recovered = executor.recover_actionable().await.unwrap();
+    assert_eq!(recovered, vec![SESSION_ID.to_string()]);
+    assert_eq!(*backend.mark_error_calls.lock().unwrap(), 1);
+    assert_eq!(
+        backend.running.lock().unwrap().meta.status,
+        QuickSessionStatus::Error
+    );
 }

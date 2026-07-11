@@ -11,6 +11,7 @@ use gitim_core::responses::{
     SendQuickSessionMessageResponse, SetQuickSessionSummaryResponse, SetQuickSessionTitleResponse,
     ToggleCronResponse, UnarchiveQuickSessionResponse,
 };
+use gitim_core::types::QuickSessionStatus;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
@@ -357,11 +358,26 @@ impl GitimClient {
         actionable: bool,
         limit: Option<usize>,
     ) -> Result<ListQuickSessionsResponse, ClientError> {
+        self.list_quick_sessions_filtered(archived, agent_id, actionable, None, limit)
+            .await
+    }
+
+    pub async fn list_quick_sessions_filtered(
+        &self,
+        archived: bool,
+        agent_id: Option<&str>,
+        actionable: bool,
+        status: Option<QuickSessionStatus>,
+        limit: Option<usize>,
+    ) -> Result<ListQuickSessionsResponse, ClientError> {
         let mut params = serde_json::Map::new();
         params.insert("archived".to_string(), json!(archived));
         params.insert("actionable".to_string(), json!(actionable));
         if let Some(agent_id) = agent_id {
             params.insert("agent_id".to_string(), json!(agent_id));
+        }
+        if let Some(status) = status {
+            params.insert("status".to_string(), json!(status));
         }
         if let Some(limit) = limit {
             params.insert("limit".to_string(), json!(limit));
@@ -1217,6 +1233,7 @@ mod tests {
             })
             .unwrap(),
             serde_json::to_value(ListQuickSessionsResponse { sessions: vec![] }).unwrap(),
+            serde_json::to_value(ListQuickSessionsResponse { sessions: vec![] }).unwrap(),
             serde_json::to_value(ReadQuickSessionResponse { session }).unwrap(),
             serde_json::to_value(SendQuickSessionMessageResponse {
                 session_id: meta.id.clone(),
@@ -1315,6 +1332,16 @@ mod tests {
             .await
             .unwrap();
         client
+            .list_quick_sessions_filtered(
+                false,
+                Some("bob"),
+                false,
+                Some(QuickSessionStatus::Running),
+                Some(25),
+            )
+            .await
+            .unwrap();
+        client
             .read_quick_session(session_id, Some(20), Some(4))
             .await
             .unwrap();
@@ -1364,6 +1391,7 @@ mod tests {
             vec![
                 json!({"method":"create_quick_session","session_id":session_id,"agent_id":"bob","first_message":"hello"}),
                 json!({"method":"list_quick_sessions","archived":false,"agent_id":"bob","actionable":true,"limit":25}),
+                json!({"method":"list_quick_sessions","archived":false,"agent_id":"bob","actionable":false,"status":"running","limit":25}),
                 json!({"method":"read_quick_session","session_id":session_id,"limit":20,"since":4}),
                 json!({"method":"send_quick_session_message","session_id":session_id,"body":"reply","reply_to":1,"request_id":"req-1","attempt_id":attempt_id}),
                 json!({"method":"set_quick_session_title","session_id":session_id,"title":"Investigate auth","attempt_id":attempt_id}),

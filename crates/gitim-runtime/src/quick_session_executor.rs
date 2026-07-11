@@ -22,7 +22,8 @@ use crate::state::LastSessionUsage;
 use crate::usage_log::AgentUsageLog;
 
 const TRANSCRIPT_ENTRY_LIMIT: usize = 24;
-const TRANSCRIPT_CHAR_LIMIT: usize = 12_000;
+const PROMPT_CHAR_LIMIT: usize = 12_000;
+const CLAIMED_ENTRY_RESERVE: usize = 2_048;
 const QUICK_SESSION_SCAN_ERROR: &str = "interrupted quick session turn discovered during recovery";
 
 #[async_trait]
@@ -31,8 +32,15 @@ pub trait QuickSessionBackend: Send + Sync {
         &self,
         agent_id: &str,
         actionable: bool,
+        status: Option<QuickSessionStatus>,
     ) -> Result<ListQuickSessionsResponse, String>;
     async fn read(&self, session_id: &str) -> Result<ReadQuickSessionResponse, String>;
+    async fn read_since(
+        &self,
+        session_id: &str,
+        since: u64,
+        limit: usize,
+    ) -> Result<ReadQuickSessionResponse, String>;
     async fn claim(
         &self,
         session_id: &str,
@@ -53,14 +61,26 @@ impl QuickSessionBackend for GitimClient {
         &self,
         agent_id: &str,
         actionable: bool,
+        status: Option<QuickSessionStatus>,
     ) -> Result<ListQuickSessionsResponse, String> {
-        self.list_quick_sessions(false, Some(agent_id), actionable, Some(100))
+        self.list_quick_sessions_filtered(false, Some(agent_id), actionable, status, Some(100))
             .await
             .map_err(|error| error.to_string())
     }
 
     async fn read(&self, session_id: &str) -> Result<ReadQuickSessionResponse, String> {
         self.read_quick_session(session_id, Some(TRANSCRIPT_ENTRY_LIMIT), None)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    async fn read_since(
+        &self,
+        session_id: &str,
+        since: u64,
+        limit: usize,
+    ) -> Result<ReadQuickSessionResponse, String> {
+        self.read_quick_session(session_id, Some(limit), Some(since))
             .await
             .map_err(|error| error.to_string())
     }
@@ -156,48 +176,48 @@ impl QuickSessionExecutor {
     }
 
     pub async fn recover_actionable(&self) -> Result<Vec<String>, RuntimeError> {
-        let sessions = self
+        let actionable_sessions = self
             .backend
-            .list(&self.config.handler, false)
+            .list(&self.config.handler, true, None)
             .await
             .map_err(provider_error)?;
-        let mut actionable = Vec::new();
-        for session in sessions.sessions {
-            if session.status == QuickSessionStatus::Running {
-                let detail = self
-                    .backend
-                    .read(&session.id)
-                    .await
-                    .map_err(provider_error)?
-                    .session;
-                if let Some(attempt_id) = detail.meta.attempt_id.as_deref() {
-                    if !self
-                        .mark_claim_error(&session.id, attempt_id, QUICK_SESSION_SCAN_ERROR)
-                        .await?
-                    {
-                        continue;
-                    }
-                    let recovered = self
-                        .backend
-                        .read(&session.id)
-                        .await
-                        .map_err(provider_error)?
-                        .session;
-                    if is_actionable(&recovered, &self.config.handler) {
-                        actionable.push(session.id);
-                    }
+        let mut actionable: Vec<String> = actionable_sessions
+            .sessions
+            .into_iter()
+            .map(|session| session.id)
+            .collect();
+        let running_sessions = self
+            .backend
+            .list(
+                &self.config.handler,
+                false,
+                Some(QuickSessionStatus::Running),
+            )
+            .await
+            .map_err(provider_error)?;
+        for session in running_sessions.sessions {
+            let detail = self
+                .backend
+                .read(&session.id)
+                .await
+                .map_err(provider_error)?
+                .session;
+            if let Some(attempt_id) = detail.meta.attempt_id.as_deref() {
+                if !self
+                    .mark_claim_error(&session.id, attempt_id, QUICK_SESSION_SCAN_ERROR)
+                    .await?
+                {
+                    continue;
                 }
-            } else if matches!(
-                session.status,
-                QuickSessionStatus::NeedsTitle | QuickSessionStatus::Active
-            ) {
-                let detail = self
+                let recovered = self
                     .backend
                     .read(&session.id)
                     .await
                     .map_err(provider_error)?
                     .session;
-                if is_actionable(&detail, &self.config.handler) {
+                if is_actionable(&recovered, &self.config.handler)
+                    && !actionable.contains(&session.id)
+                {
                     actionable.push(session.id);
                 }
             }
@@ -218,6 +238,28 @@ impl QuickSessionExecutor {
         let input_line = latest_creator_line(&before).ok_or_else(|| {
             RuntimeError::ProviderFailed("quick session has no creator input".to_string())
         })?;
+        let mut prompt_detail = before.clone();
+        if !prompt_detail
+            .entries
+            .iter()
+            .any(|entry| entry.line_number() == input_line)
+        {
+            let claimed = self
+                .backend
+                .read_since(session_id, input_line.saturating_sub(1), 1)
+                .await
+                .map_err(provider_error)?
+                .session
+                .entries
+                .into_iter()
+                .find(|entry| entry.line_number() == input_line)
+                .ok_or_else(|| {
+                    RuntimeError::ProviderFailed(
+                        "quick session claimed input is missing from transcript".to_string(),
+                    )
+                })?;
+            prompt_detail.entries.push(claimed);
+        }
         let attempt_id = generate_attempt_id();
         let claim = self
             .backend
@@ -225,7 +267,9 @@ impl QuickSessionExecutor {
             .await
             .map_err(provider_error)?;
 
-        let mut local = QuickSessionRuntimeState::load(&self.config.workspace_root, session_id)?;
+        let original_local =
+            QuickSessionRuntimeState::load(&self.config.workspace_root, session_id)?;
+        let mut local = original_local.clone();
         local.last_attempted_line = Some(input_line);
         local.save(&self.config.workspace_root, session_id)?;
         let captured_generation = local.context_generation;
@@ -248,7 +292,7 @@ impl QuickSessionExecutor {
         let self_managed = provider.self_managed_context();
         let cold_start = local.session_token.is_none();
         let prompt = build_quick_session_prompt(
-            &before,
+            &prompt_detail,
             &attempt_id,
             input_line,
             local.reset_required && !self_managed,
@@ -378,31 +422,47 @@ impl QuickSessionExecutor {
             .await
             .map_err(provider_error)?
             .session;
+        let owns_active_attempt = after.meta.status == QuickSessionStatus::Running
+            && after.meta.attempt_id.as_deref() == Some(&attempt_id);
+        let owns_completed_attempt =
+            after.meta.last_completed_attempt_id.as_deref() == Some(&attempt_id);
         if after.archived
             || after.meta.status == QuickSessionStatus::Archived
-            || after
-                .meta
-                .attempt_id
-                .as_deref()
-                .is_some_and(|active| active != attempt_id)
-            || after
-                .meta
-                .last_completed_attempt_id
-                .as_deref()
-                .is_some_and(|completed| completed != attempt_id)
+            || (!owns_active_attempt && !owns_completed_attempt)
         {
+            original_local.save(&self.config.workspace_root, session_id)?;
             return Ok(QuickSessionRunOutcome::Discarded);
         }
 
+        let completed_entry = match after.meta.last_completed_line {
+            Some(line)
+                if after
+                    .entries
+                    .iter()
+                    .any(|entry| entry.line_number() == line) =>
+            {
+                after
+                    .entries
+                    .iter()
+                    .find(|entry| entry.line_number() == line)
+                    .cloned()
+            }
+            Some(line) => self
+                .backend
+                .read_since(session_id, line.saturating_sub(1), 1)
+                .await
+                .map_err(provider_error)?
+                .session
+                .entries
+                .into_iter()
+                .find(|entry| entry.line_number() == line),
+            None => None,
+        };
         let completed = after.meta.title.is_some()
-            && after.meta.last_completed_attempt_id.as_deref() == Some(&attempt_id)
+            && owns_completed_attempt
             && after.meta.last_completed_input_line == Some(input_line)
-            && after.meta.last_completed_line.is_some_and(|line| {
-                after.entries.iter().any(|entry| {
-                    entry.line_number() == line
-                        && entry.author().as_str() == self.config.handler
-                        && entry.point_to() == input_line
-                })
+            && completed_entry.is_some_and(|entry| {
+                entry.author().as_str() == self.config.handler && entry.point_to() == input_line
             });
         let summary_updated = after.meta.summary.is_some()
             && after.meta.summary_updated_at != before.meta.summary_updated_at;
@@ -679,35 +739,12 @@ fn build_quick_session_prompt(
 ) -> String {
     let title = detail.meta.title.as_deref().unwrap_or("(unset)");
     let summary = detail.meta.summary.as_deref().unwrap_or("(none)");
-    let mut transcript = String::new();
-    for entry in detail
-        .entries
-        .iter()
-        .rev()
-        .take(TRANSCRIPT_ENTRY_LIMIT)
-        .rev()
-    {
-        let body = match entry {
-            ThreadEntry::Message(message) => &message.body,
-            ThreadEntry::Event(_) => continue,
-        };
-        let line = format!(
-            "L{} @{}: {}\n",
-            entry.line_number(),
-            entry.author().as_str(),
-            body
-        );
-        if transcript.chars().count() + line.chars().count() > TRANSCRIPT_CHAR_LIMIT {
-            break;
-        }
-        transcript.push_str(&line);
-    }
     let reset = if reset_required {
         "\nContext handoff required: update the durable summary with `gitim session summarize`, then emit [[RESET]].\n"
     } else {
         ""
     };
-    format!(
+    let mut prompt = format!(
         "Quick Session execution claim\n\
          Session id: {}\n\
          Ref: session:{}\n\
@@ -720,7 +757,7 @@ fn build_quick_session_prompt(
          gitim session title {} <title> --attempt-id {}\n\
          gitim session send {} --stdin --reply-to {} --attempt-id {}\n\
          gitim session summarize {} --stdin --attempt-id {}\n\
-         \nBounded transcript:\n{}",
+         \nBounded transcript (newest first):\n",
         detail.meta.id,
         detail.meta.id,
         attempt_id,
@@ -735,8 +772,67 @@ fn build_quick_session_prompt(
         attempt_id,
         detail.meta.id,
         attempt_id,
-        transcript
-    )
+    );
+    let mut remaining = PROMPT_CHAR_LIMIT.saturating_sub(prompt.chars().count());
+    let mut newest: Vec<&ThreadEntry> = detail.entries.iter().collect();
+    newest.sort_by_key(|entry| std::cmp::Reverse(entry.line_number()));
+    let claimed_entry = newest
+        .iter()
+        .find(|entry| entry.line_number() == input_line)
+        .copied();
+    let mut selected: Vec<&ThreadEntry> = newest.into_iter().take(TRANSCRIPT_ENTRY_LIMIT).collect();
+    if let Some(claimed_entry) = claimed_entry {
+        if !selected
+            .iter()
+            .any(|entry| entry.line_number() == input_line)
+        {
+            selected.push(claimed_entry);
+            selected.sort_by_key(|entry| std::cmp::Reverse(entry.line_number()));
+        }
+    }
+    let claimed_is_present = claimed_entry.is_some();
+    let mut claimed_rendered = false;
+    for entry in selected {
+        if matches!(entry, ThreadEntry::Event(_)) {
+            continue;
+        }
+        let is_claimed = entry.line_number() == input_line;
+        let reserve = if claimed_is_present && !claimed_rendered && !is_claimed {
+            CLAIMED_ENTRY_RESERVE.min(remaining)
+        } else {
+            0
+        };
+        let allowance = remaining.saturating_sub(reserve);
+        let Some(rendered) = render_bounded_entry(entry, allowance) else {
+            continue;
+        };
+        remaining = remaining.saturating_sub(rendered.chars().count());
+        prompt.push_str(&rendered);
+        claimed_rendered |= is_claimed;
+        if remaining == 0 {
+            break;
+        }
+    }
+    prompt
+}
+
+fn render_bounded_entry(entry: &ThreadEntry, allowance: usize) -> Option<String> {
+    const TRUNCATED: &str = " … [truncated]\n";
+    let ThreadEntry::Message(message) = entry else {
+        return None;
+    };
+    let prefix = format!("L{} @{}: ", entry.line_number(), entry.author().as_str());
+    let full_len = prefix.chars().count() + message.body.chars().count() + 1;
+    if full_len <= allowance {
+        return Some(format!("{prefix}{}\n", message.body));
+    }
+    let fixed = prefix.chars().count() + TRUNCATED.chars().count();
+    if allowance <= fixed {
+        return None;
+    }
+    let body_budget = allowance - fixed;
+    let body: String = message.body.chars().take(body_budget).collect();
+    Some(format!("{prefix}{body}{TRUNCATED}"))
 }
 
 fn normalize_usage(

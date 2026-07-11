@@ -1,4 +1,5 @@
 use gitim_core::auth_payload::AuthPayload;
+use gitim_core::types::QuickSessionStatus;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
@@ -195,6 +196,8 @@ pub enum Request {
         agent_id: Option<String>,
         #[serde(default)]
         actionable: bool,
+        #[serde(default)]
+        status: Option<QuickSessionStatus>,
         #[serde(default)]
         limit: Option<usize>,
     },
@@ -738,6 +741,24 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_quick_sessions_status_filter_is_additive_and_defaults_to_none() {
+        let filtered: Request =
+            serde_json::from_str(r#"{"method":"list_quick_sessions","status":"running"}"#).unwrap();
+        match filtered {
+            Request::ListQuickSessions { status, .. } => {
+                assert_eq!(status, Some(gitim_core::types::QuickSessionStatus::Running));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let legacy: Request = serde_json::from_str(r#"{"method":"list_quick_sessions"}"#).unwrap();
+        match legacy {
+            Request::ListQuickSessions { status, .. } => assert_eq!(status, None),
+            _ => panic!("wrong variant"),
+        }
+    }
 
     // Request deserialization tests: Request only derives Deserialize (wire format comes in as JSON).
     // We construct the JSON string directly (as clients would send it) and verify deserialization.

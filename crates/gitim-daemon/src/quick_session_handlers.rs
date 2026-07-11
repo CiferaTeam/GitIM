@@ -442,6 +442,7 @@ pub async fn handle_list_quick_sessions(
     archived: bool,
     agent_id: Option<String>,
     actionable: bool,
+    status: Option<QuickSessionStatus>,
     limit: Option<usize>,
 ) -> Response {
     if let Some(agent_id) = agent_id.as_deref() {
@@ -476,6 +477,9 @@ pub async fn handle_list_quick_sessions(
                 .as_deref()
                 .is_some_and(|agent| agent != meta.agent_id)
             {
+                continue;
+            }
+            if status.is_some_and(|status| status != meta.status) {
                 continue;
             }
             if actionable {

@@ -333,10 +333,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             archived,
             agent_id,
             actionable,
+            status,
             limit,
         } => {
             crate::quick_session_handlers::handle_list_quick_sessions(
-                state, archived, agent_id, actionable, limit,
+                state, archived, agent_id, actionable, status, limit,
             )
             .await
         }
