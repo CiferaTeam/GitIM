@@ -1571,7 +1571,7 @@ async fn verified_exact_origin_wins_endpoint_dedup_over_earlier_legacy_alias() {
 #[tokio::test(start_paused = true)]
 #[serial(home_env)]
 #[cfg(feature = "test-support")]
-async fn fast_positive_fallback_starts_get_before_slow_head_batch_drains() {
+async fn deterministic_head_window_drains_before_sorted_get() {
     let fast = MockPeer::spawn(FALLBACK_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
     let stalled = MockPeer::spawn(
         "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
