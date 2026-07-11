@@ -1607,6 +1607,126 @@ async fn owned_workspace_finalizer_panic_returns_500_after_complete_rollback() {
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial(http_workspaces_home)]
+async fn finalizer_rollback_waits_for_asset_leases_before_atomic_cleanup() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("lease-safe-rollback");
+    std::fs::create_dir(&workspace).unwrap();
+    let canonical = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+    let activation_reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let activation_resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    assets.inject_after_activation_pause(
+        std::sync::Arc::clone(&activation_reached),
+        std::sync::Arc::clone(&activation_resume),
+    );
+    let deactivation_attempted = std::sync::Arc::new(std::sync::Barrier::new(2));
+    assets.inject_deactivate_attempt(std::sync::Arc::clone(&deactivation_attempted));
+    assets.set_after_config_write_hook(std::sync::Arc::new(|| {
+        panic!("injected lease-safe finalizer panic");
+    }));
+
+    let mut request = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "lease-safe-rollback",
+            "git": { "provider": "local" },
+        })),
+    ));
+    activation_reached.wait().await;
+    let (token, binding) = {
+        let runtime = state.lock().unwrap();
+        let context = &runtime.workspaces["lease-safe-rollback"];
+        let config = context.git_config.as_ref().unwrap();
+        (
+            context.asset_token.clone(),
+            format!("local:{}", config.created_at),
+        )
+    };
+    let store = assets
+        .open_registered_store(&canonical, &binding, &token)
+        .unwrap();
+    let staged = store
+        .stage_bytes("rollback.bin", b"rollback-lease")
+        .await
+        .unwrap();
+    activation_resume.wait().await;
+    tokio::task::spawn_blocking(move || deactivation_attempted.wait())
+        .await
+        .unwrap();
+
+    let early = tokio::time::timeout(std::time::Duration::from_secs(1), &mut request).await;
+    let rollback_waited = early.is_err();
+    let context_remained = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get("lease-safe-rollback")
+        .is_some_and(|context| context.asset_token == token);
+    let config_remained = gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .any(|entry| entry.slug == "lease-safe-rollback");
+    drop(staged);
+    let (status, _body) = match early {
+        Ok(result) => result.unwrap(),
+        Err(_) => request.await.unwrap(),
+    };
+
+    assert!(
+        rollback_waited,
+        "rollback completed while an asset lease was live"
+    );
+    assert!(
+        context_remained,
+        "rollback removed its reachable context before teardown"
+    );
+    assert!(
+        config_remained,
+        "rollback removed durable config before teardown"
+    );
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!state
+        .lock()
+        .unwrap()
+        .workspaces
+        .contains_key("lease-safe-rollback"));
+    assert!(gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .all(|entry| entry.slug != "lease-safe-rollback"));
+    assert!(!canonical.join(".gitim-runtime").exists());
+    assert!(assets.health_snapshot(&canonical).is_none());
+    assert_eq!(assets.lifecycle_registry_entries(), (0, 0));
+
+    let (recreate_status, recreate_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "lease-safe-rollback",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(recreate_status, StatusCode::CREATED, "{recreate_body}");
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/lease-safe-rollback", None,)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
 async fn rollback_never_cleans_a_canonical_workspace_owned_by_a_different_token() {
     ensure_daemon_in_path();
     let _home = HomeGuard::install();
@@ -1787,6 +1907,73 @@ async fn repeated_registered_open_and_delete_cycles_leave_both_registries_empty(
         assert!(runtime.workspaces.is_empty());
         assert_eq!(runtime.workspace_transitions.live_entries(), 0);
         drop(runtime);
+        assert_eq!(assets.lifecycle_registry_entries(), (0, 0));
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn registered_open_waiters_do_not_retain_dead_path_indexes_after_delete() {
+    let _home = HomeGuard::install();
+    let root = short_tempdir();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+
+    for index in 0..16 {
+        let slug = format!("waiter-cycle-{index}");
+        let workspace = root.path().join(&slug);
+        std::fs::create_dir(&workspace).unwrap();
+        let canonical = workspace.canonicalize().unwrap();
+        let binding = format!("local:{index}");
+        let transition = state.lock().unwrap().workspace_transitions.slot(&canonical);
+        let mut context = WorkspaceContext::new(slug.clone(), slug.clone(), canonical.clone());
+        context.transition = transition;
+        let token = context.asset_token.clone();
+        let store = assets
+            .activate_workspace(&canonical, binding.clone(), &token)
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .insert(slug.clone(), context);
+
+        let transition_reached = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let transition_resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+        store.inject_persistence_transition_pause(
+            std::sync::Arc::clone(&transition_reached),
+            std::sync::Arc::clone(&transition_resume),
+        );
+        let delete_router = router.clone();
+        let delete_uri = format!("/workspaces/{slug}");
+        let delete =
+            tokio::spawn(async move { send(delete_router, "DELETE", &delete_uri, None).await });
+        tokio::task::spawn_blocking(move || transition_reached.wait())
+            .await
+            .unwrap();
+
+        let waiter_attempted = std::sync::Arc::new(std::sync::Barrier::new(2));
+        assets.inject_registered_open_wait_attempt(std::sync::Arc::clone(&waiter_attempted));
+        let waiter_assets = std::sync::Arc::clone(&assets);
+        let waiter_path = canonical.clone();
+        let waiter_binding = binding.clone();
+        let waiter_token = token.clone();
+        let waiter = tokio::task::spawn_blocking(move || {
+            waiter_assets.open_registered_store(&waiter_path, &waiter_binding, &waiter_token)
+        });
+        tokio::task::spawn_blocking(move || waiter_attempted.wait())
+            .await
+            .unwrap();
+
+        tokio::task::spawn_blocking(move || transition_resume.wait())
+            .await
+            .unwrap();
+        assert_eq!(delete.await.unwrap().0, StatusCode::OK);
+        assert!(matches!(
+            waiter.await.unwrap(),
+            Err(gitim_runtime::assets::AssetError::StaleBinding)
+        ));
         assert_eq!(assets.lifecycle_registry_entries(), (0, 0));
     }
 }

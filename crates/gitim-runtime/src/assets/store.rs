@@ -304,6 +304,8 @@ pub struct AssetService {
     #[cfg(feature = "test-support")]
     registered_open_attempt: Mutex<Option<Arc<Barrier>>>,
     #[cfg(feature = "test-support")]
+    registered_open_wait_attempt: Mutex<Option<Arc<Barrier>>>,
+    #[cfg(feature = "test-support")]
     activation_wait_attempt: Mutex<Option<Arc<Barrier>>>,
     #[cfg(feature = "test-support")]
     fail_after_activation_transition: AtomicBool,
@@ -407,6 +409,8 @@ impl AssetService {
             deactivation_transition_pause: Mutex::new(None),
             #[cfg(feature = "test-support")]
             registered_open_attempt: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            registered_open_wait_attempt: Mutex::new(None),
             #[cfg(feature = "test-support")]
             activation_wait_attempt: Mutex::new(None),
             #[cfg(feature = "test-support")]
@@ -727,31 +731,41 @@ impl AssetService {
         let slot = self
             .lifecycle_slot_for_token(token)
             .ok_or(AssetError::StaleBinding)?;
-        let registered = {
-            let mut lifecycle = lock(&slot.transition);
-            while lifecycle.deactivating {
-                lifecycle = wait_condvar(&slot.changed, lifecycle);
+        let result = (|| {
+            let registered = {
+                let mut lifecycle = lock(&slot.transition);
+                while lifecycle.deactivating {
+                    #[cfg(feature = "test-support")]
+                    if let Some(attempted) = lock(&self.registered_open_wait_attempt).take() {
+                        attempted.wait();
+                    }
+                    lifecycle = wait_condvar(&slot.changed, lifecycle);
+                }
+                lifecycle
+                    .active
+                    .as_ref()
+                    .filter(|registered| {
+                        registered.token.id == token.id
+                            && registered.requested_root == canonical_root
+                            && registered.binding == binding
+                    })
+                    .cloned()
+                    .ok_or(AssetError::StaleBinding)?
+            };
+            if token.is_revoked() {
+                return Err(AssetError::StaleBinding);
             }
-            lifecycle
-                .active
-                .as_ref()
-                .filter(|registered| {
-                    registered.token.id == token.id
-                        && registered.requested_root == canonical_root
-                        && registered.binding == binding
-                })
-                .cloned()
-                .ok_or(AssetError::StaleBinding)?
-        };
-        if token.is_revoked() {
-            return Err(AssetError::StaleBinding);
+            let _operation = read_lock(&registered.store.state.operation_gate);
+            registered.store.validate_generation()?;
+            if token.is_revoked() {
+                return Err(AssetError::StaleBinding);
+            }
+            Ok(registered.store.clone())
+        })();
+        if result.is_err() {
+            self.prune_lifecycle_slot_after_transition(slot);
         }
-        let _operation = read_lock(&registered.store.state.operation_gate);
-        registered.store.validate_generation()?;
-        if token.is_revoked() {
-            return Err(AssetError::StaleBinding);
-        }
-        Ok(registered.store.clone())
+        result
     }
 
     pub async fn deactivate_workspace(
@@ -886,6 +900,12 @@ impl AssetService {
     #[doc(hidden)]
     pub fn inject_registered_open_attempt(&self, attempted: Arc<Barrier>) {
         *lock(&self.registered_open_attempt) = Some(attempted);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_registered_open_wait_attempt(&self, attempted: Arc<Barrier>) {
+        *lock(&self.registered_open_wait_attempt) = Some(attempted);
     }
 
     #[cfg(feature = "test-support")]

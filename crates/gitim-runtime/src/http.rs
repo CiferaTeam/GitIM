@@ -5831,40 +5831,57 @@ impl Drop for WorkspaceInitializationGuard {
     }
 }
 
-fn rollback_workspace_creation(
+async fn rollback_workspace_creation(
     state: &SharedRuntimeState,
     slug: &str,
     workspace: &Path,
     expected_token: &crate::assets::AssetWorkspaceToken,
 ) {
-    let (assets, removed_exact_token) = {
-        let mut runtime = crate::preconditions::arc_mutex_lock(state);
-        let assets = Arc::clone(&runtime.assets);
-        let exact_token = runtime
+    let (assets, owns_context) = {
+        let runtime = crate::preconditions::arc_mutex_lock(state);
+        (
+            Arc::clone(&runtime.assets),
+            runtime
+                .workspaces
+                .get(slug)
+                .is_some_and(|context| context.asset_token == *expected_token),
+        )
+    };
+
+    if let Err(error) = assets.deactivate_workspace(expected_token).await {
+        assets.record_store_failure(slug, &error);
+        tracing::error!(slug, error = %error, "failed to deactivate rolled-back asset store");
+        return;
+    }
+
+    let still_owns_context = owns_context
+        && crate::preconditions::arc_mutex_lock(state)
             .workspaces
             .get(slug)
             .is_some_and(|context| context.asset_token == *expected_token);
-        let removed_exact_token = exact_token && runtime.workspaces.remove(slug).is_some();
-        (assets, removed_exact_token)
-    };
-    if removed_exact_token {
+    if still_owns_context {
         #[cfg(feature = "test-support")]
         assets.wait_before_rollback_config();
         if let Err(error) = crate::user_config::mutate(|config| {
             remove_workspace_config_entry(config, slug, workspace)
         }) {
-            tracing::warn!(slug, error = %error, "failed to remove rolled-back workspace config");
+            tracing::error!(slug, error = %error, "failed to remove rolled-back workspace config");
+            return;
         }
     }
-    if let Err(error) = assets.try_deactivate_workspace(expected_token) {
-        tracing::warn!(slug, error = %error, "failed to deactivate rolled-back asset store");
-    }
-    let owned_by_another_token = {
-        let runtime = crate::preconditions::arc_mutex_lock(state);
-        runtime
+
+    let (removed_exact_token, owned_by_another_token) = {
+        let mut runtime = crate::preconditions::arc_mutex_lock(state);
+        let removed_exact_token = runtime
+            .workspaces
+            .get(slug)
+            .is_some_and(|context| context.asset_token == *expected_token)
+            && runtime.workspaces.remove(slug).is_some();
+        let owned_by_another_token = runtime
             .workspaces
             .values()
-            .any(|context| context.path == workspace && context.asset_token != *expected_token)
+            .any(|context| context.path == workspace && context.asset_token != *expected_token);
+        (removed_exact_token, owned_by_another_token)
     };
     if removed_exact_token && !owned_by_another_token {
         cleanup_partial_workspace(workspace);
@@ -6312,7 +6329,8 @@ async fn workspaces_create(
                                 &slug,
                                 &workspace,
                                 &inner_asset_token,
-                            );
+                            )
+                            .await;
                             return (
                                 StatusCode::BAD_REQUEST,
                                 Json(ErrorBody::with_code(
@@ -6331,7 +6349,8 @@ async fn workspaces_create(
                                 &slug,
                                 &workspace,
                                 &inner_asset_token,
-                            );
+                            )
+                            .await;
                             return (
                                 StatusCode::BAD_REQUEST,
                                 Json(ErrorBody::with_code(
@@ -6345,7 +6364,8 @@ async fn workspaces_create(
                     provision_github_workspace(&state, &workspace, remote_url, token).await
                 }
                 other => {
-                    rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
+                    rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token)
+                        .await;
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorBody::with_code(
@@ -6360,7 +6380,8 @@ async fn workspaces_create(
             let (human_dir, config) = match provisioned {
                 Ok(x) => x,
                 Err((error_code, message)) => {
-                    rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
+                    rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token)
+                        .await;
                     // All provisioning failures surface as 400: they're all "your input
                     // or environment caused this" (bad token, bad URL, clone failed).
                     // None are 500-class — the runtime itself is still fine.
@@ -6387,7 +6408,7 @@ async fn workspaces_create(
                 }
             };
             if !placeholder_updated {
-                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
+                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token).await;
                 return (
                     StatusCode::CONFLICT,
                     Json(ErrorBody::with_code(
@@ -6411,7 +6432,7 @@ async fn workspaces_create(
             .await
             {
                 assets.record_store_failure(&slug, &error);
-                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
+                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token).await;
                 return (
                     error.status_code(),
                     Json(ErrorBody::with_code(
@@ -6432,7 +6453,7 @@ async fn workspaces_create(
             };
             if let Err(e) = crate::user_config::mutate(|config| config.upsert(workspace_entry)) {
                 tracing::error!(slug = %slug, error = %e, "failed to persist workspace entry");
-                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
+                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token).await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorBody::with_code(
@@ -6478,7 +6499,8 @@ async fn workspaces_create(
                     &supervisor_slug,
                     &supervisor_workspace,
                     &supervisor_asset_token,
-                );
+                )
+                .await;
                 tracing::error!(slug = %supervisor_slug, error = %error, "workspace finalization task failed");
                 let asset_error =
                     AssetError::Invariant("workspace finalization task failed unexpectedly");
@@ -6510,7 +6532,8 @@ async fn workspaces_create(
                 &join_slug,
                 &join_workspace,
                 &join_asset_token,
-            );
+            )
+            .await;
             join_initialization.finish();
             tracing::error!(slug = %join_slug, error = %error, "workspace finalization supervisor failed");
             let asset_error =

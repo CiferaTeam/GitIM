@@ -915,6 +915,13 @@ fn snapshot_workspace(
             message: "unknown workspace",
         });
     };
+    if workspace.initialization.is_some() {
+        return Err(WorkspaceSnapshotError {
+            status: StatusCode::CONFLICT,
+            error_code: "workspace_not_initialized",
+            message: "workspace is still initializing",
+        });
+    }
     let Some(config) = workspace.git_config.as_ref() else {
         return Err(WorkspaceSnapshotError {
             status: StatusCode::CONFLICT,

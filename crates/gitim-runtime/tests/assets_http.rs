@@ -12,6 +12,7 @@ use gitim_runtime::http::recover_from_config;
 use gitim_runtime::http::{create_router, SharedRuntimeState};
 use gitim_runtime::user_config::{UserConfig, WorkspaceEntry};
 use gitim_runtime::workspace::WorkspaceContext;
+use gitim_runtime::workspace::WorkspaceInitialization;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use serial_test::serial;
@@ -243,6 +244,67 @@ async fn malicious_origin_is_rejected_before_upload_body_is_consumed() {
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert!(!polled.load(Ordering::Acquire));
+    assert!(object_files(fixture.workspace.path()).is_empty());
+}
+
+#[tokio::test]
+async fn initializing_workspace_rejects_every_asset_route_before_body_poll() {
+    let fixture = fixture();
+    fixture
+        .state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get_mut("room")
+        .unwrap()
+        .initialization = Some(Arc::new(WorkspaceInitialization::new()));
+    let polled = Arc::new(AtomicBool::new(false));
+    let body_polled = Arc::clone(&polled);
+    let bytes = multipart_body(&[("file", "pending.bin", "text/plain", b"pending")]);
+    let stream = stream::once(async move {
+        body_polled.store(true, Ordering::Release);
+        Ok::<Bytes, std::io::Error>(Bytes::from(bytes))
+    });
+    let mut request = upload_request_with_body(Body::from_stream(stream));
+    request
+        .headers_mut()
+        .insert(header::ORIGIN, "https://gitim.io".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("sec-fetch-site", "cross-site".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("sec-fetch-mode", "cors".parse().unwrap());
+    request
+        .headers_mut()
+        .insert("sec-fetch-dest", "empty".parse().unwrap());
+    let response = fixture.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response_json(response).await["error_code"],
+        "workspace_not_initialized"
+    );
+    assert!(!polled.load(Ordering::Acquire));
+
+    for uri in [
+        format!(
+            "/workspaces/room/assets/resolve/{RUNTIME_ID}/{}",
+            "a".repeat(64)
+        ),
+        format!("/workspaces/room/assets/objects/{}", "a".repeat(64)),
+    ] {
+        let response = fixture
+            .app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response_json(response).await["error_code"],
+            "workspace_not_initialized"
+        );
+    }
     assert!(object_files(fixture.workspace.path()).is_empty());
 }
 
