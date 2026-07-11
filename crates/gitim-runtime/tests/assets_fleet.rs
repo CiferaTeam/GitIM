@@ -109,6 +109,16 @@ struct MockPeer {
     task: tokio::task::JoinHandle<()>,
 }
 
+struct PathAwareStoreState {
+    requests: Mutex<Vec<String>>,
+}
+
+struct PathAwareStorePeer {
+    base_url: String,
+    state: Arc<PathAwareStoreState>,
+    task: tokio::task::JoinHandle<()>,
+}
+
 struct StalledHealthState {
     requests: AtomicUsize,
     inflight: AtomicUsize,
@@ -239,6 +249,67 @@ impl MockPeer {
 impl Drop for MockPeer {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+impl PathAwareStorePeer {
+    async fn spawn() -> Self {
+        let state = Arc::new(PathAwareStoreState {
+            requests: Mutex::new(Vec::new()),
+        });
+        let app = Router::new()
+            .route("/health", get(path_aware_store_health))
+            .route(
+                "/workspaces/{slug}/assets/objects/{hash}",
+                get(path_aware_store_object),
+            )
+            .with_state(Arc::clone(&state));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            state,
+            task,
+        }
+    }
+
+    fn requests(&self) -> Vec<String> {
+        self.state.requests.lock().unwrap().clone()
+    }
+}
+
+impl Drop for PathAwareStorePeer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn path_aware_store_health() -> axum::Json<Value> {
+    axum::Json(serde_json::json!({
+        "service": "gitim-runtime",
+        "runtime_id": ORIGIN_RUNTIME_ID,
+    }))
+}
+
+async fn path_aware_store_object(
+    State(state): State<Arc<PathAwareStoreState>>,
+    AxumPath((slug, hash)): AxumPath<(String, String)>,
+) -> Response {
+    state
+        .requests
+        .lock()
+        .unwrap()
+        .push(format!("/workspaces/{slug}/assets/objects/{hash}"));
+    if slug == "store-b" {
+        object_response(&hash, PNG_1X1.to_vec(), false)
+    } else {
+        Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Body::empty())
+            .unwrap()
     }
 }
 
@@ -748,13 +819,12 @@ async fn remote_get_verifies_persists_and_survives_origin_shutdown() {
 
 #[tokio::test]
 async fn exact_origin_tries_distinct_remote_stores_and_deduplicates_identical_endpoints() {
-    let missing = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Missing).await;
-    let object = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let peer = PathAwareStorePeer::spawn().await;
     let fixture = fixture();
     add_peer_mapping_url(
         &fixture,
         "a-duplicate",
-        &missing.base_url,
+        &peer.base_url,
         Some(ORIGIN_RUNTIME_ID),
         WORKSPACE_IDENTITY,
         "store-a",
@@ -762,7 +832,7 @@ async fn exact_origin_tries_distinct_remote_stores_and_deduplicates_identical_en
     add_peer_mapping_url(
         &fixture,
         "b-missing",
-        &missing.base_url,
+        &peer.base_url,
         Some(ORIGIN_RUNTIME_ID),
         WORKSPACE_IDENTITY,
         "store-a",
@@ -770,7 +840,7 @@ async fn exact_origin_tries_distinct_remote_stores_and_deduplicates_identical_en
     add_peer_mapping_url(
         &fixture,
         "c-object",
-        &object.base_url,
+        &peer.base_url,
         Some(ORIGIN_RUNTIME_ID),
         WORKSPACE_IDENTITY,
         "store-b",
@@ -788,9 +858,14 @@ async fn exact_origin_tries_distinct_remote_stores_and_deduplicates_identical_en
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response_bytes(response).await.as_ref(), PNG_1X1);
-    assert_eq!(missing.object_gets(), 1);
-    assert_eq!(object.object_gets(), 1);
-    assert_eq!(object.observed_slug().as_deref(), Some("store-b"));
+    let hash = sha256(PNG_1X1);
+    assert_eq!(
+        peer.requests(),
+        vec![
+            format!("/workspaces/store-a/assets/objects/{hash}"),
+            format!("/workspaces/store-b/assets/objects/{hash}"),
+        ]
+    );
 }
 
 #[tokio::test]
