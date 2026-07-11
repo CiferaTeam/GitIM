@@ -1623,6 +1623,21 @@ impl AssetStore {
         }
     }
 
+    fn remove_or_quarantine_metadata_entry(
+        &self,
+        hash: &str,
+        path: &Path,
+    ) -> Result<(), AssetError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata_entry_is_atomically_replaceable(&metadata.file_type()) => {
+                remove_file_if_exists(path)
+            }
+            Ok(_) => self.quarantine_metadata_entry(hash, path),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(AssetError::Store(error)),
+        }
+    }
+
     fn quarantine_metadata_entry(&self, hash: &str, path: &Path) -> Result<(), AssetError> {
         let root = self
             .workspace_root
@@ -1815,14 +1830,9 @@ impl AssetStore {
         create_private_dir(&root)?;
         quarantine_rename(object_path, &root, &format!("corrupt-{hash}"))?;
         let metadata_path = self.raw_metadata_path(hash)?;
-        remove_file_if_exists(&metadata_path)?;
-        let (usage, objects) = self.scan_regular_object_ledger()?;
-        let mut accounting = lock(&self.state.accounting);
-        if accounting.generation == self.generation {
-            accounting.committed = usage;
-            accounting.objects = objects;
-        }
-        Ok(())
+        let metadata_result = self.remove_or_quarantine_metadata_entry(hash, &metadata_path);
+        self.reconcile_accounting()?;
+        metadata_result
     }
 }
 

@@ -124,6 +124,15 @@ fn corrupt_metadata_entries(workspace: &Path) -> Vec<PathBuf> {
     entries
 }
 
+fn corrupt_object_entries(workspace: &Path) -> Vec<PathBuf> {
+    let path = workspace.join(".gitim-runtime/orphaned-assets/corrupt-objects");
+    let mut entries: Vec<PathBuf> = fs::read_dir(path)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    entries.sort();
+    entries
+}
+
 fn write_object_only(store: &AssetStore, bytes: &[u8]) -> String {
     let hash = sha256_hex(bytes);
     let path = store.object_path(&hash).unwrap();
@@ -848,6 +857,130 @@ fn recovery_quarantines_a_metadata_directory_and_rebuilds_a_private_sidecar() {
     assert_eq!(
         reopened.read(&stored.sha256).unwrap(),
         b"metadata-directory"
+    );
+}
+
+#[tokio::test]
+async fn staged_dedupe_repairs_combined_object_and_metadata_directory_corruption() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let stored = store.put_bytes(b"good", AssetSource::LocalUpload).unwrap();
+    let object = store.object_path(&stored.sha256).unwrap();
+    let sidecar = store.metadata_path(&stored.sha256).unwrap();
+    fs::write(&object, b"evil").unwrap();
+    fs::remove_file(&sidecar).unwrap();
+    fs::create_dir(&sidecar).unwrap();
+    fs::write(sidecar.join("metadata-evidence.txt"), b"metadata evidence").unwrap();
+    let staged = store.stage_bytes("repair.bin", b"good").await.unwrap();
+
+    store
+        .persist_staged(staged, AssetSource::LocalUpload)
+        .await
+        .unwrap();
+
+    assert_eq!(store.read(&stored.sha256).unwrap(), b"good");
+    assert!(fs::symlink_metadata(&sidecar)
+        .unwrap()
+        .file_type()
+        .is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&object).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 4,
+            objects: 1,
+        }
+    );
+    let corrupt_objects = corrupt_object_entries(workspace.path());
+    assert_eq!(corrupt_objects.len(), 1);
+    assert_eq!(fs::read(&corrupt_objects[0]).unwrap(), b"evil");
+    let corrupt_metadata = corrupt_metadata_entries(workspace.path());
+    assert_eq!(corrupt_metadata.len(), 1);
+    assert_eq!(
+        fs::read(corrupt_metadata[0].join("metadata-evidence.txt")).unwrap(),
+        b"metadata evidence"
+    );
+
+    drop(store);
+    let reopened = open_store(workspace.path(), 1024);
+    reopened.recover().unwrap();
+    assert_eq!(reopened.read(&stored.sha256).unwrap(), b"good");
+    assert_eq!(
+        reopened.usage().unwrap(),
+        AssetUsage {
+            bytes: 4,
+            objects: 1,
+        }
+    );
+}
+
+#[tokio::test]
+async fn failed_combined_corruption_quarantine_reconciles_usage_before_retry() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let stored = store.put_bytes(b"good", AssetSource::LocalUpload).unwrap();
+    let object = store.object_path(&stored.sha256).unwrap();
+    let sidecar = store.metadata_path(&stored.sha256).unwrap();
+    fs::write(&object, b"evil").unwrap();
+    fs::remove_file(&sidecar).unwrap();
+    fs::create_dir(&sidecar).unwrap();
+    fs::write(sidecar.join("metadata-evidence.txt"), b"metadata evidence").unwrap();
+
+    let orphaned_root = workspace.path().join(".gitim-runtime/orphaned-assets");
+    fs::create_dir_all(&orphaned_root).unwrap();
+    let metadata_quarantine = orphaned_root.join("corrupt-metadata");
+    fs::write(&metadata_quarantine, b"block quarantine directory").unwrap();
+    let staged = store.stage_bytes("repair.bin", b"good").await.unwrap();
+
+    let error = store
+        .persist_staged(staged, AssetSource::LocalUpload)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.status_code(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!object.exists());
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 0,
+            objects: 0,
+        }
+    );
+    fs::remove_file(metadata_quarantine).unwrap();
+
+    let retry = store.stage_bytes("repair.bin", b"good").await.unwrap();
+    store
+        .persist_staged(retry, AssetSource::LocalUpload)
+        .await
+        .unwrap();
+
+    assert_eq!(store.read(&stored.sha256).unwrap(), b"good");
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 4,
+            objects: 1,
+        }
+    );
+    let corrupt_objects = corrupt_object_entries(workspace.path());
+    assert_eq!(corrupt_objects.len(), 1);
+    assert_eq!(fs::read(&corrupt_objects[0]).unwrap(), b"evil");
+    let corrupt_metadata = corrupt_metadata_entries(workspace.path());
+    assert_eq!(corrupt_metadata.len(), 1);
+    assert_eq!(
+        fs::read(corrupt_metadata[0].join("metadata-evidence.txt")).unwrap(),
+        b"metadata evidence"
     );
 }
 
