@@ -481,11 +481,6 @@ impl AssetService {
         slot: Arc<WorkspaceLifecycleSlot>,
         token: &AssetWorkspaceToken,
     ) {
-        // Removing the token may release the last strong owner. A concurrent
-        // activation either keeps this slot alive or replaces the dead weak
-        // entry; pointer identity preserves either handoff.
-        let canonical_root = slot.canonical_root.clone();
-        let expected = Arc::downgrade(&slot);
         {
             let mut registry = lock(&self.lifecycle);
             if registry
@@ -496,6 +491,15 @@ impl AssetService {
                 registry.tokens.remove(&token.id);
             }
         }
+        self.prune_lifecycle_slot_after_transition(slot);
+    }
+
+    fn prune_lifecycle_slot_after_transition(&self, slot: Arc<WorkspaceLifecycleSlot>) {
+        // Dropping this caller's owner may expire the path index. A concurrent
+        // activation either keeps this slot alive or replaces the dead weak
+        // entry; pointer identity preserves either handoff.
+        let canonical_root = slot.canonical_root.clone();
+        let expected = Arc::downgrade(&slot);
         drop(slot);
         let mut registry = lock(&self.lifecycle);
         if registry
@@ -539,6 +543,7 @@ impl AssetService {
     }
 
     fn invalidate_workspace_store(&self, store: &AssetStore) -> Result<(), AssetError> {
+        let _persistence = write_lock(&store.state.persistence_gate);
         let _operation = write_lock(&store.state.operation_gate);
         {
             let mut accounting = lock(&store.state.accounting);
@@ -607,6 +612,8 @@ impl AssetService {
             resume.wait();
         }
         if slot.canonical_root != canonical_root {
+            drop(lifecycle);
+            self.prune_lifecycle_slot_after_transition(slot);
             return Err(AssetError::Invariant(
                 "asset workspace token is already bound to another namespace",
             ));
@@ -1049,8 +1056,7 @@ impl AssetService {
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
     pub fn lifecycle_registry_entries(&self) -> (usize, usize) {
-        let mut registry = lock(&self.lifecycle);
-        registry.paths.retain(|_, slot| slot.upgrade().is_some());
+        let registry = lock(&self.lifecycle);
         (registry.paths.len(), registry.tokens.len())
     }
 }
@@ -1144,9 +1150,11 @@ struct FileIdentity {
 
 #[derive(Default)]
 struct WorkspaceAssetState {
-    // Operations that need both locks acquire operation_gate before accounting.
-    // Free-space sampling and claim updates share the accounting critical section.
+    // Generation transitions acquire persistence_gate before operation_gate.
+    // Persistence holds a read lease through staged cleanup, and operations
+    // that need accounting acquire operation_gate before accounting.
     accounting: Mutex<AccountingState>,
+    persistence_gate: RwLock<()>,
     operation_gate: RwLock<()>,
     health: HealthUsageCache,
     #[cfg(feature = "test-support")]
@@ -1227,11 +1235,11 @@ pub struct StagedAsset {
     root: PathBuf,
 }
 
-struct OperationLockedStagedAsset(StagedAsset);
+struct GenerationLockedStagedAsset(StagedAsset);
 
-impl Drop for OperationLockedStagedAsset {
+impl Drop for GenerationLockedStagedAsset {
     fn drop(&mut self) {
-        self.0.cleanup_while_operation_locked();
+        self.0.cleanup_while_generation_locked();
     }
 }
 
@@ -1331,7 +1339,16 @@ impl HashLock {
     }
 
     fn acquire_blocking(store: &AssetStore, hash: &str) -> Result<Self, AssetError> {
+        #[cfg(feature = "test-support")]
+        store
+            .state
+            .hash_lock_attempts
+            .fetch_add(1, Ordering::AcqRel);
         let file = lock_hash_file(store.open_hash_lock_file(hash)?)?;
+        Self::from_locked_file(store, hash, file)
+    }
+
+    fn from_locked_file(store: &AssetStore, hash: &str, file: File) -> Result<Self, AssetError> {
         let lock = Self {
             file,
             state: Arc::clone(&store.state),
@@ -1396,6 +1413,7 @@ impl AssetStore {
             ));
         }
         let root = workspace_root.join(".gitim-runtime/assets/v1");
+        let _persistence = write_lock(&state.persistence_gate);
         let _operation = write_lock(&state.operation_gate);
         let generation = {
             let mut accounting = lock(&state.accounting);
@@ -1625,10 +1643,14 @@ impl AssetStore {
         staged: StagedAsset,
         source: AssetSource,
     ) -> Result<PersistOutcome, AssetError> {
-        staged.validate_generation_for(self)?;
-        let hash_lock = HashLock::acquire(self, &staged.sha256).await?;
-        self.persist_staged_with_lock_outcome(staged, source, hash_lock)
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || store.persist_staged_with_acquired_lock(staged, source))
             .await
+            .map_err(|error| {
+                AssetError::Store(std::io::Error::other(format!(
+                    "asset persistence task failed: {error}"
+                )))
+            })?
     }
 
     pub async fn persist_staged_with_lock(
@@ -1664,11 +1686,33 @@ impl AssetStore {
         source: AssetSource,
         hash_lock: &HashLock,
     ) -> Result<PersistOutcome, AssetError> {
+        let persistence = read_lock(&self.state.persistence_gate);
+        let mut staged = GenerationLockedStagedAsset(staged);
         let operation = write_lock(&self.state.operation_gate);
-        let mut staged = OperationLockedStagedAsset(staged);
         let result = self.persist_staged_locked_inner(&mut staged.0, source, hash_lock);
-        drop(staged);
         drop(operation);
+        drop(staged);
+        drop(persistence);
+        result
+    }
+
+    fn persist_staged_with_acquired_lock(
+        &self,
+        staged: StagedAsset,
+        source: AssetSource,
+    ) -> Result<PersistOutcome, AssetError> {
+        let persistence = read_lock(&self.state.persistence_gate);
+        let mut staged = GenerationLockedStagedAsset(staged);
+        let result = (|| {
+            staged.0.validate_generation_for(self)?;
+            let hash_lock = HashLock::acquire_blocking(self, &staged.0.sha256)?;
+            let operation = write_lock(&self.state.operation_gate);
+            let result = self.persist_staged_locked_inner(&mut staged.0, source, &hash_lock);
+            drop(operation);
+            result
+        })();
+        drop(staged);
+        drop(persistence);
         result
     }
 
@@ -1986,8 +2030,7 @@ impl AssetStore {
             ));
         }
         let staged = self.stage_bytes_blocking("attachment", bytes)?;
-        let hash_lock = HashLock::acquire_blocking(self, &staged.sha256)?;
-        self.persist_staged_locked(staged, source, &hash_lock)
+        self.persist_staged_with_acquired_lock(staged, source)
             .map(|outcome| outcome.metadata)
     }
 
@@ -2249,6 +2292,10 @@ impl AssetStore {
 
     fn open_hash_lock_file(&self, hash: &str) -> Result<File, AssetError> {
         let _operation = read_lock(&self.state.operation_gate);
+        self.open_hash_lock_file_under_operation(hash)
+    }
+
+    fn open_hash_lock_file_under_operation(&self, hash: &str) -> Result<File, AssetError> {
         self.validate_current()?;
         let path = self.raw_lock_path(hash)?;
         create_private_dir(path.parent().ok_or_else(|| invalid_path(&path))?)?;
@@ -2774,7 +2821,7 @@ impl StoredAsset {
 }
 
 impl StagedAsset {
-    fn cleanup_while_operation_locked(&mut self) {
+    fn cleanup_while_generation_locked(&mut self) {
         #[cfg(feature = "test-support")]
         if let Some((reached, resume)) = lock(&self.state.before_staged_cleanup_pause).take() {
             reached.wait();
