@@ -24,6 +24,7 @@
 
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt;
 use tokio_util::io::ReaderStream;
 
 use crate::http::DEFAULT_PORT;
@@ -312,7 +313,7 @@ impl Client {
     ) -> Result<serde_json::Value, CliError> {
         let mut form = reqwest::multipart::Form::new();
         for upload in files {
-            let stream = ReaderStream::new(upload.file);
+            let stream = ReaderStream::new(upload.file.take(upload.length));
             let body = reqwest::Body::wrap_stream(stream);
             let part = reqwest::multipart::Part::stream_with_length(body, upload.length)
                 .file_name(upload.file_name)

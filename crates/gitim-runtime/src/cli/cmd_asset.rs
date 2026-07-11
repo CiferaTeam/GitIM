@@ -104,14 +104,7 @@ pub async fn get(client: &Client, args: GetArgs) -> Result<i32, CliError> {
         asset.origin_runtime_id, asset.sha256
     );
     let response = client.get_binary(&path).await?;
-    if let Some(length) = response.content_length() {
-        if length > MAX_ASSET_BYTES || length != asset.size {
-            return Err(CliError::InvalidConfig(format!(
-                "asset response size mismatch: expected {}, received {length}",
-                asset.size
-            )));
-        }
-    }
+    validate_content_length(&response, asset.size)?;
 
     let temporary = tempfile::NamedTempFile::new_in(parent).map_err(|error| {
         CliError::InvalidConfig(format!(
@@ -211,7 +204,7 @@ async fn prepare_uploads(paths: Vec<PathBuf>) -> Result<Vec<UploadFile>, CliErro
     let mut total = 0_u64;
     let mut files = Vec::with_capacity(paths.len());
     for path in paths {
-        let file = tokio::fs::File::open(&path).await.map_err(|error| {
+        let file = open_upload_file(&path).await.map_err(|error| {
             CliError::InvalidConfig(format!("open asset file '{}': {error}", path.display()))
         })?;
         let metadata = file.metadata().await.map_err(|error| {
@@ -247,6 +240,65 @@ async fn prepare_uploads(paths: Vec<PathBuf>) -> Result<Vec<UploadFile>, CliErro
         });
     }
     Ok(files)
+}
+
+fn validate_content_length(response: &reqwest::Response, expected: u64) -> Result<(), CliError> {
+    let mut values = response
+        .headers()
+        .get_all(reqwest::header::CONTENT_LENGTH)
+        .iter();
+    let value = values.next().ok_or_else(|| {
+        CliError::InvalidConfig("asset response is missing Content-Length".to_string())
+    })?;
+    if values.next().is_some() {
+        return Err(CliError::InvalidConfig(
+            "asset response has multiple Content-Length headers".to_string(),
+        ));
+    }
+    let raw = value.to_str().map_err(|_| {
+        CliError::InvalidConfig("asset response has an invalid Content-Length".to_string())
+    })?;
+    if raw.is_empty() || !raw.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(CliError::InvalidConfig(
+            "asset response has an invalid Content-Length".to_string(),
+        ));
+    }
+    let length = raw.parse::<u64>().map_err(|_| {
+        CliError::InvalidConfig("asset response has an invalid Content-Length".to_string())
+    })?;
+    if length > MAX_ASSET_BYTES || length != expected {
+        return Err(CliError::InvalidConfig(format!(
+            "asset response size mismatch: expected {expected}, received {length}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn open_upload_file(path: &Path) -> std::io::Result<tokio::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let path = path.to_path_buf();
+    let file = tokio::task::spawn_blocking(move || {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+    })
+    .await
+    .map_err(|error| std::io::Error::other(format!("asset open task failed: {error}")))??;
+    Ok(tokio::fs::File::from_std(file))
+}
+
+#[cfg(not(unix))]
+async fn open_upload_file(path: &Path) -> std::io::Result<tokio::fs::File> {
+    if !tokio::fs::metadata(path).await?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "asset path is not a regular file",
+        ));
+    }
+    tokio::fs::File::open(path).await
 }
 
 fn sanitized_file_name(path: &Path) -> String {
@@ -293,4 +345,44 @@ fn validate_destination(destination: &Path, force: bool) -> Result<(), CliError>
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gitim_core::types::MAX_ASSET_FILENAME_BYTES;
+
+    #[tokio::test]
+    async fn per_file_size_boundary_accepts_exact_and_rejects_plus_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let exact = directory.path().join("exact.bin");
+        std::fs::File::create(&exact)
+            .unwrap()
+            .set_len(MAX_ASSET_BYTES)
+            .unwrap();
+        let prepared = prepare_uploads(vec![exact]).await.unwrap();
+        assert_eq!(prepared[0].length, MAX_ASSET_BYTES);
+
+        let oversized = directory.path().join("oversized.bin");
+        std::fs::File::create(&oversized)
+            .unwrap()
+            .set_len(MAX_ASSET_BYTES + 1)
+            .unwrap();
+        let error = match prepare_uploads(vec![oversized]).await {
+            Ok(_) => panic!("oversized file must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, CliError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn filename_boundary_accepts_exact_and_rejects_plus_one() {
+        let exact = "a".repeat(MAX_ASSET_FILENAME_BYTES);
+        validate_upload_name(&exact, 0).unwrap();
+        let oversized = "a".repeat(MAX_ASSET_FILENAME_BYTES + 1);
+        assert!(validate_upload_name(&oversized, 0).is_err());
+
+        let encoded_max = "界".repeat(MAX_ASSET_FILENAME_BYTES / "界".len());
+        validate_upload_name(&encoded_max, 0).unwrap();
+    }
 }
