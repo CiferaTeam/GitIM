@@ -129,18 +129,6 @@ impl RequestBudget {
         self.bytes = bytes;
         Ok(())
     }
-
-    fn rollback_file(&mut self, bytes: u64) -> Result<(), AssetError> {
-        self.files = self
-            .files
-            .checked_sub(1)
-            .ok_or(AssetError::Invariant("asset request file count underflow"))?;
-        self.bytes = self
-            .bytes
-            .checked_sub(bytes)
-            .ok_or(AssetError::Invariant("asset request byte count underflow"))?;
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -209,6 +197,12 @@ struct FileDigestSnapshot {
     inspection_prefix: Vec<u8>,
     size: u64,
     modified_ns: u64,
+}
+
+enum DedupeOutcome {
+    Missing,
+    Corrupt,
+    Present(AssetMetadata),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -393,6 +387,10 @@ struct WorkspaceAssetState {
     fail_after_publish: AtomicBool,
     #[cfg(feature = "test-support")]
     before_publish_pause: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+    #[cfg(feature = "test-support")]
+    hash_lock_attempts: AtomicU64,
+    #[cfg(feature = "test-support")]
+    free_space_override: Mutex<Option<(u64, u64)>>,
 }
 
 #[derive(Default)]
@@ -401,6 +399,7 @@ struct AccountingState {
     generation: u64,
     committed: AssetUsage,
     reserved: u64,
+    unmaterialized: u64,
     limits: Option<AssetLimits>,
     initialized: bool,
     objects: HashMap<String, u64>,
@@ -438,9 +437,7 @@ impl std::fmt::Debug for StagedAsset {
 impl Drop for StagedAsset {
     fn drop(&mut self) {
         if let Some(path) = self.path.take() {
-            if let Err(error) = remove_file_if_exists(&path) {
-                tracing::warn!(error = %error, "failed to remove unfinished asset staging file");
-            }
+            remove_staged_path_if_current(&self.state, self.generation, &path);
         }
     }
 }
@@ -479,13 +476,23 @@ impl std::fmt::Debug for HashLock {
 impl HashLock {
     pub async fn acquire(store: &AssetStore, hash: &str) -> Result<Self, AssetError> {
         let file = store.open_hash_lock_file(hash)?;
-        let file = tokio::task::spawn_blocking(move || lock_hash_file(file))
-            .await
-            .map_err(|error| {
-                AssetError::Store(std::io::Error::other(format!(
-                    "asset hash lock task failed: {error}"
-                )))
-            })??;
+        let mut backoff = Duration::from_millis(2);
+        loop {
+            #[cfg(feature = "test-support")]
+            store
+                .state
+                .hash_lock_attempts
+                .fetch_add(1, Ordering::AcqRel);
+            match FileExt::try_lock_exclusive(&file) {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    store.validate_generation()?;
+                    tokio::time::sleep(backoff).await;
+                    backoff = backoff.saturating_mul(2).min(Duration::from_millis(40));
+                }
+                Err(error) => return Err(AssetError::Store(error)),
+            }
+        }
         let lock = Self {
             file,
             state: Arc::clone(&store.state),
@@ -593,6 +600,7 @@ impl AssetStore {
                 accounting.generation = generation;
                 accounting.committed = AssetUsage::default();
                 accounting.reserved = 0;
+                accounting.unmaterialized = 0;
                 accounting.limits = Some(limits.clone());
                 accounting.initialized = false;
                 accounting.objects.clear();
@@ -655,8 +663,7 @@ impl AssetStore {
     pub fn reserve(&self, incoming: u64) -> Result<AssetReservation, AssetError> {
         let _operation = read_lock(&self.state.operation_gate);
         self.validate_current()?;
-        let available = fs2::available_space(&self.root)?;
-        let total = fs2::total_space(&self.root)?;
+        let (available, total) = self.free_space()?;
         self.reserve_with_space(incoming, available, total)
     }
 
@@ -670,39 +677,21 @@ impl AssetStore {
         S: Stream<Item = Result<Bytes, E>> + Unpin,
         E: std::error::Error + Send + Sync + 'static,
     {
-        budget.begin_file(self.limits.max_files)?;
-        let mut stager = match AssetStager::new(self, name.into()) {
-            Ok(stager) => stager,
-            Err(error) => {
-                budget.rollback_file(0)?;
-                return Err(error);
-            }
-        };
+        let mut next_budget = *budget;
+        next_budget.begin_file(self.limits.max_files)?;
+        let mut stager = AssetStager::new(self, name.into())?;
         while let Some(chunk) = chunks.next().await {
             let chunk = match chunk {
                 Ok(chunk) => chunk,
                 Err(error) => {
-                    let size = stager.size;
-                    drop(stager);
-                    budget.rollback_file(size)?;
                     return Err(AssetError::Store(std::io::Error::other(error)));
                 }
             };
-            if let Err(error) = stager.write_chunk(&chunk, budget).await {
-                let size = stager.size;
-                drop(stager);
-                budget.rollback_file(size)?;
-                return Err(error);
-            }
+            stager.write_chunk(&chunk, &mut next_budget).await?;
         }
-        let size = stager.size;
-        match stager.finish().await {
-            Ok(staged) => Ok(staged),
-            Err(error) => {
-                budget.rollback_file(size)?;
-                Err(error)
-            }
-        }
+        let staged = stager.finish().await?;
+        *budget = next_budget;
+        Ok(staged)
     }
 
     pub async fn stage_bytes(
@@ -821,13 +810,16 @@ impl AssetStore {
         self.validate_current()?;
         staged.validate_file_for(self)?;
 
-        if let Some(metadata) = self.force_verify_dedupe(&staged.sha256, &source)? {
-            staged
-                .reservation
-                .take()
-                .ok_or(AssetError::Invariant("staged asset reservation is missing"))?
-                .release()?;
-            return Ok(metadata);
+        match self.force_verify_dedupe(&staged.sha256, &source)? {
+            DedupeOutcome::Present(metadata) => {
+                staged
+                    .reservation
+                    .take()
+                    .ok_or(AssetError::Invariant("staged asset reservation is missing"))?
+                    .release()?;
+                return Ok(metadata);
+            }
+            DedupeOutcome::Missing | DedupeOutcome::Corrupt => {}
         }
 
         #[cfg(feature = "test-support")]
@@ -845,17 +837,30 @@ impl AssetStore {
             .path
             .as_ref()
             .ok_or(AssetError::Invariant("staged asset path is missing"))?;
-        loop {
+        for attempt in 0..3 {
             match fs::hard_link(temp_path, &object_path) {
                 Ok(()) => break,
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    if let Some(metadata) = self.force_verify_dedupe(&staged.sha256, &source)? {
-                        staged
-                            .reservation
-                            .take()
-                            .ok_or(AssetError::Invariant("staged asset reservation is missing"))?
-                            .release()?;
-                        return Ok(metadata);
+                    match self.force_verify_dedupe(&staged.sha256, &source)? {
+                        DedupeOutcome::Present(metadata) => {
+                            staged
+                                .reservation
+                                .take()
+                                .ok_or(AssetError::Invariant(
+                                    "staged asset reservation is missing",
+                                ))?
+                                .release()?;
+                            return Ok(metadata);
+                        }
+                        DedupeOutcome::Missing if attempt == 2 => {
+                            return Err(AssetError::Store(std::io::Error::other(
+                                "asset object path repeatedly disappeared during publication",
+                            )));
+                        }
+                        DedupeOutcome::Corrupt if attempt == 2 => {
+                            return Err(AssetError::LocalCorruption);
+                        }
+                        DedupeOutcome::Missing | DedupeOutcome::Corrupt => {}
                     }
                 }
                 Err(error) => return Err(AssetError::Store(error)),
@@ -935,10 +940,19 @@ impl AssetStore {
                     used: committed_and_reserved,
                     quota: self.limits.workspace_quota_bytes,
                 })?;
-        self.check_free_space(pending, committed_and_reserved, available, total)?;
+        let unmaterialized =
+            accounting
+                .unmaterialized
+                .checked_add(incoming)
+                .ok_or(AssetError::Invariant(
+                    "asset unmaterialized byte count overflow",
+                ))?;
+        self.check_free_space(unmaterialized, committed_and_reserved, available, total)?;
         accounting.reserved = pending;
+        accounting.unmaterialized = unmaterialized;
         Ok(AssetReservation {
             bytes: incoming,
+            unmaterialized: incoming,
             state: Arc::clone(&self.state),
             generation: self.generation,
             released: false,
@@ -958,8 +972,7 @@ impl AssetStore {
         {
             return Err(AssetError::StaleBinding);
         }
-        let available = fs2::available_space(&self.root)?;
-        let total = fs2::total_space(&self.root)?;
+        let (available, total) = self.free_space()?;
         let mut accounting = lock(&self.state.accounting);
         self.validate_accounting(&accounting)?;
         let committed_and_reserved = accounting
@@ -991,7 +1004,15 @@ impl AssetStore {
                     used: committed_and_reserved,
                     quota: self.limits.workspace_quota_bytes,
                 })?;
-        self.check_free_space(reserved, committed_and_reserved, available, total)?;
+        let unmaterialized =
+            accounting
+                .unmaterialized
+                .checked_add(incoming)
+                .ok_or(AssetError::QuotaExceeded {
+                    used: committed_and_reserved,
+                    quota: self.limits.workspace_quota_bytes,
+                })?;
+        self.check_free_space(unmaterialized, committed_and_reserved, available, total)?;
         reservation.bytes =
             reservation
                 .bytes
@@ -999,7 +1020,47 @@ impl AssetStore {
                 .ok_or(AssetError::Invariant(
                     "asset reservation byte count overflow",
                 ))?;
+        reservation.unmaterialized =
+            reservation
+                .unmaterialized
+                .checked_add(incoming)
+                .ok_or(AssetError::Invariant(
+                    "asset reservation disk claim overflow",
+                ))?;
         accounting.reserved = reserved;
+        accounting.unmaterialized = unmaterialized;
+        Ok(())
+    }
+
+    fn materialize_reservation(
+        &self,
+        reservation: &mut AssetReservation,
+        written: u64,
+    ) -> Result<(), AssetError> {
+        let mut accounting = lock(&self.state.accounting);
+        self.validate_accounting(&accounting)?;
+        if !Arc::ptr_eq(&reservation.state, &self.state)
+            || reservation.generation != self.generation
+            || reservation.released
+        {
+            return Err(AssetError::StaleBinding);
+        }
+        let reservation_unmaterialized =
+            reservation
+                .unmaterialized
+                .checked_sub(written)
+                .ok_or(AssetError::Invariant(
+                    "asset reservation disk claim underflow",
+                ))?;
+        let unmaterialized =
+            accounting
+                .unmaterialized
+                .checked_sub(written)
+                .ok_or(AssetError::Invariant(
+                    "asset unmaterialized byte count underflow",
+                ))?;
+        reservation.unmaterialized = reservation_unmaterialized;
+        accounting.unmaterialized = unmaterialized;
         Ok(())
     }
 
@@ -1027,7 +1088,7 @@ impl AssetStore {
                 limit: self.limits.max_file_bytes,
             });
         }
-        let reservation = self.reserve(size)?;
+        let mut reservation = self.reserve(size)?;
         let tmp = self.root.join("tmp");
         create_private_dir(&tmp)?;
         let mut tempfile = tempfile::Builder::new()
@@ -1038,6 +1099,7 @@ impl AssetStore {
         tempfile.write_all(bytes)?;
         tempfile.flush()?;
         tempfile.as_file().sync_all()?;
+        self.materialize_reservation(&mut reservation, size)?;
         let inspection = inspect_bytes(bytes, name)?;
         let (_file, path) = tempfile
             .keep()
@@ -1064,7 +1126,7 @@ impl AssetStore {
         let object_path = self.raw_object_path(hash)?;
         let snapshot = match read_file_snapshot(&object_path, self.limits.max_file_bytes) {
             Ok(snapshot) => snapshot,
-            Err(AssetError::TooLarge { .. }) => {
+            Err(AssetError::TooLarge { .. } | AssetError::LocalCorruption) => {
                 self.quarantine_corrupt(hash, &object_path)?;
                 return Err(AssetError::LocalCorruption);
             }
@@ -1130,6 +1192,18 @@ impl AssetStore {
         *lock(&self.state.before_publish_pause) = Some((reached, resume));
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn hash_lock_attempts(&self) -> u64 {
+        self.state.hash_lock_attempts.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_free_space(&self, available: u64, total: u64) {
+        *lock(&self.state.free_space_override) = Some((available, total));
+    }
+
     pub fn recover(&self) -> Result<AssetUsage, AssetError> {
         let _operation = write_lock(&self.state.operation_gate);
         self.validate_current()?;
@@ -1175,6 +1249,11 @@ impl AssetStore {
         } else {
             Err(AssetError::StaleBinding)
         }
+    }
+
+    fn validate_generation(&self) -> Result<(), AssetError> {
+        let accounting = lock(&self.state.accounting);
+        self.validate_accounting(&accounting)
     }
 
     fn raw_object_path(&self, hash: &str) -> Result<PathBuf, AssetError> {
@@ -1226,11 +1305,23 @@ impl AssetStore {
         Ok(())
     }
 
+    fn free_space(&self) -> Result<(u64, u64), AssetError> {
+        #[cfg(feature = "test-support")]
+        if let Some(space) = *lock(&self.state.free_space_override) {
+            return Ok(space);
+        }
+        Ok((
+            fs2::available_space(&self.root)?,
+            fs2::total_space(&self.root)?,
+        ))
+    }
+
     fn refresh_metadata(&self, hash: &str) -> Result<AssetMetadata, AssetError> {
         let object_path = self.raw_object_path(hash)?;
         let object_metadata = fs::symlink_metadata(&object_path).map_err(map_missing)?;
         if !object_metadata.file_type().is_file() {
-            return Err(AssetError::Missing);
+            self.quarantine_corrupt(hash, &object_path)?;
+            return Err(AssetError::LocalCorruption);
         }
         set_path_file_mode(&object_path)?;
         if object_metadata.len() > self.limits.max_file_bytes {
@@ -1298,26 +1389,38 @@ impl AssetStore {
         &self,
         hash: &str,
         source: &AssetSource,
-    ) -> Result<Option<AssetMetadata>, AssetError> {
+    ) -> Result<DedupeOutcome, AssetError> {
         let object_path = self.raw_object_path(hash)?;
+        match fs::symlink_metadata(&object_path) {
+            Ok(metadata) if !metadata.file_type().is_file() => {
+                self.quarantine_corrupt(hash, &object_path)?;
+                return Ok(DedupeOutcome::Corrupt);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DedupeOutcome::Missing);
+            }
+            Err(error) => return Err(AssetError::Store(error)),
+        }
         let snapshot = match read_file_digest(&object_path, self.limits.max_file_bytes) {
             Ok(snapshot) => snapshot,
-            Err(AssetError::Missing) => return Ok(None),
-            Err(AssetError::TooLarge { .. }) => {
+            Err(AssetError::Missing) => return Ok(DedupeOutcome::Missing),
+            Err(AssetError::TooLarge { .. } | AssetError::LocalCorruption) => {
                 self.quarantine_corrupt(hash, &object_path)?;
-                return Ok(None);
+                return Ok(DedupeOutcome::Corrupt);
             }
             Err(error) => return Err(error),
         };
         if snapshot.sha256 != hash {
             self.quarantine_corrupt(hash, &object_path)?;
-            return Ok(None);
+            return Ok(DedupeOutcome::Corrupt);
         }
         let metadata_path = self.raw_metadata_path(hash)?;
         let existing_sidecar = read_sidecar(&metadata_path).ok();
         let metadata = if existing_sidecar.as_ref().is_some_and(|sidecar| {
             valid_sidecar(sidecar, hash, snapshot.size, snapshot.modified_ns)
         }) {
+            set_path_file_mode(&metadata_path)?;
             existing_sidecar.ok_or(AssetError::Invariant(
                 "asset sidecar disappeared during dedupe verification",
             ))?
@@ -1337,7 +1440,7 @@ impl AssetStore {
             }
         };
         self.register_existing_object(hash, snapshot.size)?;
-        Ok(Some(metadata))
+        Ok(DedupeOutcome::Present(metadata))
     }
 
     fn rebuild_metadata_from_digest(
@@ -1701,6 +1804,7 @@ impl<'a> AssetStager<'a> {
             inspection_prefix: Vec::with_capacity(MAX_INSPECTION_PREFIX_BYTES),
             reservation: Some(AssetReservation {
                 bytes: 0,
+                unmaterialized: 0,
                 state: Arc::clone(&store.state),
                 generation: store.generation,
                 released: false,
@@ -1745,6 +1849,7 @@ impl<'a> AssetStager<'a> {
             budget.bytes = previous_budget_bytes;
             return Err(AssetError::Store(error));
         }
+        self.store.materialize_reservation(reservation, incoming)?;
         self.hasher.update(chunk);
         let prefix_remaining = MAX_INSPECTION_PREFIX_BYTES - self.inspection_prefix.len();
         self.inspection_prefix
@@ -1784,15 +1889,27 @@ impl Drop for AssetStager<'_> {
     fn drop(&mut self) {
         drop(self.file.take());
         if let Some(path) = self.path.take() {
-            if let Err(error) = remove_file_if_exists(&path) {
-                tracing::warn!(error = %error, "failed to remove asset staging file");
-            }
+            remove_staged_path_if_current(&self.store.state, self.store.generation, &path);
+        }
+    }
+}
+
+fn remove_staged_path_if_current(state: &Arc<WorkspaceAssetState>, generation: u64, path: &Path) {
+    let _operation = read_lock(&state.operation_gate);
+    let is_current = {
+        let accounting = lock(&state.accounting);
+        accounting.initialized && accounting.generation == generation
+    };
+    if is_current {
+        if let Err(error) = remove_file_if_exists(path) {
+            tracing::warn!(error = %error, "failed to remove asset staging file");
         }
     }
 }
 
 pub struct AssetReservation {
     bytes: u64,
+    unmaterialized: u64,
     state: Arc<WorkspaceAssetState>,
     generation: u64,
     released: bool,
@@ -1813,6 +1930,12 @@ impl AssetReservation {
             .reserved
             .checked_sub(self.bytes)
             .ok_or(AssetError::Invariant("asset reservation commit underflow"))?;
+        let unmaterialized = accounting
+            .unmaterialized
+            .checked_sub(self.unmaterialized)
+            .ok_or(AssetError::Invariant(
+                "asset reservation commit disk claim underflow",
+            ))?;
         let is_new = !accounting.objects.contains_key(hash);
         let committed = if is_new {
             AssetUsage {
@@ -1829,6 +1952,7 @@ impl AssetReservation {
             accounting.committed
         };
         accounting.reserved = reserved;
+        accounting.unmaterialized = unmaterialized;
         accounting.committed = committed;
         if is_new {
             accounting.objects.insert(hash.to_string(), size);
@@ -1846,10 +1970,18 @@ impl AssetReservation {
             self.released = true;
             return Ok(());
         }
-        accounting.reserved = accounting
+        let reserved = accounting
             .reserved
             .checked_sub(self.bytes)
             .ok_or(AssetError::Invariant("asset reservation release underflow"))?;
+        let unmaterialized = accounting
+            .unmaterialized
+            .checked_sub(self.unmaterialized)
+            .ok_or(AssetError::Invariant(
+                "asset reservation release disk claim underflow",
+            ))?;
+        accounting.reserved = reserved;
+        accounting.unmaterialized = unmaterialized;
         self.released = true;
         Ok(())
     }
@@ -2229,15 +2361,20 @@ fn read_file_snapshot(path: &Path, limit: u64) -> Result<FileSnapshot, AssetErro
 }
 
 fn read_file_digest(path: &Path, limit: u64) -> Result<FileDigestSnapshot, AssetError> {
-    let mut file = open_options_no_follow(path, false).map_err(map_missing)?;
+    let metadata = fs::symlink_metadata(path).map_err(map_missing)?;
+    if !metadata.file_type().is_file() {
+        return Err(AssetError::LocalCorruption);
+    }
+    let mut file = open_options_no_follow_nonblocking(path).map_err(map_missing)?;
     let before = file.metadata()?;
     if !before.file_type().is_file() {
-        return Err(AssetError::Missing);
+        return Err(AssetError::LocalCorruption);
     }
     if before.len() > limit {
         return Err(AssetError::TooLarge { limit });
     }
     let before_modified_ns = modified_ns(&before)?;
+    set_file_mode(&file)?;
     let mut hasher = Sha256::new();
     let mut inspection_prefix = Vec::with_capacity(MAX_INSPECTION_PREFIX_BYTES);
     let mut size = 0_u64;
@@ -2263,9 +2400,7 @@ fn read_file_digest(path: &Path, limit: u64) -> Result<FileDigestSnapshot, Asset
         || after.len() != size
         || modified_ns(&after)? != before_modified_ns
     {
-        return Err(AssetError::Invalid(
-            "asset object changed while it was being verified".to_string(),
-        ));
+        return Err(AssetError::LocalCorruption);
     }
     Ok(FileDigestSnapshot {
         sha256: format!("{:x}", hasher.finalize()),
@@ -2280,7 +2415,11 @@ fn read_file_snapshot_with_hook(
     limit: u64,
     after_open: impl FnOnce(),
 ) -> Result<FileSnapshot, AssetError> {
-    let mut file = open_options_no_follow(path, false).map_err(map_missing)?;
+    let metadata = fs::symlink_metadata(path).map_err(map_missing)?;
+    if !metadata.file_type().is_file() {
+        return Err(AssetError::LocalCorruption);
+    }
+    let mut file = open_options_no_follow_nonblocking(path).map_err(map_missing)?;
     let before = file.metadata()?;
     if !before.file_type().is_file() {
         return Err(AssetError::Missing);
@@ -2340,11 +2479,22 @@ fn open_options_no_follow(path: &Path, write: bool) -> std::io::Result<File> {
     options.open(path)
 }
 
+fn open_options_no_follow_nonblocking(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    options.open(path)
+}
+
 fn open_hash_lock_file(path: &Path) -> Result<File, AssetError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) if !metadata.file_type().is_file() => {
-            return Err(AssetError::Invalid(
-                "asset hash lock path is not a regular file".to_string(),
+            return Err(AssetError::Invariant(
+                "asset hash lock path is not a regular file",
             ));
         }
         Ok(_) => {}
@@ -2360,8 +2510,8 @@ fn open_hash_lock_file(path: &Path) -> Result<File, AssetError> {
     }
     let file = options.open(path)?;
     if !file.metadata()?.file_type().is_file() {
-        return Err(AssetError::Invalid(
-            "asset hash lock path is not a regular file".to_string(),
+        return Err(AssetError::Invariant(
+            "asset hash lock path is not a regular file",
         ));
     }
     set_file_mode(&file)?;
