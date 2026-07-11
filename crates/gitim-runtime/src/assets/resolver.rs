@@ -6,7 +6,7 @@ use futures::StreamExt;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::header::{self, HeaderMap};
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,6 +18,7 @@ const HEADER_TIMEOUT: Duration = Duration::from_secs(10);
 const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const CANDIDATE_TIMEOUT: Duration = Duration::from_secs(90);
 const WHOLE_RESOLVE_TIMEOUT: Duration = Duration::from_secs(120);
+const LEGACY_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
 const HEAD_CONCURRENCY: usize = 8;
 const PEER_CACHE_CONTROL: &str = "private, immutable, max-age=31536000";
 
@@ -55,6 +56,7 @@ struct CandidateRequest<'a> {
     origin: &'a str,
     hash: &'a str,
     budgets: ResolverBudgets,
+    recorder: &'a ResolutionRecorder,
 }
 
 impl Default for ResolverBudgets {
@@ -80,6 +82,59 @@ struct AttemptSummary {
     peer_invalid: Option<String>,
     unavailable: bool,
     missing: bool,
+}
+
+#[derive(Clone)]
+struct ResolutionRecorder {
+    service: Arc<AssetService>,
+    workspace_slug: String,
+    hash: String,
+    origin: String,
+    store_recorded: Arc<AtomicBool>,
+    fleet_recorded: Arc<AtomicBool>,
+}
+
+impl ResolutionRecorder {
+    fn new(service: &Arc<AssetService>, workspace_slug: &str, hash: &str, origin: &str) -> Self {
+        Self {
+            service: Arc::clone(service),
+            workspace_slug: workspace_slug.to_string(),
+            hash: hash.to_string(),
+            origin: origin.to_string(),
+            store_recorded: Arc::new(AtomicBool::new(false)),
+            fleet_recorded: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn record(&self, error: &AssetError) {
+        self.record_store(error);
+        if is_fleet_resolution_failure(error)
+            && self
+                .fleet_recorded
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            record_fetch_failure(
+                &self.service,
+                &self.workspace_slug,
+                &self.hash,
+                &self.origin,
+                error,
+            );
+        }
+    }
+
+    fn record_store(&self, error: &AssetError) {
+        if is_store_failure(error)
+            && self
+                .store_recorded
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        {
+            self.service
+                .record_store_failure(&self.workspace_slug, error);
+        }
+    }
 }
 
 impl AttemptSummary {
@@ -120,13 +175,8 @@ pub fn order_peers(origin: &str, peers: Vec<AssetPeer>) -> Vec<AssetPeer> {
             .then_with(|| a.remote_workspace_slug.cmp(&b.remote_workspace_slug))
             .then_with(|| a.base_url.cmp(&b.base_url))
     });
-    let mut seen_runtime_ids = HashSet::new();
-    peers.retain(|peer| {
-        peer.runtime_id
-            .as_deref()
-            .is_none_or(|runtime_id| seen_runtime_ids.insert(runtime_id.to_string()))
-    });
-    peers.dedup();
+    let mut seen_endpoints = HashSet::new();
+    peers.retain(|peer| seen_endpoints.insert(peer_key(peer)));
     peers
 }
 
@@ -163,16 +213,25 @@ async fn resolve_get_with_budgets(
     hash: &str,
     budgets: ResolverBudgets,
 ) -> Result<ResolvedReplica, AssetError> {
-    if let Some(metadata) = local_metadata(store, hash)? {
-        return Ok(local_replica(metadata, workspace_slug));
-    }
-
     let mut summary = AttemptSummary::default();
+    let recorder = ResolutionRecorder::new(service, workspace_slug, hash, origin);
+    let network_attempted = AtomicBool::new(false);
+    let whole_timed_out = AtomicBool::new(false);
     let result = match tokio::time::timeout(budgets.whole, async {
-        let mut hash_lock = Some(HashLock::acquire(store, hash).await?);
-        if let Some(metadata) = local_metadata(store, hash)? {
+        if let Some(metadata) = local_metadata_owned(store, hash, &recorder).await? {
             return Ok(local_replica(metadata, workspace_slug));
         }
+        if workspace_identity.is_empty() {
+            return Err(AssetError::Missing);
+        }
+        let hash_lock = HashLock::acquire(store, hash).await?;
+        let (hash_lock, local) =
+            local_metadata_with_lock_owned(store, hash, hash_lock, &recorder).await?;
+        if let Some(metadata) = local {
+            return Ok(local_replica(metadata, workspace_slug));
+        }
+        let mut hash_lock = Some(hash_lock);
+        network_attempted.store(true, Ordering::Release);
         let client = peer_client()?;
         let (metadata, peer) = fetch_candidates(
             state,
@@ -186,6 +245,7 @@ async fn resolve_get_with_budgets(
             budgets,
             &mut summary,
             &mut hash_lock,
+            &recorder,
         )
         .await?;
         Ok(ResolvedReplica { metadata, peer })
@@ -194,6 +254,7 @@ async fn resolve_get_with_budgets(
     {
         Ok(result) => result,
         Err(_) => {
+            whole_timed_out.store(true, Ordering::Release);
             summary.observe(AssetError::OriginUnavailable)?;
             Err(summary.final_error())
         }
@@ -205,7 +266,11 @@ async fn resolve_get_with_budgets(
             Ok(replica)
         }
         Err(error) => {
-            record_fetch_failure(service, workspace_slug, hash, origin, &error);
+            recorder.record_store(&error);
+            if network_attempted.load(Ordering::Acquire) || whole_timed_out.load(Ordering::Acquire)
+            {
+                recorder.record(&error);
+            }
             Err(error)
         }
     }
@@ -220,21 +285,28 @@ pub async fn resolve_head(
     origin: &str,
     hash: &str,
 ) -> Result<HeadAvailability, AssetError> {
-    if let Some(metadata) = local_metadata(store, hash)? {
-        return Ok(HeadAvailability {
-            size: metadata.size,
-            media_type: metadata.media_type,
-            peer: AssetPeer {
-                node_id: "local".to_string(),
-                runtime_id: None,
-                base_url: String::new(),
-                remote_workspace_slug: workspace_slug.to_string(),
-            },
-        });
-    }
     let budgets = ResolverBudgets::default();
     let mut summary = AttemptSummary::default();
+    let recorder = ResolutionRecorder::new(service, workspace_slug, hash, origin);
+    let network_attempted = AtomicBool::new(false);
+    let whole_timed_out = AtomicBool::new(false);
     let result = match tokio::time::timeout(budgets.whole, async {
+        if let Some(metadata) = local_metadata_owned(store, hash, &recorder).await? {
+            return Ok(HeadAvailability {
+                size: metadata.size,
+                media_type: metadata.media_type,
+                peer: AssetPeer {
+                    node_id: "local".to_string(),
+                    runtime_id: None,
+                    base_url: String::new(),
+                    remote_workspace_slug: workspace_slug.to_string(),
+                },
+            });
+        }
+        if workspace_identity.is_empty() {
+            return Err(AssetError::Missing);
+        }
+        network_attempted.store(true, Ordering::Release);
         let client = peer_client()?;
         probe_candidates(
             state,
@@ -254,21 +326,75 @@ pub async fn resolve_head(
     {
         Ok(result) => result,
         Err(_) => {
+            whole_timed_out.store(true, Ordering::Release);
             summary.observe(AssetError::OriginUnavailable)?;
             Err(summary.final_error())
         }
     };
     if let Err(error) = &result {
-        record_fetch_failure(service, workspace_slug, hash, origin, error);
+        recorder.record_store(error);
+        if network_attempted.load(Ordering::Acquire) || whole_timed_out.load(Ordering::Acquire) {
+            recorder.record(error);
+        }
     }
     result
 }
 
-fn local_metadata(store: &AssetStore, hash: &str) -> Result<Option<AssetMetadata>, AssetError> {
+async fn local_metadata_owned(
+    store: &AssetStore,
+    hash: &str,
+    recorder: &ResolutionRecorder,
+) -> Result<Option<AssetMetadata>, AssetError> {
+    let store = store.clone();
+    let hash = hash.to_string();
+    let recorder = recorder.clone();
+    tokio::task::spawn_blocking(move || local_metadata_blocking(&store, &hash, &recorder))
+        .await
+        .map_err(|error| {
+            AssetError::Store(std::io::Error::other(format!(
+                "asset local verification task failed: {error}"
+            )))
+        })?
+}
+
+async fn local_metadata_with_lock_owned(
+    store: &AssetStore,
+    hash: &str,
+    hash_lock: HashLock,
+    recorder: &ResolutionRecorder,
+) -> Result<(HashLock, Option<AssetMetadata>), AssetError> {
+    let store = store.clone();
+    let hash = hash.to_string();
+    let recorder = recorder.clone();
+    let (hash_lock, result) = tokio::task::spawn_blocking(move || {
+        let result = local_metadata_blocking(&store, &hash, &recorder);
+        (hash_lock, result)
+    })
+    .await
+    .map_err(|error| {
+        AssetError::Store(std::io::Error::other(format!(
+            "asset local verification task failed: {error}"
+        )))
+    })?;
+    result.map(|metadata| (hash_lock, metadata))
+}
+
+fn local_metadata_blocking(
+    store: &AssetStore,
+    hash: &str,
+    recorder: &ResolutionRecorder,
+) -> Result<Option<AssetMetadata>, AssetError> {
     match store.verified_local_asset(hash) {
         Ok(local) => Ok(Some(local.metadata().clone())),
-        Err(AssetError::Missing | AssetError::LocalCorruption) => Ok(None),
-        Err(error) => Err(error),
+        Err(AssetError::Missing) => Ok(None),
+        Err(error @ AssetError::LocalCorruption) => {
+            recorder.record_store(&error);
+            Ok(None)
+        }
+        Err(error) => {
+            recorder.record_store(&error);
+            Err(error)
+        }
     }
 }
 
@@ -297,6 +423,7 @@ async fn fetch_candidates(
     budgets: ResolverBudgets,
     summary: &mut AttemptSummary,
     hash_lock: &mut Option<HashLock>,
+    recorder: &ResolutionRecorder,
 ) -> Result<(AssetMetadata, AssetPeer), AssetError> {
     let mut peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
     let mut attempted = HashSet::new();
@@ -304,13 +431,15 @@ async fn fetch_candidates(
         origin,
         hash,
         budgets,
+        recorder,
     };
 
-    if let Some(peer) = peers
+    let exact: Vec<_> = peers
         .iter()
-        .find(|peer| peer.runtime_id.as_deref() == Some(origin))
+        .filter(|peer| peer.runtime_id.as_deref() == Some(origin))
         .cloned()
-    {
+        .collect();
+    for peer in exact {
         attempted.insert(peer_key(&peer));
         match download_candidate(service, store, client, &peer, request, hash_lock).await {
             Ok(metadata) => return Ok((metadata, peer)),
@@ -324,35 +453,15 @@ async fn fetch_candidates(
         }
     }
 
-    if peers.iter().any(|peer| peer.runtime_id.is_none()) {
-        fleet::discover_asset_legacy_identities(state, workspace_slug, workspace_identity).await;
-        peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
-        if let Some(peer) = peers
-            .iter()
-            .find(|peer| {
-                peer.runtime_id.as_deref() == Some(origin) && !attempted.contains(&peer_key(peer))
-            })
-            .cloned()
-        {
-            attempted.insert(peer_key(&peer));
-            match download_candidate(service, store, client, &peer, request, hash_lock).await {
-                Ok(metadata) => return Ok((metadata, peer)),
-                Err(error) => {
-                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                    summary.observe(error)?;
-                    if hash_lock.is_none() {
-                        return Err(summary.final_error());
-                    }
-                }
-            }
-        }
-    }
-
+    let has_legacy = peers.iter().any(|peer| peer.runtime_id.is_none());
     let fallbacks: Vec<_> = peers
-        .into_iter()
+        .iter()
         .filter(|peer| {
-            peer.runtime_id.as_deref() != Some(origin) && attempted.insert(peer_key(peer))
+            peer.runtime_id.is_some()
+                && peer.runtime_id.as_deref() != Some(origin)
+                && attempted.insert(peer_key(peer))
         })
+        .cloned()
         .collect();
     let mut available = probe_fallbacks(
         client,
@@ -379,6 +488,77 @@ async fn fetch_candidates(
             }
         }
     }
+
+    if has_legacy {
+        if tokio::time::timeout(
+            LEGACY_DISCOVERY_TIMEOUT,
+            fleet::discover_asset_legacy_identities(state, workspace_slug, workspace_identity),
+        )
+        .await
+        .is_err()
+        {
+            summary.observe(AssetError::OriginUnavailable)?;
+        }
+        peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
+        if peers.iter().any(|peer| peer.runtime_id.is_none()) {
+            summary.observe(AssetError::OriginUnavailable)?;
+        }
+
+        let discovered_exact: Vec<_> = peers
+            .iter()
+            .filter(|peer| {
+                peer.runtime_id.as_deref() == Some(origin) && !attempted.contains(&peer_key(peer))
+            })
+            .cloned()
+            .collect();
+        for peer in discovered_exact {
+            attempted.insert(peer_key(&peer));
+            match download_candidate(service, store, client, &peer, request, hash_lock).await {
+                Ok(metadata) => return Ok((metadata, peer)),
+                Err(error) => {
+                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
+                    summary.observe(error)?;
+                    if hash_lock.is_none() {
+                        return Err(summary.final_error());
+                    }
+                }
+            }
+        }
+
+        let discovered_fallbacks: Vec<_> = peers
+            .into_iter()
+            .filter(|peer| {
+                peer.runtime_id.is_some()
+                    && peer.runtime_id.as_deref() != Some(origin)
+                    && attempted.insert(peer_key(peer))
+            })
+            .collect();
+        let mut available = probe_fallbacks(
+            client,
+            discovered_fallbacks,
+            hash,
+            store.limits().max_file_bytes,
+            budgets,
+            summary,
+            service,
+            workspace_slug,
+            origin,
+        )
+        .await?;
+        available.sort_by_key(|(index, _)| *index);
+        for (_, peer) in available {
+            match download_candidate(service, store, client, &peer, request, hash_lock).await {
+                Ok(metadata) => return Ok((metadata, peer)),
+                Err(error) => {
+                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
+                    summary.observe(error)?;
+                    if hash_lock.is_none() {
+                        return Err(summary.final_error());
+                    }
+                }
+            }
+        }
+    }
     Err(summary.final_error())
 }
 
@@ -397,11 +577,12 @@ async fn probe_candidates(
 ) -> Result<HeadAvailability, AssetError> {
     let mut peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
     let mut attempted = HashSet::new();
-    if let Some(peer) = peers
+    let exact: Vec<_> = peers
         .iter()
-        .find(|peer| peer.runtime_id.as_deref() == Some(origin))
+        .filter(|peer| peer.runtime_id.as_deref() == Some(origin))
         .cloned()
-    {
+        .collect();
+    for peer in exact {
         attempted.insert(peer_key(&peer));
         match probe_candidate(client, &peer, hash, max_file_bytes, budgets).await {
             Ok(availability) => return Ok(availability),
@@ -411,31 +592,15 @@ async fn probe_candidates(
             }
         }
     }
-    if peers.iter().any(|peer| peer.runtime_id.is_none()) {
-        fleet::discover_asset_legacy_identities(state, workspace_slug, workspace_identity).await;
-        peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
-        if let Some(peer) = peers
-            .iter()
-            .find(|peer| {
-                peer.runtime_id.as_deref() == Some(origin) && !attempted.contains(&peer_key(peer))
-            })
-            .cloned()
-        {
-            attempted.insert(peer_key(&peer));
-            match probe_candidate(client, &peer, hash, max_file_bytes, budgets).await {
-                Ok(availability) => return Ok(availability),
-                Err(error) => {
-                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                    summary.observe(error)?;
-                }
-            }
-        }
-    }
+    let has_legacy = peers.iter().any(|peer| peer.runtime_id.is_none());
     let fallbacks: Vec<_> = peers
-        .into_iter()
+        .iter()
         .filter(|peer| {
-            peer.runtime_id.as_deref() != Some(origin) && attempted.insert(peer_key(peer))
+            peer.runtime_id.is_some()
+                && peer.runtime_id.as_deref() != Some(origin)
+                && attempted.insert(peer_key(peer))
         })
+        .cloned()
         .collect();
     let mut probes = futures::stream::iter(fallbacks.into_iter().map(|peer| async move {
         let result = probe_candidate(client, &peer, hash, max_file_bytes, budgets).await;
@@ -448,6 +613,63 @@ async fn probe_candidates(
             Err(error) => {
                 record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
                 summary.observe(error)?;
+            }
+        }
+    }
+
+    if has_legacy {
+        if tokio::time::timeout(
+            LEGACY_DISCOVERY_TIMEOUT,
+            fleet::discover_asset_legacy_identities(state, workspace_slug, workspace_identity),
+        )
+        .await
+        .is_err()
+        {
+            summary.observe(AssetError::OriginUnavailable)?;
+        }
+        peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
+        if peers.iter().any(|peer| peer.runtime_id.is_none()) {
+            summary.observe(AssetError::OriginUnavailable)?;
+        }
+        let discovered_exact: Vec<_> = peers
+            .iter()
+            .filter(|peer| {
+                peer.runtime_id.as_deref() == Some(origin) && !attempted.contains(&peer_key(peer))
+            })
+            .cloned()
+            .collect();
+        for peer in discovered_exact {
+            attempted.insert(peer_key(&peer));
+            match probe_candidate(client, &peer, hash, max_file_bytes, budgets).await {
+                Ok(availability) => return Ok(availability),
+                Err(error) => {
+                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
+                    summary.observe(error)?;
+                }
+            }
+        }
+
+        let discovered_fallbacks: Vec<_> = peers
+            .into_iter()
+            .filter(|peer| {
+                peer.runtime_id.is_some()
+                    && peer.runtime_id.as_deref() != Some(origin)
+                    && attempted.insert(peer_key(peer))
+            })
+            .collect();
+        let mut probes =
+            futures::stream::iter(discovered_fallbacks.into_iter().map(|peer| async move {
+                let result = probe_candidate(client, &peer, hash, max_file_bytes, budgets).await;
+                (peer, result)
+            }))
+            .buffer_unordered(HEAD_CONCURRENCY);
+        while let Some((peer, result)) = probes.next().await {
+            match result {
+                Ok(availability) => return Ok(availability),
+                Err(error) => {
+                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
+                    summary.observe(error)?;
+                }
             }
         }
     }
@@ -476,12 +698,8 @@ fn peer_from_snapshot(peer: FleetPeerSnapshot) -> AssetPeer {
     }
 }
 
-fn peer_key(peer: &AssetPeer) -> (String, String, String) {
-    (
-        peer.node_id.clone(),
-        peer.base_url.clone(),
-        peer.remote_workspace_slug.clone(),
-    )
+fn peer_key(peer: &AssetPeer) -> (String, String) {
+    (peer.base_url.clone(), peer.remote_workspace_slug.clone())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -541,7 +759,7 @@ async fn download_candidate(
     hash_lock: &mut Option<HashLock>,
 ) -> Result<AssetMetadata, AssetError> {
     tokio::time::timeout(request.budgets.candidate, async {
-        let _permit = service.acquire_peer().await?;
+        let permit = service.acquire_peer().await?;
         let response = send_peer_request(
             client,
             peer,
@@ -590,15 +808,26 @@ async fn download_candidate(
         let hash_lock = hash_lock.take().ok_or(AssetError::Invariant(
             "fleet hash lock was already consumed",
         ))?;
-        store
-            .persist_staged_with_lock(
-                staged,
-                AssetSource::FleetReplica {
-                    origin_runtime_id: request.origin.to_string(),
-                },
-                hash_lock,
-            )
-            .await
+        let store = store.clone();
+        let recorder = request.recorder.clone();
+        let source = AssetSource::FleetReplica {
+            origin_runtime_id: request.origin.to_string(),
+        };
+        let settlement = tokio::spawn(async move {
+            let result = store
+                .persist_staged_with_lock(staged, source, hash_lock)
+                .await;
+            if let Err(error) = &result {
+                recorder.record(error);
+            }
+            drop(permit);
+            result
+        });
+        settlement.await.map_err(|error| {
+            AssetError::Store(std::io::Error::other(format!(
+                "asset settlement task failed: {error}"
+            )))
+        })?
     })
     .await
     .map_err(|_| AssetError::OriginUnavailable)?
@@ -866,13 +1095,7 @@ fn record_fetch_failure(
     origin: &str,
     error: &AssetError,
 ) {
-    if !matches!(
-        error,
-        AssetError::HashMismatch
-            | AssetError::PeerInvalid(_)
-            | AssetError::OriginUnavailable
-            | AssetError::Missing
-    ) {
+    if !is_fleet_resolution_failure(error) {
         return;
     }
     service.fleet_fetch_failures.fetch_add(1, Ordering::Relaxed);
@@ -893,6 +1116,30 @@ fn record_fetch_failure(
         error_code = error.error_code(),
         "Fleet asset resolution failed"
     );
+}
+
+fn is_store_failure(error: &AssetError) -> bool {
+    matches!(
+        error,
+        AssetError::Store(_)
+            | AssetError::Invariant(_)
+            | AssetError::StaleBinding
+            | AssetError::LocalCorruption
+    )
+}
+
+fn is_fleet_resolution_failure(error: &AssetError) -> bool {
+    matches!(
+        error,
+        AssetError::HashMismatch
+            | AssetError::PeerInvalid(_)
+            | AssetError::OriginUnavailable
+            | AssetError::Missing
+            | AssetError::Store(_)
+            | AssetError::Invariant(_)
+            | AssetError::StaleBinding
+            | AssetError::LocalCorruption
+    )
 }
 
 #[cfg(test)]
@@ -941,6 +1188,8 @@ mod tests {
         };
         let client = peer_client().unwrap();
         let hash = format!("{:x}", Sha256::digest(b"expected"));
+        let recorder =
+            ResolutionRecorder::new(&service, "room", &hash, peer.runtime_id.as_deref().unwrap());
         let mut hash_lock = Some(HashLock::acquire(&store, &hash).await.unwrap());
         {
             let future = download_candidate(
@@ -952,6 +1201,7 @@ mod tests {
                     origin: peer.runtime_id.as_deref().unwrap(),
                     hash: &hash,
                     budgets: ResolverBudgets::default(),
+                    recorder: &recorder,
                 },
                 &mut hash_lock,
             );
@@ -1009,5 +1259,203 @@ mod tests {
 
         assert!(matches!(error, AssetError::Store(_)), "{error:?}");
         assert_eq!(service.fleet_fetch_failures.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "test-support")]
+    async fn slow_initial_local_verification_stays_inside_whole_budget() {
+        let workspace = tempfile::tempdir().unwrap();
+        let limits = super::super::AssetLimits {
+            workspace_quota_bytes: 1024 * 1024,
+            min_free_bytes: 1,
+            ..Default::default()
+        };
+        let service = Arc::new(AssetService::new(limits.clone()));
+        let store = AssetStore::open(workspace.path(), "local:test", limits).unwrap();
+        let metadata = store
+            .put_bytes(b"local object", AssetSource::LocalUpload)
+            .unwrap();
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        store.inject_local_verification_pause_after(0, Arc::clone(&reached), Arc::clone(&resume));
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let task_state = Arc::clone(&state);
+        let task_service = Arc::clone(&service);
+        let task_store = store.clone();
+        let hash = metadata.sha256.clone();
+        let request = tokio::spawn(async move {
+            resolve_get_with_budgets(
+                &task_state,
+                &task_service,
+                &task_store,
+                "room",
+                "github.com/acme/room",
+                "3c6a295e-744a-41dc-ba60-5c21bb94e5a2",
+                &hash,
+                ResolverBudgets {
+                    whole: Duration::from_millis(50),
+                    ..ResolverBudgets::default()
+                },
+            )
+            .await
+        });
+        tokio::task::spawn_blocking(move || reached.wait())
+            .await
+            .unwrap();
+
+        let responsive = tokio::spawn(async {
+            tokio::task::yield_now().await;
+            true
+        });
+        assert!(tokio::time::timeout(Duration::from_millis(100), responsive)
+            .await
+            .unwrap()
+            .unwrap());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let finished_within_budget = request.is_finished();
+        tokio::task::spawn_blocking(move || resume.wait())
+            .await
+            .unwrap();
+        let result = request.await.unwrap();
+
+        assert!(finished_within_budget);
+        assert!(matches!(result, Err(AssetError::OriginUnavailable)));
+        assert_eq!(service.fleet_fetch_failures.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "test-support")]
+    async fn cancelled_post_lock_verification_retains_hash_lock_until_completion() {
+        let workspace = tempfile::tempdir().unwrap();
+        let limits = super::super::AssetLimits {
+            workspace_quota_bytes: 1024 * 1024,
+            min_free_bytes: 1,
+            ..Default::default()
+        };
+        let service = Arc::new(AssetService::new(limits.clone()));
+        let store = AssetStore::open(workspace.path(), "local:test", limits).unwrap();
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        store.inject_local_verification_pause_after(1, Arc::clone(&reached), Arc::clone(&resume));
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let hash = format!("{:x}", Sha256::digest(b"missing"));
+        let task_state = Arc::clone(&state);
+        let task_service = Arc::clone(&service);
+        let task_store = store.clone();
+        let task_hash = hash.clone();
+        let request = tokio::spawn(async move {
+            resolve_get_with_budgets(
+                &task_state,
+                &task_service,
+                &task_store,
+                "room",
+                "github.com/acme/room",
+                "3c6a295e-744a-41dc-ba60-5c21bb94e5a2",
+                &task_hash,
+                ResolverBudgets::default(),
+            )
+            .await
+        });
+        tokio::task::spawn_blocking(move || reached.wait())
+            .await
+            .unwrap();
+        request.abort();
+        assert!(request.await.is_err());
+
+        let contender_store = store.clone();
+        let contender_hash = hash.clone();
+        let contender_finished = Arc::new(AtomicBool::new(false));
+        let contender_signal = Arc::clone(&contender_finished);
+        let contender = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let result = runtime.block_on(HashLock::acquire(&contender_store, &contender_hash));
+            contender_signal.store(true, Ordering::Release);
+            result
+        });
+        std::thread::sleep(Duration::from_millis(25));
+        assert!(!contender_finished.load(Ordering::Acquire));
+        assert!(tokio::time::timeout(Duration::from_millis(100), async {
+            tokio::task::yield_now().await;
+            true
+        })
+        .await
+        .unwrap());
+
+        tokio::task::spawn_blocking(move || resume.wait())
+            .await
+            .unwrap();
+        let lock = tokio::task::spawn_blocking(move || contender.join().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(lock);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(feature = "test-support")]
+    async fn detached_local_verification_records_eventual_store_failure() {
+        let workspace = tempfile::tempdir().unwrap();
+        let limits = super::super::AssetLimits {
+            workspace_quota_bytes: 1024 * 1024,
+            min_free_bytes: 1,
+            ..Default::default()
+        };
+        let service = Arc::new(AssetService::new(limits.clone()));
+        let store = AssetStore::open(workspace.path(), "local:test", limits).unwrap();
+        let bytes = b"object requiring metadata rebuild";
+        let hash = format!("{:x}", Sha256::digest(bytes));
+        let root = workspace.path().join(".gitim-runtime/assets/v1");
+        let object = root.join("objects/sha256").join(&hash[..2]).join(&hash);
+        std::fs::create_dir_all(object.parent().unwrap()).unwrap();
+        std::fs::write(object, bytes).unwrap();
+        store.inject_sidecar_write_failure_once();
+        let reached = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        store.inject_local_verification_pause_after(0, Arc::clone(&reached), Arc::clone(&resume));
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let task_state = Arc::clone(&state);
+        let task_service = Arc::clone(&service);
+        let task_store = store.clone();
+        let task_hash = hash.clone();
+        let request = tokio::spawn(async move {
+            resolve_get_with_budgets(
+                &task_state,
+                &task_service,
+                &task_store,
+                "room",
+                "github.com/acme/room",
+                "3c6a295e-744a-41dc-ba60-5c21bb94e5a2",
+                &task_hash,
+                ResolverBudgets {
+                    whole: Duration::from_millis(50),
+                    ..ResolverBudgets::default()
+                },
+            )
+            .await
+        });
+        tokio::task::spawn_blocking(move || reached.wait())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(matches!(
+            request.await.unwrap(),
+            Err(AssetError::OriginUnavailable)
+        ));
+        assert_eq!(service.store_failures.load(Ordering::Acquire), 0);
+
+        tokio::task::spawn_blocking(move || resume.wait())
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while service.store_failures.load(Ordering::Acquire) == 0
+            && std::time::Instant::now() < deadline
+        {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(service.store_failures.load(Ordering::Acquire), 1);
+        assert_eq!(service.fleet_fetch_failures.load(Ordering::Acquire), 1);
     }
 }

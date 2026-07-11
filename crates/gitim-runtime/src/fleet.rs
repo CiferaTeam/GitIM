@@ -837,14 +837,10 @@ pub fn snapshot_asset_peers(
             .then_with(|| a.runtime_id.cmp(&b.runtime_id))
     });
 
-    let mut seen_runtime_ids = std::collections::HashSet::new();
+    let mut seen_endpoints = std::collections::HashSet::new();
     peers.retain(|peer| {
-        peer.runtime_id
-            .as_deref()
-            .and_then(|runtime_id| uuid::Uuid::parse_str(runtime_id).ok())
-            .is_none_or(|runtime_id| seen_runtime_ids.insert(runtime_id))
+        seen_endpoints.insert((peer.base_url.clone(), peer.remote_workspace_id.clone()))
     });
-    peers.dedup();
     peers
 }
 

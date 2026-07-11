@@ -656,65 +656,72 @@ async fn serve_local(
         Err(error) => return asset_error_response(&service, &slug, error),
     };
     let mut remote_resolution = false;
-    let verified = loop {
-        let lookup = tokio::task::spawn_blocking({
-            let store = store.clone();
-            let hash = hash.clone();
-            move || store.verified_local_asset(&hash)
-        })
-        .await;
-        match lookup {
-            Ok(Ok(verified)) => break verified,
-            Ok(Err(error @ (AssetError::Missing | AssetError::LocalCorruption))) if allow_fleet => {
-                if matches!(error, AssetError::LocalCorruption) {
-                    record_store_failure(&service, &slug, &error);
-                }
-                let Some(workspace_identity) = snapshot.workspace_identity.as_deref() else {
-                    return asset_error_response(&service, &slug, AssetError::Missing);
-                };
-                if request.method() == Method::HEAD {
-                    return match super::resolver::resolve_head(
-                        &state,
-                        &service,
-                        &store,
-                        &slug,
-                        workspace_identity,
-                        &origin_runtime_id,
-                        &hash,
-                    )
-                    .await
-                    {
-                        Ok(availability) => {
-                            head_availability_response(availability, &hash, &options)
-                        }
-                        Err(error) => asset_error_response(&service, &slug, error),
-                    };
-                }
-                match super::resolver::resolve_get(
-                    &state,
-                    &service,
-                    &store,
-                    &slug,
-                    workspace_identity,
-                    &origin_runtime_id,
-                    &hash,
-                )
-                .await
-                {
-                    Ok(replica) => {
-                        remote_resolution = replica.peer.node_id != "local";
+    if allow_fleet {
+        let workspace_identity = snapshot.workspace_identity.as_deref().unwrap_or_default();
+        if request.method() == Method::HEAD {
+            let etag = format!("\"sha256-{hash}\"");
+            let not_modified = exact_strong_if_none_match(request.headers(), &etag);
+            return match super::resolver::resolve_head(
+                &state,
+                &service,
+                &store,
+                &slug,
+                workspace_identity,
+                &origin_runtime_id,
+                &hash,
+            )
+            .await
+            {
+                Ok(availability) => {
+                    if availability.peer.node_id == "local" {
+                        service.record_local_hit(
+                            &slug,
+                            &hash,
+                            availability.size,
+                            &origin_runtime_id,
+                        );
                     }
-                    Err(error) => return asset_error_response(&service, &slug, error),
+                    if request.headers().get_all(header::RANGE).iter().count() > 1 {
+                        head_range_not_satisfiable_response(availability, &hash, &options)
+                    } else {
+                        head_availability_response(availability, &hash, &options, not_modified)
+                    }
                 }
+                Err(error) => resolver_error_response(error),
+            };
+        }
+        match super::resolver::resolve_get(
+            &state,
+            &service,
+            &store,
+            &slug,
+            workspace_identity,
+            &origin_runtime_id,
+            &hash,
+        )
+        .await
+        {
+            Ok(replica) => {
+                remote_resolution = replica.peer.node_id != "local";
             }
-            Ok(Err(error)) => return asset_error_response(&service, &slug, error),
-            Err(_) => {
-                return asset_error_response(
-                    &service,
-                    &slug,
-                    AssetError::Store(std::io::Error::other("asset lookup task failed")),
-                )
-            }
+            Err(error) => return resolver_error_response(error),
+        }
+    };
+    let lookup = tokio::task::spawn_blocking({
+        let store = store.clone();
+        let hash = hash.clone();
+        move || store.verified_local_asset(&hash)
+    })
+    .await;
+    let verified = match lookup {
+        Ok(Ok(verified)) => verified,
+        Ok(Err(error)) => return asset_error_response(&service, &slug, error),
+        Err(_) => {
+            return asset_error_response(
+                &service,
+                &slug,
+                AssetError::Store(std::io::Error::other("asset lookup task failed")),
+            )
         }
     };
     let verified = Arc::new(verified);
@@ -722,11 +729,7 @@ async fn serve_local(
     if let Err(error) = ensure_serve_capability(Arc::clone(&verified)).await {
         return asset_error_response(&service, &slug, error);
     }
-    let if_none_match = request.headers().get_all(header::IF_NONE_MATCH);
-    let mut if_none_match = if_none_match.iter();
-    let exact_strong_match = if_none_match.next().and_then(|value| value.to_str().ok())
-        == Some(etag.as_str())
-        && if_none_match.next().is_none();
+    let exact_strong_match = exact_strong_if_none_match(request.headers(), &etag);
     if exact_strong_match {
         if !remote_resolution {
             service.record_local_hit(&slug, &hash, verified.metadata().size, &origin_runtime_id);
@@ -774,20 +777,58 @@ fn head_availability_response(
     availability: super::resolver::HeadAvailability,
     hash: &str,
     options: &ResolveOptions,
+    not_modified: bool,
 ) -> Response {
-    let mut response = StatusCode::OK.into_response();
+    let etag = format!("\"sha256-{hash}\"");
+    let mut response = if not_modified {
+        not_modified_response(&etag)
+    } else {
+        StatusCode::OK.into_response()
+    };
     let headers = response.headers_mut();
-    if let Ok(value) = HeaderValue::from_str(&availability.size.to_string()) {
-        headers.insert(header::CONTENT_LENGTH, value);
-    }
-    if let Ok(value) = HeaderValue::from_str(&availability.media_type) {
-        headers.insert(header::CONTENT_TYPE, value);
+    if !not_modified {
+        if let Ok(value) = HeaderValue::from_str(&availability.size.to_string()) {
+            headers.insert(header::CONTENT_LENGTH, value);
+        }
+        if let Ok(value) = HeaderValue::from_str(&availability.media_type) {
+            headers.insert(header::CONTENT_TYPE, value);
+        }
     }
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static(CACHE_CONTROL_VALUE),
     );
-    if let Ok(value) = HeaderValue::from_str(&format!("\"sha256-{hash}\"")) {
+    if let Ok(value) = HeaderValue::from_str(&etag) {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
+    if let Ok(value) = content_disposition(false, options.name.as_deref()) {
+        headers.insert(header::CONTENT_DISPOSITION, value);
+    }
+    response
+}
+
+fn head_range_not_satisfiable_response(
+    availability: super::resolver::HeadAvailability,
+    hash: &str,
+    options: &ResolveOptions,
+) -> Response {
+    let etag = format!("\"sha256-{hash}\"");
+    let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(&format!("bytes */{}", availability.size)) {
+        headers.insert(header::CONTENT_RANGE, value);
+    }
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(CACHE_CONTROL_VALUE),
+    );
+    if let Ok(value) = HeaderValue::from_str(&etag) {
         headers.insert(header::ETAG, value);
     }
     headers.insert(
@@ -798,6 +839,12 @@ fn head_availability_response(
         headers.insert(header::CONTENT_DISPOSITION, value);
     }
     response
+}
+
+fn exact_strong_if_none_match(headers: &HeaderMap, etag: &str) -> bool {
+    let values = headers.get_all(header::IF_NONE_MATCH);
+    let mut values = values.iter();
+    values.next().and_then(|value| value.to_str().ok()) == Some(etag) && values.next().is_none()
 }
 
 async fn ensure_serve_capability(
@@ -905,6 +952,9 @@ fn not_modified_response(etag: &str) -> Response {
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
+    response
+        .headers_mut()
+        .insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     response
 }
 
@@ -1061,6 +1111,10 @@ async fn activate_store_async(
 
 fn asset_error_response(service: &AssetService, workspace: &str, error: AssetError) -> Response {
     record_store_failure(service, workspace, &error);
+    error_response(error.status_code(), error.error_code(), &error.to_string())
+}
+
+fn resolver_error_response(error: AssetError) -> Response {
     error_response(error.status_code(), error.error_code(), &error.to_string())
 }
 

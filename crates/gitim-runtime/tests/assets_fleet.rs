@@ -7,6 +7,8 @@ use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
 use futures::StreamExt;
+#[cfg(feature = "test-support")]
+use gitim_runtime::assets::{resolve_fleet_asset_for_test, AssetEvent};
 use gitim_runtime::assets::{AssetLimits, AssetService, AssetSource};
 use gitim_runtime::fleet;
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
@@ -18,7 +20,11 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
+#[cfg(feature = "test-support")]
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+#[cfg(feature = "test-support")]
+use std::sync::Barrier;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -101,6 +107,70 @@ struct MockPeer {
     base_url: String,
     state: Arc<MockPeerState>,
     task: tokio::task::JoinHandle<()>,
+}
+
+struct StalledHealthState {
+    requests: AtomicUsize,
+    inflight: AtomicUsize,
+}
+
+struct StalledHealthGuard {
+    state: Arc<StalledHealthState>,
+}
+
+impl Drop for StalledHealthGuard {
+    fn drop(&mut self) {
+        self.state.inflight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+struct StalledHealthPeer {
+    base_url: String,
+    state: Arc<StalledHealthState>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl StalledHealthPeer {
+    async fn spawn() -> Self {
+        let state = Arc::new(StalledHealthState {
+            requests: AtomicUsize::new(0),
+            inflight: AtomicUsize::new(0),
+        });
+        let app = Router::new()
+            .route("/health", get(stalled_health))
+            .with_state(Arc::clone(&state));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        Self {
+            base_url: format!("http://{address}"),
+            state,
+            task,
+        }
+    }
+
+    fn requests(&self) -> usize {
+        self.state.requests.load(Ordering::Acquire)
+    }
+
+    fn inflight(&self) -> usize {
+        self.state.inflight.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for StalledHealthPeer {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn stalled_health(State(state): State<Arc<StalledHealthState>>) -> Response {
+    state.requests.fetch_add(1, Ordering::AcqRel);
+    state.inflight.fetch_add(1, Ordering::AcqRel);
+    let _guard = StalledHealthGuard { state };
+    std::future::pending::<Response>().await
 }
 
 impl MockPeer {
@@ -410,17 +480,53 @@ fn add_peer_url(
     runtime_id: Option<&str>,
     workspace_identity: &str,
 ) {
+    add_peer_mapping_url(
+        fixture,
+        alias,
+        base_url,
+        runtime_id,
+        workspace_identity,
+        "remote-room",
+    );
+}
+
+fn add_peer_mapping_url(
+    fixture: &Fixture,
+    alias: &str,
+    base_url: &str,
+    runtime_id: Option<&str>,
+    workspace_identity: &str,
+    remote_workspace_id: &str,
+) {
+    add_peer_mapping_url_to_state(
+        &fixture.state,
+        alias,
+        base_url,
+        runtime_id,
+        workspace_identity,
+        remote_workspace_id,
+    );
+}
+
+fn add_peer_mapping_url_to_state(
+    state: &SharedRuntimeState,
+    alias: &str,
+    base_url: &str,
+    runtime_id: Option<&str>,
+    workspace_identity: &str,
+    remote_workspace_id: &str,
+) {
     fleet::activate_node(
-        fixture.state.clone(),
+        state.clone(),
         FleetNodeEntry {
             node_id: alias.to_string(),
             runtime_id: runtime_id.map(str::to_string),
             base_url: base_url.to_string(),
             node_ip: None,
             node_name: None,
-            workspaces: vec!["remote-room".to_string()],
+            workspaces: vec![remote_workspace_id.to_string()],
             workspace_mappings: vec![FleetWorkspaceMapping {
-                remote_workspace_id: "remote-room".to_string(),
+                remote_workspace_id: remote_workspace_id.to_string(),
                 local_workspace_id: "room".to_string(),
                 workspace_identity: workspace_identity.to_string(),
             }],
@@ -474,6 +580,23 @@ async fn spawn_raw_truncated_peer(hash: String) -> (String, tokio::task::JoinHan
         }
     });
     (format!("http://{address}"), task)
+}
+
+async fn spawn_accept_close_peer() -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let task_accepts = Arc::clone(&accepts);
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((socket, _)) = listener.accept().await else {
+                return;
+            };
+            task_accepts.fetch_add(1, Ordering::AcqRel);
+            drop(socket);
+        }
+    });
+    (format!("http://{address}"), accepts, task)
 }
 
 fn sha256(bytes: &[u8]) -> String {
@@ -538,6 +661,41 @@ fn workspace_store(fixture: &Fixture) -> gitim_runtime::assets::AssetStore {
         .unwrap()
 }
 
+#[cfg(feature = "test-support")]
+fn spawn_resolver_child(
+    workspace: &Path,
+    base_url: &str,
+    hash: &str,
+    start: &Path,
+    ready: &Path,
+) -> Child {
+    Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("fleet_resolver_child")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env("GITIM_FLEET_RESOLVER_CHILD", "1")
+        .env("GITIM_FLEET_RESOLVER_WORKSPACE", workspace)
+        .env("GITIM_FLEET_RESOLVER_BASE_URL", base_url)
+        .env("GITIM_FLEET_RESOLVER_HASH", hash)
+        .env("GITIM_FLEET_RESOLVER_START", start)
+        .env("GITIM_FLEET_RESOLVER_READY", ready)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
+#[cfg(feature = "test-support")]
+fn wait_for_child_marker(child: &mut Child, marker: &Path) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        assert!(child.try_wait().unwrap().is_none());
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[tokio::test]
 async fn remote_get_verifies_persists_and_survives_origin_shutdown() {
     let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
@@ -589,6 +747,53 @@ async fn remote_get_verifies_persists_and_survives_origin_shutdown() {
 }
 
 #[tokio::test]
+async fn exact_origin_tries_distinct_remote_stores_and_deduplicates_identical_endpoints() {
+    let missing = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Missing).await;
+    let object = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let fixture = fixture();
+    add_peer_mapping_url(
+        &fixture,
+        "a-duplicate",
+        &missing.base_url,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+        "store-a",
+    );
+    add_peer_mapping_url(
+        &fixture,
+        "b-missing",
+        &missing.base_url,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+        "store-a",
+    );
+    add_peer_mapping_url(
+        &fixture,
+        "c-object",
+        &object.base_url,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+        "store-b",
+    );
+
+    let response = fixture
+        .app
+        .oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &sha256(PNG_1X1),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_bytes(response).await.as_ref(), PNG_1X1);
+    assert_eq!(missing.object_gets(), 1);
+    assert_eq!(object.object_gets(), 1);
+    assert_eq!(object.observed_slug().as_deref(), Some("store-b"));
+}
+
+#[tokio::test]
 async fn fallback_finds_replica_after_third_sorted_alias() {
     let origin = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Missing).await;
     let alpha = MockPeer::spawn(
@@ -606,14 +811,14 @@ async fn fallback_finds_replica_after_third_sorted_alias() {
         PeerBehavior::Missing,
     )
     .await;
-    let delta = MockPeer::spawn(FALLBACK_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let omega = MockPeer::spawn(FALLBACK_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
     let fixture = fixture();
     for (alias, peer, runtime_id) in [
         ("origin", &origin, ORIGIN_RUNTIME_ID),
         ("alpha", &alpha, "11111111-1111-4111-8111-111111111111"),
         ("beta", &beta, "22222222-2222-4222-8222-222222222222"),
         ("gamma", &gamma, "33333333-3333-4333-8333-333333333333"),
-        ("delta", &delta, FALLBACK_RUNTIME_ID),
+        ("omega", &omega, FALLBACK_RUNTIME_ID),
     ] {
         add_peer(&fixture, alias, peer, Some(runtime_id), WORKSPACE_IDENTITY);
     }
@@ -629,11 +834,101 @@ async fn fallback_finds_replica_after_third_sorted_alias() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(delta.object_gets(), 1);
+    assert_eq!(omega.object_gets(), 1);
     assert_eq!(alpha.object_heads(), 1);
     assert_eq!(beta.object_heads(), 1);
     assert_eq!(gamma.object_heads(), 1);
-    assert_eq!(delta.object_heads(), 1);
+    assert_eq!(omega.object_heads(), 1);
+}
+
+#[tokio::test(start_paused = true)]
+#[serial(home_env)]
+async fn verified_fallback_resolves_before_large_legacy_discovery() {
+    let _home = HomeGuard::install();
+    let stalled = StalledHealthPeer::spawn().await;
+    let verified =
+        MockPeer::spawn(FALLBACK_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "verified",
+        &verified,
+        Some(FALLBACK_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    for index in 0..121 {
+        add_peer_mapping_url(
+            &fixture,
+            &format!("legacy-{index:03}"),
+            &stalled.base_url,
+            None,
+            WORKSPACE_IDENTITY,
+            &format!("legacy-room-{index:03}"),
+        );
+    }
+    let started = tokio::time::Instant::now();
+    let app = fixture.app.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &sha256(PNG_1X1),
+        ))
+        .await
+        .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !request.is_finished() && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(request.is_finished());
+    let response = request.await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(verified.object_heads(), 1);
+    assert_eq!(verified.object_gets(), 1);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    assert_eq!(stalled.requests(), 0);
+    assert_eq!(stalled.inflight(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+#[serial(home_env)]
+async fn legacy_only_discovery_has_one_small_aggregate_budget() {
+    let _home = HomeGuard::install();
+    let stalled = StalledHealthPeer::spawn().await;
+    let fixture = fixture();
+    for index in 0..121 {
+        add_peer_mapping_url(
+            &fixture,
+            &format!("legacy-{index:03}"),
+            &stalled.base_url,
+            None,
+            WORKSPACE_IDENTITY,
+            &format!("legacy-room-{index:03}"),
+        );
+    }
+    let started = tokio::time::Instant::now();
+    let response = fixture
+        .app
+        .oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &sha256(PNG_1X1),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(started.elapsed() >= Duration::from_secs(8));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    tokio::task::yield_now().await;
+    assert!(stalled.requests() <= 16, "requests={}", stalled.requests());
+    assert_eq!(stalled.inflight(), 0);
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
 }
 
 #[tokio::test]
@@ -670,6 +965,127 @@ async fn concurrent_gets_issue_one_peer_object_get() {
         .iter()
         .all(|response| response.status() == StatusCode::OK));
     assert_eq!(peer.object_gets(), 1);
+}
+
+#[tokio::test]
+#[cfg(feature = "test-support")]
+async fn cross_process_resolvers_share_filesystem_singleflight() {
+    let peer = MockPeer::spawn(
+        ORIGIN_RUNTIME_ID,
+        PeerBehavior::HeaderDelay {
+            bytes: PNG_1X1.to_vec(),
+            delay: Duration::from_millis(100),
+        },
+    )
+    .await;
+    let workspace = tempfile::tempdir().unwrap();
+    let store = gitim_runtime::assets::AssetStore::open(
+        workspace.path(),
+        format!("github:{WORKSPACE_IDENTITY}"),
+        limits(),
+    )
+    .unwrap();
+    let hash = sha256(PNG_1X1);
+    let start = workspace.path().join("resolver-start");
+    let ready_a = workspace.path().join("resolver-ready-a");
+    let ready_b = workspace.path().join("resolver-ready-b");
+    let mut child_a =
+        spawn_resolver_child(workspace.path(), &peer.base_url, &hash, &start, &ready_a);
+    let mut child_b =
+        spawn_resolver_child(workspace.path(), &peer.base_url, &hash, &start, &ready_b);
+    wait_for_child_marker(&mut child_a, &ready_a);
+    wait_for_child_marker(&mut child_b, &ready_b);
+    std::fs::write(&start, b"start").unwrap();
+
+    let output_a = tokio::task::spawn_blocking(move || child_a.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    let output_b = tokio::task::spawn_blocking(move || child_b.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert!(
+        output_a.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output_a.stderr)
+    );
+    assert!(
+        output_b.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output_b.stderr)
+    );
+    assert_eq!(peer.object_gets(), 1);
+    assert_eq!(object_files(workspace.path()).len(), 1);
+    assert!(temp_files(workspace.path()).is_empty());
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+    assert_eq!(store.inspect(&hash).unwrap().size, PNG_1X1.len() as u64);
+    let lock = tokio::time::timeout(
+        Duration::from_secs(2),
+        gitim_runtime::assets::HashLock::acquire(&store, &hash),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    drop(lock);
+}
+
+#[test]
+#[cfg(feature = "test-support")]
+#[ignore = "child-process helper"]
+fn fleet_resolver_child() {
+    if std::env::var_os("GITIM_FLEET_RESOLVER_CHILD").is_none() {
+        return;
+    }
+    let workspace = PathBuf::from(std::env::var_os("GITIM_FLEET_RESOLVER_WORKSPACE").unwrap());
+    let base_url = std::env::var("GITIM_FLEET_RESOLVER_BASE_URL").unwrap();
+    let hash = std::env::var("GITIM_FLEET_RESOLVER_HASH").unwrap();
+    let start = PathBuf::from(std::env::var_os("GITIM_FLEET_RESOLVER_START").unwrap());
+    let ready = PathBuf::from(std::env::var_os("GITIM_FLEET_RESOLVER_READY").unwrap());
+    let store = gitim_runtime::assets::AssetStore::open(
+        &workspace,
+        format!("github:{WORKSPACE_IDENTITY}"),
+        limits(),
+    )
+    .unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !start.exists() {
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let (_router, state) = create_router();
+        add_peer_mapping_url_to_state(
+            &state,
+            "origin",
+            &base_url,
+            Some(ORIGIN_RUNTIME_ID),
+            WORKSPACE_IDENTITY,
+            "remote-room",
+        );
+        let service = Arc::new(AssetService::new(limits()));
+        let replica = resolve_fleet_asset_for_test(
+            &state,
+            &service,
+            &store,
+            "room",
+            WORKSPACE_IDENTITY,
+            ORIGIN_RUNTIME_ID,
+            &hash,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replica.metadata.sha256, hash);
+        assert_eq!(replica.metadata.size, PNG_1X1.len() as u64);
+        assert_eq!(store.reserved_bytes().unwrap(), 0);
+        assert_eq!(service.available_peer_permits(), limits().peer_slots);
+    });
 }
 
 #[tokio::test]
@@ -803,6 +1219,47 @@ async fn local_verified_hash_wins_without_contacting_stale_origin() {
     assert_eq!(peer.object_heads(), 0);
 }
 
+#[tokio::test(start_paused = true)]
+#[cfg(feature = "test-support")]
+async fn resolve_route_bounds_initial_local_verification() {
+    let fixture = fixture();
+    let store = workspace_store(&fixture);
+    let metadata = store.put_bytes(PNG_1X1, AssetSource::LocalUpload).unwrap();
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    store.inject_local_verification_pause_after(0, Arc::clone(&reached), Arc::clone(&resume));
+    let app = fixture.app.clone();
+    let hash = metadata.sha256.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(Method::GET, ORIGIN_RUNTIME_ID, &hash))
+            .await
+            .unwrap()
+    });
+    tokio::task::spawn_blocking(move || reached.wait())
+        .await
+        .unwrap();
+
+    let responsive = tokio::spawn(async {
+        tokio::task::yield_now().await;
+        true
+    });
+    assert!(responsive.await.unwrap());
+    tokio::time::advance(Duration::from_secs(121)).await;
+    tokio::task::yield_now().await;
+    let finished_within_budget = request.is_finished();
+    tokio::task::spawn_blocking(move || resume.wait())
+        .await
+        .unwrap();
+    let response = request.await.unwrap();
+
+    assert!(finished_within_budget);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        fixture.service.fleet_fetch_failures.load(Ordering::Acquire),
+        1
+    );
+}
+
 #[tokio::test]
 async fn head_remote_availability_never_persists_or_sends_browser_headers() {
     let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
@@ -835,6 +1292,84 @@ async fn head_remote_availability_never_persists_or_sends_browser_headers() {
     assert_eq!(peer.object_heads(), 1);
     assert!(object_files(fixture.workspace.path()).is_empty());
     assert!(!peer.browser_headers_seen());
+}
+
+#[tokio::test]
+async fn remote_head_honors_exact_strong_validator_and_immutable_headers() {
+    let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "origin",
+        &peer,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    let hash = sha256(PNG_1X1);
+    let etag = format!("\"sha256-{hash}\"");
+    let uri = format!("/workspaces/room/assets/resolve/{ORIGIN_RUNTIME_ID}/{hash}?name=pixel.png");
+
+    let ok = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri(&uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+    assert_eq!(ok.headers()[header::ETAG], etag);
+    assert_eq!(
+        ok.headers()[header::CACHE_CONTROL],
+        "private, immutable, max-age=31536000"
+    );
+    assert_eq!(ok.headers()[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(ok.headers()["x-content-type-options"], "nosniff");
+    assert!(response_bytes(ok).await.is_empty());
+
+    let not_modified = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri(&uri)
+                .header(header::IF_NONE_MATCH, &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(not_modified.headers()[header::ETAG], etag);
+    assert_eq!(
+        not_modified.headers()[header::CACHE_CONTROL],
+        "private, immutable, max-age=31536000"
+    );
+    assert_eq!(not_modified.headers()[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(not_modified.headers()["x-content-type-options"], "nosniff");
+    assert!(response_bytes(not_modified).await.is_empty());
+
+    let weak = fixture
+        .app
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri(&uri)
+                .header(header::IF_NONE_MATCH, format!("W/{etag}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(weak.status(), StatusCode::OK);
+    assert_eq!(peer.object_heads(), 3);
+    assert_eq!(peer.object_gets(), 0);
+    assert!(object_files(fixture.workspace.path()).is_empty());
 }
 
 #[tokio::test]
@@ -900,9 +1435,7 @@ async fn no_eligible_peer_mapping_is_unavailable_for_get_and_head() {
 
 #[tokio::test]
 async fn invalid_and_unreachable_peer_urls_are_unavailable() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let unreachable = format!("http://{}", listener.local_addr().unwrap());
-    drop(listener);
+    let (unreachable, accepts, reset_peer) = spawn_accept_close_peer().await;
     for base_url in ["://invalid".to_string(), unreachable] {
         let fixture = fixture();
         add_peer_url(
@@ -933,6 +1466,8 @@ async fn invalid_and_unreachable_peer_urls_are_unavailable() {
             1
         );
     }
+    assert!(accepts.load(Ordering::Acquire) > 0);
+    reset_peer.abort();
 }
 
 #[tokio::test]
@@ -1658,6 +2193,320 @@ async fn candidate_timeout_includes_waiting_for_peer_capacity() {
 }
 
 #[tokio::test(start_paused = true)]
+#[cfg(feature = "test-support")]
+async fn timed_out_persistence_keeps_peer_permit_and_hash_lock_until_settled() {
+    let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "origin",
+        &peer,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    let store = workspace_store(&fixture);
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    store.inject_before_publish_pause(Arc::clone(&reached), Arc::clone(&resume));
+    let hash = sha256(PNG_1X1);
+    let app = fixture.app.clone();
+    let request_hash = hash.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &request_hash,
+        ))
+        .await
+        .unwrap()
+    });
+    tokio::task::spawn_blocking(move || reached.wait())
+        .await
+        .unwrap();
+
+    tokio::time::advance(Duration::from_secs(91)).await;
+    let response = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .expect("candidate timeout must finish the request")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let permits_while_settling = fixture.service.available_peer_permits();
+    let contender_store = store.clone();
+    let contender_hash = hash.clone();
+    let contender_finished = Arc::new(AtomicBool::new(false));
+    let contender_signal = Arc::clone(&contender_finished);
+    let contender = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let result = runtime.block_on(gitim_runtime::assets::HashLock::acquire(
+            &contender_store,
+            &contender_hash,
+        ));
+        contender_signal.store(true, Ordering::Release);
+        result
+    });
+    std::thread::sleep(Duration::from_millis(25));
+    let contender_waited = !contender_finished.load(Ordering::Acquire);
+
+    tokio::task::spawn_blocking(move || resume.wait())
+        .await
+        .unwrap();
+    let lock = tokio::task::spawn_blocking(move || contender.join().unwrap())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(lock);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fixture.service.available_peer_permits() != limits().peer_slots
+        && std::time::Instant::now() < deadline
+    {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(permits_while_settling, limits().peer_slots - 1);
+    assert!(contender_waited);
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
+    assert!(store.inspect(&hash).is_ok());
+    assert_eq!(
+        fixture.service.fleet_fetch_failures.load(Ordering::Acquire),
+        1
+    );
+    assert_eq!(fixture.service.store_failures.load(Ordering::Acquire), 0);
+}
+
+#[tokio::test]
+#[cfg(feature = "test-support")]
+async fn cancelled_persistence_keeps_owned_settlement_alive() {
+    let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "origin",
+        &peer,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    let store = workspace_store(&fixture);
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    store.inject_before_publish_pause(Arc::clone(&reached), Arc::clone(&resume));
+    let hash = sha256(PNG_1X1);
+    let app = fixture.app.clone();
+    let request_hash = hash.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &request_hash,
+        ))
+        .await
+        .unwrap()
+    });
+    tokio::task::spawn_blocking(move || reached.wait())
+        .await
+        .unwrap();
+    request.abort();
+    assert!(request.await.is_err());
+    tokio::task::yield_now().await;
+    let permits_while_settling = fixture.service.available_peer_permits();
+
+    tokio::task::spawn_blocking(move || resume.wait())
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fixture.service.available_peer_permits() != limits().peer_slots
+        && std::time::Instant::now() < deadline
+    {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(permits_while_settling, limits().peer_slots - 1);
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
+    assert!(store.inspect(&hash).is_ok());
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg(feature = "test-support")]
+async fn detached_settlement_records_eventual_store_failure_once() {
+    let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "origin",
+        &peer,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    let store = workspace_store(&fixture);
+    store.inject_after_publish_failure_once();
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    store.inject_before_publish_pause(Arc::clone(&reached), Arc::clone(&resume));
+    let events = Arc::new(Mutex::new(Vec::<AssetEvent>::new()));
+    let observed = Arc::clone(&events);
+    fixture
+        .service
+        .set_event_observer(Arc::new(move |event| observed.lock().unwrap().push(event)));
+    let hash = sha256(PNG_1X1);
+    let app = fixture.app.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(Method::GET, ORIGIN_RUNTIME_ID, &hash))
+            .await
+            .unwrap()
+    });
+    tokio::task::spawn_blocking(move || reached.wait())
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(91)).await;
+    let response = tokio::time::timeout(Duration::from_secs(1), request)
+        .await
+        .expect("candidate timeout must finish the request")
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    tokio::task::spawn_blocking(move || resume.wait())
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fixture.service.store_failures.load(Ordering::Acquire) == 0
+        && std::time::Instant::now() < deadline
+    {
+        tokio::task::yield_now().await;
+    }
+
+    assert_eq!(fixture.service.store_failures.load(Ordering::Acquire), 1);
+    assert_eq!(
+        fixture.service.fleet_fetch_failures.load(Ordering::Acquire),
+        1
+    );
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
+    assert_eq!(
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.event == "asset_store_failure")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(start_paused = true)]
+#[cfg(feature = "test-support")]
+async fn detached_settlement_counts_toward_the_four_peer_slot_cap() {
+    let settling_peer =
+        MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
+    let waiting_bytes = b"second object";
+    let waiting_peer = MockPeer::spawn(
+        FALLBACK_RUNTIME_ID,
+        PeerBehavior::Object(waiting_bytes.to_vec()),
+    )
+    .await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "settling",
+        &settling_peer,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    add_peer(
+        &fixture,
+        "waiting",
+        &waiting_peer,
+        Some(FALLBACK_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    let store = workspace_store(&fixture);
+    let reached = Arc::new(Barrier::new(2));
+    let resume = Arc::new(Barrier::new(2));
+    store.inject_before_publish_pause(Arc::clone(&reached), Arc::clone(&resume));
+    let app = fixture.app.clone();
+    let first = tokio::spawn(async move {
+        app.oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &sha256(PNG_1X1),
+        ))
+        .await
+        .unwrap()
+    });
+    tokio::task::spawn_blocking(move || reached.wait())
+        .await
+        .unwrap();
+    tokio::time::advance(Duration::from_secs(91)).await;
+    let response = tokio::time::timeout(Duration::from_secs(1), first)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    let mut manual_permits = Vec::new();
+    for _ in 0..3 {
+        manual_permits.push(fixture.service.acquire_peer().await.unwrap());
+    }
+    assert_eq!(fixture.service.available_peer_permits(), 0);
+    let waiting_workspace = tempfile::tempdir().unwrap();
+    let waiting_store = gitim_runtime::assets::AssetStore::open(
+        waiting_workspace.path(),
+        format!("github:{WORKSPACE_IDENTITY}"),
+        limits(),
+    )
+    .unwrap();
+    let waiting_state = fixture.state.clone();
+    let waiting_service = Arc::clone(&fixture.service);
+    let waiting_hash = sha256(waiting_bytes);
+    let waiter = tokio::spawn(async move {
+        resolve_fleet_asset_for_test(
+            &waiting_state,
+            &waiting_service,
+            &waiting_store,
+            "room",
+            WORKSPACE_IDENTITY,
+            FALLBACK_RUNTIME_ID,
+            &waiting_hash,
+        )
+        .await
+    });
+    for _ in 0..100 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(waiting_peer.object_gets(), 0);
+
+    drop(manual_permits.pop());
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !waiter.is_finished() && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(waiter.await.unwrap().is_ok());
+    drop(manual_permits);
+    tokio::task::spawn_blocking(move || resume.wait())
+        .await
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fixture.service.available_peer_permits() != limits().peer_slots
+        && std::time::Instant::now() < deadline
+    {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
+}
+
+#[tokio::test(start_paused = true)]
 async fn response_header_timeout_is_ten_seconds() {
     let peer = MockPeer::spawn(
         ORIGIN_RUNTIME_ID,
@@ -1675,22 +2524,34 @@ async fn response_header_timeout_is_ten_seconds() {
         Some(ORIGIN_RUNTIME_ID),
         WORKSPACE_IDENTITY,
     );
-    let started = tokio::time::Instant::now();
-
-    let response = fixture
-        .app
-        .oneshot(resolve_request(
+    let app = fixture.app.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(
             Method::GET,
             ORIGIN_RUNTIME_ID,
             &sha256(PNG_1X1),
         ))
         .await
-        .unwrap();
+        .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while peer.object_gets() == 0 && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(peer.object_gets(), 1);
+    let started = tokio::time::Instant::now();
+    let response = request.await.unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(
-        started.elapsed() < Duration::from_secs(30),
-        "header budget did not preempt the delayed peer"
+        started.elapsed() >= Duration::from_secs(10),
+        "elapsed {:?}",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(11),
+        "elapsed {:?}",
+        started.elapsed()
     );
 }
 
@@ -1707,12 +2568,13 @@ async fn fallback_head_fanout_caps_at_eight_and_full_gets_remain_sequential() {
     let fixture = fixture();
     for index in 0..12 {
         let runtime_id = format!("00000000-0000-4000-8000-{index:012}");
-        add_peer(
+        add_peer_mapping_url(
             &fixture,
             &format!("peer-{index:02}"),
-            &peer,
+            &peer.base_url,
             Some(&runtime_id),
             WORKSPACE_IDENTITY,
+            &format!("remote-room-{index:02}"),
         );
     }
     let origin = "ffffffff-ffff-4fff-8fff-ffffffffffff";

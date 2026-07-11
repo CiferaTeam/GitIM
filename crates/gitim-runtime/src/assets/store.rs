@@ -287,6 +287,13 @@ struct FreeSpaceSampleWait {
     materialized: Arc<AtomicBool>,
 }
 
+#[cfg(feature = "test-support")]
+struct LocalVerificationPause {
+    remaining: usize,
+    reached: Arc<Barrier>,
+    resume: Arc<Barrier>,
+}
+
 pub struct AssetService {
     upload_slots: Arc<Semaphore>,
     peer_slots: Arc<Semaphore>,
@@ -1296,6 +1303,8 @@ struct WorkspaceAssetState {
     materialize_pause: Mutex<Option<MaterializePause>>,
     #[cfg(feature = "test-support")]
     after_free_space_sample_wait: Mutex<Option<FreeSpaceSampleWait>>,
+    #[cfg(feature = "test-support")]
+    local_verification_pause: Mutex<Option<LocalVerificationPause>>,
 }
 
 #[derive(Default)]
@@ -2319,6 +2328,26 @@ impl AssetStore {
         hash: &str,
     ) -> Result<VerifiedLocalAsset, AssetError> {
         let _operation = write_lock(&self.state.operation_gate);
+        #[cfg(feature = "test-support")]
+        {
+            let pause = {
+                let mut pause = lock(&self.state.local_verification_pause);
+                if let Some(configured) = pause.as_mut() {
+                    if configured.remaining == 0 {
+                        pause.take()
+                    } else {
+                        configured.remaining -= 1;
+                        None
+                    }
+                } else {
+                    None
+                }
+            };
+            if let Some(pause) = pause {
+                pause.reached.wait();
+                pause.resume.wait();
+            }
+        }
         self.validate_current()?;
         let metadata = self.refresh_metadata(hash)?;
         let path = self.raw_object_path(hash)?;
@@ -2432,6 +2461,21 @@ impl AssetStore {
         *lock(&self.state.after_free_space_sample_wait) = Some(FreeSpaceSampleWait {
             sampled,
             materialized,
+        });
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_local_verification_pause_after(
+        &self,
+        remaining: usize,
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    ) {
+        *lock(&self.state.local_verification_pause) = Some(LocalVerificationPause {
+            remaining,
+            reached,
+            resume,
         });
     }
 

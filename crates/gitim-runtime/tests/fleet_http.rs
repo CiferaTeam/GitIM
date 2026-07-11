@@ -24,7 +24,9 @@ use tower::ServiceExt;
 use gitim_runtime::fleet;
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
 use gitim_runtime::http::{create_router, AgentActivityEvent};
-use gitim_runtime::user_config::{self, FleetNodeEntry, FleetWorkspaceMapping, UserConfig};
+use gitim_runtime::user_config::{
+    self, FleetNodeEntry, FleetWorkspaceMapping, UserConfig, WorkspaceEntry,
+};
 use gitim_runtime::workspace::WorkspaceContext;
 
 mod common;
@@ -1394,6 +1396,104 @@ async fn duplicate_legacy_backfills_converge_to_earliest_config_entry() {
     assert!(live.fleet_nodes.contains_key("first"));
     drop(live);
     assert_eq!(fleet::snapshot_workspace_peers(&state, "room").len(), 1);
+
+    first_server.abort();
+    second_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn parallel_legacy_backfills_preserve_concurrent_runtime_config_mutation() {
+    let home_guard = HomeGuard::install();
+    let (first_url, first_entered, first_release, first_server) =
+        spawn_delayed_health_runtime().await;
+    let (second_url, second_entered, second_release, second_server) =
+        spawn_delayed_health_runtime().await;
+    let runtime_path = home_guard.path().join(".gitim/runtime.json");
+    let first = fleet_node("first", &first_url, None, "room", "remote-first");
+    let second = fleet_node("second", &second_url, None, "room", "remote-second");
+    user_config::write_to(
+        &UserConfig {
+            fleet_nodes: vec![first.clone(), second.clone()],
+            ..UserConfig::default()
+        },
+        &runtime_path,
+    )
+    .unwrap();
+    let (_router, state) = create_router();
+    fleet::activate_node(state.clone(), first.clone());
+    fleet::activate_node(state.clone(), second.clone());
+
+    let first_state = state.clone();
+    let first_discovery =
+        tokio::spawn(
+            async move { fleet::discover_legacy_runtime_id_once(&first_state, "first").await },
+        );
+    let second_state = state.clone();
+    let second_discovery = tokio::spawn(async move {
+        fleet::discover_legacy_runtime_id_once(&second_state, "second").await
+    });
+    tokio::time::timeout(Duration::from_secs(2), first_entered.notified())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), second_entered.notified())
+        .await
+        .unwrap();
+
+    let concurrent = fleet_node(
+        "concurrent",
+        "http://127.0.0.1:19090",
+        Some("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+        "other-room",
+        "remote-other",
+    );
+    user_config::mutate_at(&runtime_path, |config| {
+        config.listen_port = Some(19090);
+        config.workspaces.push(WorkspaceEntry {
+            slug: "other-room".to_string(),
+            workspace_name: "Other Room".to_string(),
+            path: "/tmp/other-room".to_string(),
+        });
+        config.upsert_fleet_node(concurrent.clone());
+    })
+    .unwrap();
+
+    second_release.notify_one();
+    first_release.notify_one();
+    assert_eq!(
+        first_discovery.await.unwrap().unwrap().as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    assert_eq!(
+        second_discovery.await.unwrap().unwrap().as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+
+    let disk = user_config::read_from(Some(&runtime_path));
+    assert_eq!(disk.listen_port, Some(19090));
+    assert_eq!(disk.workspaces.len(), 1);
+    assert_eq!(disk.workspaces[0].slug, "other-room");
+    assert_eq!(disk.fleet_nodes.len(), 3);
+    assert_eq!(
+        disk.fleet_nodes[0].workspace_mappings,
+        first.workspace_mappings
+    );
+    assert_eq!(
+        disk.fleet_nodes[1].workspace_mappings,
+        second.workspace_mappings
+    );
+    assert_eq!(disk.fleet_nodes[2], concurrent);
+    assert_eq!(
+        disk.fleet_nodes[0].runtime_id.as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    assert_eq!(
+        disk.fleet_nodes[1].runtime_id.as_deref(),
+        Some(REMOTE_RUNTIME_ID)
+    );
+    let live = state.lock().unwrap();
+    assert!(live.fleet_nodes.contains_key("first"));
+    assert!(!live.fleet_nodes.contains_key("second"));
 
     first_server.abort();
     second_server.abort();
