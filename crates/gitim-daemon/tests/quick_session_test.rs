@@ -82,6 +82,32 @@ async fn set_title(state: SharedState, attempt_id: &str, author: &str) -> Respon
     .await
 }
 
+async fn set_summary(state: SharedState, attempt_id: &str, author: &str) -> Response {
+    handle_request(
+        Request::SetQuickSessionSummary {
+            session_id: SESSION_ID.to_string(),
+            summary: "Durable handoff".to_string(),
+            attempt_id: attempt_id.to_string(),
+            author: Some(author.to_string()),
+        },
+        state,
+    )
+    .await
+}
+
+async fn mark_error(state: SharedState, attempt_id: &str, author: &str) -> Response {
+    handle_request(
+        Request::MarkQuickSessionError {
+            session_id: SESSION_ID.to_string(),
+            attempt_id: attempt_id.to_string(),
+            error: "provider failed".to_string(),
+            author: Some(author.to_string()),
+        },
+        state,
+    )
+    .await
+}
+
 async fn send_agent(
     state: SharedState,
     body: &str,
@@ -111,7 +137,7 @@ async fn read(state: SharedState) -> ReadQuickSessionResponse {
                 limit: None,
                 since: None,
             },
-            state,
+            state.clone(),
         )
         .await,
     )
@@ -188,7 +214,7 @@ async fn create_is_one_commit_canonical_and_idempotent() {
             state.clone(),
             SESSION_ID,
             "bob",
-            "Please inspect CI",
+            "Please inspect CI\n",
             "alice",
         )
         .await,
@@ -309,6 +335,16 @@ async fn title_gate_and_attempt_compare_and_set_protect_agent_writes() {
     let stale_title = set_title(state.clone(), OTHER_ATTEMPT_ID, "bob").await;
     assert_eq!(
         stale_title.error_code.as_deref(),
+        Some("quick_session_stale_attempt")
+    );
+    let stale_summary = set_summary(state.clone(), OTHER_ATTEMPT_ID, "bob").await;
+    assert_eq!(
+        stale_summary.error_code.as_deref(),
+        Some("quick_session_stale_attempt")
+    );
+    let stale_error = mark_error(state.clone(), OTHER_ATTEMPT_ID, "bob").await;
+    assert_eq!(
+        stale_error.error_code.as_deref(),
         Some("quick_session_stale_attempt")
     );
     data::<gitim_core::responses::SetQuickSessionTitleResponse>(
@@ -449,6 +485,72 @@ async fn mutations_roll_back_on_commit_failure() {
 }
 
 #[tokio::test]
+async fn send_and_unarchive_restore_exact_bytes_on_commit_failure() {
+    let (_tmp, state) = setup_repo_alice_bob().await;
+    data::<CreateQuickSessionResponse>(
+        create(state.clone(), SESSION_ID, "bob", "first", "alice").await,
+    );
+    let active_dir = state.repo_root.join(format!("quick-sessions/{SESSION_ID}"));
+    let meta_before = std::fs::read(active_dir.join("session.meta.yaml")).unwrap();
+    let thread_before = std::fs::read(active_dir.join("discussion.thread")).unwrap();
+    install_rejecting_hook(&state);
+
+    let send = send_human(state.clone(), "must roll back", "req-rollback", "alice").await;
+    assert!(!send.ok);
+    assert_eq!(
+        std::fs::read(active_dir.join("session.meta.yaml")).unwrap(),
+        meta_before
+    );
+    assert_eq!(
+        std::fs::read(active_dir.join("discussion.thread")).unwrap(),
+        thread_before
+    );
+
+    std::fs::remove_file(state.repo_root.join(".git/hooks/pre-commit")).unwrap();
+    data::<gitim_core::responses::ArchiveQuickSessionResponse>(
+        handle_request(
+            Request::ArchiveQuickSession {
+                session_id: SESSION_ID.to_string(),
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await,
+    );
+    let archive_dir = state
+        .repo_root
+        .join(format!("archive/quick-sessions/{SESSION_ID}"));
+    let archived_meta = std::fs::read(archive_dir.join("session.meta.yaml")).unwrap();
+    let archived_thread = std::fs::read(archive_dir.join("discussion.thread")).unwrap();
+    install_rejecting_hook(&state);
+
+    let unarchive = handle_request(
+        Request::UnarchiveQuickSession {
+            session_id: SESSION_ID.to_string(),
+            author: Some("alice".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(!unarchive.ok);
+    assert!(!active_dir.exists());
+    assert_eq!(
+        std::fs::read(archive_dir.join("session.meta.yaml")).unwrap(),
+        archived_meta
+    );
+    assert_eq!(
+        std::fs::read(archive_dir.join("discussion.thread")).unwrap(),
+        archived_thread
+    );
+    let status = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(&state.repo_root)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&status.stdout).trim().is_empty());
+}
+
+#[tokio::test]
 async fn list_filters_actionability_and_read_pagination() {
     let (_tmp, state) = setup_repo_alice_bob().await;
     data::<CreateQuickSessionResponse>(
@@ -543,6 +645,15 @@ async fn poll_routes_active_and_archived_sessions_to_the_assigned_agent() {
             && change["entries"][0]["status"] == "archived"
             && change["entries"][0].get("recipients").is_none()
     }));
+    assert!(changes.iter().any(|change| {
+        change["kind"] == "quick_session_thread"
+            && change["entries"].as_array().is_some_and(|entries| {
+                !entries.is_empty()
+                    && entries
+                        .iter()
+                        .all(|entry| entry.get("recipients").is_none())
+            })
+    }));
 }
 
 #[tokio::test]
@@ -556,8 +667,18 @@ async fn guest_guard_rejects_every_quick_session_write() {
         send_human(state.clone(), "body", "req", "alice").await,
         claim(state.clone(), 1, ATTEMPT_ID, "bob").await,
         set_title(state.clone(), ATTEMPT_ID, "bob").await,
+        set_summary(state.clone(), ATTEMPT_ID, "bob").await,
+        mark_error(state.clone(), ATTEMPT_ID, "bob").await,
         handle_request(
             Request::ArchiveQuickSession {
+                session_id: SESSION_ID.to_string(),
+                author: Some("alice".to_string()),
+            },
+            state.clone(),
+        )
+        .await,
+        handle_request(
+            Request::UnarchiveQuickSession {
                 session_id: SESSION_ID.to_string(),
                 author: Some("alice".to_string()),
             },

@@ -17,6 +17,7 @@ use gitim_core::types::{
     ThreadEntry, TransitionOutcome,
 };
 use gitim_core::validator::compliance::validate_append;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{error, warn};
 
@@ -60,6 +61,42 @@ fn validate_body(body: &str) -> Result<(), Response> {
             "invalid_quick_session_message",
         ));
     }
+    Ok(())
+}
+
+fn canonical_message_body(author: &Handler, body: &str) -> Result<String, Response> {
+    let formatted = format_message(1, 0, author, "19700101T000000Z", body);
+    let parsed = parse_thread(&formatted)
+        .map_err(|error| Response::error(format!("failed to normalize message: {error}")))?;
+    match parsed.entries.first() {
+        Some(ThreadEntry::Message(message)) => Ok(message.body.clone()),
+        _ => Err(Response::error("failed to normalize message")),
+    }
+}
+
+fn atomic_write_file(path: &Path, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    atomic_write_file_with_hook(path, content, |_| Ok(()))
+}
+
+fn atomic_write_file_with_hook<F>(
+    path: &Path,
+    content: impl AsRef<[u8]>,
+    before_persist: F,
+) -> std::io::Result<()>
+where
+    F: FnOnce(&Path) -> std::io::Result<()>,
+{
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "atomic write destination has no parent",
+        )
+    })?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(content.as_ref())?;
+    temporary.as_file_mut().sync_all()?;
+    before_persist(temporary.path())?;
+    temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
 
@@ -200,6 +237,9 @@ fn yaml(meta: &QuickSessionMeta) -> Result<String, Response> {
 }
 
 fn reset_paths(repo_root: &Path, paths: &[&str], context: &str) {
+    if paths.is_empty() {
+        return;
+    }
     let output = std::process::Command::new("git")
         .arg("reset")
         .arg("HEAD")
@@ -221,7 +261,7 @@ fn reset_paths(repo_root: &Path, paths: &[&str], context: &str) {
 fn restore_files(state: &SharedState, paths: &[(&Path, &str)], rel_paths: &[&str], context: &str) {
     reset_paths(&state.repo_root, rel_paths, context);
     for (path, content) in paths {
-        if let Err(error) = std::fs::write(path, content) {
+        if let Err(error) = atomic_write_file(path, content) {
             error!(context, path = %path.display(), %error, "quick session rollback write failed");
         }
     }
@@ -265,6 +305,10 @@ pub async fn handle_create_quick_session(
     if let Err(response) = ensure_active_user(&state, &agent_id, "agent") {
         return response;
     }
+    let first_message = match canonical_message_body(&creator, &first_message) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
 
     let registered_users = state.users.read().await.clone();
     let registered_refs: Vec<&str> = registered_users.iter().map(String::as_str).collect();
@@ -341,8 +385,8 @@ pub async fn handle_create_quick_session(
     let meta_rel = format!("{rel_dir}/session.meta.yaml");
     let thread_rel = format!("{rel_dir}/discussion.thread");
     if let Err(error) = std::fs::create_dir_all(&dir)
-        .and_then(|()| std::fs::write(dir.join("session.meta.yaml"), &meta_yaml))
-        .and_then(|()| std::fs::write(dir.join("discussion.thread"), &thread))
+        .and_then(|()| atomic_write_file(&dir.join("session.meta.yaml"), &meta_yaml))
+        .and_then(|()| atomic_write_file(&dir.join("discussion.thread"), &thread))
     {
         let _ = std::fs::remove_dir_all(&dir);
         return Response::error(format!("failed to write quick session: {error}"));
@@ -607,8 +651,8 @@ pub async fn handle_send_quick_session_message(
             return Response::error(format!("failed to read quick session metadata: {error}"))
         }
     };
-    if let Err(error) = std::fs::write(&meta_path, &new_meta)
-        .and_then(|()| std::fs::write(&thread_path, &new_thread))
+    if let Err(error) = atomic_write_file(&meta_path, &new_meta)
+        .and_then(|()| atomic_write_file(&thread_path, &new_thread))
     {
         restore_files(
             &state,
@@ -688,7 +732,7 @@ fn apply_meta_transition(
         .repo_root
         .join(&located.rel_dir)
         .join("session.meta.yaml");
-    std::fs::write(&meta_path, new_meta)
+    atomic_write_file(&meta_path, new_meta)
         .map_err(|e| Response::error(format!("failed to write quick session metadata: {e}")))?;
     let meta_rel = format!("{}/session.meta.yaml", located.rel_dir);
     let (name, email) = state.author_for(author);
@@ -954,7 +998,7 @@ async fn move_session(
         Err(response) => return response,
     };
     let source_meta = state.repo_root.join(&source_rel).join("session.meta.yaml");
-    if let Err(error) = std::fs::write(&source_meta, new_meta) {
+    if let Err(error) = atomic_write_file(&source_meta, new_meta) {
         return Response::error(format!("failed to write quick session metadata: {error}"));
     }
     let target_parent = state
@@ -964,13 +1008,17 @@ async fn move_session(
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from(&state.repo_root));
     if let Err(error) = std::fs::create_dir_all(target_parent) {
-        let _ = std::fs::write(&source_meta, &old_meta);
+        if let Err(rollback) = atomic_write_file(&source_meta, &old_meta) {
+            error!(%rollback, "quick session metadata rollback failed");
+        }
         return Response::error(format!(
             "failed to create quick session archive directory: {error}"
         ));
     }
     if let Err(error) = state.git_storage.mv(&source_rel, &target_rel) {
-        let _ = std::fs::write(&source_meta, &old_meta);
+        if let Err(rollback) = atomic_write_file(&source_meta, &old_meta) {
+            error!(%rollback, "quick session metadata rollback failed");
+        }
         return Response::error(format!("failed to move quick session: {error}"));
     }
     let target_meta_rel = format!("{target_rel}/session.meta.yaml");
@@ -992,7 +1040,7 @@ async fn move_session(
             &[&source_meta_rel, &target_meta_rel, &target_thread_rel],
             verb,
         );
-        if let Err(rollback) = std::fs::write(&source_meta, &old_meta) {
+        if let Err(rollback) = atomic_write_file(&source_meta, &old_meta) {
             error!(%rollback, "quick session metadata rollback failed");
         }
         return Response::error(format!(
@@ -1034,4 +1082,27 @@ pub async fn handle_unarchive_quick_session(
     author: String,
 ) -> Response {
     move_session(state, session_id, author, false).await
+}
+
+#[cfg(test)]
+mod atomic_write_tests {
+    use super::*;
+
+    #[test]
+    fn atomic_write_failure_preserves_original_bytes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("session.meta.yaml");
+        std::fs::write(&path, b"original").unwrap();
+
+        let result = atomic_write_file_with_hook(&path, b"replacement", |_| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "injected persist failure",
+            ))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+    }
 }
