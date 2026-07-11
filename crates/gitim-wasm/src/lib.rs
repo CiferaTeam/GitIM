@@ -131,6 +131,43 @@ pub fn validate_handler(handler: &str) -> Result<String, JsError> {
     Ok(h.as_str().to_string())
 }
 
+#[wasm_bindgen(js_name = "validateQuickSessionId")]
+pub fn validate_quick_session_id_wasm(id: &str) -> Result<(), JsError> {
+    gitim_core::types::validate_quick_session_id(id)
+        .map_err(|error| JsError::new(&error.to_string()))
+}
+
+#[wasm_bindgen(js_name = "parseQuickSessionMeta")]
+pub fn parse_quick_session_meta_wasm(yaml: &str) -> Result<JsValue, JsError> {
+    let meta: gitim_core::types::QuickSessionMeta =
+        serde_yaml::from_str(yaml).map_err(|error| JsError::new(&error.to_string()))?;
+    gitim_core::types::validate_quick_session_meta(&meta)
+        .map_err(|error| JsError::new(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&meta).map_err(|error| JsError::new(&error.to_string()))
+}
+
+#[derive(serde::Serialize)]
+struct QuickSessionTransitionResult {
+    meta: gitim_core::types::QuickSessionMeta,
+    outcome: gitim_core::types::TransitionOutcome,
+}
+
+#[wasm_bindgen(js_name = "applyQuickSessionTransition")]
+pub fn apply_quick_session_transition_wasm(
+    meta: JsValue,
+    transition: JsValue,
+) -> Result<JsValue, JsError> {
+    let mut meta: gitim_core::types::QuickSessionMeta =
+        serde_wasm_bindgen::from_value(meta).map_err(|error| JsError::new(&error.to_string()))?;
+    let transition: gitim_core::types::QuickSessionTransition =
+        serde_wasm_bindgen::from_value(transition)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+    let outcome = gitim_core::types::apply_quick_session_transition(&mut meta, transition)
+        .map_err(|error| JsError::new(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&QuickSessionTransitionResult { meta, outcome })
+        .map_err(|error| JsError::new(&error.to_string()))
+}
+
 // `parseChannelMeta` / `parseUserMeta` mirror the daemon's *read* path, which
 // is a lenient `serde_yaml::from_str::<ChannelMeta/UserMeta>` (see
 // gitim-daemon handlers — channel listing/poll/read all deserialize without

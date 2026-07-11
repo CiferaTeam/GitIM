@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::types::{QuickSessionMeta, QuickSessionStatus, ThreadEntry};
+
 /// Response payload for `Request::Status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StatusResponse {
@@ -366,6 +368,122 @@ pub enum OnboardResponse {
     /// Authenticated onboard. `created` is `true` when a fresh user
     /// meta file was written; `false` on re-onboard of an existing user.
     User { handler: String, created: bool },
+}
+
+// -- Quick Session responses --
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct QuickSessionListItem {
+    pub id: String,
+    pub title: Option<String>,
+    pub agent_id: String,
+    pub created_by: String,
+    pub status: QuickSessionStatus,
+    pub updated_at: String,
+    pub last_message_preview: String,
+    pub revision: u64,
+    pub archived: bool,
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+}
+
+impl QuickSessionListItem {
+    pub fn from_meta(meta: &QuickSessionMeta, archived: bool) -> Self {
+        Self {
+            id: meta.id.clone(),
+            title: meta.title.clone(),
+            agent_id: meta.agent_id.clone(),
+            created_by: meta.created_by.clone(),
+            status: meta.status,
+            updated_at: meta.updated_at.clone(),
+            last_message_preview: meta.last_message_preview.clone(),
+            revision: meta.revision,
+            archived,
+            r#ref: meta.ref_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct QuickSessionDetail {
+    pub meta: QuickSessionMeta,
+    pub entries: Vec<ThreadEntry>,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CreateQuickSessionResponse {
+    pub session: QuickSessionDetail,
+    pub line_number: u64,
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ListQuickSessionsResponse {
+    pub sessions: Vec<QuickSessionListItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReadQuickSessionResponse {
+    pub session: QuickSessionDetail,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SendQuickSessionMessageResponse {
+    pub session_id: String,
+    pub line_number: u64,
+    pub status: QuickSessionStatus,
+    pub revision: u64,
+    #[serde(rename = "ref")]
+    pub r#ref: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetQuickSessionTitleResponse {
+    pub session_id: String,
+    pub title: String,
+    pub status: QuickSessionStatus,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SetQuickSessionSummaryResponse {
+    pub session_id: String,
+    pub summary: String,
+    pub status: QuickSessionStatus,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClaimQuickSessionTurnResponse {
+    pub session_id: String,
+    pub input_line: u64,
+    pub attempt_id: String,
+    pub status: QuickSessionStatus,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MarkQuickSessionErrorResponse {
+    pub session_id: String,
+    pub status: QuickSessionStatus,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveQuickSessionResponse {
+    pub session_id: String,
+    pub status: QuickSessionStatus,
+    pub revision: u64,
+    pub archived_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UnarchiveQuickSessionResponse {
+    pub session_id: String,
+    pub status: QuickSessionStatus,
+    pub revision: u64,
 }
 
 // -- Card responses --

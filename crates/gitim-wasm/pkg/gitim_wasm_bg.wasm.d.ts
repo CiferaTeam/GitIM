@@ -9,6 +9,9 @@ export const validateAppend: (a: number, b: number, c: number, d: number, e: any
 export const validateJoin: (a: number, b: number, c: any, d: any, e: any) => [number, number];
 export const validateLeave: (a: number, b: number, c: any, d: any, e: any) => [number, number];
 export const validateHandler: (a: number, b: number) => [number, number, number, number];
+export const validateQuickSessionId: (a: number, b: number) => [number, number];
+export const parseQuickSessionMeta: (a: number, b: number) => [number, number, number];
+export const applyQuickSessionTransition: (a: any, b: any) => [number, number, number];
 export const parseChannelMeta: (a: number, b: number) => [number, number, number];
 export const parseUserMeta: (a: number, b: number) => [number, number, number];
 export const validateUserMeta: (a: number, b: number) => [number, number, number];
