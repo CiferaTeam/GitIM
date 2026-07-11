@@ -632,7 +632,7 @@ impl AppState {
     /// Confirm all locally committed messages after the sync loop reports a
     /// successful push. `included_head` identifies the local snapshot before
     /// rebase rewriting; `pushed_head` is the rewritten snapshot that reached
-    /// the remote. Entries committed later remain pending.
+    /// the remote. Entries outside both confirmed histories remain pending.
     pub fn confirm_pending_pushes(&self, pushed_head: &str, included_head: &str) {
         let _guard = self
             .commit_lock
@@ -649,7 +649,9 @@ impl AppState {
         let mut by_channel: HashMap<String, Vec<u64>> = HashMap::new();
         let mut remaining = Vec::new();
         for message in pending.drain(..) {
-            let included = is_ancestor(&message.commit_id, included_head, &self.repo_root);
+            let included = is_ancestor(&message.commit_id, pushed_head, &self.repo_root)
+                || (included_head != pushed_head
+                    && is_ancestor(&message.commit_id, included_head, &self.repo_root));
             if included {
                 by_channel
                     .entry(message.channel.clone())

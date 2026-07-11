@@ -324,28 +324,27 @@ async fn quick_session_send_acks_locally_until_sync_confirms_push() {
 
     assert_eq!(response.line_number, 2);
     assert_eq!(bare_head(&bare), remote_before_send);
-    let pending = state
-        .pending_push
-        .read()
-        .unwrap_or_else(|error| error.into_inner());
-    assert_eq!(pending.len(), 2);
-    assert!(pending.iter().all(|message| {
-        message.channel == format!("quick_session:{SESSION_ID}")
-            && matches!(message.line_number, 1 | 2)
-    }));
-    assert_eq!(pending[0].commit_id, create_head);
-    assert_eq!(
-        pending[1].commit_id,
-        state.git_storage.rev_parse("HEAD").unwrap()
-    );
-    drop(pending);
+    {
+        let pending = state
+            .pending_push
+            .read()
+            .unwrap_or_else(|error| error.into_inner());
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().all(|message| {
+            message.channel == format!("quick_session:{SESSION_ID}")
+                && matches!(message.line_number, 1 | 2)
+        }));
+        assert_eq!(pending[0].commit_id, create_head);
+        assert_eq!(
+            pending[1].commit_id,
+            state.git_storage.rev_parse("HEAD").unwrap()
+        );
+    }
 
     let mut events = state.event_tx.subscribe();
-    run_git(
-        &state.repo_root,
-        &["push", "origin", &format!("{create_head}:refs/heads/main")],
-    );
-    state.confirm_pending_pushes(&create_head, &create_head);
+    run_git(&state.repo_root, &["push"]);
+    let actual_pushed_head = state.git_storage.rev_parse("@{upstream}").unwrap();
+    state.confirm_pending_pushes(&actual_pushed_head, &create_head);
     let first_push = events.try_recv().unwrap();
     match first_push {
         gitim_daemon::api::Event::MessagesPushed {
@@ -353,18 +352,42 @@ async fn quick_session_send_acks_locally_until_sync_confirms_push() {
             line_numbers,
         } => {
             assert_eq!(channel, format!("quick_session:{SESSION_ID}"));
-            assert_eq!(line_numbers, vec![1]);
+            assert_eq!(line_numbers, vec![1, 2]);
         }
         other => panic!("unexpected event: {other:?}"),
     }
+    assert!(state
+        .pending_push
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_empty());
+
+    let after_push: SendQuickSessionMessageResponse = data(
+        send_human(
+            state.clone(),
+            "committed after push",
+            "req-after-push",
+            "alice",
+        )
+        .await,
+    );
+    assert_eq!(after_push.line_number, 3);
+    state.confirm_pending_pushes(&actual_pushed_head, &create_head);
     let pending = state
         .pending_push
         .read()
         .unwrap_or_else(|error| error.into_inner());
     assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].line_number, 2);
+    assert_eq!(pending[0].line_number, 3);
     drop(pending);
+    while let Ok(event) = events.try_recv() {
+        assert!(
+            !matches!(event, gitim_daemon::api::Event::MessagesPushed { .. }),
+            "a commit made after the confirmed push must remain pending"
+        );
+    }
 
+    let remote_before_final_push = bare_head(&bare);
     let mut circuit = AuthCircuit::new(state.auth_failed.clone());
     run_sync_cycle(
         &state.git_storage,
@@ -377,7 +400,7 @@ async fn quick_session_send_acks_locally_until_sync_confirms_push() {
         None,
     );
 
-    assert_ne!(bare_head(&bare), remote_before_send);
+    assert_ne!(bare_head(&bare), remote_before_final_push);
     assert!(state
         .pending_push
         .read()
@@ -390,7 +413,7 @@ async fn quick_session_send_acks_locally_until_sync_confirms_push() {
             line_numbers,
         } => {
             assert_eq!(channel, format!("quick_session:{SESSION_ID}"));
-            assert_eq!(line_numbers, vec![2]);
+            assert_eq!(line_numbers, vec![3]);
         }
         other => panic!("unexpected event: {other:?}"),
     }

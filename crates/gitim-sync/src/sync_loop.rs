@@ -848,21 +848,21 @@ fn sync_with_push(
     let mut included_head_before_rewrite: Option<String> = None;
     for attempt in 1..=MAX_SYNC_RETRIES {
         // Try push directly
-        let direct_push_head = match repo.rev_parse("HEAD") {
-            Ok(head) => head,
-            Err(error) => {
-                warn!("sync: failed to snapshot direct-push HEAD: {}", error);
-                return SyncOutcome::Normal;
-            }
-        };
-        let direct_included_head = included_head_before_rewrite
-            .clone()
-            .unwrap_or_else(|| direct_push_head.clone());
         let push_result = repo.push();
         observe_auth(circuit, &push_result);
         match push_result {
             Ok(()) => {
-                on_pushed(direct_push_head, direct_included_head);
+                let pushed_head = match repo.rev_parse("@{upstream}") {
+                    Ok(head) => head,
+                    Err(error) => {
+                        warn!("sync: failed to resolve pushed upstream HEAD: {}", error);
+                        return SyncOutcome::Normal;
+                    }
+                };
+                let included_head = included_head_before_rewrite
+                    .clone()
+                    .unwrap_or_else(|| pushed_head.clone());
+                on_pushed(pushed_head, included_head);
                 info!("sync: push complete (attempt {})", attempt);
                 return SyncOutcome::Normal;
             }
@@ -992,13 +992,6 @@ fn sync_with_push(
             Ok(()) => {
                 included_head_before_rewrite
                     .get_or_insert_with(|| local_head_before_rebase.clone());
-                let rebased_head = match repo.rev_parse("HEAD") {
-                    Ok(head) => head,
-                    Err(error) => {
-                        warn!("sync: failed to snapshot rebased HEAD: {}", error);
-                        return SyncOutcome::Normal;
-                    }
-                };
                 drop(rebase_guard);
                 // Epoch fence, checkpoint (3) — backstop: the rebase may have
                 // replayed local messages on top of a just-pulled R. Never
@@ -1010,8 +1003,15 @@ fn sync_with_push(
                 observe_auth(circuit, &push_after_rebase);
                 match push_after_rebase {
                     Ok(()) => {
+                        let pushed_head = match repo.rev_parse("@{upstream}") {
+                            Ok(head) => head,
+                            Err(error) => {
+                                warn!("sync: failed to resolve pushed upstream HEAD: {}", error);
+                                return SyncOutcome::Normal;
+                            }
+                        };
                         on_pushed(
-                            rebased_head,
+                            pushed_head,
                             included_head_before_rewrite
                                 .clone()
                                 .unwrap_or_else(|| local_head_before_rebase.clone()),
@@ -1254,13 +1254,6 @@ fn sync_with_push(
                     on_renumbered(m.file.clone(), m.old_line, m.new_line);
                 }
 
-                let resolved_head = match repo.rev_parse("HEAD") {
-                    Ok(head) => head,
-                    Err(error) => {
-                        warn!("sync: failed to snapshot resolved HEAD: {}", error);
-                        return SyncOutcome::Normal;
-                    }
-                };
                 included_head_before_rewrite
                     .get_or_insert_with(|| local_head_before_rebase.clone());
 
@@ -1273,8 +1266,15 @@ fn sync_with_push(
                 observe_auth(circuit, &push_after_resolve);
                 match push_after_resolve {
                     Ok(()) => {
+                        let pushed_head = match repo.rev_parse("@{upstream}") {
+                            Ok(head) => head,
+                            Err(error) => {
+                                warn!("sync: failed to resolve pushed upstream HEAD: {}", error);
+                                return SyncOutcome::Normal;
+                            }
+                        };
                         on_pushed(
-                            resolved_head,
+                            pushed_head,
                             included_head_before_rewrite
                                 .clone()
                                 .unwrap_or_else(|| local_head_before_rebase.clone()),
