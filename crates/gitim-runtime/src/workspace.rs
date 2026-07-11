@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{broadcast, watch};
 
 use crate::git_config::WorkspaceConfig;
@@ -21,6 +21,7 @@ pub struct WorkspaceContext {
     pub git_config: Option<WorkspaceConfig>,
     pub asset_token: crate::assets::AssetWorkspaceToken,
     pub initialization: Option<Arc<WorkspaceInitialization>>,
+    pub transition: Arc<WorkspaceTransitionSlot>,
 }
 
 impl WorkspaceContext {
@@ -38,7 +39,56 @@ impl WorkspaceContext {
             git_config: None,
             asset_token: crate::assets::AssetWorkspaceToken::new(),
             initialization: None,
+            transition: Arc::new(WorkspaceTransitionSlot::new()),
         }
+    }
+}
+
+pub struct WorkspaceTransitionSlot {
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl WorkspaceTransitionSlot {
+    fn new() -> Self {
+        Self {
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    pub async fn lock_owned(self: Arc<Self>) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.gate).lock_owned().await
+    }
+}
+
+impl Default for WorkspaceTransitionSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Default)]
+pub struct WorkspaceTransitionRegistry {
+    slots: Mutex<HashMap<PathBuf, Weak<WorkspaceTransitionSlot>>>,
+}
+
+impl WorkspaceTransitionRegistry {
+    pub fn slot(&self, canonical_workspace: &Path) -> Arc<WorkspaceTransitionSlot> {
+        let mut slots = crate::preconditions::mutex_lock(&self.slots);
+        slots.retain(|_, slot| slot.strong_count() > 0);
+        if let Some(slot) = slots.get(canonical_workspace).and_then(Weak::upgrade) {
+            return slot;
+        }
+        let slot = Arc::new(WorkspaceTransitionSlot::new());
+        slots.insert(canonical_workspace.to_path_buf(), Arc::downgrade(&slot));
+        slot
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn live_entries(&self) -> usize {
+        let mut slots = crate::preconditions::mutex_lock(&self.slots);
+        slots.retain(|_, slot| slot.strong_count() > 0);
+        slots.len()
     }
 }
 

@@ -387,6 +387,9 @@ pub struct RuntimeState {
     /// so we don't accidentally create a "demo mode" path.
     pub clone_url_override: Option<String>,
     pub workspaces: HashMap<String, crate::workspace::WorkspaceContext>,
+    pub workspace_transitions: Arc<crate::workspace::WorkspaceTransitionRegistry>,
+    #[cfg(feature = "test-support")]
+    pub workspace_create_reservation_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub fleet_tx: tokio::sync::broadcast::Sender<crate::fleet::FleetEventEnvelope>,
     pub fleet_nodes: HashMap<String, crate::fleet::FleetNodeRuntime>,
     pub fleet_status: HashMap<String, crate::fleet::FleetNodeStatus>,
@@ -471,6 +474,11 @@ impl Default for RuntimeState {
             github_api: Arc::new(DefaultGithubApi { base_url }),
             clone_url_override,
             workspaces: HashMap::new(),
+            workspace_transitions: Arc::new(
+                crate::workspace::WorkspaceTransitionRegistry::default(),
+            ),
+            #[cfg(feature = "test-support")]
+            workspace_create_reservation_barrier: None,
             fleet_tx,
             fleet_nodes: HashMap::new(),
             fleet_status: HashMap::new(),
@@ -5125,6 +5133,21 @@ async fn fleet_nodes_delete(
 /// workspace is recovered in its own task so one slow daemon doesn't stall
 /// the rest.
 pub async fn recover_from_config(state: SharedRuntimeState) {
+    if let Err(error) = crate::user_config::mutate(|config| {
+        let mut seen_paths = HashSet::new();
+        config.workspaces.retain_mut(|entry| {
+            let Ok(canonical) = PathBuf::from(&entry.path).canonicalize() else {
+                return true;
+            };
+            if !seen_paths.insert(canonical.clone()) {
+                return false;
+            }
+            entry.path = canonical.to_string_lossy().into_owned();
+            true
+        });
+    }) {
+        tracing::warn!(error = %error, "failed to normalize persisted workspace paths");
+    }
     let cfg = crate::user_config::read();
     if cfg.workspaces.is_empty() {
         return;
@@ -5142,17 +5165,17 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
         let recovered_path = match workspace.canonicalize() {
             Ok(path) => path,
             Err(e) => {
-                tracing::warn!(slug=%entry.slug, path=%entry.path, error=%e, "workspace path canonicalization failed; using configured path");
-                workspace.clone()
+                tracing::warn!(slug=%entry.slug, path=%entry.path, error=%e, "workspace path canonicalization failed; skipping workspace");
+                continue;
             }
         };
-        if !seen_paths.insert(recovered_path) {
+        if !seen_paths.insert(recovered_path.clone()) {
             tracing::warn!(slug=%entry.slug, path=%entry.path, "workspace path already recovered; skipping duplicate entry");
             continue;
         }
         let state = state.clone();
         tasks.push(tokio::spawn(async move {
-            recover_single_workspace(state, entry.slug, entry.workspace_name, workspace).await;
+            recover_single_workspace(state, entry.slug, entry.workspace_name, recovered_path).await;
         }));
     }
     for t in tasks {
@@ -5166,7 +5189,16 @@ async fn recover_single_workspace(
     workspace_name: String,
     workspace: PathBuf,
 ) {
-    let recovered_config = WorkspaceConfig::read(&workspace).ok();
+    let mut recovered_config = WorkspaceConfig::read(&workspace).ok();
+    if let Some(config) = recovered_config.as_mut() {
+        let canonical = workspace.to_string_lossy().into_owned();
+        if config.workspace != canonical {
+            config.workspace.clone_from(&canonical);
+            if let Err(error) = config.write(&workspace) {
+                tracing::warn!(slug, error = %error, "failed to normalize workspace config path");
+            }
+        }
+    }
     {
         let mut s = crate::preconditions::arc_mutex_lock(&state);
         if s.workspaces.contains_key(&slug) {
@@ -5178,6 +5210,7 @@ async fn recover_single_workspace(
             workspace_name,
             workspace.clone(),
         );
+        ctx.transition = s.workspace_transitions.slot(&workspace);
         ctx.git_config = recovered_config.clone();
         s.workspaces.insert(slug.clone(), ctx);
     }
@@ -5188,13 +5221,13 @@ async fn recover_single_workspace(
             let Some(workspace) = s.workspaces.get(&slug) else {
                 return;
             };
-            (Arc::clone(&s.assets), workspace.asset_token)
+            (Arc::clone(&s.assets), workspace.asset_token.clone())
         };
         if let Err(error) = crate::assets::http::open_workspace_store(
             Arc::clone(&assets),
             workspace.clone(),
             config,
-            token,
+            &token,
         )
         .await
         {
@@ -5607,17 +5640,6 @@ struct WorkspaceSummary {
     initialized: bool,
 }
 
-enum WorkspaceDeleteClaim {
-    Ready(
-        Box<crate::workspace::WorkspaceContext>,
-        Arc<crate::assets::AssetService>,
-    ),
-    Wait(
-        crate::assets::AssetWorkspaceToken,
-        Arc<crate::workspace::WorkspaceInitialization>,
-    ),
-}
-
 fn workspace_summary(ctx: &crate::workspace::WorkspaceContext) -> WorkspaceSummary {
     let provider = ctx
         .git_config
@@ -5695,8 +5717,8 @@ async fn workspaces_delete(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let claim = {
-        let mut s = crate::preconditions::arc_mutex_lock(&state);
+    let (expected_token, initialization, transition) = {
+        let s = crate::preconditions::arc_mutex_lock(&state);
         let Some(workspace) = s.workspaces.get(&slug) else {
             return (
                 StatusCode::NOT_FOUND,
@@ -5704,44 +5726,33 @@ async fn workspaces_delete(
             )
                 .into_response();
         };
-        match workspace.initialization.clone() {
-            Some(initialization) => {
-                WorkspaceDeleteClaim::Wait(workspace.asset_token, initialization)
-            }
-            None => {
+        (
+            workspace.asset_token.clone(),
+            workspace.initialization.clone(),
+            Arc::clone(&workspace.transition),
+        )
+    };
+    if let Some(initialization) = initialization {
+        initialization.wait().await;
+    }
+    let _workspace_transition_guard = transition.lock_owned().await;
+    let (mut removed, assets) = {
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
+        match s.workspaces.get(&slug) {
+            Some(workspace) if workspace.asset_token == expected_token => {
                 let Some(removed) = s.workspaces.remove(&slug) else {
-                    return (
-                        StatusCode::NOT_FOUND,
-                        Json(ErrorBody::new("unknown workspace")),
-                    )
-                        .into_response();
-                };
-                WorkspaceDeleteClaim::Ready(Box::new(removed), Arc::clone(&s.assets))
-            }
-        }
-    };
-
-    let (mut removed, assets) = match claim {
-        WorkspaceDeleteClaim::Ready(removed, assets) => (*removed, assets),
-        WorkspaceDeleteClaim::Wait(expected_token, initialization) => {
-            initialization.wait().await;
-            let mut s = crate::preconditions::arc_mutex_lock(&state);
-            match s.workspaces.get(&slug) {
-                Some(workspace) if workspace.asset_token == expected_token => {
-                    let Some(removed) = s.workspaces.remove(&slug) else {
-                        return Json(OkAckResponse { ok: true }).into_response();
-                    };
-                    (removed, Arc::clone(&s.assets))
-                }
-                None | Some(_) => {
-                    // The workspace targeted by this DELETE no longer exists.
-                    // A replacement using the same slug is a separate lifecycle.
                     return Json(OkAckResponse { ok: true }).into_response();
-                }
+                };
+                (removed, Arc::clone(&s.assets))
+            }
+            None | Some(_) => {
+                // The workspace targeted by this DELETE no longer exists.
+                // A replacement using the same slug is a separate lifecycle.
+                return Json(OkAckResponse { ok: true }).into_response();
             }
         }
     };
-    if let Err(error) = assets.deactivate_workspace(removed.asset_token) {
+    if let Err(error) = assets.deactivate_workspace(&removed.asset_token) {
         tracing::warn!(slug = %slug, error = %error, "failed to deactivate asset store");
     }
 
@@ -5757,7 +5768,9 @@ async fn workspaces_delete(
 
     crate::workspace::kill_daemons(&removed).await;
 
-    if let Err(e) = crate::user_config::mutate(|config| config.remove(&slug)) {
+    if let Err(e) = crate::user_config::mutate(|config| {
+        remove_workspace_config_entry(config, &slug, &removed.path)
+    }) {
         tracing::error!(slug = %slug, error = %e, "failed to persist workspace removal");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -5786,6 +5799,23 @@ fn cleanup_partial_workspace(workspace: &Path) {
     let _ = std::fs::remove_dir_all(&runtime_dir);
 }
 
+fn remove_workspace_config_entry(
+    config: &mut crate::user_config::UserConfig,
+    slug: &str,
+    canonical_workspace: &Path,
+) -> bool {
+    let before = config.workspaces.len();
+    config.workspaces.retain(|entry| {
+        if entry.slug != slug {
+            return true;
+        }
+        let configured = PathBuf::from(&entry.path);
+        let identity = configured.canonicalize().unwrap_or(configured);
+        identity != canonical_workspace
+    });
+    config.workspaces.len() != before
+}
+
 struct WorkspaceInitializationGuard(Arc<crate::workspace::WorkspaceInitialization>);
 
 impl Drop for WorkspaceInitializationGuard {
@@ -5798,7 +5828,7 @@ fn rollback_workspace_creation(
     state: &SharedRuntimeState,
     slug: &str,
     workspace: &Path,
-    expected_token: crate::assets::AssetWorkspaceToken,
+    expected_token: &crate::assets::AssetWorkspaceToken,
 ) {
     let (assets, removed_exact_token) = {
         let mut runtime = crate::preconditions::arc_mutex_lock(state);
@@ -5806,20 +5836,36 @@ fn rollback_workspace_creation(
         let exact_token = runtime
             .workspaces
             .get(slug)
-            .is_some_and(|context| context.asset_token == expected_token);
-        if exact_token {
-            if let Err(error) = crate::user_config::mutate(|config| config.remove(slug)) {
-                tracing::warn!(slug, error = %error, "failed to remove rolled-back workspace config");
-            }
-        }
+            .is_some_and(|context| context.asset_token == *expected_token);
         let removed_exact_token = exact_token && runtime.workspaces.remove(slug).is_some();
         (assets, removed_exact_token)
     };
+    if removed_exact_token {
+        #[cfg(feature = "test-support")]
+        assets.wait_before_rollback_config();
+        if let Err(error) = crate::user_config::mutate(|config| {
+            remove_workspace_config_entry(config, slug, workspace)
+        }) {
+            tracing::warn!(slug, error = %error, "failed to remove rolled-back workspace config");
+        }
+    }
     if let Err(error) = assets.deactivate_workspace(expected_token) {
         tracing::warn!(slug, error = %error, "failed to deactivate rolled-back asset store");
     }
-    if removed_exact_token {
+    let owned_by_another_token = {
+        let runtime = crate::preconditions::arc_mutex_lock(state);
+        runtime
+            .workspaces
+            .values()
+            .any(|context| context.path == workspace && context.asset_token != *expected_token)
+    };
+    if removed_exact_token && !owned_by_another_token {
         cleanup_partial_workspace(workspace);
+    } else if removed_exact_token {
+        tracing::warn!(
+            slug,
+            "skipped workspace rollback cleanup because the canonical path has a new owner"
+        );
     }
 }
 
@@ -6054,11 +6100,45 @@ async fn workspaces_create(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let workspace = PathBuf::from(&req.path);
+    let requested_workspace = PathBuf::from(&req.path);
 
-    // Path validation: only cloud-sync rejection today. Do this before
-    // touching `state` so concurrent callers with bad paths fail fast and
-    // don't race for a slug.
+    // Validate both the requested spelling and its canonical identity before
+    // touching state or performing any workspace-owned side effect.
+    if let Err(crate::git_config::WorkspacePathError::CloudSyncDetected(service)) =
+        validate_workspace_path_from_env(&requested_workspace)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody::with_code(
+                format!("workspace is inside {service} — refusing to store a token there"),
+                "cloud_sync_path_rejected",
+            )),
+        )
+            .into_response();
+    }
+    let workspace = match requested_workspace.canonicalize() {
+        Ok(path) if path.is_dir() => path,
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(
+                    "workspace path must be an existing directory",
+                    "invalid_workspace_path",
+                )),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(
+                    format!("workspace path cannot be resolved: {error}"),
+                    "invalid_workspace_path",
+                )),
+            )
+                .into_response()
+        }
+    };
     if let Err(crate::git_config::WorkspacePathError::CloudSyncDetected(service)) =
         validate_workspace_path_from_env(&workspace)
     {
@@ -6071,6 +6151,21 @@ async fn workspaces_create(
         )
             .into_response();
     }
+    #[cfg(feature = "test-support")]
+    let reservation_barrier = {
+        crate::preconditions::arc_mutex_lock(&state)
+            .workspace_create_reservation_barrier
+            .clone()
+    };
+    #[cfg(feature = "test-support")]
+    if let Some(reservation_barrier) = reservation_barrier {
+        reservation_barrier.wait().await;
+    }
+    let workspace_transition = {
+        let runtime = crate::preconditions::arc_mutex_lock(&state);
+        runtime.workspace_transitions.slot(&workspace)
+    };
+    let workspace_transition_guard = Arc::clone(&workspace_transition).lock_owned().await;
 
     // `workspace_name` defaults to the basename *as-is* (case/spaces/unicode
     // preserved) so the UI can show a human-friendly label even when the slug
@@ -6175,8 +6270,9 @@ async fn workspaces_create(
             workspace_name.clone(),
             workspace.clone(),
         );
+        placeholder.transition = Arc::clone(&workspace_transition);
         placeholder.initialization = Some(Arc::clone(&initialization));
-        let asset_token = placeholder.asset_token;
+        let asset_token = placeholder.asset_token.clone();
         s.workspaces.insert(slug.clone(), placeholder);
         (slug, initialization, asset_token)
     };
@@ -6185,11 +6281,15 @@ async fn workspaces_create(
     let join_slug = slug.clone();
     let join_workspace = workspace.clone();
     let join_initialization = Arc::clone(&initialization);
+    let join_asset_token = asset_token.clone();
     let finalization = tokio::spawn(async move {
         let _initialization_guard = WorkspaceInitializationGuard(initialization);
+        let _workspace_transition_guard = workspace_transition_guard;
         let supervisor_state = Arc::clone(&state);
         let supervisor_slug = slug.clone();
         let supervisor_workspace = workspace.clone();
+        let supervisor_asset_token = asset_token;
+        let inner_asset_token = supervisor_asset_token.clone();
         let inner = tokio::spawn(async move {
             // Async provisioning runs without the state lock held. On any failure
             // below we must re-lock and drop the placeholder so a retry can succeed.
@@ -6200,7 +6300,12 @@ async fn workspaces_create(
                     let token = match req.git.token.as_ref() {
                         Some(t) if !t.is_empty() => t.clone(),
                         _ => {
-                            rollback_workspace_creation(&state, &slug, &workspace, asset_token);
+                            rollback_workspace_creation(
+                                &state,
+                                &slug,
+                                &workspace,
+                                &inner_asset_token,
+                            );
                             return (
                                 StatusCode::BAD_REQUEST,
                                 Json(ErrorBody::with_code(
@@ -6214,7 +6319,12 @@ async fn workspaces_create(
                     let remote_url = match req.git.remote_url.as_ref() {
                         Some(u) if !u.is_empty() => u.clone(),
                         _ => {
-                            rollback_workspace_creation(&state, &slug, &workspace, asset_token);
+                            rollback_workspace_creation(
+                                &state,
+                                &slug,
+                                &workspace,
+                                &inner_asset_token,
+                            );
                             return (
                                 StatusCode::BAD_REQUEST,
                                 Json(ErrorBody::with_code(
@@ -6228,7 +6338,7 @@ async fn workspaces_create(
                     provision_github_workspace(&state, &workspace, remote_url, token).await
                 }
                 other => {
-                    rollback_workspace_creation(&state, &slug, &workspace, asset_token);
+                    rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorBody::with_code(
@@ -6243,7 +6353,7 @@ async fn workspaces_create(
             let (human_dir, config) = match provisioned {
                 Ok(x) => x,
                 Err((error_code, message)) => {
-                    rollback_workspace_creation(&state, &slug, &workspace, asset_token);
+                    rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
                     // All provisioning failures surface as 400: they're all "your input
                     // or environment caused this" (bad token, bad URL, clone failed).
                     // None are 500-class — the runtime itself is still fine.
@@ -6261,7 +6371,7 @@ async fn workspaces_create(
             let placeholder_updated = {
                 let mut s = crate::preconditions::arc_mutex_lock(&state);
                 match s.workspaces.get_mut(&slug) {
-                    Some(ctx) if ctx.asset_token == asset_token => {
+                    Some(ctx) if ctx.asset_token == inner_asset_token => {
                         ctx.human_repo = Some(human_dir);
                         ctx.git_config = Some(config.clone());
                         true
@@ -6270,7 +6380,7 @@ async fn workspaces_create(
                 }
             };
             if !placeholder_updated {
-                rollback_workspace_creation(&state, &slug, &workspace, asset_token);
+                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
                 return (
                     StatusCode::CONFLICT,
                     Json(ErrorBody::with_code(
@@ -6289,12 +6399,12 @@ async fn workspaces_create(
                 Arc::clone(&assets),
                 workspace.clone(),
                 &config,
-                asset_token,
+                &inner_asset_token,
             )
             .await
             {
                 assets.record_store_failure(&slug, &error);
-                rollback_workspace_creation(&state, &slug, &workspace, asset_token);
+                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
                 return (
                     error.status_code(),
                     Json(ErrorBody::with_code(
@@ -6315,7 +6425,7 @@ async fn workspaces_create(
             };
             if let Err(e) = crate::user_config::mutate(|config| config.upsert(workspace_entry)) {
                 tracing::error!(slug = %slug, error = %e, "failed to persist workspace entry");
-                rollback_workspace_creation(&state, &slug, &workspace, asset_token);
+                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token);
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorBody::with_code(
@@ -6346,7 +6456,7 @@ async fn workspaces_create(
                 .workspaces
                 .get_mut(&slug)
             {
-                if workspace.asset_token == asset_token {
+                if workspace.asset_token == inner_asset_token {
                     workspace.initialization = None;
                 }
             }
@@ -6360,7 +6470,7 @@ async fn workspaces_create(
                     &supervisor_state,
                     &supervisor_slug,
                     &supervisor_workspace,
-                    asset_token,
+                    &supervisor_asset_token,
                 );
                 tracing::error!(slug = %supervisor_slug, error = %error, "workspace finalization task failed");
                 let asset_error =
@@ -6383,7 +6493,17 @@ async fn workspaces_create(
     match finalization.await {
         Ok(response) => response,
         Err(error) => {
-            rollback_workspace_creation(&join_state, &join_slug, &join_workspace, asset_token);
+            let transition = {
+                let runtime = crate::preconditions::arc_mutex_lock(&join_state);
+                runtime.workspace_transitions.slot(&join_workspace)
+            };
+            let _workspace_transition_guard = transition.lock_owned().await;
+            rollback_workspace_creation(
+                &join_state,
+                &join_slug,
+                &join_workspace,
+                &join_asset_token,
+            );
             join_initialization.finish();
             tracing::error!(slug = %join_slug, error = %error, "workspace finalization supervisor failed");
             let asset_error =
@@ -6527,6 +6647,7 @@ pub fn create_router_with_asset_upload_limit(
     create_router_with_asset_http_config(max_upload_bytes, Vec::new())
 }
 
+#[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub fn create_router_with_asset_http_config(
     max_upload_bytes: usize,

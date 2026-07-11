@@ -1772,7 +1772,7 @@ async fn workspace_deactivation_waits_for_an_inflight_publish_then_invalidates_h
     let service = Arc::new(AssetService::new(limits(1024)));
     let token = AssetWorkspaceToken::new();
     let store = service
-        .activate_workspace(workspace.path(), "local:lifecycle", token)
+        .activate_workspace(workspace.path(), "local:lifecycle", &token)
         .unwrap();
     let staged = store
         .stage_bytes("inflight.bin", b"inflight")
@@ -1796,7 +1796,7 @@ async fn workspace_deactivation_waits_for_an_inflight_publish_then_invalidates_h
     service.inject_deactivate_attempt(Arc::clone(&deactivate_attempted));
     let mut deactivate = tokio::task::spawn_blocking({
         let service = Arc::clone(&service);
-        move || service.deactivate_workspace(token)
+        move || service.deactivate_workspace(&token)
     });
     tokio::task::spawn_blocking(move || deactivate_attempted.wait())
         .await
@@ -1815,6 +1815,148 @@ async fn workspace_deactivation_waits_for_an_inflight_publish_then_invalidates_h
     assert!(deactivate.await.unwrap().unwrap());
     assert!(matches!(store.usage(), Err(AssetError::StaleBinding)));
     assert!(owned_temp_files(&store).is_empty());
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paused_activation_does_not_block_registered_open_for_another_workspace() {
+    let workspace_a = TempDir::new().unwrap();
+    let workspace_b = TempDir::new().unwrap();
+    let service = Arc::new(AssetService::new(limits(1024)));
+    let token_a = AssetWorkspaceToken::new();
+    let token_b = AssetWorkspaceToken::new();
+    service
+        .activate_workspace(workspace_b.path(), "local:b", &token_b)
+        .unwrap();
+    let activation_reached = Arc::new(Barrier::new(2));
+    let activation_resume = Arc::new(Barrier::new(2));
+    service.inject_activation_transition_pause(
+        Arc::clone(&activation_reached),
+        Arc::clone(&activation_resume),
+    );
+    let activate_a = tokio::task::spawn_blocking({
+        let service = Arc::clone(&service);
+        let path = workspace_a.path().to_path_buf();
+        move || service.activate_workspace(path, "local:a", &token_a)
+    });
+    tokio::task::spawn_blocking(move || activation_reached.wait())
+        .await
+        .unwrap();
+
+    let open_attempted = Arc::new(Barrier::new(2));
+    service.inject_registered_open_attempt(Arc::clone(&open_attempted));
+    let mut open_b = tokio::task::spawn_blocking({
+        let service = Arc::clone(&service);
+        let path = workspace_b.path().to_path_buf();
+        move || service.open_registered_store(path, "local:b", &token_b)
+    });
+    tokio::task::spawn_blocking(move || open_attempted.wait())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), &mut open_b)
+        .await
+        .expect("workspace B open waited for workspace A activation")
+        .unwrap()
+        .unwrap();
+
+    tokio::task::spawn_blocking(move || activation_resume.wait())
+        .await
+        .unwrap();
+    activate_a.await.unwrap().unwrap();
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn paused_deactivation_does_not_block_registered_open_for_another_workspace() {
+    let workspace_a = TempDir::new().unwrap();
+    let workspace_b = TempDir::new().unwrap();
+    let service = Arc::new(AssetService::new(limits(1024)));
+    let token_a = AssetWorkspaceToken::new();
+    let token_b = AssetWorkspaceToken::new();
+    service
+        .activate_workspace(workspace_a.path(), "local:a", &token_a)
+        .unwrap();
+    service
+        .activate_workspace(workspace_b.path(), "local:b", &token_b)
+        .unwrap();
+    let deactivate_attempted = Arc::new(Barrier::new(2));
+    let deactivate_resume = Arc::new(Barrier::new(2));
+    service.inject_deactivation_transition_pause(
+        Arc::clone(&deactivate_attempted),
+        Arc::clone(&deactivate_resume),
+    );
+    let deactivate_a = tokio::task::spawn_blocking({
+        let service = Arc::clone(&service);
+        move || service.deactivate_workspace(&token_a)
+    });
+    tokio::task::spawn_blocking(move || deactivate_attempted.wait())
+        .await
+        .unwrap();
+
+    let open_attempted = Arc::new(Barrier::new(2));
+    service.inject_registered_open_attempt(Arc::clone(&open_attempted));
+    let mut open_b = tokio::task::spawn_blocking({
+        let service = Arc::clone(&service);
+        let path = workspace_b.path().to_path_buf();
+        move || service.open_registered_store(path, "local:b", &token_b)
+    });
+    tokio::task::spawn_blocking(move || open_attempted.wait())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(1), &mut open_b)
+        .await
+        .expect("workspace B open waited for workspace A deactivation")
+        .unwrap()
+        .unwrap();
+
+    tokio::task::spawn_blocking(move || deactivate_resume.wait())
+        .await
+        .unwrap();
+    assert!(deactivate_a.await.unwrap().unwrap());
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn repeated_workspace_activation_and_deletion_keeps_lifecycle_registry_bounded() {
+    let root = TempDir::new().unwrap();
+    let service = AssetService::new(limits(1024));
+    for index in 0..64 {
+        let workspace = root.path().join(format!("workspace-{index}"));
+        fs::create_dir(&workspace).unwrap();
+        let token = AssetWorkspaceToken::new();
+        service
+            .activate_workspace(&workspace, format!("local:{index}"), &token)
+            .unwrap();
+        assert!(service.deactivate_workspace(&token).unwrap());
+        assert_eq!(service.lifecycle_registry_entries(), (0, 0));
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[test]
+fn rejected_same_token_reactivation_preserves_the_original_registry_mapping() {
+    let workspace = TempDir::new().unwrap();
+    let other = TempDir::new().unwrap();
+    let service = AssetService::new(limits(1024));
+    let token = AssetWorkspaceToken::new();
+    service
+        .activate_workspace(workspace.path(), "local:original", &token)
+        .unwrap();
+
+    assert!(matches!(
+        service.activate_workspace(other.path(), "local:other", &token),
+        Err(AssetError::Invariant(_))
+    ));
+    assert!(matches!(
+        service.activate_workspace(workspace.path(), "local:wrong-binding", &token),
+        Err(AssetError::Invariant(_))
+    ));
+    service
+        .open_registered_store(workspace.path(), "local:original", &token)
+        .unwrap();
+    assert_eq!(service.lifecycle_registry_entries(), (1, 1));
+    assert!(service.deactivate_workspace(&token).unwrap());
+    assert_eq!(service.lifecycle_registry_entries(), (0, 0));
 }
 
 #[test]

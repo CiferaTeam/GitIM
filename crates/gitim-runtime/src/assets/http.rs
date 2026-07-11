@@ -180,6 +180,7 @@ pub fn router() -> Router<SharedRuntimeState> {
     router_with_policy(MAX_UPLOAD_HTTP_BYTES, AssetHttpPolicy::from_environment())
 }
 
+#[cfg(feature = "test-support")]
 pub(crate) fn router_with_configured_origins(
     max_upload_bytes: usize,
     configured_origins: Vec<String>,
@@ -242,10 +243,10 @@ pub(crate) async fn open_workspace_store(
     service: Arc<AssetService>,
     workspace_root: PathBuf,
     config: &WorkspaceConfig,
-    token: AssetWorkspaceToken,
+    token: &AssetWorkspaceToken,
 ) -> Result<AssetStore, AssetError> {
     let binding = workspace_binding(config)?;
-    activate_store_async(service, workspace_root, binding, token).await
+    activate_store_async(service, workspace_root, binding, token.clone()).await
 }
 
 async fn guard_upload_browser(
@@ -940,7 +941,7 @@ fn snapshot_workspace(
     Ok(WorkspaceAssetSnapshot {
         workspace_root: workspace.path.clone(),
         binding,
-        token: workspace.asset_token,
+        token: workspace.asset_token.clone(),
         runtime_id: runtime.runtime_id.clone(),
         service: Arc::clone(&runtime.assets),
     })
@@ -953,7 +954,7 @@ async fn open_store_async(
     token: AssetWorkspaceToken,
 ) -> Result<AssetStore, AssetError> {
     tokio::task::spawn_blocking(move || {
-        service.open_registered_store(workspace_root, &binding, token)
+        service.open_registered_store(workspace_root, &binding, &token)
     })
     .await
     .map_err(|_| AssetError::Store(std::io::Error::other("asset store task failed")))?
@@ -965,7 +966,7 @@ async fn activate_store_async(
     binding: String,
     token: AssetWorkspaceToken,
 ) -> Result<AssetStore, AssetError> {
-    tokio::task::spawn_blocking(move || service.activate_workspace(workspace_root, binding, token))
+    tokio::task::spawn_blocking(move || service.activate_workspace(workspace_root, binding, &token))
         .await
         .map_err(|_| AssetError::Store(std::io::Error::other("asset store task failed")))?
 }

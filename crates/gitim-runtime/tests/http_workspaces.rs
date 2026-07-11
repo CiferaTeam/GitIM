@@ -27,8 +27,8 @@
 //! semantics are preserved without starting a daemon.
 //!
 //! Tests 7 and 8 exercise genuine POST-side early-fail branches (missing
-//! field → 4xx from serde; path that can't host `repo.git` → 400 with
-//! `clone_failed`).
+//! field → 4xx from serde; unresolvable workspace path → 400 with
+//! `invalid_workspace_path`).
 //!
 //! ## HOME isolation
 //!
@@ -49,6 +49,8 @@ use serial_test::serial;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+#[cfg(feature = "test-support")]
+use gitim_runtime::assets::AssetSource;
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
 use gitim_runtime::http::{create_router, SharedRuntimeState};
 use gitim_runtime::slug;
@@ -102,10 +104,11 @@ fn inject_workspace(
     path: &std::path::Path,
     provider: GitProvider,
 ) {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut ctx = WorkspaceContext::new(
         slug_str.to_string(),
         workspace_name.to_string(),
-        path.to_path_buf(),
+        path.clone(),
     );
     ctx.git_config = Some(WorkspaceConfig {
         workspace: path.to_string_lossy().into_owned(),
@@ -133,10 +136,11 @@ fn inject_github_workspace_with_remote(
     path: &std::path::Path,
     remote_url: &str,
 ) {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut ctx = WorkspaceContext::new(
         slug_str.to_string(),
         workspace_name.to_string(),
-        path.to_path_buf(),
+        path.clone(),
     );
     ctx.git_config = Some(WorkspaceConfig {
         workspace: path.to_string_lossy().into_owned(),
@@ -385,7 +389,7 @@ async fn create_workspace_rejects_missing_path() {
     );
 }
 
-// -- 8. nonexistent/unwritable path → 400 ----------------------------------
+// -- 8. unresolvable workspace path → 400 ---------------------------------
 
 #[tokio::test]
 #[serial(http_workspaces_home)]
@@ -393,10 +397,9 @@ async fn create_workspace_rejects_nonexistent_path() {
     let _home = HomeGuard::install();
     let (router, _state) = create_router();
 
-    // `/dev/null/foo` can't host `repo.git` — `create_dir_all` in
-    // `provision_local_workspace` fails with ENOTDIR, surfacing as 400 with
-    // error_code=clone_failed. This exercises the real POST path without
-    // getting as far as the daemon spawn.
+    // Workspace identity is canonicalized before state reservation or
+    // provisioning. A path below a regular file therefore fails without
+    // creating any workspace-owned artifacts.
     let (status, body) = send(
         router,
         "POST",
@@ -463,7 +466,10 @@ async fn get_workspace_happy_path() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["slug"], "backend");
     assert_eq!(body["workspace_name"], "backend");
-    assert_eq!(body["path"], ws_path.to_string_lossy().as_ref());
+    assert_eq!(
+        body["path"],
+        ws_path.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
     assert_eq!(body["provider"], "local");
     assert_eq!(body["agents_count"], 0);
     // `initialized` is false because we injected without `human_repo`.
@@ -860,19 +866,290 @@ async fn create_workspace_rejects_duplicate_path() {
     assert!(s.workspaces.contains_key("first-workspace"));
 }
 
-// -- 17. POST failure does not leak placeholder state ----------------------
+#[cfg(unix)]
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn create_workspace_rejects_a_leaf_symlink_alias_before_provider_side_effects() {
+    use std::os::unix::fs::symlink;
+
+    let _home = HomeGuard::install();
+    let (router, state) = create_router();
+    let parent = TempDir::new().unwrap();
+    let workspace = parent.path().join("canonical-room");
+    let alias = parent.path().join("room-alias");
+    std::fs::create_dir(&workspace).unwrap();
+    symlink(&workspace, &alias).unwrap();
+    let sentinel = workspace.join(".gitim-runtime/sentinel");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, b"active-workspace").unwrap();
+    inject_workspace(
+        &state,
+        "canonical-room",
+        "Canonical Room",
+        &workspace,
+        GitProvider::Local,
+    );
+    let token = state.lock().unwrap().workspaces["canonical-room"]
+        .asset_token
+        .clone();
+
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": alias,
+            "slug": "alias-room",
+            "git": { "provider": "github" },
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error_code"], "workspace_path_exists");
+    assert_eq!(body["existing_slug"], "canonical-room");
+    let runtime = state.lock().unwrap();
+    assert_eq!(runtime.workspaces.len(), 1);
+    assert_eq!(runtime.workspaces["canonical-room"].asset_token, token);
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"active-workspace");
+}
+
+#[cfg(all(unix, feature = "test-support"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn all_workspace_alias_forms_leave_an_active_workspace_byte_for_byte_unchanged() {
+    use std::os::unix::fs::symlink;
+
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let root = short_tempdir();
+    let real_parent = root.path().join("real-parent");
+    let workspace = real_parent.join("room");
+    let nested = real_parent.join("nested");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir(&nested).unwrap();
+    let leaf_alias = root.path().join("room-link");
+    let parent_alias = root.path().join("parent-link");
+    symlink(&workspace, &leaf_alias).unwrap();
+    symlink(&real_parent, &parent_alias).unwrap();
+    let lexical_alias = nested.join("..").join("room");
+    let canonical_workspace = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+
+    let (status, _) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical_workspace,
+            "slug": "room",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (assets, token, binding) = {
+        let runtime = state.lock().unwrap();
+        let context = &runtime.workspaces["room"];
+        let config = context.git_config.as_ref().unwrap();
+        (
+            std::sync::Arc::clone(&runtime.assets),
+            context.asset_token.clone(),
+            format!("local:{}", config.created_at),
+        )
+    };
+    let store = assets
+        .open_registered_store(&canonical_workspace, &binding, &token)
+        .unwrap();
+    let stored = store
+        .put_bytes(b"alias-safety-object", AssetSource::LocalUpload)
+        .unwrap();
+    let object_path = canonical_workspace
+        .join(".gitim-runtime/assets/v1/objects/sha256")
+        .join(&stored.sha256[..2])
+        .join(&stored.sha256);
+    let runtime_json =
+        std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".gitim/runtime.json");
+    let workspace_config = canonical_workspace.join(".gitim-runtime/config.json");
+    let manifest = canonical_workspace.join(".gitim-runtime/assets/v1/store.json");
+    let pid_file = canonical_workspace.join(".gitim-runtime/human/.gitim/run/gitim.pid");
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    let baseline_runtime_json = std::fs::read(&runtime_json).unwrap();
+    let baseline_workspace_config = std::fs::read(&workspace_config).unwrap();
+    let baseline_manifest = std::fs::read(&manifest).unwrap();
+    let baseline_object = std::fs::read(&object_path).unwrap();
+    let baseline_usage = store.usage().unwrap();
+    let baseline_health = assets.health_snapshot(&canonical_workspace).unwrap();
+    let orphaned = canonical_workspace.join(".gitim-runtime/orphaned-assets");
+    let baseline_quarantine = std::fs::read_dir(&orphaned)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+
+    let aliases = [
+        (leaf_alias, "leaf-alias", json!({ "provider": "local" })),
+        (
+            parent_alias.join("room"),
+            "parent-alias",
+            json!({
+                "provider": "github",
+                "remote_url": "https://github.com/example/never-contact",
+                "token": "must-not-be-used"
+            }),
+        ),
+        (
+            lexical_alias,
+            "lexical-alias",
+            json!({ "provider": "local" }),
+        ),
+    ];
+    for (alias, slug, git) in aliases {
+        let (status, body) = send(
+            router.clone(),
+            "POST",
+            "/workspaces",
+            Some(json!({ "path": alias, "slug": slug, "git": git })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{slug}");
+        assert_eq!(body["error_code"], "workspace_path_exists", "{slug}");
+        assert_eq!(body["existing_slug"], "room", "{slug}");
+        assert!(std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(std::fs::read(&runtime_json).unwrap(), baseline_runtime_json);
+        assert_eq!(
+            std::fs::read(&workspace_config).unwrap(),
+            baseline_workspace_config
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), baseline_manifest);
+        assert_eq!(std::fs::read(&object_path).unwrap(), baseline_object);
+        assert_eq!(store.usage().unwrap(), baseline_usage);
+        assert_eq!(
+            assets.health_snapshot(&canonical_workspace).unwrap(),
+            baseline_health
+        );
+        assert_eq!(
+            std::fs::read_dir(&orphaned)
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            baseline_quarantine
+        );
+        let runtime = state.lock().unwrap();
+        assert_eq!(runtime.workspaces.len(), 1);
+        assert_eq!(runtime.workspaces["room"].asset_token, token);
+        assert_eq!(assets.lifecycle_registry_entries(), (1, 1));
+    }
+
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/room", None).await.0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(all(unix, feature = "test-support"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn concurrent_canonical_and_alias_creates_have_one_side_effecting_winner() {
+    use std::os::unix::fs::symlink;
+
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let root = short_tempdir();
+    let workspace = root.path().join("room");
+    let alias = root.path().join("room-link");
+    std::fs::create_dir(&workspace).unwrap();
+    symlink(&workspace, &alias).unwrap();
+    let canonical_workspace = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+    let reservation_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    state.lock().unwrap().workspace_create_reservation_barrier =
+        Some(std::sync::Arc::clone(&reservation_barrier));
+
+    let canonical_create = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical_workspace,
+            "slug": "canonical-room",
+            "git": { "provider": "local" },
+        })),
+    ));
+    let alias_create = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": alias,
+            "slug": "alias-room",
+            "git": { "provider": "local" },
+        })),
+    ));
+    reservation_barrier.wait().await;
+    let first = canonical_create.await.unwrap();
+    let second = alias_create.await.unwrap();
+    let mut results = [first, second];
+    results.sort_by_key(|(status, _)| status.as_u16());
+    assert_eq!(results[0].0, StatusCode::CREATED);
+    assert_eq!(results[1].0, StatusCode::CONFLICT);
+    assert_eq!(results[1].1["error_code"], "workspace_path_exists");
+    let winner = results[0].1["slug"].as_str().unwrap().to_string();
+
+    let (assets, pid) = {
+        let runtime = state.lock().unwrap();
+        assert_eq!(runtime.workspaces.len(), 1);
+        let context = &runtime.workspaces[&winner];
+        assert_eq!(context.path, workspace.canonicalize().unwrap());
+        let pid = std::fs::read_to_string(
+            context
+                .path
+                .join(".gitim-runtime/human/.gitim/run/gitim.pid"),
+        )
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+        (std::sync::Arc::clone(&runtime.assets), pid)
+    };
+    assert!(std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(gitim_runtime::user_config::read().workspaces.len(), 1);
+    assert_eq!(assets.lifecycle_registry_entries(), (1, 1));
+    assert_eq!(
+        std::fs::read_dir(workspace.join(".gitim-runtime/orphaned-assets"))
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        send(router, "DELETE", &format!("/workspaces/{winner}"), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+// -- 17. invalid POST path does not reserve placeholder state --------------
 
 #[tokio::test]
 #[serial(http_workspaces_home)]
-async fn create_workspace_failure_cleans_up_placeholder() {
+async fn invalid_workspace_path_never_reserves_placeholder() {
     let _home = HomeGuard::install();
     let (router, state) = create_router();
 
-    // `/dev/null/...` can't host `repo.git` — `create_dir_all` in
-    // `provision_local_workspace` fails with ENOTDIR, the handler takes the
-    // rollback path and removes the placeholder. Without rollback, this would
-    // leave a half-initialized `WorkspaceContext` in state visible to later
-    // requests.
+    // Canonical path validation precedes placeholder reservation, so this
+    // request cannot leave a half-initialized `WorkspaceContext` visible to
+    // later requests.
     let (status, _body) = send(
         router,
         "POST",
@@ -890,6 +1167,98 @@ async fn create_workspace_failure_cleans_up_placeholder() {
         s.workspaces.is_empty(),
         "failed create left placeholder in state: {:?}",
         s.workspaces.keys().collect::<Vec<_>>()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn recovery_canonicalizes_aliases_deduplicates_paths_and_preserves_other_workspaces() {
+    use std::os::unix::fs::symlink;
+
+    let _home = HomeGuard::install();
+    let root = TempDir::new().unwrap();
+    let room = root.path().join("room");
+    let room_alias = root.path().join("room-alias");
+    let other = root.path().join("other");
+    std::fs::create_dir(&room).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    symlink(&room, &room_alias).unwrap();
+    let room_canonical = room.canonicalize().unwrap();
+    let other_canonical = other.canonicalize().unwrap();
+    WorkspaceConfig {
+        workspace: room_alias.to_string_lossy().into_owned(),
+        created_at: "2026-07-12T00:00:00Z".to_string(),
+        git: GitConfig {
+            provider: GitProvider::Local,
+            remote_url: None,
+            token: None,
+            github_email: None,
+        },
+    }
+    .write(&room)
+    .unwrap();
+    WorkspaceConfig {
+        workspace: other.to_string_lossy().into_owned(),
+        created_at: "2026-07-12T00:00:01Z".to_string(),
+        git: GitConfig {
+            provider: GitProvider::Local,
+            remote_url: None,
+            token: None,
+            github_email: None,
+        },
+    }
+    .write(&other)
+    .unwrap();
+    gitim_runtime::user_config::write(&gitim_runtime::user_config::UserConfig {
+        runtime_id: "24a6489c-762e-4461-9247-a824807a6080".to_string(),
+        workspaces: vec![
+            gitim_runtime::user_config::WorkspaceEntry {
+                slug: "room".to_string(),
+                workspace_name: "Room".to_string(),
+                path: room_alias.to_string_lossy().into_owned(),
+            },
+            gitim_runtime::user_config::WorkspaceEntry {
+                slug: "room-duplicate".to_string(),
+                workspace_name: "Duplicate".to_string(),
+                path: room.to_string_lossy().into_owned(),
+            },
+            gitim_runtime::user_config::WorkspaceEntry {
+                slug: "other".to_string(),
+                workspace_name: "Other".to_string(),
+                path: other.to_string_lossy().into_owned(),
+            },
+        ],
+        listen_port: Some(17777),
+        fleet_nodes: Vec::new(),
+    })
+    .unwrap();
+    let (_router, state) = create_router();
+
+    gitim_runtime::http::recover_from_config(std::sync::Arc::clone(&state)).await;
+
+    let runtime = state.lock().unwrap();
+    assert_eq!(runtime.workspaces.len(), 2);
+    assert_eq!(runtime.workspaces["room"].path, room_canonical);
+    assert_eq!(runtime.workspaces["other"].path, other_canonical);
+    assert!(!runtime.workspaces.contains_key("room-duplicate"));
+    drop(runtime);
+    let persisted = gitim_runtime::user_config::read();
+    assert_eq!(persisted.runtime_id, "24a6489c-762e-4461-9247-a824807a6080");
+    assert_eq!(persisted.listen_port, Some(17777));
+    assert_eq!(persisted.workspaces.len(), 2);
+    assert_eq!(
+        persisted
+            .workspaces
+            .iter()
+            .find(|entry| entry.slug == "room")
+            .unwrap()
+            .path,
+        room_canonical.to_string_lossy()
+    );
+    assert_eq!(
+        WorkspaceConfig::read(&room).unwrap().workspace,
+        room_canonical.to_string_lossy()
     );
 }
 
@@ -950,14 +1319,14 @@ async fn cancelled_create_request_finishes_owned_asset_activation_and_durable_st
         let context = &runtime.workspaces["cancel-safe-create"];
         (
             context.path.clone(),
-            context.asset_token,
+            context.asset_token.clone(),
             std::sync::Arc::clone(&runtime.assets),
         )
     };
     let config = WorkspaceConfig::read(&path).unwrap();
     let binding = format!("local:{}", config.created_at);
     assets
-        .open_registered_store(&path, &binding, token)
+        .open_registered_store(&path, &binding, &token)
         .expect("cancelled request left active registered store");
     assert!(gitim_runtime::user_config::read()
         .workspaces
@@ -1050,7 +1419,7 @@ async fn delete_waiting_for_old_initialization_does_not_remove_recreated_workspa
             "New".to_string(),
             new_path.clone(),
         );
-        let token = recreated.asset_token;
+        let token = recreated.asset_token.clone();
         runtime
             .workspaces
             .insert("replace-race".to_string(), recreated);
@@ -1167,6 +1536,193 @@ async fn owned_workspace_finalizer_panic_returns_500_after_complete_rollback() {
             .load(std::sync::atomic::Ordering::Relaxed),
         1
     );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn rollback_never_cleans_a_canonical_workspace_owned_by_a_different_token() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("replacement-owner");
+    std::fs::create_dir(&workspace).unwrap();
+    let canonical_workspace = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+    let activation_reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let activation_resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    assets.inject_after_activation_pause(
+        std::sync::Arc::clone(&activation_reached),
+        std::sync::Arc::clone(&activation_resume),
+    );
+    assets.set_after_config_write_hook(std::sync::Arc::new(|| {
+        panic!("injected finalizer panic after owner replacement");
+    }));
+
+    let create = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical_workspace,
+            "slug": "replacement-owner",
+            "git": { "provider": "local" },
+        })),
+    ));
+    activation_reached.wait().await;
+
+    let (human_repo, git_config, transition, pid) = {
+        let runtime = state.lock().unwrap();
+        let old = &runtime.workspaces["replacement-owner"];
+        let human_repo = old.human_repo.clone().unwrap();
+        let pid = std::fs::read_to_string(human_repo.join(".gitim/run/gitim.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        (
+            human_repo,
+            old.git_config.clone(),
+            std::sync::Arc::clone(&old.transition),
+            pid,
+        )
+    };
+    let mut replacement = WorkspaceContext::new(
+        "replacement-owner".to_string(),
+        "Replacement Owner".to_string(),
+        canonical_workspace.clone(),
+    );
+    replacement.human_repo = Some(human_repo);
+    replacement.git_config = git_config;
+    replacement.transition = transition;
+    let replacement_token = replacement.asset_token.clone();
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .insert("replacement-owner".to_string(), replacement);
+    let sentinel = canonical_workspace.join(".gitim-runtime/replacement-owner.sentinel");
+    std::fs::write(&sentinel, b"new-owner").unwrap();
+    activation_resume.wait().await;
+
+    assert_eq!(create.await.unwrap().0, StatusCode::INTERNAL_SERVER_ERROR);
+    {
+        let runtime = state.lock().unwrap();
+        assert_eq!(
+            runtime.workspaces["replacement-owner"].asset_token,
+            replacement_token
+        );
+    }
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"new-owner");
+    assert!(canonical_workspace.join(".gitim-runtime").is_dir());
+    assert!(std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    assert!(gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .any(|entry| entry.slug == "replacement-owner"));
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/replacement-owner", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn rollback_config_io_does_not_hold_runtime_state_or_leak_transition_slots() {
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("rollback-config-pause");
+    std::fs::create_dir(&workspace).unwrap();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+    let rollback_reached = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let rollback_resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+    assets.inject_rollback_config_pause(
+        std::sync::Arc::clone(&rollback_reached),
+        std::sync::Arc::clone(&rollback_resume),
+    );
+
+    let create = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": workspace,
+            "slug": "rollback-config-pause",
+            "git": { "provider": "unsupported" },
+        })),
+    ));
+    tokio::task::spawn_blocking(move || rollback_reached.wait())
+        .await
+        .unwrap();
+
+    let list = tokio::spawn(send(router, "GET", "/workspaces", None));
+    let (list_status, _) = tokio::time::timeout(std::time::Duration::from_secs(1), list)
+        .await
+        .expect("workspace list waited for rollback config I/O")
+        .unwrap();
+    assert_eq!(list_status, StatusCode::OK);
+
+    tokio::task::spawn_blocking(move || rollback_resume.wait())
+        .await
+        .unwrap();
+    assert_eq!(create.await.unwrap().0, StatusCode::BAD_REQUEST);
+    let runtime = state.lock().unwrap();
+    assert!(runtime.workspaces.is_empty());
+    assert_eq!(runtime.workspace_transitions.live_entries(), 0);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn repeated_registered_open_and_delete_cycles_leave_both_registries_empty() {
+    let _home = HomeGuard::install();
+    let root = short_tempdir();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+
+    for index in 0..32 {
+        let slug = format!("cycle-{index}");
+        let workspace = root.path().join(&slug);
+        std::fs::create_dir(&workspace).unwrap();
+        let canonical = workspace.canonicalize().unwrap();
+        let transition = state.lock().unwrap().workspace_transitions.slot(&canonical);
+        let mut context = WorkspaceContext::new(slug.clone(), slug.clone(), canonical.clone());
+        context.transition = transition;
+        assets
+            .activate_workspace(&canonical, format!("local:{index}"), &context.asset_token)
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .insert(slug.clone(), context);
+
+        assert_eq!(
+            send(
+                router.clone(),
+                "DELETE",
+                &format!("/workspaces/{slug}"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let runtime = state.lock().unwrap();
+        assert!(runtime.workspaces.is_empty());
+        assert_eq!(runtime.workspace_transitions.live_entries(), 0);
+        drop(runtime);
+        assert_eq!(assets.lifecycle_registry_entries(), (0, 0));
+    }
 }
 
 #[cfg(feature = "test-support")]

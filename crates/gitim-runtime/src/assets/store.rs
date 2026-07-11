@@ -6,13 +6,11 @@ use futures::{Stream, StreamExt};
 use gitim_core::types::{AssetRef, ASSET_REF_VERSION};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-#[cfg(feature = "test-support")]
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 #[cfg(feature = "test-support")]
 use std::sync::Barrier;
 use std::sync::{
@@ -102,12 +100,40 @@ pub struct AssetHealthSnapshot {
     pub quota_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AssetWorkspaceToken(uuid::Uuid);
+#[derive(Debug, Clone)]
+pub struct AssetWorkspaceToken {
+    id: uuid::Uuid,
+    revoked: Arc<AtomicBool>,
+}
 
 impl AssetWorkspaceToken {
     pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
+        Self {
+            id: uuid::Uuid::new_v4(),
+            revoked: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn revoke(&self) {
+        self.revoked.store(true, Ordering::Release);
+    }
+
+    fn is_revoked(&self) -> bool {
+        self.revoked.load(Ordering::Acquire)
+    }
+}
+
+impl PartialEq for AssetWorkspaceToken {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for AssetWorkspaceToken {}
+
+impl std::hash::Hash for AssetWorkspaceToken {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.id, state);
     }
 }
 
@@ -272,6 +298,14 @@ pub struct AssetService {
     #[cfg(feature = "test-support")]
     deactivate_attempt: Mutex<Option<Arc<Barrier>>>,
     #[cfg(feature = "test-support")]
+    activation_transition_pause: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+    #[cfg(feature = "test-support")]
+    deactivation_transition_pause: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+    #[cfg(feature = "test-support")]
+    registered_open_attempt: Mutex<Option<Arc<Barrier>>>,
+    #[cfg(feature = "test-support")]
+    rollback_config_pause: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+    #[cfg(feature = "test-support")]
     before_persist_pause: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
     #[cfg(feature = "test-support")]
     after_activation_pause: Mutex<Option<(Arc<tokio::sync::Barrier>, Arc<tokio::sync::Barrier>)>>,
@@ -293,14 +327,25 @@ pub struct AssetService {
 
 #[derive(Default)]
 struct WorkspaceLifecycleRegistry {
-    active: HashMap<AssetWorkspaceToken, RegisteredWorkspace>,
-    revoked: HashSet<AssetWorkspaceToken>,
+    paths: HashMap<PathBuf, Arc<WorkspaceLifecycleSlot>>,
+    tokens: HashMap<uuid::Uuid, Weak<WorkspaceLifecycleSlot>>,
+}
+
+struct WorkspaceLifecycleSlot {
+    canonical_root: PathBuf,
+    transition: Mutex<WorkspaceLifecycleState>,
+}
+
+#[derive(Default)]
+struct WorkspaceLifecycleState {
+    active: Option<RegisteredWorkspace>,
 }
 
 #[derive(Clone)]
 struct RegisteredWorkspace {
     requested_root: PathBuf,
     binding: String,
+    token: AssetWorkspaceToken,
     store: AssetStore,
 }
 
@@ -322,6 +367,14 @@ impl AssetService {
             before_registered_open_pause: Mutex::new(None),
             #[cfg(feature = "test-support")]
             deactivate_attempt: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            activation_transition_pause: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            deactivation_transition_pause: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            registered_open_attempt: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            rollback_config_pause: Mutex::new(None),
             #[cfg(feature = "test-support")]
             before_persist_pause: Mutex::new(None),
             #[cfg(feature = "test-support")]
@@ -379,15 +432,102 @@ impl AssetService {
         Ok(store)
     }
 
+    fn lifecycle_slot_for_activation(
+        &self,
+        canonical_root: &Path,
+        token: &AssetWorkspaceToken,
+    ) -> Arc<WorkspaceLifecycleSlot> {
+        let mut registry = lock(&self.lifecycle);
+        registry.tokens.retain(|_, slot| slot.strong_count() > 0);
+        if let Some(slot) = registry.tokens.get(&token.id).and_then(Weak::upgrade) {
+            return slot;
+        }
+        let slot = registry
+            .paths
+            .get(canonical_root)
+            .cloned()
+            .unwrap_or_else(|| {
+                let slot = Arc::new(WorkspaceLifecycleSlot {
+                    canonical_root: canonical_root.to_path_buf(),
+                    transition: Mutex::new(WorkspaceLifecycleState::default()),
+                });
+                registry
+                    .paths
+                    .insert(canonical_root.to_path_buf(), Arc::clone(&slot));
+                slot
+            });
+        registry.tokens.insert(token.id, Arc::downgrade(&slot));
+        slot
+    }
+
+    fn lifecycle_slot_for_token(
+        &self,
+        token: &AssetWorkspaceToken,
+    ) -> Option<Arc<WorkspaceLifecycleSlot>> {
+        let mut registry = lock(&self.lifecycle);
+        registry.tokens.retain(|_, slot| slot.strong_count() > 0);
+        registry.tokens.get(&token.id).and_then(Weak::upgrade)
+    }
+
+    fn release_lifecycle_slot(
+        &self,
+        slot: &Arc<WorkspaceLifecycleSlot>,
+        token: &AssetWorkspaceToken,
+        remove_path: bool,
+    ) {
+        let mut registry = lock(&self.lifecycle);
+        if registry
+            .tokens
+            .get(&token.id)
+            .and_then(Weak::upgrade)
+            .is_some_and(|registered| Arc::ptr_eq(&registered, slot))
+        {
+            registry.tokens.remove(&token.id);
+        }
+        if remove_path
+            && registry
+                .paths
+                .get(&slot.canonical_root)
+                .is_some_and(|registered| Arc::ptr_eq(registered, slot))
+        {
+            registry.paths.remove(&slot.canonical_root);
+        }
+        registry.tokens.retain(|_, slot| slot.strong_count() > 0);
+    }
+
+    fn invalidate_workspace_store(&self, store: &AssetStore) -> Result<(), AssetError> {
+        let _operation = write_lock(&store.state.operation_gate);
+        {
+            let mut accounting = lock(&store.state.accounting);
+            accounting.generation = accounting
+                .generation
+                .checked_add(1)
+                .ok_or(AssetError::Invariant("asset store generation overflow"))?;
+            accounting.active_binding = None;
+            accounting.initialized = false;
+            accounting.committed = AssetUsage::default();
+            accounting.reserved = 0;
+            accounting.unmaterialized = 0;
+            accounting.objects.clear();
+            store.state.health.publish(AssetUsage::default());
+        }
+        lock(&self.workspaces).retain(|_, entry| !Arc::ptr_eq(&entry.state, &store.state));
+        lock(&self.health_workspaces).retain(|_, state| {
+            state
+                .upgrade()
+                .is_some_and(|state| !Arc::ptr_eq(&state, &store.state))
+        });
+        Ok(())
+    }
+
     pub fn activate_workspace(
         &self,
         workspace_root: impl AsRef<Path>,
         binding: impl Into<String>,
-        token: AssetWorkspaceToken,
+        token: &AssetWorkspaceToken,
     ) -> Result<AssetStore, AssetError> {
         let requested_root = workspace_root.as_ref().to_path_buf();
         let binding = binding.into();
-        let mut lifecycle = lock(&self.lifecycle);
         #[cfg(feature = "test-support")]
         if self
             .fail_next_activation_store
@@ -406,36 +546,59 @@ impl AssetService {
                 "injected asset activation invariant failure",
             ));
         }
-        if lifecycle.revoked.contains(&token) {
+        let canonical_root = canonical_workspace_root(&requested_root)?;
+        if token.is_revoked() {
             return Err(AssetError::StaleBinding);
         }
-        if let Some(registered) = lifecycle.active.get(&token) {
-            if registered.requested_root == requested_root && registered.binding == binding {
-                return Ok(registered.store.clone());
-            }
+        let slot = self.lifecycle_slot_for_activation(&canonical_root, token);
+        let mut lifecycle = lock(&slot.transition);
+        #[cfg(feature = "test-support")]
+        if let Some((reached, resume)) = lock(&self.activation_transition_pause).take() {
+            reached.wait();
+            resume.wait();
+        }
+        if slot.canonical_root != canonical_root {
             return Err(AssetError::Invariant(
                 "asset workspace token is already bound to another namespace",
             ));
         }
-        let canonical_root = canonical_workspace_root(&requested_root)?;
-        if lifecycle
-            .active
-            .values()
-            .any(|registered| registered.store.workspace_root == canonical_root)
-        {
+        if let Some(registered) = lifecycle.active.as_ref() {
+            if registered.token.id == token.id
+                && registered.requested_root == canonical_root
+                && registered.binding == binding
+            {
+                return Ok(registered.store.clone());
+            }
+            if registered.token.id != token.id {
+                self.release_lifecycle_slot(&slot, token, false);
+            }
             return Err(AssetError::Invariant(
                 "asset workspace path is already active under another token",
             ));
         }
-        let store = self.open_store(&requested_root, binding.clone())?;
-        lifecycle.active.insert(
-            token,
-            RegisteredWorkspace {
-                requested_root,
-                binding,
-                store: store.clone(),
-            },
-        );
+        if token.is_revoked() {
+            self.release_lifecycle_slot(&slot, token, true);
+            return Err(AssetError::StaleBinding);
+        }
+        let store = match self.open_store(&canonical_root, binding.clone()) {
+            Ok(store) => store,
+            Err(error) => {
+                self.release_lifecycle_slot(&slot, token, true);
+                return Err(error);
+            }
+        };
+        if token.is_revoked() {
+            let invalidation = self.invalidate_workspace_store(&store);
+            self.release_lifecycle_slot(&slot, token, true);
+            invalidation?;
+            return Err(AssetError::StaleBinding);
+        }
+        lifecycle.active = Some(RegisteredWorkspace {
+            requested_root: canonical_root,
+            binding,
+            token: token.clone(),
+            store: store.clone(),
+        });
         Ok(store)
     }
 
@@ -443,58 +606,74 @@ impl AssetService {
         &self,
         workspace_root: impl AsRef<Path>,
         binding: &str,
-        token: AssetWorkspaceToken,
+        token: &AssetWorkspaceToken,
     ) -> Result<AssetStore, AssetError> {
         #[cfg(feature = "test-support")]
         if let Some((reached, resume)) = lock(&self.before_registered_open_pause).take() {
             reached.wait();
             resume.wait();
         }
-        let lifecycle = lock(&self.lifecycle);
-        let registered = lifecycle
-            .active
-            .get(&token)
+        #[cfg(feature = "test-support")]
+        if let Some(attempted) = lock(&self.registered_open_attempt).take() {
+            attempted.wait();
+        }
+        if token.is_revoked() {
+            return Err(AssetError::StaleBinding);
+        }
+        let canonical_root = canonical_workspace_root(workspace_root.as_ref())?;
+        let slot = self
+            .lifecycle_slot_for_token(token)
             .ok_or(AssetError::StaleBinding)?;
-        if registered.requested_root != workspace_root.as_ref() || registered.binding != binding {
+        let registered = {
+            let lifecycle = lock(&slot.transition);
+            lifecycle
+                .active
+                .as_ref()
+                .filter(|registered| {
+                    registered.token.id == token.id
+                        && registered.requested_root == canonical_root
+                        && registered.binding == binding
+                })
+                .cloned()
+                .ok_or(AssetError::StaleBinding)?
+        };
+        if token.is_revoked() {
             return Err(AssetError::StaleBinding);
         }
         let _operation = read_lock(&registered.store.state.operation_gate);
         registered.store.validate_generation()?;
+        if token.is_revoked() {
+            return Err(AssetError::StaleBinding);
+        }
         Ok(registered.store.clone())
     }
 
-    pub fn deactivate_workspace(&self, token: AssetWorkspaceToken) -> Result<bool, AssetError> {
-        let mut lifecycle = lock(&self.lifecycle);
-        lifecycle.revoked.insert(token);
-        let Some(registered) = lifecycle.active.remove(&token) else {
+    pub fn deactivate_workspace(&self, token: &AssetWorkspaceToken) -> Result<bool, AssetError> {
+        token.revoke();
+        let Some(slot) = self.lifecycle_slot_for_token(token) else {
+            return Ok(false);
+        };
+        let mut lifecycle = lock(&slot.transition);
+        #[cfg(feature = "test-support")]
+        if let Some((reached, resume)) = lock(&self.deactivation_transition_pause).take() {
+            reached.wait();
+            resume.wait();
+        }
+        let Some(registered) = lifecycle
+            .active
+            .take_if(|registered| registered.token.id == token.id)
+        else {
+            let remove_path = lifecycle.active.is_none();
+            self.release_lifecycle_slot(&slot, token, remove_path);
             return Ok(false);
         };
         #[cfg(feature = "test-support")]
         if let Some(attempted) = lock(&self.deactivate_attempt).take() {
             attempted.wait();
         }
-        let _operation = write_lock(&registered.store.state.operation_gate);
-        {
-            let mut accounting = lock(&registered.store.state.accounting);
-            accounting.generation = accounting
-                .generation
-                .checked_add(1)
-                .ok_or(AssetError::Invariant("asset store generation overflow"))?;
-            accounting.active_binding = None;
-            accounting.initialized = false;
-            accounting.committed = AssetUsage::default();
-            accounting.reserved = 0;
-            accounting.unmaterialized = 0;
-            accounting.objects.clear();
-            registered.store.state.health.publish(AssetUsage::default());
-        }
-        lock(&self.workspaces)
-            .retain(|_, entry| !Arc::ptr_eq(&entry.state, &registered.store.state));
-        lock(&self.health_workspaces).retain(|_, state| {
-            state
-                .upgrade()
-                .is_some_and(|state| !Arc::ptr_eq(&state, &registered.store.state))
-        });
+        let invalidation = self.invalidate_workspace_store(&registered.store);
+        self.release_lifecycle_slot(&slot, token, true);
+        invalidation?;
         Ok(true)
     }
 
@@ -508,6 +687,42 @@ impl AssetService {
     #[doc(hidden)]
     pub fn inject_deactivate_attempt(&self, attempted: Arc<Barrier>) {
         *lock(&self.deactivate_attempt) = Some(attempted);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_activation_transition_pause(&self, reached: Arc<Barrier>, resume: Arc<Barrier>) {
+        *lock(&self.activation_transition_pause) = Some((reached, resume));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_deactivation_transition_pause(
+        &self,
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+    ) {
+        *lock(&self.deactivation_transition_pause) = Some((reached, resume));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_registered_open_attempt(&self, attempted: Arc<Barrier>) {
+        *lock(&self.registered_open_attempt) = Some(attempted);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_rollback_config_pause(&self, reached: Arc<Barrier>, resume: Arc<Barrier>) {
+        *lock(&self.rollback_config_pause) = Some((reached, resume));
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn wait_before_rollback_config(&self) {
+        if let Some((reached, resume)) = lock(&self.rollback_config_pause).take() {
+            reached.wait();
+            resume.wait();
+        }
     }
 
     #[cfg(feature = "test-support")]
@@ -748,6 +963,14 @@ impl AssetService {
     #[doc(hidden)]
     pub fn set_after_config_write_hook(&self, hook: Arc<dyn Fn() + Send + Sync>) {
         *lock(&self.after_config_write_hook) = Some(hook);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn lifecycle_registry_entries(&self) -> (usize, usize) {
+        let mut registry = lock(&self.lifecycle);
+        registry.tokens.retain(|_, slot| slot.strong_count() > 0);
+        (registry.paths.len(), registry.tokens.len())
     }
 }
 
@@ -3593,16 +3816,16 @@ mod tests {
         let service = AssetService::new(test_limits(100));
         let old_token = AssetWorkspaceToken::new();
         let old = service
-            .activate_workspace(workspace.path(), "local:old", old_token)
+            .activate_workspace(workspace.path(), "local:old", &old_token)
             .expect("activate old workspace");
         old.put_bytes(b"old", AssetSource::LocalUpload)
             .expect("persist old object");
 
         assert!(service
-            .deactivate_workspace(old_token)
+            .deactivate_workspace(&old_token)
             .expect("deactivate old workspace"));
         assert!(matches!(
-            service.open_registered_store(workspace.path(), "local:old", old_token),
+            service.open_registered_store(workspace.path(), "local:old", &old_token),
             Err(AssetError::StaleBinding)
         ));
         assert!(matches!(
@@ -3612,19 +3835,19 @@ mod tests {
 
         let new_token = AssetWorkspaceToken::new();
         let new = service
-            .activate_workspace(workspace.path(), "local:new", new_token)
+            .activate_workspace(workspace.path(), "local:new", &new_token)
             .expect("activate recreated workspace");
         let current = new
             .put_bytes(b"current", AssetSource::LocalUpload)
             .expect("persist recreated object");
 
         assert!(matches!(
-            service.open_registered_store(workspace.path(), "local:old", old_token),
+            service.open_registered_store(workspace.path(), "local:old", &old_token),
             Err(AssetError::StaleBinding)
         ));
         assert_eq!(
             service
-                .open_registered_store(workspace.path(), "local:new", new_token)
+                .open_registered_store(workspace.path(), "local:new", &new_token)
                 .expect("open current workspace")
                 .read(&current.sha256)
                 .expect("read current object"),
@@ -3639,10 +3862,10 @@ mod tests {
         let token = AssetWorkspaceToken::new();
 
         assert!(!service
-            .deactivate_workspace(token)
+            .deactivate_workspace(&token)
             .expect("revoke pending workspace"));
         assert!(matches!(
-            service.activate_workspace(workspace.path(), "local:late", token),
+            service.activate_workspace(workspace.path(), "local:late", &token),
             Err(AssetError::StaleBinding)
         ));
         assert!(!workspace.path().join(".gitim-runtime/assets").exists());

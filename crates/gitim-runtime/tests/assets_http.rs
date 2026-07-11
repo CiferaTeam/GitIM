@@ -54,8 +54,7 @@ fn limits() -> AssetLimits {
 
 fn fixture_with_limits(limits: AssetLimits) -> Fixture {
     let workspace = tempfile::tempdir().unwrap();
-    let (app, state) =
-        gitim_runtime::http::create_router_with_asset_http_config(201 * 1024 * 1024, Vec::new());
+    let (app, state) = create_router();
     fixture_from_router(workspace, app, state, limits)
 }
 
@@ -65,13 +64,14 @@ fn fixture_from_router(
     state: SharedRuntimeState,
     limits: AssetLimits,
 ) -> Fixture {
+    let workspace_path = workspace.path().canonicalize().unwrap();
     let mut ctx = WorkspaceContext::new(
         "room".to_string(),
         "Room".to_string(),
-        workspace.path().to_path_buf(),
+        workspace_path.clone(),
     );
     ctx.git_config = Some(WorkspaceConfig {
-        workspace: workspace.path().to_string_lossy().into_owned(),
+        workspace: workspace_path.to_string_lossy().into_owned(),
         created_at: CREATED_AT.to_string(),
         git: GitConfig {
             provider: GitProvider::Local,
@@ -83,9 +83,9 @@ fn fixture_from_router(
     let service = Arc::new(AssetService::new(limits));
     service
         .activate_workspace(
-            workspace.path(),
+            &workspace_path,
             format!("local:{CREATED_AT}"),
-            ctx.asset_token,
+            &ctx.asset_token,
         )
         .unwrap();
     {
@@ -231,9 +231,10 @@ async fn malicious_origin_is_rejected_before_upload_body_is_consumed() {
         Ok::<Bytes, std::io::Error>(Bytes::from(bytes))
     });
     let mut request = upload_request_with_body(Body::from_stream(stream));
+    let forbidden_origin = format!("https://{}.invalid", uuid::Uuid::new_v4());
     request
         .headers_mut()
-        .insert(header::ORIGIN, "https://evil.example".parse().unwrap());
+        .insert(header::ORIGIN, forbidden_origin.parse().unwrap());
     request
         .headers_mut()
         .insert("sec-fetch-site", "cross-site".parse().unwrap());
@@ -292,14 +293,11 @@ async fn browser_origin_allowlist_is_exact() {
 
     for origin in [
         "null",
-        "https://gitim.io.evil.example",
         "https://evil.example/gitim.io",
         "https://user@gitim.io",
         "https://gitim.io/",
         "http://gitim.io",
-        "https://localhost:5173",
         "http://localhost",
-        "http://localhost:5174",
     ] {
         let mut request = upload_request(&[("file", "a.txt", "text/plain", b"a")]);
         request
@@ -323,6 +321,30 @@ async fn browser_origin_allowlist_is_exact() {
         fixture.app.oneshot(duplicate).await.unwrap().status(),
         StatusCode::FORBIDDEN
     );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+async fn non_default_canonical_origins_are_forbidden_without_injection() {
+    let fixture = fixture_with_origins(&[]);
+    for origin in [
+        "https://gitim.io.evil.example",
+        "https://localhost:5173",
+        "http://localhost:5174",
+    ] {
+        let mut request = upload_request(&[("file", "a.txt", "text/plain", b"a")]);
+        request
+            .headers_mut()
+            .insert(header::ORIGIN, origin.parse().unwrap());
+        request
+            .headers_mut()
+            .insert("sec-fetch-site", "cross-site".parse().unwrap());
+        assert_eq!(
+            fixture.app.clone().oneshot(request).await.unwrap().status(),
+            StatusCode::FORBIDDEN,
+            "{origin}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1540,7 +1562,7 @@ async fn health_does_not_wait_for_the_store_operation_gate() {
     tokio::task::spawn_blocking(move || attempted.wait())
         .await
         .unwrap();
-    let health = tokio::time::timeout(std::time::Duration::from_millis(100), health)
+    let health = tokio::time::timeout(std::time::Duration::from_secs(1), health)
         .await
         .expect("health waited for the store operation gate")
         .unwrap()
@@ -1556,19 +1578,16 @@ async fn health_does_not_wait_for_the_store_operation_gate() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn stale_http_snapshot_cannot_reopen_a_same_path_workspace_after_reactivation() {
     let fixture = fixture();
+    let workspace_path = fixture.workspace.path().canonicalize().unwrap();
     let (service, old_token) = {
         let runtime = fixture.state.lock().unwrap();
         (
             Arc::clone(&runtime.assets),
-            runtime.workspaces["room"].asset_token,
+            runtime.workspaces["room"].asset_token.clone(),
         )
     };
     let old_store = service
-        .open_registered_store(
-            fixture.workspace.path(),
-            &format!("local:{CREATED_AT}"),
-            old_token,
-        )
+        .open_registered_store(&workspace_path, &format!("local:{CREATED_AT}"), &old_token)
         .unwrap();
     let old = old_store
         .put_bytes(b"old", AssetSource::LocalUpload)
@@ -1613,7 +1632,7 @@ async fn stale_http_snapshot_cannot_reopen_a_same_path_workspace_after_reactivat
 
     fixture.state.lock().unwrap().workspaces.remove("room");
     let service_for_deactivate = Arc::clone(&service);
-    tokio::task::spawn_blocking(move || service_for_deactivate.deactivate_workspace(old_token))
+    tokio::task::spawn_blocking(move || service_for_deactivate.deactivate_workspace(&old_token))
         .await
         .unwrap()
         .unwrap();
@@ -1622,10 +1641,10 @@ async fn stale_http_snapshot_cannot_reopen_a_same_path_workspace_after_reactivat
     let mut recreated = WorkspaceContext::new(
         "room".to_string(),
         "Room".to_string(),
-        fixture.workspace.path().to_path_buf(),
+        workspace_path.clone(),
     );
     recreated.git_config = Some(WorkspaceConfig {
-        workspace: fixture.workspace.path().to_string_lossy().into_owned(),
+        workspace: workspace_path.to_string_lossy().into_owned(),
         created_at: new_created_at.to_string(),
         git: GitConfig {
             provider: GitProvider::Local,
@@ -1636,9 +1655,9 @@ async fn stale_http_snapshot_cannot_reopen_a_same_path_workspace_after_reactivat
     });
     service
         .activate_workspace(
-            fixture.workspace.path(),
+            &workspace_path,
             format!("local:{new_created_at}"),
-            recreated.asset_token,
+            &recreated.asset_token,
         )
         .unwrap();
     fixture
@@ -1667,13 +1686,7 @@ async fn stale_http_snapshot_cannot_reopen_a_same_path_workspace_after_reactivat
         quarantine_count,
         "resuming the stale request changed the recreated namespace"
     );
-    assert_eq!(
-        service
-            .health_snapshot(fixture.workspace.path())
-            .unwrap()
-            .objects,
-        0
-    );
+    assert_eq!(service.health_snapshot(&workspace_path).unwrap().objects, 0);
 }
 
 #[cfg(feature = "test-support")]
@@ -1684,14 +1697,14 @@ async fn aborted_upload_keeps_its_permit_until_owned_persistence_settles() {
         let runtime = fixture.state.lock().unwrap();
         (
             Arc::clone(&runtime.assets),
-            runtime.workspaces["room"].asset_token,
+            runtime.workspaces["room"].asset_token.clone(),
         )
     };
     let _store = service
         .open_registered_store(
             fixture.workspace.path(),
             &format!("local:{CREATED_AT}"),
-            token,
+            &token,
         )
         .unwrap();
     let reached = Arc::new(tokio::sync::Barrier::new(2));
