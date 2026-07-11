@@ -1,6 +1,5 @@
 use super::{
     AssetError, AssetMetadata, AssetService, AssetSource, AssetStore, HashLock, RequestBudget,
-    StagedAsset,
 };
 use axum::body::Bytes;
 use futures::StreamExt;
@@ -51,6 +50,13 @@ struct ResolverBudgets {
     whole: Duration,
 }
 
+#[derive(Clone, Copy)]
+struct CandidateRequest<'a> {
+    origin: &'a str,
+    hash: &'a str,
+    budgets: ResolverBudgets,
+}
+
 impl Default for ResolverBudgets {
     fn default() -> Self {
         Self {
@@ -90,15 +96,17 @@ impl AttemptSummary {
         Ok(())
     }
 
-    fn finish(self) -> AssetError {
+    fn final_error(&self) -> AssetError {
         if self.hash_mismatch {
             AssetError::HashMismatch
-        } else if let Some(message) = self.peer_invalid {
-            AssetError::PeerInvalid(message)
+        } else if let Some(message) = &self.peer_invalid {
+            AssetError::PeerInvalid(message.clone())
         } else if self.unavailable {
             AssetError::OriginUnavailable
-        } else {
+        } else if self.missing {
             AssetError::Missing
+        } else {
+            AssetError::OriginUnavailable
         }
     }
 }
@@ -159,13 +167,14 @@ async fn resolve_get_with_budgets(
         return Ok(local_replica(metadata, workspace_slug));
     }
 
+    let mut summary = AttemptSummary::default();
     let result = match tokio::time::timeout(budgets.whole, async {
-        let hash_lock = HashLock::acquire(store, hash).await?;
+        let mut hash_lock = Some(HashLock::acquire(store, hash).await?);
         if let Some(metadata) = local_metadata(store, hash)? {
             return Ok(local_replica(metadata, workspace_slug));
         }
         let client = peer_client()?;
-        let (staged, peer) = fetch_candidates(
+        let (metadata, peer) = fetch_candidates(
             state,
             service,
             store,
@@ -175,23 +184,19 @@ async fn resolve_get_with_budgets(
             origin,
             hash,
             budgets,
+            &mut summary,
+            &mut hash_lock,
         )
         .await?;
-        let metadata = store
-            .persist_staged_with_lock(
-                staged,
-                AssetSource::FleetReplica {
-                    origin_runtime_id: origin.to_string(),
-                },
-                hash_lock,
-            )
-            .await?;
         Ok(ResolvedReplica { metadata, peer })
     })
     .await
     {
         Ok(result) => result,
-        Err(_) => Err(AssetError::OriginUnavailable),
+        Err(_) => {
+            summary.observe(AssetError::OriginUnavailable)?;
+            Err(summary.final_error())
+        }
     };
 
     match result {
@@ -228,6 +233,7 @@ pub async fn resolve_head(
         });
     }
     let budgets = ResolverBudgets::default();
+    let mut summary = AttemptSummary::default();
     let result = match tokio::time::timeout(budgets.whole, async {
         let client = peer_client()?;
         probe_candidates(
@@ -240,13 +246,17 @@ pub async fn resolve_head(
             hash,
             service.limits.max_file_bytes,
             budgets,
+            &mut summary,
         )
         .await
     })
     .await
     {
         Ok(result) => result,
-        Err(_) => Err(AssetError::OriginUnavailable),
+        Err(_) => {
+            summary.observe(AssetError::OriginUnavailable)?;
+            Err(summary.final_error())
+        }
     };
     if let Err(error) = &result {
         record_fetch_failure(service, workspace_slug, hash, origin, error);
@@ -285,10 +295,16 @@ async fn fetch_candidates(
     origin: &str,
     hash: &str,
     budgets: ResolverBudgets,
-) -> Result<(StagedAsset, AssetPeer), AssetError> {
+    summary: &mut AttemptSummary,
+    hash_lock: &mut Option<HashLock>,
+) -> Result<(AssetMetadata, AssetPeer), AssetError> {
     let mut peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
-    let mut summary = AttemptSummary::default();
     let mut attempted = HashSet::new();
+    let request = CandidateRequest {
+        origin,
+        hash,
+        budgets,
+    };
 
     if let Some(peer) = peers
         .iter()
@@ -296,11 +312,14 @@ async fn fetch_candidates(
         .cloned()
     {
         attempted.insert(peer_key(&peer));
-        match download_candidate(service, store, client, &peer, hash, budgets).await {
-            Ok(staged) => return Ok((staged, peer)),
+        match download_candidate(service, store, client, &peer, request, hash_lock).await {
+            Ok(metadata) => return Ok((metadata, peer)),
             Err(error) => {
                 record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
                 summary.observe(error)?;
+                if hash_lock.is_none() {
+                    return Err(summary.final_error());
+                }
             }
         }
     }
@@ -316,11 +335,14 @@ async fn fetch_candidates(
             .cloned()
         {
             attempted.insert(peer_key(&peer));
-            match download_candidate(service, store, client, &peer, hash, budgets).await {
-                Ok(staged) => return Ok((staged, peer)),
+            match download_candidate(service, store, client, &peer, request, hash_lock).await {
+                Ok(metadata) => return Ok((metadata, peer)),
                 Err(error) => {
                     record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
                     summary.observe(error)?;
+                    if hash_lock.is_none() {
+                        return Err(summary.final_error());
+                    }
                 }
             }
         }
@@ -338,7 +360,7 @@ async fn fetch_candidates(
         hash,
         store.limits().max_file_bytes,
         budgets,
-        &mut summary,
+        summary,
         service,
         workspace_slug,
         origin,
@@ -346,15 +368,18 @@ async fn fetch_candidates(
     .await?;
     available.sort_by_key(|(index, _)| *index);
     for (_, peer) in available {
-        match download_candidate(service, store, client, &peer, hash, budgets).await {
-            Ok(staged) => return Ok((staged, peer)),
+        match download_candidate(service, store, client, &peer, request, hash_lock).await {
+            Ok(metadata) => return Ok((metadata, peer)),
             Err(error) => {
                 record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
                 summary.observe(error)?;
+                if hash_lock.is_none() {
+                    return Err(summary.final_error());
+                }
             }
         }
     }
-    Err(summary.finish())
+    Err(summary.final_error())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -368,9 +393,9 @@ async fn probe_candidates(
     hash: &str,
     max_file_bytes: u64,
     budgets: ResolverBudgets,
+    summary: &mut AttemptSummary,
 ) -> Result<HeadAvailability, AssetError> {
     let mut peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
-    let mut summary = AttemptSummary::default();
     let mut attempted = HashSet::new();
     if let Some(peer) = peers
         .iter()
@@ -426,7 +451,7 @@ async fn probe_candidates(
             }
         }
     }
-    Err(summary.finish())
+    Err(summary.final_error())
 }
 
 fn snapshot_peers(
@@ -512,15 +537,23 @@ async fn download_candidate(
     store: &AssetStore,
     client: &reqwest::Client,
     peer: &AssetPeer,
-    hash: &str,
-    budgets: ResolverBudgets,
-) -> Result<StagedAsset, AssetError> {
-    let _permit = service.acquire_peer().await?;
-    tokio::time::timeout(budgets.candidate, async {
-        let response = send_peer_request(client, peer, hash, reqwest::Method::GET, budgets).await?;
-        let validated = validate_peer_response(response, hash, store.limits().max_file_bytes)?;
+    request: CandidateRequest<'_>,
+    hash_lock: &mut Option<HashLock>,
+) -> Result<AssetMetadata, AssetError> {
+    tokio::time::timeout(request.budgets.candidate, async {
+        let _permit = service.acquire_peer().await?;
+        let response = send_peer_request(
+            client,
+            peer,
+            request.hash,
+            reqwest::Method::GET,
+            request.budgets,
+        )
+        .await?;
+        let validated =
+            validate_peer_response(response, request.hash, store.limits().max_file_bytes)?;
         let declared_size = validated.size;
-        let idle = budgets.chunk_idle;
+        let idle = request.budgets.chunk_idle;
         let stream = validated.response.bytes_stream();
         let chunks = futures::stream::unfold(stream, move |mut stream| async move {
             match tokio::time::timeout(idle, stream.next()).await {
@@ -551,10 +584,21 @@ async fn download_candidate(
                 "peer content length does not match the response body".to_string(),
             ));
         }
-        if staged.sha256() != hash {
+        if staged.sha256() != request.hash {
             return Err(AssetError::HashMismatch);
         }
-        Ok(staged)
+        let hash_lock = hash_lock.take().ok_or(AssetError::Invariant(
+            "fleet hash lock was already consumed",
+        ))?;
+        store
+            .persist_staged_with_lock(
+                staged,
+                AssetSource::FleetReplica {
+                    origin_runtime_id: request.origin.to_string(),
+                },
+                hash_lock,
+            )
+            .await
     })
     .await
     .map_err(|_| AssetError::OriginUnavailable)?
@@ -700,8 +744,7 @@ fn singleton_header_with_commas(
 }
 
 fn peer_object_url(peer: &AssetPeer, hash: &str) -> Result<reqwest::Url, AssetError> {
-    let mut url = reqwest::Url::parse(&peer.base_url)
-        .map_err(|_| AssetError::PeerInvalid("fleet peer base URL is invalid".to_string()))?;
+    let mut url = reqwest::Url::parse(&peer.base_url).map_err(|_| AssetError::OriginUnavailable)?;
     if !matches!(url.scheme(), "http" | "https")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -709,9 +752,7 @@ fn peer_object_url(peer: &AssetPeer, hash: &str) -> Result<reqwest::Url, AssetEr
         || url.fragment().is_some()
         || url.host_str().is_none()
     {
-        return Err(AssetError::PeerInvalid(
-            "fleet peer base URL is invalid".to_string(),
-        ));
+        return Err(AssetError::OriginUnavailable);
     }
     let workspace = utf8_percent_encode(&peer.remote_workspace_slug, NON_ALPHANUMERIC).to_string();
     url.set_path(&format!("/workspaces/{workspace}/assets/objects/{hash}"));
@@ -863,6 +904,8 @@ mod tests {
     use sha2::{Digest, Sha256};
     #[cfg(feature = "test-support")]
     use std::sync::Mutex;
+    #[cfg(feature = "test-support")]
+    use std::task::Poll;
 
     #[test]
     fn production_network_budgets_are_exact() {
@@ -872,6 +915,64 @@ mod tests {
         assert_eq!(CANDIDATE_TIMEOUT, Duration::from_secs(90));
         assert_eq!(WHOLE_RESOLVE_TIMEOUT, Duration::from_secs(120));
         assert_eq!(HEAD_CONCURRENCY, 8);
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[cfg(feature = "test-support")]
+    async fn candidate_budget_includes_waiting_for_peer_slot() {
+        let workspace = tempfile::tempdir().unwrap();
+        let limits = super::super::AssetLimits {
+            workspace_quota_bytes: 1024 * 1024,
+            min_free_bytes: 1,
+            peer_slots: 4,
+            ..Default::default()
+        };
+        let service = Arc::new(AssetService::new(limits.clone()));
+        let store = AssetStore::open(workspace.path(), "local:test", limits).unwrap();
+        let mut permits = Vec::new();
+        for _ in 0..4 {
+            permits.push(service.acquire_peer().await.unwrap());
+        }
+        let peer = AssetPeer {
+            node_id: "blocked".to_string(),
+            runtime_id: Some("3c6a295e-744a-41dc-ba60-5c21bb94e5a2".to_string()),
+            base_url: "http://127.0.0.1:9".to_string(),
+            remote_workspace_slug: "room".to_string(),
+        };
+        let client = peer_client().unwrap();
+        let hash = format!("{:x}", Sha256::digest(b"expected"));
+        let mut hash_lock = Some(HashLock::acquire(&store, &hash).await.unwrap());
+        {
+            let future = download_candidate(
+                &service,
+                &store,
+                &client,
+                &peer,
+                CandidateRequest {
+                    origin: peer.runtime_id.as_deref().unwrap(),
+                    hash: &hash,
+                    budgets: ResolverBudgets::default(),
+                },
+                &mut hash_lock,
+            );
+            tokio::pin!(future);
+            assert!(matches!(futures::poll!(&mut future), Poll::Pending));
+
+            tokio::time::advance(Duration::from_secs(89)).await;
+            assert!(matches!(futures::poll!(&mut future), Poll::Pending));
+            tokio::time::advance(Duration::from_secs(1)).await;
+            let result = tokio::time::timeout(Duration::from_secs(1), &mut future).await;
+
+            assert!(matches!(result, Ok(Err(AssetError::OriginUnavailable))));
+        }
+        assert!(hash_lock.is_some());
+        assert_eq!(service.available_peer_permits(), 0);
+        assert_eq!(store.reserved_bytes().unwrap(), 0);
+        assert_eq!(service.fleet_fetch_failures.load(Ordering::Acquire), 0);
+        drop(permits);
+        assert_eq!(service.available_peer_permits(), 4);
+        tokio::task::yield_now().await;
+        assert_eq!(service.available_peer_permits(), 4);
     }
 
     #[tokio::test]

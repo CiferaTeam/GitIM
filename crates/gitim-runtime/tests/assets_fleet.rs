@@ -6,6 +6,7 @@ use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use axum::Router;
+use futures::StreamExt;
 use gitim_runtime::assets::{AssetLimits, AssetService, AssetSource};
 use gitim_runtime::fleet;
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
@@ -53,7 +54,7 @@ enum PeerBehavior {
         bytes: Vec<u8>,
         delay: Duration,
     },
-    NeverBody {
+    StalledBody {
         declared_size: u64,
     },
     SlowChunks {
@@ -209,7 +210,7 @@ async fn peer_object(
         state
             .max_inflight_gets
             .fetch_max(inflight, Ordering::AcqRel);
-        state.get_entered.notify_waiters();
+        state.get_entered.notify_one();
     }
     let _guard = (method == Method::GET).then(|| TransferGuard {
         state: Arc::clone(&state),
@@ -252,7 +253,7 @@ async fn peer_object(
             tokio::time::sleep(delay).await;
             object_response(&hash, bytes, method == Method::HEAD)
         }
-        PeerBehavior::NeverBody { declared_size } => Response::builder()
+        PeerBehavior::StalledBody { declared_size } => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_LENGTH, declared_size.to_string())
             .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -266,7 +267,12 @@ async fn peer_object(
             .body(if method == Method::HEAD {
                 Body::empty()
             } else {
-                Body::from_stream(futures::stream::pending::<Result<Bytes, Infallible>>())
+                Body::from_stream(
+                    futures::stream::once(async {
+                        Ok::<Bytes, Infallible>(Bytes::from_static(b"x"))
+                    })
+                    .chain(futures::stream::pending::<Result<Bytes, Infallible>>()),
+                )
             })
             .unwrap(),
         PeerBehavior::SlowChunks {
@@ -854,9 +860,79 @@ async fn workspace_identity_filters_candidates_before_network_access() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response_json(response).await["error_code"],
+        "asset_origin_unavailable"
+    );
     assert_eq!(wrong_identity.object_gets(), 0);
     assert_eq!(wrong_identity.object_heads(), 0);
+}
+
+#[tokio::test]
+async fn no_eligible_peer_mapping_is_unavailable_for_get_and_head() {
+    let fixture = fixture();
+    let hash = sha256(PNG_1X1);
+
+    let get = fixture
+        .app
+        .clone()
+        .oneshot(resolve_request(Method::GET, ORIGIN_RUNTIME_ID, &hash))
+        .await
+        .unwrap();
+    assert_eq!(get.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        response_json(get).await["error_code"],
+        "asset_origin_unavailable"
+    );
+
+    let head = fixture
+        .app
+        .oneshot(resolve_request(Method::HEAD, ORIGIN_RUNTIME_ID, &hash))
+        .await
+        .unwrap();
+    assert_eq!(head.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        fixture.service.fleet_fetch_failures.load(Ordering::Acquire),
+        2
+    );
+}
+
+#[tokio::test]
+async fn invalid_and_unreachable_peer_urls_are_unavailable() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let unreachable = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    for base_url in ["://invalid".to_string(), unreachable] {
+        let fixture = fixture();
+        add_peer_url(
+            &fixture,
+            "origin",
+            &base_url,
+            Some(ORIGIN_RUNTIME_ID),
+            WORKSPACE_IDENTITY,
+        );
+
+        let response = fixture
+            .app
+            .oneshot(resolve_request(
+                Method::GET,
+                ORIGIN_RUNTIME_ID,
+                &sha256(PNG_1X1),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response_json(response).await["error_code"],
+            "asset_origin_unavailable"
+        );
+        assert_eq!(
+            fixture.service.fleet_fetch_failures.load(Ordering::Acquire),
+            1
+        );
+    }
 }
 
 #[tokio::test]
@@ -1121,7 +1197,7 @@ async fn head_distinguishes_reachable_missing_from_unavailable() {
 async fn cancelled_remote_get_releases_temp_reservation_hash_lock_and_peer_slot() {
     let peer = MockPeer::spawn(
         ORIGIN_RUNTIME_ID,
-        PeerBehavior::NeverBody { declared_size: 8 },
+        PeerBehavior::StalledBody { declared_size: 8 },
     )
     .await;
     let fixture = fixture();
@@ -1292,7 +1368,7 @@ async fn runtime_health_reports_real_fleet_and_integrity_counters() {
 async fn idle_peer_is_cancelled_before_candidate_deadline_and_cleans_staging() {
     let peer = MockPeer::spawn(
         ORIGIN_RUNTIME_ID,
-        PeerBehavior::NeverBody { declared_size: 8 },
+        PeerBehavior::StalledBody { declared_size: 8 },
     )
     .await;
     let fixture = fixture();
@@ -1313,7 +1389,12 @@ async fn idle_peer_is_cancelled_before_candidate_deadline_and_cleans_staging() {
         .await
         .unwrap()
     });
-    peer.state.get_entered.notified().await;
+    let store = workspace_store(&fixture);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while store.reserved_bytes().unwrap() == 0 && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(store.reserved_bytes().unwrap(), 1);
     let started = tokio::time::Instant::now();
     let response = request.await.unwrap();
 
@@ -1325,7 +1406,7 @@ async fn idle_peer_is_cancelled_before_candidate_deadline_and_cleans_staging() {
     );
     assert!(started.elapsed() < Duration::from_secs(90));
     assert!(temp_files(fixture.workspace.path()).is_empty());
-    assert_eq!(workspace_store(&fixture).reserved_bytes().unwrap(), 0);
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
 }
 
 #[tokio::test(start_paused = true)]
@@ -1370,7 +1451,170 @@ async fn active_chunks_are_still_bounded_before_the_whole_resolution_deadline() 
 }
 
 #[tokio::test(start_paused = true)]
-async fn whole_resolution_timeout_includes_waiting_for_peer_capacity() {
+async fn whole_timeout_preserves_origin_hash_mismatch_precedence() {
+    let origin = MockPeer::spawn(
+        ORIGIN_RUNTIME_ID,
+        PeerBehavior::Wrong(b"wrong origin bytes".to_vec()),
+    )
+    .await;
+    let fallback = MockPeer::spawn(
+        FALLBACK_RUNTIME_ID,
+        PeerBehavior::SlowChunks {
+            declared_size: 100,
+            interval: Duration::from_secs(14),
+        },
+    )
+    .await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "origin",
+        &origin,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    add_peer(
+        &fixture,
+        "fallback-a",
+        &fallback,
+        Some(FALLBACK_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    add_peer(
+        &fixture,
+        "fallback-b",
+        &fallback,
+        Some("d1ed66e4-c1e2-4c0f-b4a9-3091d6279796"),
+        WORKSPACE_IDENTITY,
+    );
+    let app = fixture.app.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &sha256(b"expected bytes"),
+        ))
+        .await
+        .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fixture.service.hash_mismatches.load(Ordering::Acquire) == 0
+        && std::time::Instant::now() < deadline
+    {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(origin.object_gets(), 1);
+    assert_eq!(fixture.service.hash_mismatches.load(Ordering::Acquire), 1);
+    let response = request.await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_GATEWAY,
+        "origin_gets={} fallback_gets={} hash_mismatches={}",
+        origin.object_gets(),
+        fallback.object_gets(),
+        fixture.service.hash_mismatches.load(Ordering::Acquire)
+    );
+    assert_eq!(
+        response_json(response).await["error_code"],
+        "asset_hash_mismatch"
+    );
+    assert_eq!(fixture.service.hash_mismatches.load(Ordering::Acquire), 1);
+    assert_eq!(
+        fixture.service.fleet_fetch_failures.load(Ordering::Acquire),
+        1
+    );
+    assert!(temp_files(fixture.workspace.path()).is_empty());
+    assert_eq!(workspace_store(&fixture).reserved_bytes().unwrap(), 0);
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn whole_timeout_preserves_origin_peer_invalid_precedence() {
+    let origin = MockPeer::spawn(
+        ORIGIN_RUNTIME_ID,
+        PeerBehavior::IncompleteMetadata(PNG_1X1.to_vec()),
+    )
+    .await;
+    let fallback = MockPeer::spawn(
+        FALLBACK_RUNTIME_ID,
+        PeerBehavior::SlowChunks {
+            declared_size: 100,
+            interval: Duration::from_secs(14),
+        },
+    )
+    .await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "origin",
+        &origin,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    add_peer(
+        &fixture,
+        "fallback-a",
+        &fallback,
+        Some(FALLBACK_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+    add_peer(
+        &fixture,
+        "fallback-b",
+        &fallback,
+        Some("d1ed66e4-c1e2-4c0f-b4a9-3091d6279796"),
+        WORKSPACE_IDENTITY,
+    );
+
+    let app = fixture.app.clone();
+    let request = tokio::spawn(async move {
+        app.oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &sha256(b"expected bytes"),
+        ))
+        .await
+        .unwrap()
+    });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while fallback.object_heads() == 0 && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(origin.object_gets(), 1);
+    assert!(fallback.object_heads() > 0);
+    let response = request.await.unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_GATEWAY,
+        "origin_gets={} fallback_gets={} hash_mismatches={}",
+        origin.object_gets(),
+        fallback.object_gets(),
+        fixture.service.hash_mismatches.load(Ordering::Acquire)
+    );
+    assert_eq!(
+        response_json(response).await["error_code"],
+        "asset_peer_invalid"
+    );
+    assert_eq!(fixture.service.hash_mismatches.load(Ordering::Acquire), 0);
+    assert_eq!(
+        fixture.service.fleet_fetch_failures.load(Ordering::Acquire),
+        1
+    );
+    assert!(temp_files(fixture.workspace.path()).is_empty());
+    assert_eq!(workspace_store(&fixture).reserved_bytes().unwrap(), 0);
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn candidate_timeout_includes_waiting_for_peer_capacity() {
     let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
     let fixture = fixture();
     add_peer(
@@ -1397,14 +1641,20 @@ async fn whole_resolution_timeout_includes_waiting_for_peer_capacity() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    assert!(started.elapsed() >= Duration::from_secs(120));
-    assert!(started.elapsed() < Duration::from_secs(121));
+    assert!(started.elapsed() >= Duration::from_secs(90));
+    assert!(started.elapsed() < Duration::from_secs(91));
     assert_eq!(peer.object_gets(), 0);
     assert_eq!(
         fixture.service.fleet_fetch_failures.load(Ordering::Acquire),
         1
     );
     drop(permits);
+    tokio::task::yield_now().await;
+    assert_eq!(peer.object_gets(), 0);
+    assert_eq!(
+        fixture.service.available_peer_permits(),
+        limits().peer_slots
+    );
 }
 
 #[tokio::test(start_paused = true)]
