@@ -43,6 +43,14 @@ fn claim(input_line: u64, attempt_id: &str, now: &str) -> QuickSessionTransition
     }
 }
 
+fn accept_human(meta: &mut QuickSessionMeta, line_number: u64) {
+    apply_quick_session_transition(
+        meta,
+        human(line_number, Some("setup-request"), "2026-07-11T00:00:00Z"),
+    )
+    .unwrap();
+}
+
 fn title(attempt_id: &str, value: &str, now: &str) -> QuickSessionTransition {
     QuickSessionTransition::SetTitle {
         actor: "alice".to_string(),
@@ -122,6 +130,7 @@ fn quick_session_meta_constructor_and_serde_defaults_are_canonical() {
     assert_eq!(legacy.title_source, QuickSessionTitleSource::None);
     assert_eq!(legacy.revision, 1);
     assert_eq!(legacy.last_message_preview, "");
+    assert_eq!(legacy.last_failed_attempt_id, None);
     assert!(validate_quick_session_meta(&legacy).is_ok());
 
     let json = serde_json::to_value(&meta).unwrap();
@@ -156,6 +165,46 @@ fn quick_session_meta_validation_rejects_impossible_combinations() {
     invalid.status = QuickSessionStatus::Archived;
     invalid.archived_from = Some(QuickSessionStatus::Archived);
     assert!(validate_quick_session_meta(&invalid).is_err());
+}
+
+#[test]
+fn quick_session_meta_enforces_stable_status_and_line_invariants() {
+    let mut archived_without_source = meta_fixture();
+    archived_without_source.status = QuickSessionStatus::Archived;
+    archived_without_source.archived_at = Some("2026-07-11T00:00:01Z".to_string());
+    assert!(validate_quick_session_meta(&archived_without_source).is_err());
+
+    let mut active_without_title = meta_fixture();
+    active_without_title.status = QuickSessionStatus::Active;
+    assert!(validate_quick_session_meta(&active_without_title).is_err());
+
+    let mut needs_title_with_title = meta_fixture();
+    needs_title_with_title.title = Some("Already titled".to_string());
+    needs_title_with_title.title_source = QuickSessionTitleSource::ApiSet;
+    assert!(validate_quick_session_meta(&needs_title_with_title).is_err());
+
+    let mut archived_wrong_source = meta_fixture();
+    archived_wrong_source.title = Some("Already titled".to_string());
+    archived_wrong_source.title_source = QuickSessionTitleSource::ApiSet;
+    archived_wrong_source.status = QuickSessionStatus::Archived;
+    archived_wrong_source.archived_at = Some("2026-07-11T00:00:01Z".to_string());
+    archived_wrong_source.archived_from = Some(QuickSessionStatus::NeedsTitle);
+    assert!(validate_quick_session_meta(&archived_wrong_source).is_err());
+
+    let mut unknown_processing_line = meta_fixture();
+    unknown_processing_line.status = QuickSessionStatus::Running;
+    unknown_processing_line.processing_input_line = Some(3);
+    unknown_processing_line.processing_started_at = Some("2026-07-11T00:00:01Z".to_string());
+    unknown_processing_line.attempt_id = Some(ATTEMPT_ID.to_string());
+    unknown_processing_line.last_human_line = Some(2);
+    assert!(validate_quick_session_meta(&unknown_processing_line).is_err());
+
+    let mut completion_after_known_human = meta_fixture();
+    completion_after_known_human.last_human_line = Some(2);
+    completion_after_known_human.last_completed_attempt_id = Some(ATTEMPT_ID.to_string());
+    completion_after_known_human.last_completed_input_line = Some(3);
+    completion_after_known_human.last_completed_line = Some(4);
+    assert!(validate_quick_session_meta(&completion_after_known_human).is_err());
 }
 
 #[test]
@@ -247,8 +296,31 @@ fn quick_session_human_retry_remains_duplicate_after_archive() {
 }
 
 #[test]
+fn quick_session_human_lines_never_move_backward() {
+    let mut meta = meta_fixture();
+    apply_quick_session_transition(
+        &mut meta,
+        human(2, Some("request-2"), "2026-07-11T00:00:01Z"),
+    )
+    .unwrap();
+
+    assert!(apply_quick_session_transition(
+        &mut meta,
+        human(1, Some("request-1"), "2026-07-11T00:00:02Z")
+    )
+    .is_err());
+    assert!(apply_quick_session_transition(
+        &mut meta,
+        human(2, Some("different-request"), "2026-07-11T00:00:03Z")
+    )
+    .is_err());
+    assert_eq!(meta.last_human_line, Some(2));
+}
+
+#[test]
 fn quick_session_claim_is_compare_and_set_and_requires_new_input() {
     let mut meta = meta_fixture();
+    accept_human(&mut meta, 1);
     apply_quick_session_transition(&mut meta, claim(1, ATTEMPT_ID, "2026-07-11T00:00:01Z"))
         .unwrap();
     assert_eq!(meta.status, QuickSessionStatus::Running);
@@ -268,6 +340,7 @@ fn quick_session_claim_is_compare_and_set_and_requires_new_input() {
     .is_err());
 
     let mut completed = meta_fixture();
+    completed.last_human_line = Some(4);
     completed.last_completed_attempt_id = Some(ATTEMPT_ID.to_string());
     completed.last_completed_input_line = Some(4);
     completed.last_completed_line = Some(5);
@@ -278,6 +351,7 @@ fn quick_session_claim_is_compare_and_set_and_requires_new_input() {
     .is_err());
 
     let mut wrong_actor = meta_fixture();
+    accept_human(&mut wrong_actor, 1);
     let mut transition = claim(1, ATTEMPT_ID, "2026-07-11T00:00:05Z");
     if let QuickSessionTransition::Claim { actor, .. } = &mut transition {
         *actor = "lewis".to_string();
@@ -286,8 +360,35 @@ fn quick_session_claim_is_compare_and_set_and_requires_new_input() {
 }
 
 #[test]
+fn quick_session_claim_requires_the_latest_known_human_line() {
+    let mut meta = meta_fixture();
+    apply_quick_session_transition(
+        &mut meta,
+        human(3, Some("request-3"), "2026-07-11T00:00:01Z"),
+    )
+    .unwrap();
+
+    assert!(apply_quick_session_transition(
+        &mut meta,
+        claim(2, ATTEMPT_ID, "2026-07-11T00:00:02Z")
+    )
+    .is_err());
+    assert!(apply_quick_session_transition(
+        &mut meta,
+        claim(4, ATTEMPT_ID, "2026-07-11T00:00:03Z")
+    )
+    .is_err());
+    assert!(apply_quick_session_transition(
+        &mut meta,
+        claim(3, ATTEMPT_ID, "2026-07-11T00:00:04Z")
+    )
+    .is_ok());
+}
+
+#[test]
 fn quick_session_title_and_summary_are_attempt_bound_and_idempotent() {
     let mut meta = meta_fixture();
+    accept_human(&mut meta, 1);
     apply_quick_session_transition(&mut meta, claim(1, ATTEMPT_ID, "2026-07-11T00:00:01Z"))
         .unwrap();
 
@@ -360,6 +461,7 @@ fn quick_session_title_and_summary_are_attempt_bound_and_idempotent() {
 #[test]
 fn quick_session_agent_reply_requires_title_attempt_and_claimed_input() {
     let mut meta = meta_fixture();
+    accept_human(&mut meta, 1);
     apply_quick_session_transition(&mut meta, claim(1, ATTEMPT_ID, "2026-07-11T00:00:01Z"))
         .unwrap();
     assert!(apply_quick_session_transition(
@@ -414,6 +516,7 @@ fn quick_session_agent_reply_requires_title_attempt_and_claimed_input() {
 #[test]
 fn quick_session_human_input_queues_while_running() {
     let mut meta = meta_fixture();
+    accept_human(&mut meta, 1);
     apply_quick_session_transition(&mut meta, claim(1, ATTEMPT_ID, "2026-07-11T00:00:01Z"))
         .unwrap();
     apply_quick_session_transition(
@@ -446,6 +549,7 @@ fn quick_session_human_input_queues_while_running() {
 #[test]
 fn quick_session_running_archive_clears_claim_and_unarchive_restores_stable_state() {
     let mut meta = meta_fixture();
+    accept_human(&mut meta, 1);
     apply_quick_session_transition(&mut meta, claim(1, ATTEMPT_ID, "2026-07-11T00:00:01Z"))
         .unwrap();
     apply_quick_session_transition(
@@ -491,6 +595,7 @@ fn quick_session_running_archive_clears_claim_and_unarchive_restores_stable_stat
 #[test]
 fn quick_session_error_archive_round_trips_error_state() {
     let mut meta = meta_fixture();
+    accept_human(&mut meta, 1);
     apply_quick_session_transition(&mut meta, claim(1, ATTEMPT_ID, "2026-07-11T00:00:01Z"))
         .unwrap();
     apply_quick_session_transition(
@@ -523,6 +628,40 @@ fn quick_session_error_archive_round_trips_error_state() {
     .unwrap();
     assert_eq!(meta.status, QuickSessionStatus::Error);
     assert_eq!(meta.error.as_deref(), Some("provider exited"));
+}
+
+#[test]
+fn quick_session_mark_error_retry_is_idempotent() {
+    let mut meta = meta_fixture();
+    accept_human(&mut meta, 1);
+    apply_quick_session_transition(&mut meta, claim(1, ATTEMPT_ID, "2026-07-11T00:00:01Z"))
+        .unwrap();
+    let transition = QuickSessionTransition::MarkError {
+        actor: "alice".to_string(),
+        attempt_id: ATTEMPT_ID.to_string(),
+        error: "provider exited".to_string(),
+        now: "2026-07-11T00:00:02Z".to_string(),
+    };
+    apply_quick_session_transition(&mut meta, transition.clone()).unwrap();
+    let revision = meta.revision;
+
+    assert_eq!(
+        apply_quick_session_transition(&mut meta, transition).unwrap(),
+        TransitionOutcome::Duplicate { line_number: None }
+    );
+    assert_eq!(meta.revision, revision);
+    assert_eq!(meta.last_failed_attempt_id.as_deref(), Some(ATTEMPT_ID));
+
+    assert!(apply_quick_session_transition(
+        &mut meta,
+        QuickSessionTransition::MarkError {
+            actor: "alice".to_string(),
+            attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY".to_string(),
+            error: "late failure".to_string(),
+            now: "2026-07-11T00:00:03Z".to_string(),
+        }
+    )
+    .is_err());
 }
 
 #[test]
@@ -573,6 +712,7 @@ fn quick_session_refs_parse_only_at_text_boundaries() {
         format!("session:{SESSION_ID}界"),
         format!("/session:{SESSION_ID}"),
         format!("session:{SESSION_ID}/discussion.thread"),
+        format!("session:{SESSION_ID}:L18446744073709551616"),
     ] {
         assert!(extract_links(&invalid).is_empty(), "{invalid}");
     }

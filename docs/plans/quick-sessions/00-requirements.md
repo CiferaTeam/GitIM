@@ -70,6 +70,7 @@ archive/quick-sessions/<session-id>/discussion.thread
 - `error` when the latest actionable turn failed
 - `processing_input_line`, `processing_started_at`, and `attempt_id` while a turn is claimed
 - `last_completed_attempt_id`, `last_completed_input_line`, and `last_completed_line` after an agent reply
+- `last_failed_attempt_id` after an attempted turn enters the durable error state
 - the latest accepted human message request id for retry deduplication
 - `revision`, incremented by every metadata mutation
 

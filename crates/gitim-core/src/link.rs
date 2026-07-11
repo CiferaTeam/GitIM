@@ -59,7 +59,13 @@ pub fn extract_links(body: &str) -> Vec<Link> {
         if validate_quick_session_id(&session_id).is_err() {
             continue;
         }
-        let line_number = caps.get(2).and_then(|value| value.as_str().parse().ok());
+        let line_number = match caps.get(2) {
+            Some(value) => match value.as_str().parse() {
+                Ok(line_number) => Some(line_number),
+                Err(_) => continue,
+            },
+            None => None,
+        };
         result.push((
             matched.start(),
             Link {

@@ -114,6 +114,8 @@ pub struct QuickSessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_completed_line: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_failed_attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_human_request_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_human_line: Option<u64>,
@@ -144,6 +146,7 @@ impl QuickSessionMeta {
             last_completed_attempt_id: None,
             last_completed_input_line: None,
             last_completed_line: None,
+            last_failed_attempt_id: None,
             last_human_request_id: None,
             last_human_line: None,
             revision: default_revision(),
@@ -338,14 +341,25 @@ pub fn validate_quick_session_meta(meta: &QuickSessionMeta) -> Result<(), QuickS
         if meta.archived_at.is_none() {
             return invalid_meta("archived status requires archived_at");
         }
-        if matches!(
-            meta.archived_from,
-            Some(QuickSessionStatus::Running | QuickSessionStatus::Archived)
-        ) {
-            return invalid_meta("archived_from must be a stable status");
+        match (meta.archived_from, meta.title.is_some()) {
+            (Some(QuickSessionStatus::Active), true)
+            | (Some(QuickSessionStatus::NeedsTitle), false)
+            | (Some(QuickSessionStatus::Error), _) => {}
+            (None, _) => return invalid_meta("archived status requires archived_from"),
+            _ => return invalid_meta("archived_from does not match the stable title state"),
         }
     } else if meta.archived_at.is_some() || meta.archived_from.is_some() {
         return invalid_meta("active metadata cannot retain archive fields");
+    }
+
+    match meta.status {
+        QuickSessionStatus::NeedsTitle if meta.title.is_some() => {
+            return invalid_meta("needs_title status cannot have a title");
+        }
+        QuickSessionStatus::Active if meta.title.is_none() => {
+            return invalid_meta("active status requires a title");
+        }
+        _ => {}
     }
 
     match (meta.status, meta.error.as_deref(), meta.archived_from) {
@@ -375,12 +389,37 @@ pub fn validate_quick_session_meta(meta: &QuickSessionMeta) -> Result<(), QuickS
         if input_line == 0 || output_line <= input_line {
             return invalid_meta("completion line numbers are invalid");
         }
+        if meta
+            .last_human_line
+            .is_none_or(|last_human_line| input_line > last_human_line)
+        {
+            return invalid_meta("completed input must be a known human line");
+        }
     }
     if meta.last_human_line == Some(0) {
         return invalid_meta("last_human_line must be positive");
     }
     if meta.last_human_request_id.is_some() && meta.last_human_line.is_none() {
         return invalid_meta("human request id requires a line number");
+    }
+    if meta.processing_input_line.is_some_and(|input_line| {
+        meta.last_human_line
+            .is_none_or(|last_human_line| input_line > last_human_line)
+    }) {
+        return invalid_meta("processing input must be a known human line");
+    }
+    if let Some(attempt_id) = meta.last_failed_attempt_id.as_deref() {
+        validate_quick_session_attempt_id(attempt_id)?;
+        if !matches!(
+            (meta.status, meta.archived_from),
+            (QuickSessionStatus::Error, _)
+                | (
+                    QuickSessionStatus::Archived,
+                    Some(QuickSessionStatus::Error)
+                )
+        ) {
+            return invalid_meta("failed attempt id requires error state");
+        }
     }
     Ok(())
 }
@@ -429,9 +468,16 @@ fn apply_transition(
             if line_number == 0 {
                 return Err(QuickSessionError::InvalidLineNumber);
             }
+            if meta
+                .last_human_line
+                .is_some_and(|last_human_line| line_number <= last_human_line)
+            {
+                return Err(QuickSessionError::StaleInputLine);
+            }
             if meta.status == QuickSessionStatus::Error {
                 meta.status = title_derived_status(meta);
                 meta.error = None;
+                meta.last_failed_attempt_id = None;
             }
             meta.last_human_request_id = request_id;
             meta.last_human_line = Some(line_number);
@@ -458,6 +504,9 @@ fn apply_transition(
             ) {
                 return Err(QuickSessionError::InvalidState);
             }
+            if meta.last_human_line != Some(input_line) {
+                return Err(QuickSessionError::InputLineMismatch);
+            }
             if input_line == 0
                 || meta
                     .last_completed_input_line
@@ -470,6 +519,7 @@ fn apply_transition(
             meta.processing_started_at = Some(now.clone());
             meta.attempt_id = Some(attempt_id);
             meta.error = None;
+            meta.last_failed_attempt_id = None;
             finish(meta, now)?;
         }
         QuickSessionTransition::SetTitle {
@@ -539,6 +589,7 @@ fn apply_transition(
             meta.last_completed_line = Some(output_line);
             meta.last_message_preview = truncate_quick_session_preview(&preview);
             meta.error = None;
+            meta.last_failed_attempt_id = None;
             clear_claim(meta);
             finish(meta, now)?;
         }
@@ -549,6 +600,10 @@ fn apply_transition(
             now,
         } => {
             require_agent(meta, &actor)?;
+            validate_quick_session_attempt_id(&attempt_id)?;
+            if meta.last_failed_attempt_id.as_deref() == Some(&attempt_id) {
+                return Ok(TransitionOutcome::Duplicate { line_number: None });
+            }
             require_attempt(meta, &attempt_id)?;
             let error = error.trim().to_string();
             if error.is_empty() {
@@ -556,6 +611,7 @@ fn apply_transition(
             }
             meta.status = QuickSessionStatus::Error;
             meta.error = Some(error);
+            meta.last_failed_attempt_id = Some(attempt_id);
             clear_claim(meta);
             finish(meta, now)?;
         }
@@ -584,6 +640,7 @@ fn apply_transition(
                 .unwrap_or_else(|| title_derived_status(meta));
             if meta.status != QuickSessionStatus::Error {
                 meta.error = None;
+                meta.last_failed_attempt_id = None;
             }
             meta.archived_at = None;
             meta.archived_from = None;

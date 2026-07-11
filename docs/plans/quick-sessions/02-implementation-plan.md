@@ -142,6 +142,7 @@ pub struct QuickSessionMeta {
     pub last_completed_attempt_id: Option<String>,
     pub last_completed_input_line: Option<u64>,
     pub last_completed_line: Option<u64>,
+    pub last_failed_attempt_id: Option<String>,
     pub last_human_request_id: Option<String>,
     pub last_human_line: Option<u64>,
     pub revision: u64,
