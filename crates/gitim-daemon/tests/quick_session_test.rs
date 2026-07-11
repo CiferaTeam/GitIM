@@ -2,7 +2,9 @@
 
 mod common;
 
-use common::setup_repo_alice_bob;
+use common::{
+    init_bare_and_clone, make_state, run_git, setup_repo_alice_bob, write_alice, write_bob,
+};
 use gitim_core::responses::{
     ClaimQuickSessionTurnResponse, CreateQuickSessionResponse, ListQuickSessionsResponse,
     ReadQuickSessionResponse, SendQuickSessionMessageResponse,
@@ -11,6 +13,7 @@ use gitim_core::types::{QuickSessionStatus, ThreadEntry};
 use gitim_daemon::api::{Request, Response};
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::SharedState;
+use gitim_sync::sync_loop::{run_sync_cycle, AuthCircuit};
 
 const SESSION_ID: &str = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
 const OTHER_SESSION_ID: &str = "qs-01K00000000000000000000000";
@@ -22,6 +25,10 @@ fn data<T: serde::de::DeserializeOwned>(response: Response) -> T {
     serde_json::from_value(response.data.unwrap()).unwrap()
 }
 
+async fn set_actor(state: &SharedState, actor: &str) {
+    *state.current_user.write().await = Some(actor.to_string());
+}
+
 async fn create(
     state: SharedState,
     session_id: &str,
@@ -29,6 +36,7 @@ async fn create(
     first_message: &str,
     author: &str,
 ) -> Response {
+    set_actor(&state, author).await;
     handle_request(
         Request::CreateQuickSession {
             session_id: session_id.to_string(),
@@ -42,6 +50,7 @@ async fn create(
 }
 
 async fn send_human(state: SharedState, body: &str, request_id: &str, author: &str) -> Response {
+    set_actor(&state, author).await;
     handle_request(
         Request::SendQuickSessionMessage {
             session_id: SESSION_ID.to_string(),
@@ -57,6 +66,7 @@ async fn send_human(state: SharedState, body: &str, request_id: &str, author: &s
 }
 
 async fn claim(state: SharedState, input_line: u64, attempt_id: &str, author: &str) -> Response {
+    set_actor(&state, author).await;
     handle_request(
         Request::ClaimQuickSessionTurn {
             session_id: SESSION_ID.to_string(),
@@ -70,6 +80,7 @@ async fn claim(state: SharedState, input_line: u64, attempt_id: &str, author: &s
 }
 
 async fn set_title(state: SharedState, attempt_id: &str, author: &str) -> Response {
+    set_actor(&state, author).await;
     handle_request(
         Request::SetQuickSessionTitle {
             session_id: SESSION_ID.to_string(),
@@ -83,6 +94,7 @@ async fn set_title(state: SharedState, attempt_id: &str, author: &str) -> Respon
 }
 
 async fn set_summary(state: SharedState, attempt_id: &str, author: &str) -> Response {
+    set_actor(&state, author).await;
     handle_request(
         Request::SetQuickSessionSummary {
             session_id: SESSION_ID.to_string(),
@@ -96,6 +108,7 @@ async fn set_summary(state: SharedState, attempt_id: &str, author: &str) -> Resp
 }
 
 async fn mark_error(state: SharedState, attempt_id: &str, author: &str) -> Response {
+    set_actor(&state, author).await;
     handle_request(
         Request::MarkQuickSessionError {
             session_id: SESSION_ID.to_string(),
@@ -115,6 +128,7 @@ async fn send_agent(
     attempt_id: &str,
     author: &str,
 ) -> Response {
+    set_actor(&state, author).await;
     handle_request(
         Request::SendQuickSessionMessage {
             session_id: SESSION_ID.to_string(),
@@ -167,6 +181,16 @@ fn install_rejecting_hook(state: &SharedState) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+}
+
+fn bare_head(bare: &std::path::Path) -> String {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(bare)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
 #[tokio::test]
@@ -248,6 +272,98 @@ async fn create_rejects_invalid_unknown_and_departed_agents() {
     .unwrap();
     let departed = create(state, SESSION_ID, "bob", "hello", "alice").await;
     assert!(!departed.ok);
+}
+
+#[tokio::test]
+async fn dispatch_rejects_quick_session_author_impersonation() {
+    let (_tmp, state) = setup_repo_alice_bob().await;
+    let head_before = state.git_storage.rev_parse("HEAD").unwrap();
+
+    let response = handle_request(
+        Request::CreateQuickSession {
+            session_id: SESSION_ID.to_string(),
+            agent_id: "alice".to_string(),
+            first_message: "impersonated".to_string(),
+            author: Some("bob".to_string()),
+        },
+        state.clone(),
+    )
+    .await;
+
+    assert!(!response.ok);
+    assert_eq!(
+        response.error_code.as_deref(),
+        Some("quick_session_forbidden")
+    );
+    assert!(!state.repo_root.join("quick-sessions").exists());
+    assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head_before);
+}
+
+#[tokio::test]
+async fn quick_session_send_acks_locally_until_sync_confirms_push() {
+    let root = tempfile::tempdir().unwrap();
+    let bare = root.path().join("remote.git");
+    let clone = root.path().join("clone");
+    std::fs::create_dir_all(&bare).unwrap();
+    std::fs::create_dir_all(&clone).unwrap();
+    init_bare_and_clone(&bare, &clone);
+    write_alice(&clone);
+    write_bob(&clone);
+    run_git(&clone, &["add", "."]);
+    run_git(&clone, &["commit", "-m", "users"]);
+    run_git(&clone, &["push", "-u", "origin", "HEAD"]);
+    let state = make_state(clone, Some("alice"), &["alice", "bob"]).await;
+
+    data::<CreateQuickSessionResponse>(
+        create(state.clone(), SESSION_ID, "bob", "first", "alice").await,
+    );
+    let remote_before_send = bare_head(&bare);
+    let response: SendQuickSessionMessageResponse =
+        data(send_human(state.clone(), "queued for sync", "req-pending", "alice").await);
+
+    assert_eq!(response.line_number, 2);
+    assert_eq!(bare_head(&bare), remote_before_send);
+    let pending = state
+        .pending_push
+        .read()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(pending.len(), 2);
+    assert!(pending.iter().all(|message| {
+        message.channel == format!("quick_session:{SESSION_ID}")
+            && matches!(message.line_number, 1 | 2)
+    }));
+    drop(pending);
+
+    let mut events = state.event_tx.subscribe();
+    let mut circuit = AuthCircuit::new(state.auth_failed.clone());
+    run_sync_cycle(
+        &state.git_storage,
+        &mut circuit,
+        &state.commit_lock,
+        &|| state.confirm_pending_pushes(),
+        &|_, _, _| {},
+        &|_| {},
+        &|| {},
+        None,
+    );
+
+    assert_ne!(bare_head(&bare), remote_before_send);
+    assert!(state
+        .pending_push
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_empty());
+    let pushed = events.try_recv().unwrap();
+    match pushed {
+        gitim_daemon::api::Event::MessagesPushed {
+            channel,
+            line_numbers,
+        } => {
+            assert_eq!(channel, format!("quick_session:{SESSION_ID}"));
+            assert_eq!(line_numbers, vec![1, 2]);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -375,16 +491,7 @@ async fn queued_input_survives_running_turn_and_mark_error_recovers() {
     assert_eq!(running.session.meta.last_human_line, Some(2));
 
     data::<gitim_core::responses::MarkQuickSessionErrorResponse>(
-        handle_request(
-            Request::MarkQuickSessionError {
-                session_id: SESSION_ID.to_string(),
-                attempt_id: ATTEMPT_ID.to_string(),
-                error: "provider failed".to_string(),
-                author: Some("bob".to_string()),
-            },
-            state.clone(),
-        )
-        .await,
+        mark_error(state.clone(), ATTEMPT_ID, "bob").await,
     );
     assert_eq!(
         read(state.clone()).await.session.meta.status,
@@ -400,6 +507,7 @@ async fn archive_running_rejects_late_completion_and_unarchive_is_readable() {
         create(state.clone(), SESSION_ID, "bob", "first", "alice").await,
     );
     data::<ClaimQuickSessionTurnResponse>(claim(state.clone(), 1, ATTEMPT_ID, "bob").await);
+    set_actor(&state, "alice").await;
 
     data::<gitim_core::responses::ArchiveQuickSessionResponse>(
         handle_request(
@@ -417,6 +525,7 @@ async fn archive_running_rejects_late_completion_and_unarchive_is_readable() {
     assert!(archived.session.meta.attempt_id.is_none());
     let late = set_title(state.clone(), ATTEMPT_ID, "bob").await;
     assert!(!late.ok);
+    set_actor(&state, "alice").await;
 
     data::<gitim_core::responses::UnarchiveQuickSessionResponse>(
         handle_request(

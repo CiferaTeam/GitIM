@@ -1,5 +1,4 @@
 use crate::api::{Event, Response};
-use crate::card_handlers::push_with_retry;
 use crate::handlers::ensure_author_not_departed;
 use crate::state::{PendingMessage, SharedState};
 
@@ -276,10 +275,10 @@ fn emit_changed(state: &SharedState, meta: &QuickSessionMeta) {
     });
 }
 
-async fn push_after_commit(state: &SharedState, operation: &str) -> Result<(), Response> {
-    push_with_retry(state, operation)
-        .await
-        .map_err(Response::error)
+fn schedule_sync(state: &SharedState) {
+    if state.has_remote && state.sync_started.load(std::sync::atomic::Ordering::SeqCst) {
+        state.push_notify.notify_one();
+    }
 }
 
 pub async fn handle_create_quick_session(
@@ -411,9 +410,15 @@ pub async fn handle_create_quick_session(
         ));
     }
     drop(guard);
-    if let Err(response) = push_after_commit(&state, "create_quick_session").await {
-        return response;
-    }
+    state
+        .pending_push
+        .write()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(PendingMessage {
+            channel: format!("quick_session:{session_id}"),
+            line_number: 1,
+        });
+    schedule_sync(&state);
     emit_changed(&state, &meta);
 
     Response::json(CreateQuickSessionResponse {
@@ -691,9 +696,6 @@ pub async fn handle_send_quick_session_message(
         ));
     }
     drop(guard);
-    if let Err(response) = push_after_commit(&state, "send_quick_session_message").await {
-        return response;
-    }
     state
         .pending_push
         .write()
@@ -702,6 +704,7 @@ pub async fn handle_send_quick_session_message(
             channel: format!("quick_session:{session_id}"),
             line_number: next_line,
         });
+    schedule_sync(&state);
     emit_changed(&state, &meta);
     Response::json(SendQuickSessionMessageResponse {
         session_id,
@@ -820,9 +823,7 @@ pub async fn handle_claim_quick_session_turn(
     };
     drop(guard);
     if changed {
-        if let Err(response) = push_after_commit(&state, "claim_quick_session_turn").await {
-            return response;
-        }
+        schedule_sync(&state);
         emit_changed(&state, &meta);
     }
     Response::json(ClaimQuickSessionTurnResponse {
@@ -942,9 +943,7 @@ async fn mutate_agent_meta<T: serde::Serialize>(
     };
     drop(guard);
     if changed {
-        if let Err(response) = push_after_commit(&state, operation).await {
-            return response;
-        }
+        schedule_sync(&state);
         emit_changed(&state, &meta);
     }
     Response::json(response(&meta))
@@ -1057,9 +1056,7 @@ async fn move_session(
         ));
     }
     drop(guard);
-    if let Err(response) = push_after_commit(&state, verb).await {
-        return response;
-    }
+    schedule_sync(&state);
     emit_changed(&state, &meta);
     if archive {
         Response::json(ArchiveQuickSessionResponse {

@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use gitim_core::parser::{parse_thread, ParseError};
-use gitim_core::types::ChannelMeta;
+use gitim_core::types::{
+    truncate_quick_session_preview, validate_quick_session_meta, ChannelMeta, QuickSessionMeta,
+    QuickSessionStatus, QuickSessionTitleSource, ThreadEntry,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -17,6 +20,8 @@ pub enum ConflictError {
     Io(#[from] std::io::Error),
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
+    #[error("quick session conflict cannot be reconciled: {0}")]
+    QuickSession(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -199,4 +204,228 @@ pub fn merge_channel_meta(local: &ChannelMeta, remote: &ChannelMeta) -> ChannelM
         members,
         project: remote.project.clone(),
     }
+}
+
+pub fn merge_quick_session_meta(
+    local: &QuickSessionMeta,
+    remote: &QuickSessionMeta,
+    merged_thread: &str,
+    mappings: &[RenumberMapping],
+    thread_path: &std::path::Path,
+) -> Result<QuickSessionMeta, ConflictError> {
+    validate_quick_session_meta(local)
+        .map_err(|error| ConflictError::QuickSession(error.to_string()))?;
+    validate_quick_session_meta(remote)
+        .map_err(|error| ConflictError::QuickSession(error.to_string()))?;
+    if local.id != remote.id
+        || local.agent_id != remote.agent_id
+        || local.created_by != remote.created_by
+        || local.created_at != remote.created_at
+    {
+        return Err(ConflictError::QuickSession(
+            "immutable metadata differs".to_string(),
+        ));
+    }
+    if local.status == QuickSessionStatus::Archived || remote.status == QuickSessionStatus::Archived
+    {
+        return Err(ConflictError::QuickSession(
+            "archive transitions require manual resolution".to_string(),
+        ));
+    }
+
+    let (title, title_source) = match (&local.title, &remote.title) {
+        (Some(local), Some(remote)) if local != remote => {
+            return Err(ConflictError::QuickSession(
+                "concurrent titles differ".to_string(),
+            ))
+        }
+        (Some(title), _) | (_, Some(title)) => {
+            (Some(title.clone()), QuickSessionTitleSource::ApiSet)
+        }
+        (None, None) => (None, QuickSessionTitleSource::None),
+    };
+    let translate_local = |line: u64| {
+        mappings
+            .iter()
+            .find(|mapping| mapping.file == thread_path && mapping.old_line == line)
+            .map_or(line, |mapping| mapping.new_line)
+    };
+    let parsed = parse_thread(merged_thread)?;
+    let newest_human_line = parsed
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            ThreadEntry::Message(message) if message.author.as_str() == local.created_by => {
+                Some(message.line_number)
+            }
+            _ => None,
+        })
+        .max();
+    let final_preview = parsed
+        .entries
+        .iter()
+        .rev()
+        .find_map(|entry| match entry {
+            ThreadEntry::Message(message) => Some(truncate_quick_session_preview(&message.body)),
+            ThreadEntry::Event(_) => None,
+        })
+        .unwrap_or_default();
+
+    let local_human_line = local.last_human_line.map(translate_local);
+    let remote_human_line = remote.last_human_line;
+    let last_human_request_id = match (local_human_line, remote_human_line) {
+        (Some(local_line), Some(remote_line)) if local_line > remote_line => {
+            local.last_human_request_id.clone()
+        }
+        (Some(local_line), None) if Some(local_line) == newest_human_line => {
+            local.last_human_request_id.clone()
+        }
+        _ => remote.last_human_request_id.clone(),
+    };
+
+    let local_completion = match (
+        local.last_completed_attempt_id.as_ref(),
+        local.last_completed_input_line,
+        local.last_completed_line,
+    ) {
+        (Some(attempt), Some(input), Some(output)) => Some((
+            attempt.clone(),
+            translate_local(input),
+            translate_local(output),
+        )),
+        _ => None,
+    };
+    let remote_completion = match (
+        remote.last_completed_attempt_id.as_ref(),
+        remote.last_completed_input_line,
+        remote.last_completed_line,
+    ) {
+        (Some(attempt), Some(input), Some(output)) => Some((attempt.clone(), input, output)),
+        _ => None,
+    };
+    let completion = match (local_completion, remote_completion) {
+        (Some(local), Some(remote)) if local.0 != remote.0 && local.1 == remote.1 => {
+            return Err(ConflictError::QuickSession(
+                "different attempts completed the same input".to_string(),
+            ))
+        }
+        (Some(local), Some(remote)) => Some(if (local.1, local.2) >= (remote.1, remote.2) {
+            local
+        } else {
+            remote
+        }),
+        (Some(completion), None) | (None, Some(completion)) => Some(completion),
+        (None, None) => None,
+    };
+
+    let local_claim = if local.status == QuickSessionStatus::Running {
+        Some((
+            local.attempt_id.clone().ok_or_else(|| {
+                ConflictError::QuickSession("local running claim is incomplete".to_string())
+            })?,
+            translate_local(local.processing_input_line.ok_or_else(|| {
+                ConflictError::QuickSession("local running claim is incomplete".to_string())
+            })?),
+            local.processing_started_at.clone().ok_or_else(|| {
+                ConflictError::QuickSession("local running claim is incomplete".to_string())
+            })?,
+        ))
+    } else {
+        None
+    };
+    let remote_claim = if remote.status == QuickSessionStatus::Running {
+        Some((
+            remote.attempt_id.clone().ok_or_else(|| {
+                ConflictError::QuickSession("remote running claim is incomplete".to_string())
+            })?,
+            remote.processing_input_line.ok_or_else(|| {
+                ConflictError::QuickSession("remote running claim is incomplete".to_string())
+            })?,
+            remote.processing_started_at.clone().ok_or_else(|| {
+                ConflictError::QuickSession("remote running claim is incomplete".to_string())
+            })?,
+        ))
+    } else {
+        None
+    };
+    let claim_completed = |claim: &(String, u64, String)| {
+        completion
+            .as_ref()
+            .is_some_and(|completed| completed.0 == claim.0 && completed.1 == claim.1)
+    };
+    let local_claim = local_claim.filter(|claim| !claim_completed(claim));
+    let remote_claim = remote_claim.filter(|claim| !claim_completed(claim));
+    let claim = match (local_claim, remote_claim) {
+        (Some(local), Some(remote)) if local.0 != remote.0 || local.1 != remote.1 => {
+            return Err(ConflictError::QuickSession(
+                "concurrent running claims differ".to_string(),
+            ))
+        }
+        (Some(local), Some(remote)) => Some(if local.2 >= remote.2 { local } else { remote }),
+        (Some(claim), None) | (None, Some(claim)) => Some(claim),
+        (None, None) => None,
+    };
+
+    let (summary, summary_updated_at) = match (
+        local.summary_updated_at.as_deref(),
+        remote.summary_updated_at.as_deref(),
+    ) {
+        (Some(local_time), Some(remote_time)) if local_time > remote_time => {
+            (local.summary.clone(), local.summary_updated_at.clone())
+        }
+        (Some(_), None) => (local.summary.clone(), local.summary_updated_at.clone()),
+        _ => (remote.summary.clone(), remote.summary_updated_at.clone()),
+    };
+    let status = if claim.is_some() {
+        QuickSessionStatus::Running
+    } else if title.is_some() {
+        QuickSessionStatus::Active
+    } else {
+        QuickSessionStatus::NeedsTitle
+    };
+    let (attempt_id, processing_input_line, processing_started_at) = match claim {
+        Some((attempt, input, started)) => (Some(attempt), Some(input), Some(started)),
+        None => (None, None, None),
+    };
+    let (last_completed_attempt_id, last_completed_input_line, last_completed_line) =
+        match completion {
+            Some((attempt, input, output)) => (Some(attempt), Some(input), Some(output)),
+            None => (None, None, None),
+        };
+    let mut merged = QuickSessionMeta {
+        id: local.id.clone(),
+        title,
+        title_source,
+        agent_id: local.agent_id.clone(),
+        created_by: local.created_by.clone(),
+        status,
+        created_at: local.created_at.clone(),
+        updated_at: local.updated_at.clone().max(remote.updated_at.clone()),
+        archived_at: None,
+        archived_from: None,
+        summary,
+        summary_updated_at,
+        last_message_preview: final_preview,
+        error: None,
+        processing_input_line,
+        processing_started_at,
+        attempt_id,
+        last_completed_attempt_id,
+        last_completed_input_line,
+        last_completed_line,
+        last_failed_attempt_id: None,
+        last_human_request_id,
+        last_human_line: newest_human_line,
+        revision: local
+            .revision
+            .max(remote.revision)
+            .checked_add(1)
+            .ok_or_else(|| ConflictError::QuickSession("revision overflow".to_string()))?,
+    };
+    if merged.status == QuickSessionStatus::Running {
+        merged.error = None;
+    }
+    validate_quick_session_meta(&merged)
+        .map_err(|error| ConflictError::QuickSession(error.to_string()))?;
+    Ok(merged)
 }
