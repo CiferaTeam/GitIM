@@ -831,6 +831,18 @@ fn quick_session_client(
     }
 }
 
+#[allow(clippy::result_large_err)]
+fn validate_quick_session_workspace_slug(slug: &str) -> Result<(), axum::response::Response> {
+    use axum::response::IntoResponse;
+    crate::slug::validate(slug).map_err(|error| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {error}"))),
+        )
+            .into_response()
+    })
+}
+
 // -- /im/me --
 
 async fn im_me(
@@ -1165,6 +1177,9 @@ async fn im_read_quick_session(
     axum::extract::Path((slug, session_id)): axum::extract::Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<ReadQuickSessionQuery>,
 ) -> axum::response::Response {
+    if let Err(response) = validate_quick_session_workspace_slug(&slug) {
+        return response;
+    }
     let client = match quick_session_client(&state, &slug) {
         Ok(client) => client,
         Err(response) => return response,
@@ -1181,19 +1196,34 @@ async fn im_send_quick_session_message(
     axum::extract::Path((slug, session_id)): axum::extract::Path<(String, String)>,
     Json(request): Json<SendQuickSessionMessageRequest>,
 ) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(response) = validate_quick_session_workspace_slug(&slug) {
+        return response;
+    }
+    let request_id = match request
+        .request_id
+        .as_deref()
+        .filter(|request_id| !request_id.trim().is_empty())
+    {
+        Some(request_id) => request_id,
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(
+                    "quick session request_id is required",
+                    "invalid_quick_session_request_id",
+                )),
+            )
+                .into_response();
+        }
+    };
     let client = match quick_session_client(&state, &slug) {
         Ok(client) => client,
         Err(response) => return response,
     };
     typed_api_response_to_json(
         client
-            .send_quick_session_message(
-                &session_id,
-                &request.body,
-                None,
-                request.request_id.as_deref(),
-                None,
-            )
+            .send_quick_session_message(&session_id, &request.body, None, Some(request_id), None)
             .await,
     )
 }
@@ -1202,6 +1232,9 @@ async fn im_archive_quick_session(
     State(state): State<SharedRuntimeState>,
     axum::extract::Path((slug, session_id)): axum::extract::Path<(String, String)>,
 ) -> axum::response::Response {
+    if let Err(response) = validate_quick_session_workspace_slug(&slug) {
+        return response;
+    }
     let client = match quick_session_client(&state, &slug) {
         Ok(client) => client,
         Err(response) => return response,
@@ -1213,6 +1246,9 @@ async fn im_unarchive_quick_session(
     State(state): State<SharedRuntimeState>,
     axum::extract::Path((slug, session_id)): axum::extract::Path<(String, String)>,
 ) -> axum::response::Response {
+    if let Err(response) = validate_quick_session_workspace_slug(&slug) {
+        return response;
+    }
     let client = match quick_session_client(&state, &slug) {
         Ok(client) => client,
         Err(response) => return response,

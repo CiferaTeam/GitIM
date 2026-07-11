@@ -439,15 +439,14 @@ async fn quick_session_create_rejects_non_active_handler_before_mutation() {
 }
 
 #[tokio::test]
-async fn quick_session_routes_preserve_daemon_guest_error_code() {
+async fn quick_session_routes_preserve_daemon_guest_error() {
     let mut responses = HashMap::new();
     responses.insert("users", vec![ok(json!({"users": ["alice", "lewis"]}))]);
     responses.insert(
         "create_quick_session",
         vec![json!({
             "ok": false,
-            "error": "guest mode is read-only",
-            "error_code": "guest_read_only"
+            "error": "guest mode: write operations are not allowed"
         })],
     );
     let (router, _daemon, _tmp) = setup(responses);
@@ -465,9 +464,105 @@ async fn quick_session_routes_preserve_daemon_guest_error_code() {
     .await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["ok"], false);
-    assert_eq!(body["error"], "guest mode is read-only");
-    assert_eq!(body["error_code"], "guest_read_only");
+    assert_eq!(
+        body,
+        json!({
+            "ok": false,
+            "error": "guest mode: write operations are not allowed"
+        })
+    );
+}
+
+#[tokio::test]
+async fn quick_session_send_preserves_typed_forbidden_error() {
+    let mut responses = HashMap::new();
+    responses.insert(
+        "send_quick_session_message",
+        vec![json!({
+            "ok": false,
+            "error": "quick session actor is not authorized for this transition",
+            "error_code": "quick_session_forbidden"
+        })],
+    );
+    let (router, _daemon, _tmp) = setup(responses);
+
+    let (status, body) = send(
+        router,
+        Method::POST,
+        &format!("/workspaces/room/im/quick-sessions/{SESSION_ID}/messages"),
+        Some(json!({"body": "follow-up", "request_id": "req-1"})),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["error_code"], "quick_session_forbidden");
+    assert_eq!(
+        body["error"],
+        "quick session actor is not authorized for this transition"
+    );
+}
+
+#[tokio::test]
+async fn quick_session_send_requires_non_empty_request_id_before_daemon_call() {
+    for body in [
+        json!({"body": "follow-up"}),
+        json!({
+            "body": "follow-up",
+            "request_id": "  "
+        }),
+    ] {
+        let (router, mut daemon, _tmp) = setup(HashMap::new());
+        let (status, response) = send(
+            router,
+            Method::POST,
+            &format!("/workspaces/room/im/quick-sessions/{SESSION_ID}/messages"),
+            Some(body),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(response["error_code"], "invalid_quick_session_request_id");
+        assert!(daemon.try_next_request().is_none());
+    }
+}
+
+#[tokio::test]
+async fn quick_session_path_routes_reject_invalid_workspace_slug() {
+    let (router, mut daemon, _tmp) = setup(HashMap::new());
+    let cases = [
+        (
+            Method::GET,
+            format!("/workspaces/UPPER/im/quick-sessions/{SESSION_ID}"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/workspaces/UPPER/im/quick-sessions/{SESSION_ID}/messages"),
+            Some(json!({"body": "follow-up", "request_id": "req-1"})),
+        ),
+        (
+            Method::POST,
+            format!("/workspaces/UPPER/im/quick-sessions/{SESSION_ID}/archive"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/workspaces/UPPER/im/quick-sessions/{SESSION_ID}/unarchive"),
+            None,
+        ),
+    ];
+
+    for (method, uri, body) in cases {
+        let (status, response) = send(router.clone(), method, &uri, body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}");
+        assert!(
+            response["error"]
+                .as_str()
+                .is_some_and(|error| error.contains("invalid slug")),
+            "{response}"
+        );
+    }
+    assert!(daemon.try_next_request().is_none());
 }
 
 #[tokio::test]
