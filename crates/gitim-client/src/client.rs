@@ -1267,6 +1267,23 @@ mod tests {
                 revision: 5,
             })
             .unwrap(),
+            serde_json::to_value(ListQuickSessionsResponse { sessions: vec![] }).unwrap(),
+            serde_json::to_value(ReadQuickSessionResponse {
+                session: QuickSessionDetail {
+                    meta: meta.clone(),
+                    entries: Vec::new(),
+                    archived: false,
+                },
+            })
+            .unwrap(),
+            serde_json::to_value(SendQuickSessionMessageResponse {
+                session_id: meta.id.clone(),
+                line_number: 3,
+                status: QuickSessionStatus::Active,
+                revision: 6,
+                r#ref: format!("session:{}:L000003", meta.id),
+            })
+            .unwrap(),
         ];
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
@@ -1329,6 +1346,18 @@ mod tests {
             .unwrap();
         client.archive_quick_session(session_id).await.unwrap();
         client.unarchive_quick_session(session_id).await.unwrap();
+        client
+            .list_quick_sessions(false, None, false, None)
+            .await
+            .unwrap();
+        client
+            .read_quick_session(session_id, None, None)
+            .await
+            .unwrap();
+        client
+            .send_quick_session_message(session_id, "human follow-up", None, None, None)
+            .await
+            .unwrap();
 
         assert_eq!(
             server.await.unwrap(),
@@ -1343,6 +1372,9 @@ mod tests {
                 json!({"method":"mark_quick_session_error","session_id":session_id,"attempt_id":attempt_id,"error":"provider failed"}),
                 json!({"method":"archive_quick_session","session_id":session_id}),
                 json!({"method":"unarchive_quick_session","session_id":session_id}),
+                json!({"method":"list_quick_sessions","archived":false,"actionable":false}),
+                json!({"method":"read_quick_session","session_id":session_id}),
+                json!({"method":"send_quick_session_message","session_id":session_id,"body":"human follow-up"}),
             ]
         );
     }

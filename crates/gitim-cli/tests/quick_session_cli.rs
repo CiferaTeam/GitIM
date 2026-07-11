@@ -235,3 +235,25 @@ fn send_rejects_missing_turn_coordinates() {
         .code(2)
         .stderr(predicate::str::contains("--reply-to"));
 }
+
+#[test]
+fn list_help_describes_archived_only_filter() {
+    gitim()
+        .args(["session", "list", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "List archived Quick Sessions only",
+        ));
+}
+
+#[test]
+fn list_rejects_archived_with_actionable() {
+    gitim()
+        .args(["session", "list", "--archived", "--actionable"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("--archived"))
+        .stderr(predicate::str::contains("--actionable"));
+}

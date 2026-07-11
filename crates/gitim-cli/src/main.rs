@@ -348,8 +348,8 @@ enum DmCommands {
 enum SessionCommands {
     /// List Quick Sessions
     List {
-        /// Include archived sessions
-        #[arg(long)]
+        /// List archived Quick Sessions only
+        #[arg(long, conflicts_with = "actionable")]
         archived: bool,
         /// Filter by assigned agent
         #[arg(long = "agent")]
