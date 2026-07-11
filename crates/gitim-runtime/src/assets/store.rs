@@ -211,6 +211,19 @@ struct StoreManifest {
     namespace: String,
 }
 
+#[cfg(feature = "test-support")]
+struct MaterializePause {
+    reached: Arc<Barrier>,
+    resume: Arc<Barrier>,
+    materialized: Arc<AtomicBool>,
+}
+
+#[cfg(feature = "test-support")]
+struct FreeSpaceSampleWait {
+    sampled: Arc<Barrier>,
+    materialized: Arc<AtomicBool>,
+}
+
 pub struct AssetService {
     upload_slots: Arc<Semaphore>,
     peer_slots: Arc<Semaphore>,
@@ -379,6 +392,8 @@ pub struct AssetStore {
 
 #[derive(Default)]
 struct WorkspaceAssetState {
+    // Operations that need both locks acquire operation_gate before accounting.
+    // Free-space sampling and claim updates share the accounting critical section.
     accounting: Mutex<AccountingState>,
     operation_gate: RwLock<()>,
     #[cfg(feature = "test-support")]
@@ -391,6 +406,10 @@ struct WorkspaceAssetState {
     hash_lock_attempts: AtomicU64,
     #[cfg(feature = "test-support")]
     free_space_override: Mutex<Option<(u64, u64)>>,
+    #[cfg(feature = "test-support")]
+    materialize_pause: Mutex<Option<MaterializePause>>,
+    #[cfg(feature = "test-support")]
+    after_free_space_sample_wait: Mutex<Option<FreeSpaceSampleWait>>,
 }
 
 #[derive(Default)]
@@ -663,8 +682,10 @@ impl AssetStore {
     pub fn reserve(&self, incoming: u64) -> Result<AssetReservation, AssetError> {
         let _operation = read_lock(&self.state.operation_gate);
         self.validate_current()?;
+        let mut accounting = lock(&self.state.accounting);
+        self.validate_accounting(&accounting)?;
         let (available, total) = self.free_space()?;
-        self.reserve_with_space(incoming, available, total)
+        self.reserve_with_space_locked(&mut accounting, incoming, available, total)
     }
 
     pub async fn stage_stream<S, E>(
@@ -903,6 +924,7 @@ impl AssetStore {
         publish_result
     }
 
+    #[cfg(test)]
     fn reserve_with_space(
         &self,
         incoming: u64,
@@ -911,6 +933,16 @@ impl AssetStore {
     ) -> Result<AssetReservation, AssetError> {
         let mut accounting = lock(&self.state.accounting);
         self.validate_accounting(&accounting)?;
+        self.reserve_with_space_locked(&mut accounting, incoming, available, total)
+    }
+
+    fn reserve_with_space_locked(
+        &self,
+        accounting: &mut AccountingState,
+        incoming: u64,
+        available: u64,
+        total: u64,
+    ) -> Result<AssetReservation, AssetError> {
         let committed_and_reserved = accounting
             .committed
             .bytes
@@ -972,9 +1004,9 @@ impl AssetStore {
         {
             return Err(AssetError::StaleBinding);
         }
-        let (available, total) = self.free_space()?;
         let mut accounting = lock(&self.state.accounting);
         self.validate_accounting(&accounting)?;
+        let (available, total) = self.free_space()?;
         let committed_and_reserved = accounting
             .committed
             .bytes
@@ -1037,6 +1069,12 @@ impl AssetStore {
         reservation: &mut AssetReservation,
         written: u64,
     ) -> Result<(), AssetError> {
+        #[cfg(feature = "test-support")]
+        let materialized_signal = lock(&self.state.materialize_pause).take().map(|pause| {
+            pause.reached.wait();
+            pause.resume.wait();
+            pause.materialized
+        });
         let mut accounting = lock(&self.state.accounting);
         self.validate_accounting(&accounting)?;
         if !Arc::ptr_eq(&reservation.state, &self.state)
@@ -1061,6 +1099,10 @@ impl AssetStore {
                 ))?;
         reservation.unmaterialized = reservation_unmaterialized;
         accounting.unmaterialized = unmaterialized;
+        #[cfg(feature = "test-support")]
+        if let Some(signal) = materialized_signal {
+            signal.store(true, Ordering::Release);
+        }
         Ok(())
     }
 
@@ -1204,6 +1246,34 @@ impl AssetStore {
         *lock(&self.state.free_space_override) = Some((available, total));
     }
 
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_materialize_pause(
+        &self,
+        reached: Arc<Barrier>,
+        resume: Arc<Barrier>,
+        materialized: Arc<AtomicBool>,
+    ) {
+        *lock(&self.state.materialize_pause) = Some(MaterializePause {
+            reached,
+            resume,
+            materialized,
+        });
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_after_free_space_sample_wait(
+        &self,
+        sampled: Arc<Barrier>,
+        materialized: Arc<AtomicBool>,
+    ) {
+        *lock(&self.state.after_free_space_sample_wait) = Some(FreeSpaceSampleWait {
+            sampled,
+            materialized,
+        });
+    }
+
     pub fn recover(&self) -> Result<AssetUsage, AssetError> {
         let _operation = write_lock(&self.state.operation_gate);
         self.validate_current()?;
@@ -1307,13 +1377,26 @@ impl AssetStore {
 
     fn free_space(&self) -> Result<(u64, u64), AssetError> {
         #[cfg(feature = "test-support")]
-        if let Some(space) = *lock(&self.state.free_space_override) {
-            return Ok(space);
+        let override_space = *lock(&self.state.free_space_override);
+        #[cfg(not(feature = "test-support"))]
+        let override_space: Option<(u64, u64)> = None;
+        let space = match override_space {
+            Some(space) => space,
+            None => (
+                fs2::available_space(&self.root)?,
+                fs2::total_space(&self.root)?,
+            ),
+        };
+        #[cfg(feature = "test-support")]
+        if let Some(wait) = lock(&self.state.after_free_space_sample_wait).take() {
+            wait.sampled.wait();
+            let deadline = std::time::Instant::now() + Duration::from_millis(200);
+            while !wait.materialized.load(Ordering::Acquire) && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
-        Ok((
-            fs2::available_space(&self.root)?,
-            fs2::total_space(&self.root)?,
-        ))
+        Ok(space)
     }
 
     fn refresh_metadata(&self, hash: &str) -> Result<AssetMetadata, AssetError> {

@@ -11,7 +11,7 @@ use std::fs::{self, FileTimes, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant, SystemTime};
 use tempfile::TempDir;
@@ -382,6 +382,39 @@ async fn materialized_temp_bytes_are_not_double_counted_by_free_space_checks() {
 
     assert_eq!(store.reserved_bytes().unwrap(), 8);
     drop((first, second));
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_available_space_sample_cannot_outlive_a_materialized_claim() {
+    let workspace = TempDir::new().unwrap();
+    let store = Arc::new(open_store(workspace.path(), 100));
+    store.inject_free_space(8, 0);
+    let materialize_reached = Arc::new(Barrier::new(2));
+    let materialize_resume = Arc::new(Barrier::new(2));
+    let materialized = Arc::new(AtomicBool::new(false));
+    store.inject_materialize_pause(
+        Arc::clone(&materialize_reached),
+        Arc::clone(&materialize_resume),
+        Arc::clone(&materialized),
+    );
+    let first_store = Arc::clone(&store);
+    let first = tokio::spawn(async move { first_store.stage_bytes("first.bin", b"aaaa").await });
+    materialize_reached.wait();
+
+    let sampled = Arc::new(Barrier::new(2));
+    store.inject_after_free_space_sample_wait(Arc::clone(&sampled), Arc::clone(&materialized));
+    let second_store = Arc::clone(&store);
+    let second =
+        tokio::spawn(async move { second_store.stage_bytes("second.bin", b"bbbbb").await });
+    sampled.wait();
+    materialize_resume.wait();
+
+    let second_error = second.await.unwrap().unwrap_err();
+    assert!(matches!(second_error, AssetError::QuotaExceeded { .. }));
+    let first = first.await.unwrap().unwrap();
+    assert!(materialized.load(Ordering::Acquire));
+    drop(first);
     assert_eq!(store.reserved_bytes().unwrap(), 0);
 }
 
