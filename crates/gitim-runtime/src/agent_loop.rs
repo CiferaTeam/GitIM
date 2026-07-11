@@ -285,6 +285,12 @@ impl AgentLoop {
                 event_type: event_type.to_string(),
                 detail: detail.to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
+                scope: crate::http::ActivityScope::default(),
+                session_id: None,
+                r#ref: None,
+                session_revision: None,
+                attempt_id: None,
+                context_generation: None,
             });
         }
     }
@@ -2023,6 +2029,12 @@ mod tests {
             event_type: "tool_use".to_string(),
             detail: "d".to_string(),
             timestamp: "t".to_string(),
+            scope: crate::http::ActivityScope::default(),
+            session_id: None,
+            r#ref: None,
+            session_revision: None,
+            attempt_id: None,
+            context_generation: None,
         };
         let json = serde_json::to_string(&e).unwrap();
         assert!(json.contains("\"workspace_id\":\"ws1\""));

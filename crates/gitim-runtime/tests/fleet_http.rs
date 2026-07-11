@@ -23,7 +23,7 @@ use tower::ServiceExt;
 
 use gitim_runtime::fleet;
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
-use gitim_runtime::http::{create_router, AgentActivityEvent};
+use gitim_runtime::http::{create_router, ActivityScope, AgentActivityEvent};
 use gitim_runtime::user_config::{
     self, FleetNodeEntry, FleetWorkspaceMapping, UserConfig, WorkspaceEntry,
 };
@@ -34,6 +34,7 @@ use common::HomeGuard;
 
 const REMOTE_RUNTIME_ID: &str = "01234567-89ab-cdef-0123-456789abcdef";
 const REMOTE_RUNTIME_ID_UPPERCASE: &str = "01234567-89AB-CDEF-0123-456789ABCDEF";
+const QUICK_SESSION_ID: &str = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
 
 async fn remote_agent_events(
     State(tx): State<broadcast::Sender<AgentActivityEvent>>,
@@ -570,6 +571,12 @@ async fn add_fleet_node_hot_subscribes_remote_sse() {
                 event_type: "tool_use".to_string(),
                 detail: "remote event arrived".to_string(),
                 timestamp: "2026-05-15T00:00:00Z".to_string(),
+                scope: ActivityScope::default(),
+                session_id: None,
+                r#ref: None,
+                session_revision: None,
+                attempt_id: None,
+                context_generation: None,
             });
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -589,6 +596,60 @@ async fn add_fleet_node_hot_subscribes_remote_sse() {
     );
     assert!(text.contains("\"agent_id\":\"cfo\""), "{text}");
     assert!(text.contains("remote event arrived"), "{text}");
+
+    sender.abort();
+    remote_server.abort();
+}
+
+#[tokio::test]
+#[serial(home_env)]
+async fn fleet_preserves_quick_session_activity_scope_fields() {
+    let _home_guard = HomeGuard::install();
+    let (remote_base_url, remote_tx, remote_server) = spawn_remote_runtime().await;
+    let (router, state) = create_router();
+    inject_github_workspace(&state, "room", "https://github.com/org/repo.git");
+
+    let events_resp = router
+        .clone()
+        .oneshot(fleet_events_request())
+        .await
+        .expect("fleet events response");
+    assert_eq!(events_resp.status(), StatusCode::OK);
+    let mut events_body = events_resp.into_body().into_data_stream();
+    let add_resp = router
+        .clone()
+        .oneshot(post_fleet_node(&remote_base_url))
+        .await
+        .expect("add fleet node response");
+    assert_eq!(add_resp.status(), StatusCode::OK);
+
+    let sender = tokio::spawn(async move {
+        for _ in 0..20 {
+            let _ = remote_tx.send(AgentActivityEvent {
+                agent_id: "cfo".to_string(),
+                workspace_id: "remote-room".to_string(),
+                event_type: "thinking".to_string(),
+                detail: "scoped quick session event".to_string(),
+                timestamp: "2026-07-11T00:00:00Z".to_string(),
+                scope: ActivityScope::QuickSession,
+                session_id: Some(QUICK_SESSION_ID.to_string()),
+                r#ref: Some(format!("session:{QUICK_SESSION_ID}")),
+                session_revision: Some(7),
+                attempt_id: Some("qa-01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string()),
+                context_generation: Some(3),
+            });
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    });
+
+    let text = wait_for_frame_containing(&mut events_body, "scoped quick session event").await;
+    assert!(text.contains("\"scope\":\"quick_session\""), "{text}");
+    assert!(
+        text.contains(&format!("\"session_id\":\"{QUICK_SESSION_ID}\"")),
+        "{text}"
+    );
+    assert!(text.contains("\"session_revision\":7"), "{text}");
+    assert!(text.contains("\"context_generation\":3"), "{text}");
 
     sender.abort();
     remote_server.abort();
@@ -625,6 +686,12 @@ async fn fleet_status_tracks_connected_and_last_event() {
                 event_type: "tool_use".to_string(),
                 detail: "updates status".to_string(),
                 timestamp: "2026-05-15T00:00:00Z".to_string(),
+                scope: ActivityScope::default(),
+                session_id: None,
+                r#ref: None,
+                session_revision: None,
+                attempt_id: None,
+                context_generation: None,
             });
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
