@@ -34,6 +34,7 @@ pub struct AssetPeer {
 pub struct ResolvedReplica {
     pub metadata: AssetMetadata,
     pub peer: AssetPeer,
+    pub locality: AssetLocality,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +42,13 @@ pub struct HeadAvailability {
     pub size: u64,
     pub media_type: String,
     pub peer: AssetPeer,
+    pub locality: AssetLocality,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetLocality {
+    Local,
+    Remote,
 }
 
 #[derive(Clone, Copy)]
@@ -261,7 +269,11 @@ async fn resolve_get_with_budgets(
             &recorder,
         )
         .await?;
-        Ok(ResolvedReplica { metadata, peer })
+        Ok(ResolvedReplica {
+            metadata,
+            peer,
+            locality: AssetLocality::Remote,
+        })
     })
     .await
     {
@@ -314,6 +326,7 @@ pub async fn resolve_head(
                     base_url: String::new(),
                     remote_workspace_slug: workspace_slug.to_string(),
                 },
+                locality: AssetLocality::Local,
             });
         }
         if workspace_identity.is_empty() {
@@ -420,6 +433,7 @@ fn local_replica(metadata: AssetMetadata, workspace_slug: &str) -> ResolvedRepli
             base_url: String::new(),
             remote_workspace_slug: workspace_slug.to_string(),
         },
+        locality: AssetLocality::Local,
     }
 }
 
@@ -465,7 +479,7 @@ async fn fetch_candidates(
     hash_lock: &mut Option<HashLock>,
     recorder: &ResolutionRecorder,
 ) -> Result<(AssetMetadata, AssetPeer), AssetError> {
-    let mut peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
+    let peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
     let mut attempted = HashSet::new();
     let request = CandidateRequest {
         origin,
@@ -473,6 +487,9 @@ async fn fetch_candidates(
         budgets,
         recorder,
     };
+    if peers.iter().any(|peer| peer.runtime_id.is_none()) {
+        start_legacy_discovery(state, service, workspace_slug, workspace_identity);
+    }
 
     let exact: Vec<_> = peers
         .iter()
@@ -493,15 +510,11 @@ async fn fetch_candidates(
         }
     }
 
-    let has_legacy = peers.iter().any(|peer| peer.runtime_id.is_none());
     let fallbacks: Vec<_> = peers
-        .iter()
+        .into_iter()
         .filter(|peer| {
-            peer.runtime_id.is_some()
-                && peer.runtime_id.as_deref() != Some(origin)
-                && attempted.insert(peer_key(peer))
+            peer.runtime_id.as_deref() != Some(origin) && attempted.insert(peer_key(peer))
         })
-        .cloned()
         .collect();
     if let Some(resolved) = fetch_fallbacks(
         service,
@@ -517,70 +530,7 @@ async fn fetch_candidates(
     )
     .await?
     {
-        if has_legacy {
-            start_legacy_discovery(state, service, workspace_slug, workspace_identity);
-        }
         return Ok(resolved);
-    }
-
-    if has_legacy {
-        if tokio::time::timeout(
-            LEGACY_DISCOVERY_TIMEOUT,
-            fleet::discover_asset_legacy_identities(state, workspace_slug, workspace_identity),
-        )
-        .await
-        .is_err()
-        {
-            summary.observe(AssetError::OriginUnavailable)?;
-        }
-        peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
-        if peers.iter().any(|peer| peer.runtime_id.is_none()) {
-            summary.observe(AssetError::OriginUnavailable)?;
-        }
-
-        let discovered_exact: Vec<_> = peers
-            .iter()
-            .filter(|peer| {
-                peer.runtime_id.as_deref() == Some(origin) && !attempted.contains(&peer_key(peer))
-            })
-            .cloned()
-            .collect();
-        for peer in discovered_exact {
-            attempted.insert(peer_key(&peer));
-            match download_candidate(service, store, client, &peer, request, hash_lock).await {
-                Ok(metadata) => return Ok((metadata, peer)),
-                Err(error) => {
-                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                    summary.observe(error)?;
-                    if hash_lock.is_none() {
-                        return Err(summary.final_error());
-                    }
-                }
-            }
-        }
-
-        let discovered_fallbacks: Vec<_> = peers
-            .into_iter()
-            .filter(|peer| {
-                peer.runtime_id.as_deref() != Some(origin) && attempted.insert(peer_key(peer))
-            })
-            .collect();
-        if let Some(resolved) = fetch_fallbacks(
-            service,
-            store,
-            client,
-            discovered_fallbacks,
-            request,
-            budgets,
-            summary,
-            workspace_slug,
-            origin,
-            hash_lock,
-        )
-        .await?
-        {
-            return Ok(resolved);
-        }
     }
     Err(summary.final_error())
 }
@@ -598,8 +548,11 @@ async fn probe_candidates(
     budgets: ResolverBudgets,
     summary: &mut AttemptSummary,
 ) -> Result<HeadAvailability, AssetError> {
-    let mut peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
+    let peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
     let mut attempted = HashSet::new();
+    if peers.iter().any(|peer| peer.runtime_id.is_none()) {
+        start_legacy_discovery(state, service, workspace_slug, workspace_identity);
+    }
     let exact: Vec<_> = peers
         .iter()
         .filter(|peer| peer.runtime_id.as_deref() == Some(origin))
@@ -615,89 +568,26 @@ async fn probe_candidates(
             }
         }
     }
-    let has_legacy = peers.iter().any(|peer| peer.runtime_id.is_none());
     let fallbacks: Vec<_> = peers
-        .iter()
+        .into_iter()
         .filter(|peer| {
-            peer.runtime_id.is_some()
-                && peer.runtime_id.as_deref() != Some(origin)
-                && attempted.insert(peer_key(peer))
+            peer.runtime_id.as_deref() != Some(origin) && attempted.insert(peer_key(peer))
         })
-        .cloned()
         .collect();
-    let mut probes = futures::stream::iter(fallbacks.into_iter().map(|peer| async move {
-        let result = probe_candidate(client, &peer, hash, max_file_bytes, budgets).await;
-        (peer, result)
-    }))
-    .buffer_unordered(HEAD_CONCURRENCY);
-    while let Some((peer, result)) = probes.next().await {
-        match result {
-            Ok(availability) => {
-                if has_legacy {
-                    start_legacy_discovery(state, service, workspace_slug, workspace_identity);
-                }
-                return Ok(availability);
-            }
-            Err(error) => {
-                record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                summary.observe(error)?;
-            }
-        }
-    }
-
-    if has_legacy {
-        if tokio::time::timeout(
-            LEGACY_DISCOVERY_TIMEOUT,
-            fleet::discover_asset_legacy_identities(state, workspace_slug, workspace_identity),
-        )
-        .await
-        .is_err()
-        {
-            summary.observe(AssetError::OriginUnavailable)?;
-        }
-        peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
-        if peers.iter().any(|peer| peer.runtime_id.is_none()) {
-            summary.observe(AssetError::OriginUnavailable)?;
-        }
-        let discovered_exact: Vec<_> = peers
-            .iter()
-            .filter(|peer| {
-                peer.runtime_id.as_deref() == Some(origin) && !attempted.contains(&peer_key(peer))
-            })
-            .cloned()
-            .collect();
-        for peer in discovered_exact {
-            attempted.insert(peer_key(&peer));
-            match probe_candidate(client, &peer, hash, max_file_bytes, budgets).await {
-                Ok(availability) => return Ok(availability),
-                Err(error) => {
-                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                    summary.observe(error)?;
-                }
-            }
-        }
-
-        let discovered_fallbacks: Vec<_> = peers
-            .into_iter()
-            .filter(|peer| {
-                peer.runtime_id.as_deref() != Some(origin) && attempted.insert(peer_key(peer))
-            })
-            .collect();
-        let mut probes =
-            futures::stream::iter(discovered_fallbacks.into_iter().map(|peer| async move {
-                let result = probe_candidate(client, &peer, hash, max_file_bytes, budgets).await;
-                (peer, result)
-            }))
-            .buffer_unordered(HEAD_CONCURRENCY);
-        while let Some((peer, result)) = probes.next().await {
-            match result {
-                Ok(availability) => return Ok(availability),
-                Err(error) => {
-                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                    summary.observe(error)?;
-                }
-            }
-        }
+    if let Some(availability) = probe_fallback_windows(
+        service,
+        client,
+        fallbacks,
+        hash,
+        max_file_bytes,
+        budgets,
+        summary,
+        workspace_slug,
+        origin,
+    )
+    .await?
+    {
+        return Ok(availability);
     }
     Err(summary.final_error())
 }
@@ -742,43 +632,95 @@ async fn fetch_fallbacks(
     hash_lock: &mut Option<HashLock>,
 ) -> Result<Option<(AssetMetadata, AssetPeer)>, AssetError> {
     let max_file_bytes = store.limits().max_file_bytes;
-    let mut probes = futures::stream::iter(peers.into_iter().map(|peer| async move {
-        let result = probe_candidate(client, &peer, request.hash, max_file_bytes, budgets).await;
-        (peer, result)
-    }))
-    .buffer_unordered(HEAD_CONCURRENCY);
-    while let Some((peer, result)) = probes.next().await {
-        match result {
-            Ok(_) => {
-                match download_candidate(service, store, client, &peer, request, hash_lock).await {
-                    Ok(metadata) => return Ok(Some((metadata, peer))),
-                    Err(error) => {
-                        record_candidate_failure(
-                            service,
-                            workspace_slug,
-                            request.hash,
-                            origin,
-                            &peer,
-                            &error,
-                        );
-                        summary.observe(error)?;
-                        if hash_lock.is_none() {
-                            return Err(summary.final_error());
-                        }
+    for window in peers.chunks(HEAD_CONCURRENCY) {
+        let mut probes = futures::stream::iter(window.iter().cloned().enumerate().map(
+            |(index, peer)| async move {
+                let result =
+                    probe_candidate(client, &peer, request.hash, max_file_bytes, budgets).await;
+                (index, peer, result)
+            },
+        ))
+        .buffer_unordered(HEAD_CONCURRENCY);
+        let mut available = Vec::new();
+        while let Some((index, peer, result)) = probes.next().await {
+            match result {
+                Ok(_) => {
+                    #[cfg(feature = "test-support")]
+                    service.record_fallback_probe_success();
+                    available.push((index, peer));
+                }
+                Err(error) => {
+                    record_candidate_failure(
+                        service,
+                        workspace_slug,
+                        request.hash,
+                        origin,
+                        &peer,
+                        &error,
+                    );
+                    summary.observe(error)?;
+                }
+            }
+        }
+        #[cfg(feature = "test-support")]
+        service.record_fallback_probe_window_completed();
+        available.sort_by_key(|(index, _)| *index);
+        for (_, peer) in available {
+            match download_candidate(service, store, client, &peer, request, hash_lock).await {
+                Ok(metadata) => return Ok(Some((metadata, peer))),
+                Err(error) => {
+                    record_candidate_failure(
+                        service,
+                        workspace_slug,
+                        request.hash,
+                        origin,
+                        &peer,
+                        &error,
+                    );
+                    summary.observe(error)?;
+                    if hash_lock.is_none() {
+                        return Err(summary.final_error());
                     }
                 }
             }
-            Err(error) => {
-                record_candidate_failure(
-                    service,
-                    workspace_slug,
-                    request.hash,
-                    origin,
-                    &peer,
-                    &error,
-                );
-                summary.observe(error)?;
+        }
+    }
+    Ok(None)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn probe_fallback_windows(
+    service: &Arc<AssetService>,
+    client: &reqwest::Client,
+    peers: Vec<AssetPeer>,
+    hash: &str,
+    max_file_bytes: u64,
+    budgets: ResolverBudgets,
+    summary: &mut AttemptSummary,
+    workspace_slug: &str,
+    origin: &str,
+) -> Result<Option<HeadAvailability>, AssetError> {
+    for window in peers.chunks(HEAD_CONCURRENCY) {
+        let mut probes = futures::stream::iter(window.iter().cloned().enumerate().map(
+            |(index, peer)| async move {
+                let result = probe_candidate(client, &peer, hash, max_file_bytes, budgets).await;
+                (index, peer, result)
+            },
+        ))
+        .buffer_unordered(HEAD_CONCURRENCY);
+        let mut available = Vec::new();
+        while let Some((index, peer, result)) = probes.next().await {
+            match result {
+                Ok(availability) => available.push((index, availability)),
+                Err(error) => {
+                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
+                    summary.observe(error)?;
+                }
             }
+        }
+        available.sort_by_key(|(index, _)| *index);
+        if let Some((_, availability)) = available.into_iter().next() {
+            return Ok(Some(availability));
         }
     }
     Ok(None)
@@ -797,6 +739,7 @@ async fn probe_candidate(
         size: validated.size,
         media_type: "application/octet-stream".to_string(),
         peer: peer.clone(),
+        locality: AssetLocality::Remote,
     })
 }
 
@@ -1118,7 +1061,7 @@ fn record_fetch_success(
     origin: &str,
     replica: &ResolvedReplica,
 ) {
-    if replica.peer.node_id == "local" {
+    if replica.locality == AssetLocality::Local {
         return;
     }
     let event = if replica.peer.runtime_id.as_deref() == Some(origin) {

@@ -675,11 +675,13 @@ async fn serve_local(
                 Ok(availability) => availability,
                 Err(error) => return resolver_error_response(error),
             };
-            if availability.peer.node_id != "local" {
-                return if request.headers().get_all(header::RANGE).iter().count() > 1 {
+            if availability.locality == super::resolver::AssetLocality::Remote {
+                return if not_modified {
+                    head_availability_response(availability, &hash, &options, true)
+                } else if request.headers().get_all(header::RANGE).iter().count() > 1 {
                     head_range_not_satisfiable_response(availability, &hash, &options)
                 } else {
-                    head_availability_response(availability, &hash, &options, not_modified)
+                    head_availability_response(availability, &hash, &options, false)
                 };
             }
         }
@@ -696,7 +698,7 @@ async fn serve_local(
             .await
             {
                 Ok(replica) => {
-                    remote_resolution = replica.peer.node_id != "local";
+                    remote_resolution = replica.locality == super::resolver::AssetLocality::Remote;
                 }
                 Err(error) => return resolver_error_response(error),
             }

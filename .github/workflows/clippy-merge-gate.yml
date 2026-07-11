@@ -64,6 +64,9 @@ jobs:
       - name: cargo test (asset Fleet)
         run: cargo test -p gitim-runtime --features test-support --test assets_fleet --locked
 
+      - name: cargo test (Fleet HTTP)
+        run: cargo test -p gitim-runtime --test fleet_http --locked
+
       - name: Post result
         uses: actions/github-script@v7
         if: always()

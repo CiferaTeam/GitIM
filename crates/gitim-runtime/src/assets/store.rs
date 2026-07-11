@@ -333,6 +333,10 @@ pub struct AssetService {
     fail_next_activation_invariant: AtomicBool,
     #[cfg(feature = "test-support")]
     health_snapshot_attempt: Mutex<Option<Arc<Barrier>>>,
+    #[cfg(feature = "test-support")]
+    fallback_probe_successes: AtomicUsize,
+    #[cfg(feature = "test-support")]
+    fallback_probe_windows_completed: AtomicUsize,
     pub store_failures: AtomicU64,
     pub hash_mismatches: AtomicU64,
     pub fleet_fetch_failures: AtomicU64,
@@ -440,6 +444,10 @@ impl AssetService {
             fail_next_activation_invariant: AtomicBool::new(false),
             #[cfg(feature = "test-support")]
             health_snapshot_attempt: Mutex::new(None),
+            #[cfg(feature = "test-support")]
+            fallback_probe_successes: AtomicUsize::new(0),
+            #[cfg(feature = "test-support")]
+            fallback_probe_windows_completed: AtomicUsize::new(0),
             store_failures: AtomicU64::new(0),
             hash_mismatches: AtomicU64::new(0),
             fleet_fetch_failures: AtomicU64::new(0),
@@ -1049,6 +1057,30 @@ impl AssetService {
 
     pub(crate) fn finish_fleet_discovery(&self, workspace: &str, identity: &str) {
         lock(&self.fleet_discoveries).remove(&(workspace.to_string(), identity.to_string()));
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn record_fallback_probe_success(&self) {
+        self.fallback_probe_successes.fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn fallback_probe_successes(&self) -> usize {
+        self.fallback_probe_successes.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn record_fallback_probe_window_completed(&self) {
+        self.fallback_probe_windows_completed
+            .fetch_add(1, Ordering::AcqRel);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn fallback_probe_windows_completed(&self) -> usize {
+        self.fallback_probe_windows_completed
+            .load(Ordering::Acquire)
     }
 
     pub async fn acquire_peer(&self) -> Result<OwnedSemaphorePermit, AssetError> {
