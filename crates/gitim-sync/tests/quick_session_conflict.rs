@@ -176,7 +176,7 @@ fn concurrent_creator_input_and_agent_completion_reconcile_session_markers() {
         &repo,
         &mut circuit,
         &Mutex::new(()),
-        &move || pushed_callback.store(true, Ordering::SeqCst),
+        &move |_, _| pushed_callback.store(true, Ordering::SeqCst),
         &|_, _, _| {},
         &|_| {},
         &|| {},
@@ -224,4 +224,168 @@ fn concurrent_creator_input_and_agent_completion_reconcile_session_markers() {
         },
     )
     .expect("queued creator input should remain claimable");
+}
+
+#[test]
+fn metadata_only_claim_and_title_merge_with_remote_creator_append() {
+    let bare = TempDir::new().unwrap();
+    let clone_a = TempDir::new().unwrap();
+    let clone_b = TempDir::new().unwrap();
+    run_git(bare.path(), &["init", "--bare"]);
+    run_git(
+        clone_a.path().parent().unwrap(),
+        &[
+            "clone",
+            bare.path().to_str().unwrap(),
+            clone_a.path().to_str().unwrap(),
+        ],
+    );
+    run_git(clone_a.path(), &["config", "user.email", "alice@test.com"]);
+    run_git(clone_a.path(), &["config", "user.name", "Alice"]);
+
+    let alice = Handler::new("alice").unwrap();
+    let mut base_meta = QuickSessionMeta::new(
+        SESSION_ID.to_string(),
+        "bob".to_string(),
+        "alice".to_string(),
+        "2026-07-11T00:00:00Z".to_string(),
+    );
+    apply_quick_session_transition(
+        &mut base_meta,
+        QuickSessionTransition::HumanMessage {
+            actor: "alice".to_string(),
+            line_number: 1,
+            request_id: Some("request-1".to_string()),
+            preview: "first".to_string(),
+            now: "2026-07-11T00:00:01Z".to_string(),
+        },
+    )
+    .unwrap();
+    let base_thread = format_message(1, 0, &alice, "20260711T000001Z", "first");
+    write_session(clone_a.path(), &base_meta, &base_thread);
+    run_git(clone_a.path(), &["add", "."]);
+    run_git(clone_a.path(), &["commit", "-m", "session base"]);
+    run_git(clone_a.path(), &["push", "-u", "origin", "HEAD"]);
+    run_git(
+        clone_b.path().parent().unwrap(),
+        &[
+            "clone",
+            bare.path().to_str().unwrap(),
+            clone_b.path().to_str().unwrap(),
+        ],
+    );
+    run_git(clone_b.path(), &["config", "user.email", "bob@test.com"]);
+    run_git(clone_b.path(), &["config", "user.name", "Bob"]);
+
+    let mut remote_meta = base_meta.clone();
+    apply_quick_session_transition(
+        &mut remote_meta,
+        QuickSessionTransition::HumanMessage {
+            actor: "alice".to_string(),
+            line_number: 2,
+            request_id: Some("request-2".to_string()),
+            preview: "queued while claiming".to_string(),
+            now: "2026-07-11T00:00:02Z".to_string(),
+        },
+    )
+    .unwrap();
+    let remote_thread = format!(
+        "{base_thread}{}",
+        format_message(2, 0, &alice, "20260711T000002Z", "queued while claiming")
+    );
+    write_session(clone_a.path(), &remote_meta, &remote_thread);
+    run_git(clone_a.path(), &["add", "."]);
+    run_git(clone_a.path(), &["commit", "-m", "creator append"]);
+    run_git(clone_a.path(), &["push"]);
+
+    let mut local_meta = base_meta;
+    apply_quick_session_transition(
+        &mut local_meta,
+        QuickSessionTransition::Claim {
+            actor: "bob".to_string(),
+            input_line: 1,
+            attempt_id: ATTEMPT_A.to_string(),
+            now: "2026-07-11T00:00:03Z".to_string(),
+        },
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut local_meta,
+        QuickSessionTransition::SetTitle {
+            actor: "bob".to_string(),
+            attempt_id: ATTEMPT_A.to_string(),
+            title: "Metadata-only title".to_string(),
+            now: "2026-07-11T00:00:04Z".to_string(),
+        },
+    )
+    .unwrap();
+    write_session(clone_b.path(), &local_meta, &base_thread);
+    run_git(
+        clone_b.path(),
+        &[
+            "add",
+            &format!("quick-sessions/{SESSION_ID}/session.meta.yaml"),
+        ],
+    );
+    run_git(clone_b.path(), &["commit", "-m", "agent claim and title"]);
+
+    let repo = GitStorage::new(clone_b.path());
+    let pushed = Arc::new(AtomicBool::new(false));
+    let pushed_callback = pushed.clone();
+    let mut circuit = AuthCircuit::new(Arc::new(AtomicBool::new(false)));
+    run_sync_cycle(
+        &repo,
+        &mut circuit,
+        &Mutex::new(()),
+        &move |_, _| pushed_callback.store(true, Ordering::SeqCst),
+        &|_, _, _| {},
+        &|_| {},
+        &|| {},
+        Some(&("Bob".to_string(), "bob@test.com".to_string())),
+    );
+
+    assert!(pushed.load(Ordering::SeqCst));
+    assert!(!repo.has_stale_rebase_state());
+    let merged_meta: QuickSessionMeta = serde_yaml::from_str(
+        &std::fs::read_to_string(
+            clone_b
+                .path()
+                .join(format!("quick-sessions/{SESSION_ID}/session.meta.yaml")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(merged_meta.title.as_deref(), Some("Metadata-only title"));
+    assert_eq!(merged_meta.status, QuickSessionStatus::Running);
+    assert_eq!(merged_meta.processing_input_line, Some(1));
+    assert_eq!(merged_meta.attempt_id.as_deref(), Some(ATTEMPT_A));
+    assert_eq!(merged_meta.last_human_line, Some(2));
+    assert_eq!(
+        merged_meta.last_human_request_id.as_deref(),
+        Some("request-2")
+    );
+
+    let mut next = merged_meta;
+    apply_quick_session_transition(
+        &mut next,
+        QuickSessionTransition::AgentReply {
+            actor: "bob".to_string(),
+            input_line: 1,
+            attempt_id: ATTEMPT_A.to_string(),
+            output_line: 3,
+            preview: "done".to_string(),
+            now: "2026-07-11T00:00:05Z".to_string(),
+        },
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut next,
+        QuickSessionTransition::Claim {
+            actor: "bob".to_string(),
+            input_line: 2,
+            attempt_id: ATTEMPT_B.to_string(),
+            now: "2026-07-11T00:00:06Z".to_string(),
+        },
+    )
+    .expect("remote creator append should remain claimable after the current turn");
 }

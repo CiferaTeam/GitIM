@@ -52,6 +52,7 @@ async fn test_handle_send_creates_git_commit() {
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].channel, "general");
     assert_eq!(pending[0].line_number, 1);
+    assert_eq!(pending[0].commit_id, data["commit_id"]);
 }
 
 async fn setup_git_test_repo_with_email(email: Option<String>) -> (TempDir, Arc<AppState>) {

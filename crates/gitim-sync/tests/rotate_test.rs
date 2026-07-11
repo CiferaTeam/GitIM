@@ -576,7 +576,7 @@ fn run_one_sync_cycle(storage: &GitStorage, lock: &std::sync::Mutex<()>) {
         storage,
         &mut circuit,
         lock,
-        &|| {},
+        &|_, _| {},
         &|_, _, _| {},
         &|_| {},
         &|| {},

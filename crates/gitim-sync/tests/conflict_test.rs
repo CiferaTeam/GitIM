@@ -280,8 +280,13 @@ fn test_resolve_content_preserves_external_p_references() {
     );
 }
 
+use gitim_core::formatter::format_message;
 use gitim_core::types::ChannelMeta;
-use gitim_sync::conflict::merge_channel_meta;
+use gitim_core::types::{
+    apply_quick_session_transition, Handler, QuickSessionMeta, QuickSessionStatus,
+    QuickSessionTransition,
+};
+use gitim_sync::conflict::{merge_channel_meta, merge_quick_session_meta};
 
 #[test]
 fn test_merge_channel_meta_union_and_dedup() {
@@ -348,4 +353,105 @@ fn test_merge_channel_meta_scalars_from_remote() {
     assert_eq!(merged.display_name, "Remote Name");
     assert_eq!(merged.introduction, "remote intro");
     assert_eq!(merged.members, vec!["alice", "bob"]);
+}
+
+#[test]
+fn quick_session_merge_preserves_newer_error_and_clears_failed_claim() {
+    let session_id = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    let attempt_id = "qa-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    let mut base = QuickSessionMeta::new(
+        session_id.to_string(),
+        "bob".to_string(),
+        "alice".to_string(),
+        "2026-07-11T00:00:00Z".to_string(),
+    );
+    apply_quick_session_transition(
+        &mut base,
+        QuickSessionTransition::HumanMessage {
+            actor: "alice".to_string(),
+            line_number: 1,
+            request_id: None,
+            preview: "first".to_string(),
+            now: "2026-07-11T00:00:01Z".to_string(),
+        },
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut base,
+        QuickSessionTransition::Claim {
+            actor: "bob".to_string(),
+            input_line: 1,
+            attempt_id: attempt_id.to_string(),
+            now: "2026-07-11T00:00:02Z".to_string(),
+        },
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut base,
+        QuickSessionTransition::SetTitle {
+            actor: "bob".to_string(),
+            attempt_id: attempt_id.to_string(),
+            title: "Preserved title".to_string(),
+            now: "2026-07-11T00:00:03Z".to_string(),
+        },
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut base,
+        QuickSessionTransition::SetSummary {
+            actor: "bob".to_string(),
+            attempt_id: attempt_id.to_string(),
+            summary: "Preserved summary".to_string(),
+            now: "2026-07-11T00:00:04Z".to_string(),
+        },
+    )
+    .unwrap();
+
+    let mut local = base.clone();
+    apply_quick_session_transition(
+        &mut local,
+        QuickSessionTransition::HumanMessage {
+            actor: "alice".to_string(),
+            line_number: 2,
+            request_id: Some("request-2".to_string()),
+            preview: "queued".to_string(),
+            now: "2026-07-11T00:00:05Z".to_string(),
+        },
+    )
+    .unwrap();
+    let mut remote = base;
+    apply_quick_session_transition(
+        &mut remote,
+        QuickSessionTransition::MarkError {
+            actor: "bob".to_string(),
+            attempt_id: attempt_id.to_string(),
+            error: "provider failed".to_string(),
+            now: "2026-07-11T00:00:06Z".to_string(),
+        },
+    )
+    .unwrap();
+
+    let alice = Handler::new("alice").unwrap();
+    let merged_thread = format!(
+        "{}{}",
+        format_message(1, 0, &alice, "20260711T000001Z", "first"),
+        format_message(2, 0, &alice, "20260711T000005Z", "queued")
+    );
+    let merged = merge_quick_session_meta(
+        &local,
+        &remote,
+        &merged_thread,
+        &[],
+        Path::new(&format!("quick-sessions/{session_id}/discussion.thread")),
+    )
+    .unwrap();
+
+    assert_eq!(merged.status, QuickSessionStatus::Active);
+    assert_eq!(merged.title.as_deref(), Some("Preserved title"));
+    assert_eq!(merged.summary.as_deref(), Some("Preserved summary"));
+    assert_eq!(merged.error.as_deref(), Some("provider failed"));
+    assert_eq!(merged.last_failed_attempt_id.as_deref(), Some(attempt_id));
+    assert!(merged.attempt_id.is_none());
+    assert!(merged.processing_input_line.is_none());
+    assert_eq!(merged.last_human_line, Some(2));
 }

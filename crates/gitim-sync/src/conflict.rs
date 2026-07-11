@@ -273,15 +273,52 @@ pub fn merge_quick_session_meta(
 
     let local_human_line = local.last_human_line.map(translate_local);
     let remote_human_line = remote.last_human_line;
-    let last_human_request_id = match (local_human_line, remote_human_line) {
-        (Some(local_line), Some(remote_line)) if local_line > remote_line => {
-            local.last_human_request_id.clone()
-        }
-        (Some(local_line), None) if Some(local_line) == newest_human_line => {
-            local.last_human_request_id.clone()
-        }
-        _ => remote.last_human_request_id.clone(),
+    let (last_human_request_id, last_human_updated_at) = match (local_human_line, remote_human_line)
+    {
+        (Some(local_line), Some(remote_line)) if local_line > remote_line => (
+            local.last_human_request_id.clone(),
+            Some(local.updated_at.as_str()),
+        ),
+        (Some(local_line), None) if Some(local_line) == newest_human_line => (
+            local.last_human_request_id.clone(),
+            Some(local.updated_at.as_str()),
+        ),
+        (_, Some(_)) => (
+            remote.last_human_request_id.clone(),
+            Some(remote.updated_at.as_str()),
+        ),
+        _ => (None, None),
     };
+
+    let local_failure = match (local.last_failed_attempt_id.as_ref(), local.error.as_ref()) {
+        (Some(attempt), Some(error)) => Some((
+            attempt.clone(),
+            error.clone(),
+            local.updated_at.clone(),
+            local_human_line,
+        )),
+        _ => None,
+    };
+    let remote_failure = match (
+        remote.last_failed_attempt_id.as_ref(),
+        remote.error.as_ref(),
+    ) {
+        (Some(attempt), Some(error)) => Some((
+            attempt.clone(),
+            error.clone(),
+            remote.updated_at.clone(),
+            remote_human_line,
+        )),
+        _ => None,
+    };
+    let failure = match (local_failure, remote_failure) {
+        (Some(local), Some(remote)) => Some(if local.2 >= remote.2 { local } else { remote }),
+        (Some(failure), None) | (None, Some(failure)) => Some(failure),
+        (None, None) => None,
+    }
+    .filter(|failure| {
+        last_human_updated_at.is_none_or(|human_updated_at| failure.2.as_str() >= human_updated_at)
+    });
 
     let local_completion = match (
         local.last_completed_attempt_id.as_ref(),
@@ -317,6 +354,15 @@ pub fn merge_quick_session_meta(
         (Some(completion), None) | (None, Some(completion)) => Some(completion),
         (None, None) => None,
     };
+    if completion.as_ref().is_some_and(|completed| {
+        failure
+            .as_ref()
+            .is_some_and(|failed| failed.0 == completed.0)
+    }) {
+        return Err(ConflictError::QuickSession(
+            "the same attempt both completed and failed".to_string(),
+        ));
+    }
 
     let local_claim = if local.status == QuickSessionStatus::Running {
         Some((
@@ -352,6 +398,7 @@ pub fn merge_quick_session_meta(
         completion
             .as_ref()
             .is_some_and(|completed| completed.0 == claim.0 && completed.1 == claim.1)
+            || failure.as_ref().is_some_and(|failed| failed.0 == claim.0)
     };
     let local_claim = local_claim.filter(|claim| !claim_completed(claim));
     let remote_claim = remote_claim.filter(|claim| !claim_completed(claim));
@@ -376,8 +423,20 @@ pub fn merge_quick_session_meta(
         (Some(_), None) => (local.summary.clone(), local.summary_updated_at.clone()),
         _ => (remote.summary.clone(), remote.summary_updated_at.clone()),
     };
+    if claim
+        .as_ref()
+        .is_some_and(|claim| failure.as_ref().is_some_and(|failed| failed.0 != claim.0))
+    {
+        return Err(ConflictError::QuickSession(
+            "a running claim conflicts with a failed attempt".to_string(),
+        ));
+    }
     let status = if claim.is_some() {
         QuickSessionStatus::Running
+    } else if failure.as_ref().is_some_and(|failed| {
+        newest_human_line.is_none_or(|newest| failed.3.is_none_or(|seen| newest <= seen))
+    }) {
+        QuickSessionStatus::Error
     } else if title.is_some() {
         QuickSessionStatus::Active
     } else {
@@ -392,7 +451,11 @@ pub fn merge_quick_session_meta(
             Some((attempt, input, output)) => (Some(attempt), Some(input), Some(output)),
             None => (None, None, None),
         };
-    let mut merged = QuickSessionMeta {
+    let (error, last_failed_attempt_id) = match failure {
+        Some((attempt, error, _, _)) => (Some(error), Some(attempt)),
+        None => (None, None),
+    };
+    let merged = QuickSessionMeta {
         id: local.id.clone(),
         title,
         title_source,
@@ -406,14 +469,14 @@ pub fn merge_quick_session_meta(
         summary,
         summary_updated_at,
         last_message_preview: final_preview,
-        error: None,
+        error,
         processing_input_line,
         processing_started_at,
         attempt_id,
         last_completed_attempt_id,
         last_completed_input_line,
         last_completed_line,
-        last_failed_attempt_id: None,
+        last_failed_attempt_id,
         last_human_request_id,
         last_human_line: newest_human_line,
         revision: local
@@ -422,9 +485,6 @@ pub fn merge_quick_session_meta(
             .checked_add(1)
             .ok_or_else(|| ConflictError::QuickSession("revision overflow".to_string()))?,
     };
-    if merged.status == QuickSessionStatus::Running {
-        merged.error = None;
-    }
     validate_quick_session_meta(&merged)
         .map_err(|error| ConflictError::QuickSession(error.to_string()))?;
     Ok(merged)

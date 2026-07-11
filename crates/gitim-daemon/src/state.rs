@@ -52,10 +52,10 @@ fn pending_channel_for_thread_path(path: &std::path::Path) -> String {
 /// In-flight tracker for a locally-committed message that the sync loop
 /// has not yet pushed to the remote.
 ///
-/// `send` enqueues an entry after a successful local commit and returns
-/// to the caller immediately. The sync loop drains entries on push
-/// success (emitting `Event::MessagesPushed`) and rewrites `line_number`
-/// when rebase renumbers the message.
+/// `send` enqueues an entry under `commit_lock` after a successful local
+/// commit and returns immediately. `commit_id` is the push watermark. The
+/// sync loop only confirms entries included in the pushed snapshot and
+/// rewrites `line_number` when conflict resolution renumbers the message.
 ///
 /// There is no per-entry result channel: push outcome is observable via
 /// `Event::MessagesPushed` (success) and sync_loop log + `auth_failed`
@@ -64,6 +64,7 @@ fn pending_channel_for_thread_path(path: &std::path::Path) -> String {
 pub struct PendingMessage {
     pub channel: String,
     pub line_number: u64,
+    pub commit_id: String,
 }
 
 pub struct AppState {
@@ -437,8 +438,8 @@ impl AppState {
                 push_notify,
                 auth_failed,
                 commit_lock,
-                move || {
-                    push_state.confirm_pending_pushes();
+                move |pushed_head, included_head| {
+                    push_state.confirm_pending_pushes(&pushed_head, &included_head);
 
                     // Rotation check: this push may have tipped the epoch
                     // over threshold. Throttled (60s) — counting a 1M-commit
@@ -629,20 +630,36 @@ impl AppState {
     }
 
     /// Confirm all locally committed messages after the sync loop reports a
-    /// successful push. Entries are grouped so one SSE acknowledgement covers
-    /// every line pushed for the same channel or Quick Session.
-    pub fn confirm_pending_pushes(&self) {
+    /// successful push. `included_head` identifies the local snapshot before
+    /// rebase rewriting; `pushed_head` is the rewritten snapshot that reached
+    /// the remote. Entries committed later remain pending.
+    pub fn confirm_pending_pushes(&self, pushed_head: &str, included_head: &str) {
+        let _guard = self
+            .commit_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !is_ancestor(pushed_head, "@{upstream}", &self.repo_root) {
+            tracing::warn!(%pushed_head, "push callback head is not reachable from upstream");
+            return;
+        }
         let mut pending = self
             .pending_push
             .write()
             .unwrap_or_else(|error| error.into_inner());
         let mut by_channel: HashMap<String, Vec<u64>> = HashMap::new();
+        let mut remaining = Vec::new();
         for message in pending.drain(..) {
-            by_channel
-                .entry(message.channel)
-                .or_default()
-                .push(message.line_number);
+            let included = is_ancestor(&message.commit_id, included_head, &self.repo_root);
+            if included {
+                by_channel
+                    .entry(message.channel.clone())
+                    .or_default()
+                    .push(message.line_number);
+            } else {
+                remaining.push(message);
+            }
         }
+        *pending = remaining;
         drop(pending);
 
         for (channel, line_numbers) in by_channel {

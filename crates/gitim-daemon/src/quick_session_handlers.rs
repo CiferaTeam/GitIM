@@ -409,15 +409,18 @@ pub async fn handle_create_quick_session(
             "create quick session commit failed: {error}; rolled back"
         ));
     }
+    if let Ok(commit_id) = state.git_storage.rev_parse("HEAD") {
+        state
+            .pending_push
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .push(PendingMessage {
+                channel: format!("quick_session:{session_id}"),
+                line_number: 1,
+                commit_id,
+            });
+    }
     drop(guard);
-    state
-        .pending_push
-        .write()
-        .unwrap_or_else(|error| error.into_inner())
-        .push(PendingMessage {
-            channel: format!("quick_session:{session_id}"),
-            line_number: 1,
-        });
     schedule_sync(&state);
     emit_changed(&state, &meta);
 
@@ -695,15 +698,18 @@ pub async fn handle_send_quick_session_message(
             "send quick session message commit failed: {error}; rolled back"
         ));
     }
+    if let Ok(commit_id) = state.git_storage.rev_parse("HEAD") {
+        state
+            .pending_push
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(PendingMessage {
+                channel: format!("quick_session:{session_id}"),
+                line_number: next_line,
+                commit_id,
+            });
+    }
     drop(guard);
-    state
-        .pending_push
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(PendingMessage {
-            channel: format!("quick_session:{session_id}"),
-            line_number: next_line,
-        });
     schedule_sync(&state);
     emit_changed(&state, &meta);
     Response::json(SendQuickSessionMessageResponse {

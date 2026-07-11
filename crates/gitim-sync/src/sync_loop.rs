@@ -143,7 +143,8 @@ const AUTH_CIRCUIT_HEARTBEAT_SECS: u64 = 300;
 ///   write+commit sequence — never around the network-only `fetch`/`push`. The
 ///   daemon's write handlers hold the same lock around their own commits, so
 ///   `rebase` is guaranteed never to run while a handler is mid-append.
-/// - `on_pushed`: called after a successful push (all pending messages are now remote)
+/// - `on_pushed`: called after a successful push with the pushed HEAD and the
+///   pre-rewrite local HEAD whose commits were included.
 /// - `on_renumbered`: called for each message that was renumbered during conflict resolution
 ///   (file, old_line, new_line)
 /// - `on_synced`: called after every sync cycle completes, with the current HEAD commit hash.
@@ -168,7 +169,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     on_cycle_done: F4,
     rebase_author: Option<(String, String)>,
 ) where
-    F1: Fn() + Send + Sync + 'static,
+    F1: Fn(String, String) + Send + Sync + 'static,
     F2: Fn(PathBuf, u64, u64) + Send + Sync + 'static,
     F3: Fn(String) + Send + Sync + 'static,
     F4: Fn() + Send + Sync + 'static,
@@ -195,7 +196,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     // `&dyn Fn(..)` deref'd from the Arc. Sync bound on the F* params is
     // load-bearing here: `Arc<F>: Sync` requires `F: Sync`, which the daemon's
     // closures satisfy (they capture `Arc<AppState>`, itself Sync).
-    let on_pushed: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(on_pushed);
+    let on_pushed: Arc<dyn Fn(String, String) + Send + Sync + 'static> = Arc::new(on_pushed);
     let on_renumbered: Arc<dyn Fn(PathBuf, u64, u64) + Send + Sync + 'static> =
         Arc::new(on_renumbered);
     let on_synced: Arc<dyn Fn(String) + Send + Sync + 'static> = Arc::new(on_synced);
@@ -372,7 +373,7 @@ pub fn run_sync_cycle(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
     commit_lock: &Mutex<()>,
-    on_pushed: &dyn Fn(),
+    on_pushed: &dyn Fn(String, String),
     on_renumbered: &dyn Fn(PathBuf, u64, u64),
     on_synced: &dyn Fn(String),
     on_cycle_done: &dyn Fn(),
@@ -506,22 +507,22 @@ fn prepare_quick_session_meta_resolutions(
         let meta_path = meta_path.ok_or_else(|| {
             format!("quick session {session_id} changed without session.meta.yaml")
         })?;
-        let thread_path = thread_path.ok_or_else(|| {
-            format!("quick session {session_id} changed without discussion.thread")
-        })?;
-        let local_thread = local_additions.get(&thread_path).ok_or_else(|| {
-            format!("quick session {session_id} metadata-only conflict requires manual resolution")
-        })?;
-        let parsed_local = gitim_core::parser::parse_thread(local_thread)
-            .map_err(|error| format!("quick session {session_id} local thread: {error}"))?;
-        if parsed_local
-            .entries
-            .first()
-            .is_none_or(|entry| entry.line_number() <= 1)
-        {
-            return Err(format!(
-                "quick session {session_id} create conflict requires manual resolution"
-            ));
+        let canonical_thread_path =
+            PathBuf::from(format!("quick-sessions/{session_id}/discussion.thread"));
+        let thread_path = thread_path.unwrap_or(canonical_thread_path);
+        let local_thread = local_additions.get(&thread_path);
+        if let Some(local_thread) = local_thread {
+            let parsed_local = gitim_core::parser::parse_thread(local_thread)
+                .map_err(|error| format!("quick session {session_id} local thread: {error}"))?;
+            if parsed_local
+                .entries
+                .first()
+                .is_none_or(|entry| entry.line_number() <= 1)
+            {
+                return Err(format!(
+                    "quick session {session_id} create conflict requires manual resolution"
+                ));
+            }
         }
         let local_meta: gitim_core::types::QuickSessionMeta =
             serde_yaml::from_str(local_metas.get(&meta_path).ok_or_else(|| {
@@ -543,18 +544,25 @@ fn prepare_quick_session_meta_resolutions(
                 })?,
         )
         .map_err(|error| format!("quick session {session_id} remote metadata: {error}"))?;
-        let additions = HashMap::from([(thread_path.clone(), local_thread.clone())]);
-        let remote_contents = HashMap::from([(thread_path.clone(), remote_thread)]);
-        let (resolved_files, mappings) =
-            conflict::resolve_content_pure(&additions, &remote_contents)
-                .map_err(|error| error.to_string())?;
-        let merged_thread = resolved_files
-            .first()
-            .ok_or_else(|| format!("quick session {session_id} thread was not resolved"))?;
+        let (merged_thread, mappings) = if let Some(local_thread) = local_thread {
+            let additions = HashMap::from([(thread_path.clone(), local_thread.clone())]);
+            let remote_contents = HashMap::from([(thread_path.clone(), remote_thread)]);
+            let (resolved_files, mappings) =
+                conflict::resolve_content_pure(&additions, &remote_contents)
+                    .map_err(|error| error.to_string())?;
+            let merged_thread = resolved_files
+                .first()
+                .ok_or_else(|| format!("quick session {session_id} thread was not resolved"))?
+                .content
+                .clone();
+            (merged_thread, mappings)
+        } else {
+            (remote_thread, Vec::new())
+        };
         let merged_meta = conflict::merge_quick_session_meta(
             &local_meta,
             &remote_meta,
-            &merged_thread.content,
+            &merged_thread,
             &mappings,
             &thread_path,
         )
@@ -824,7 +832,7 @@ fn sync_with_push(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
     commit_lock: &Mutex<()>,
-    on_pushed: &dyn Fn(),
+    on_pushed: &dyn Fn(String, String),
     on_renumbered: &dyn Fn(PathBuf, u64, u64),
     rebase_author: Option<&(String, String)>,
 ) -> SyncOutcome {
@@ -837,13 +845,24 @@ fn sync_with_push(
         return SyncOutcome::Normal;
     }
 
+    let mut included_head_before_rewrite: Option<String> = None;
     for attempt in 1..=MAX_SYNC_RETRIES {
         // Try push directly
+        let direct_push_head = match repo.rev_parse("HEAD") {
+            Ok(head) => head,
+            Err(error) => {
+                warn!("sync: failed to snapshot direct-push HEAD: {}", error);
+                return SyncOutcome::Normal;
+            }
+        };
+        let direct_included_head = included_head_before_rewrite
+            .clone()
+            .unwrap_or_else(|| direct_push_head.clone());
         let push_result = repo.push();
         observe_auth(circuit, &push_result);
         match push_result {
             Ok(()) => {
-                on_pushed();
+                on_pushed(direct_push_head, direct_included_head);
                 info!("sync: push complete (attempt {})", attempt);
                 return SyncOutcome::Normal;
             }
@@ -916,9 +935,16 @@ fn sync_with_push(
         let rebase_guard = commit_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let local_head_before_rebase = match repo.rev_parse("HEAD") {
+            Ok(head) => head,
+            Err(error) => {
+                warn!("sync: failed to snapshot pre-rebase HEAD: {}", error);
+                return SyncOutcome::Normal;
+            }
+        };
 
         // Capture local additions BEFORE attempting rebase
-        let local_additions = match repo.diff_unpushed("*.thread") {
+        let local_additions = match repo.diff_since_merge_base("*.thread") {
             Ok(v) => v,
             Err(e) => {
                 warn!("sync: failed to diff unpushed additions: {}", e);
@@ -928,7 +954,7 @@ fn sync_with_push(
 
         // Capture changed meta files BEFORE attempting rebase
         let changed_meta_files = repo
-            .changed_files_unpushed("*.meta.yaml")
+            .changed_files_since_merge_base("*.meta.yaml")
             .unwrap_or_default();
         let mut local_metas: HashMap<PathBuf, String> = HashMap::new();
         for rel_path in &changed_meta_files {
@@ -938,14 +964,11 @@ fn sync_with_push(
             }
         }
 
-        // Capture the FULL unpushed file list BEFORE attempting rebase. After
-        // rebase failure, HEAD may be detached or in a partial-rebase state, so
-        // querying `@{upstream}..HEAD` then can return wrong/empty results and
-        // mask non-resolvable changes — falling through to discard_unpushed
-        // (data loss). We snapshot it here while HEAD is reliably on the local
-        // branch and use the cached list to decide whether the rebase failure
-        // is safe to recover from.
-        let all_unpushed_before_rebase = match repo.changed_files_unpushed_all() {
+        // Capture the complete local side before attempting rebase. The
+        // merge-base range excludes remote-only objects while HEAD still
+        // points to the local branch, so conflict classification remains
+        // stable after a failed rebase detaches HEAD.
+        let all_unpushed_before_rebase = match repo.changed_files_since_merge_base_all() {
             Ok(v) => v,
             Err(e) => {
                 warn!("sync: failed to list unpushed files: {}", e);
@@ -967,6 +990,15 @@ fn sync_with_push(
         // Try rebase (fast path: no .thread conflicts)
         match repo.rebase_onto_origin() {
             Ok(()) => {
+                included_head_before_rewrite
+                    .get_or_insert_with(|| local_head_before_rebase.clone());
+                let rebased_head = match repo.rev_parse("HEAD") {
+                    Ok(head) => head,
+                    Err(error) => {
+                        warn!("sync: failed to snapshot rebased HEAD: {}", error);
+                        return SyncOutcome::Normal;
+                    }
+                };
                 drop(rebase_guard);
                 // Epoch fence, checkpoint (3) — backstop: the rebase may have
                 // replayed local messages on top of a just-pulled R. Never
@@ -978,7 +1010,12 @@ fn sync_with_push(
                 observe_auth(circuit, &push_after_rebase);
                 match push_after_rebase {
                     Ok(()) => {
-                        on_pushed();
+                        on_pushed(
+                            rebased_head,
+                            included_head_before_rewrite
+                                .clone()
+                                .unwrap_or_else(|| local_head_before_rebase.clone()),
+                        );
                         info!("sync: push complete after rebase (attempt {})", attempt);
                         return SyncOutcome::Normal;
                     }
@@ -1217,6 +1254,16 @@ fn sync_with_push(
                     on_renumbered(m.file.clone(), m.old_line, m.new_line);
                 }
 
+                let resolved_head = match repo.rev_parse("HEAD") {
+                    Ok(head) => head,
+                    Err(error) => {
+                        warn!("sync: failed to snapshot resolved HEAD: {}", error);
+                        return SyncOutcome::Normal;
+                    }
+                };
+                included_head_before_rewrite
+                    .get_or_insert_with(|| local_head_before_rebase.clone());
+
                 // Resolve committed — commit tree is stable again, release
                 // before the network round-trip so a slow push doesn't hold
                 // back handler writers waiting on commit_lock.
@@ -1226,7 +1273,12 @@ fn sync_with_push(
                 observe_auth(circuit, &push_after_resolve);
                 match push_after_resolve {
                     Ok(()) => {
-                        on_pushed();
+                        on_pushed(
+                            resolved_head,
+                            included_head_before_rewrite
+                                .clone()
+                                .unwrap_or_else(|| local_head_before_rebase.clone()),
+                        );
                         info!(
                             "sync: push complete after conflict resolution (attempt {})",
                             attempt

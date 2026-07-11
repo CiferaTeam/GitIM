@@ -413,6 +413,21 @@ impl GitStorage {
         )))
     }
 
+    /// Return additions introduced by local-only commits since the common
+    /// ancestor with upstream. Remote-only paths are excluded even after a
+    /// fetch makes the two branch tips divergent.
+    pub fn diff_since_merge_base(
+        &self,
+        pattern: &str,
+    ) -> Result<HashMap<PathBuf, String>, GitError> {
+        let merge_base = self.merge_base_with_upstream()?;
+        let range = format!("{merge_base}..HEAD");
+        let output = run_git(&["diff", "--no-renames", &range, "--", pattern], &self.root)?;
+        Ok(Self::parse_diff_output(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
+    }
+
     fn parse_diff_output(stdout: &str) -> HashMap<PathBuf, String> {
         let mut result: HashMap<PathBuf, String> = HashMap::new();
         let mut current_path: Option<PathBuf> = None;
@@ -479,11 +494,13 @@ impl GitStorage {
             .collect())
     }
 
+    pub fn changed_files_since_merge_base_all(&self) -> Result<Vec<PathBuf>, GitError> {
+        let merge_base = self.merge_base_with_upstream()?;
+        self.changed_files_range(&merge_base, "HEAD")
+    }
+
     pub fn changed_files_since_merge_base(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
-        let merge_base_output = run_git(&["merge-base", "@{upstream}", "HEAD"], &self.root)?;
-        let merge_base = String::from_utf8_lossy(&merge_base_output.stdout)
-            .trim()
-            .to_string();
+        let merge_base = self.merge_base_with_upstream()?;
         let range = format!("{}..HEAD", merge_base);
         let output = run_git(
             &["diff", "--name-only", "--no-renames", &range, "--", pattern],
@@ -494,6 +511,11 @@ impl GitStorage {
             .filter(|l| !l.is_empty())
             .map(PathBuf::from)
             .collect())
+    }
+
+    fn merge_base_with_upstream(&self) -> Result<String, GitError> {
+        let output = run_git(&["merge-base", "@{upstream}", "HEAD"], &self.root)?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     pub fn mv(&self, from: &str, to: &str) -> Result<(), GitError> {

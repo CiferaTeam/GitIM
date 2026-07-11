@@ -12,7 +12,7 @@ use gitim_core::responses::{
 use gitim_core::types::{QuickSessionStatus, ThreadEntry};
 use gitim_daemon::api::{Request, Response};
 use gitim_daemon::handlers::handle_request;
-use gitim_daemon::state::SharedState;
+use gitim_daemon::state::{PendingMessage, SharedState};
 use gitim_sync::sync_loop::{run_sync_cycle, AuthCircuit};
 
 const SESSION_ID: &str = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
@@ -317,6 +317,7 @@ async fn quick_session_send_acks_locally_until_sync_confirms_push() {
     data::<CreateQuickSessionResponse>(
         create(state.clone(), SESSION_ID, "bob", "first", "alice").await,
     );
+    let create_head = state.git_storage.rev_parse("HEAD").unwrap();
     let remote_before_send = bare_head(&bare);
     let response: SendQuickSessionMessageResponse =
         data(send_human(state.clone(), "queued for sync", "req-pending", "alice").await);
@@ -332,15 +333,44 @@ async fn quick_session_send_acks_locally_until_sync_confirms_push() {
         message.channel == format!("quick_session:{SESSION_ID}")
             && matches!(message.line_number, 1 | 2)
     }));
+    assert_eq!(pending[0].commit_id, create_head);
+    assert_eq!(
+        pending[1].commit_id,
+        state.git_storage.rev_parse("HEAD").unwrap()
+    );
     drop(pending);
 
     let mut events = state.event_tx.subscribe();
+    run_git(
+        &state.repo_root,
+        &["push", "origin", &format!("{create_head}:refs/heads/main")],
+    );
+    state.confirm_pending_pushes(&create_head, &create_head);
+    let first_push = events.try_recv().unwrap();
+    match first_push {
+        gitim_daemon::api::Event::MessagesPushed {
+            channel,
+            line_numbers,
+        } => {
+            assert_eq!(channel, format!("quick_session:{SESSION_ID}"));
+            assert_eq!(line_numbers, vec![1]);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+    let pending = state
+        .pending_push
+        .read()
+        .unwrap_or_else(|error| error.into_inner());
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].line_number, 2);
+    drop(pending);
+
     let mut circuit = AuthCircuit::new(state.auth_failed.clone());
     run_sync_cycle(
         &state.git_storage,
         &mut circuit,
         &state.commit_lock,
-        &|| state.confirm_pending_pushes(),
+        &|pushed_head, included_head| state.confirm_pending_pushes(&pushed_head, &included_head),
         &|_, _, _| {},
         &|_| {},
         &|| {},
@@ -353,14 +383,64 @@ async fn quick_session_send_acks_locally_until_sync_confirms_push() {
         .read()
         .unwrap_or_else(|error| error.into_inner())
         .is_empty());
-    let pushed = events.try_recv().unwrap();
-    match pushed {
+    let second_push = events.try_recv().unwrap();
+    match second_push {
         gitim_daemon::api::Event::MessagesPushed {
             channel,
             line_numbers,
         } => {
             assert_eq!(channel, format!("quick_session:{SESSION_ID}"));
-            assert_eq!(line_numbers, vec![1, 2]);
+            assert_eq!(line_numbers, vec![2]);
+        }
+        other => panic!("unexpected event: {other:?}"),
+    }
+
+    let confirmed_head = state.git_storage.rev_parse("HEAD").unwrap();
+    let commit_guard = state
+        .commit_lock
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let confirm_state = state.clone();
+    let confirm_head = confirmed_head.clone();
+    let confirm = std::thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        confirm_state.confirm_pending_pushes(&confirm_head, &confirm_head);
+        done_tx.send(()).unwrap();
+    });
+    started_rx.recv().unwrap();
+    assert!(
+        done_rx
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err(),
+        "push confirmation must wait for the writer's commit lock"
+    );
+    state
+        .pending_push
+        .write()
+        .unwrap_or_else(|error| error.into_inner())
+        .push(PendingMessage {
+            channel: format!("quick_session:{SESSION_ID}"),
+            line_number: 99,
+            commit_id: confirmed_head,
+        });
+    drop(commit_guard);
+    confirm.join().unwrap();
+    done_rx.recv().unwrap();
+
+    assert!(state
+        .pending_push
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_empty());
+    match events.try_recv().unwrap() {
+        gitim_daemon::api::Event::MessagesPushed {
+            channel,
+            line_numbers,
+        } => {
+            assert_eq!(channel, format!("quick_session:{SESSION_ID}"));
+            assert_eq!(line_numbers, vec![99]);
         }
         other => panic!("unexpected event: {other:?}"),
     }
