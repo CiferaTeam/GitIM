@@ -5,7 +5,10 @@ use crate::state::SharedState;
 use gitim_core::dm::parse_dm_filename;
 use gitim_core::mention::extract_mentions;
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{CardMeta, ChannelMeta, Handler, Message, ThreadEntry};
+use gitim_core::types::{
+    validate_quick_session_id, validate_quick_session_meta, CardMeta, ChannelMeta, Handler,
+    Message, QuickSessionMeta, QuickSessionStatus, ThreadEntry,
+};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use tracing::warn;
@@ -198,6 +201,89 @@ pub async fn handle_poll(state: SharedState, since: Option<String>) -> Response 
 
         if board_handler_from_path(&path_str).is_some() {
             continue;
+        }
+
+        if let Some((archived, session_id, file)) = quick_session_path(&path_str) {
+            let base = if archived {
+                state
+                    .repo_root
+                    .join("archive/quick-sessions")
+                    .join(session_id)
+            } else {
+                state.repo_root.join("quick-sessions").join(session_id)
+            };
+            let meta = std::fs::read_to_string(base.join("session.meta.yaml"))
+                .ok()
+                .and_then(|content| serde_yaml::from_str::<QuickSessionMeta>(&content).ok())
+                .filter(|meta| validate_quick_session_meta(meta).is_ok());
+            if meta.is_none() {
+                warn!(
+                    session_id,
+                    path = %path_str,
+                    "poll: quick session metadata missing or invalid; suppressing agent recipient"
+                );
+            }
+            let routes_to_agent = !archived
+                && meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.status != QuickSessionStatus::Archived);
+            if file == "session.meta.yaml" {
+                let Some(meta) = meta else {
+                    continue;
+                };
+                let mut entry = serde_json::json!({
+                    "type": "quick_session_meta",
+                    "session_id": meta.id,
+                    "agent_id": meta.agent_id,
+                    "status": meta.status,
+                    "revision": meta.revision,
+                });
+                if routes_to_agent {
+                    entry["recipients"] = serde_json::json!([meta.agent_id]);
+                }
+                changes.push(gitim_core::responses::PollChange {
+                    channel: session_id.to_string(),
+                    kind: "quick_session_meta".to_string(),
+                    entries: vec![entry],
+                });
+                continue;
+            }
+            if file == "discussion.thread" {
+                let parsed = match parse_thread(added_content) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        warn!(
+                            session_id,
+                            path = %path_str,
+                            %error,
+                            "poll: failed to parse quick session thread"
+                        );
+                        continue;
+                    }
+                };
+                if parsed.entries.is_empty() {
+                    continue;
+                }
+                let entries = parsed
+                    .entries
+                    .iter()
+                    .map(|entry| {
+                        let mut json = entry_to_json(entry);
+                        if routes_to_agent && matches!(entry, ThreadEntry::Message(_)) {
+                            if let Some(meta) = meta.as_ref() {
+                                json["recipients"] = serde_json::json!([meta.agent_id]);
+                            }
+                        }
+                        json
+                    })
+                    .collect();
+                changes.push(gitim_core::responses::PollChange {
+                    channel: session_id.to_string(),
+                    kind: "quick_session_thread".to_string(),
+                    entries,
+                });
+                continue;
+            }
         }
 
         // Match card paths first so they don't fall through to the channel_meta /
@@ -753,4 +839,18 @@ fn board_handler_from_path(path: &str) -> Option<&str> {
     } else {
         None
     }
+}
+
+fn quick_session_path(path: &str) -> Option<(bool, &str, &str)> {
+    let (archived, rest) = if let Some(rest) = path.strip_prefix("quick-sessions/") {
+        (false, rest)
+    } else {
+        (true, path.strip_prefix("archive/quick-sessions/")?)
+    };
+    let (session_id, file) = rest.split_once('/')?;
+    if file.contains('/') || validate_quick_session_id(session_id).is_err() {
+        return None;
+    }
+    matches!(file, "session.meta.yaml" | "discussion.thread")
+        .then_some((archived, session_id, file))
 }

@@ -13,6 +13,7 @@ pub mod http;
 pub mod identity;
 pub mod lifecycle;
 pub mod onboard;
+pub mod quick_session_handlers;
 pub mod reconcile;
 pub mod server;
 pub mod state;
