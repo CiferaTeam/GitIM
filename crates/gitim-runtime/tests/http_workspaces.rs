@@ -1388,6 +1388,72 @@ async fn delete_waits_for_owned_workspace_finalization_before_deactivating_exact
 #[cfg(feature = "test-support")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial(http_workspaces_home)]
+async fn cancelled_delete_keeps_the_workspace_registered_for_retry() {
+    let _home = HomeGuard::install();
+    let workspace = short_tempdir();
+    let canonical = workspace.path().canonicalize().unwrap();
+    let (router, state) = create_router();
+    inject_workspace(
+        &state,
+        "cancel-delete",
+        "Cancel Delete",
+        &canonical,
+        GitProvider::Local,
+    );
+    let (assets, token) = {
+        let runtime = state.lock().unwrap();
+        (
+            std::sync::Arc::clone(&runtime.assets),
+            runtime.workspaces["cancel-delete"].asset_token.clone(),
+        )
+    };
+    let store = assets
+        .activate_workspace(&canonical, "local:2026-04-18T00:00:00Z", &token)
+        .unwrap();
+    let staged = store
+        .stage_bytes("pending.bin", b"pending-delete")
+        .await
+        .unwrap();
+    let transition_reached = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let transition_resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+    store.inject_persistence_transition_pause(
+        std::sync::Arc::clone(&transition_reached),
+        std::sync::Arc::clone(&transition_resume),
+    );
+    let request = tokio::spawn(send(
+        router.clone(),
+        "DELETE",
+        "/workspaces/cancel-delete",
+        None,
+    ));
+    tokio::task::spawn_blocking(move || transition_reached.wait())
+        .await
+        .unwrap();
+    request.abort();
+    tokio::task::spawn_blocking(move || transition_resume.wait())
+        .await
+        .unwrap();
+    assert!(request.await.unwrap_err().is_cancelled());
+
+    assert_eq!(
+        state.lock().unwrap().workspaces["cancel-delete"].asset_token,
+        token
+    );
+    assets
+        .open_registered_store(&canonical, "local:2026-04-18T00:00:00Z", &token)
+        .unwrap();
+    drop(staged);
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/cancel-delete", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
 async fn delete_waiting_for_old_initialization_does_not_remove_recreated_workspace() {
     let _home = HomeGuard::install();
     let parent = short_tempdir();

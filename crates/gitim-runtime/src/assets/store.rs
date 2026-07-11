@@ -14,11 +14,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 #[cfg(feature = "test-support")]
 use std::sync::Barrier;
 use std::sync::{
-    Arc, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
+    Arc, Condvar, Mutex, MutexGuard, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard, Weak,
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 const STORE_SCHEMA_VERSION: u32 = 1;
 const SIDECAR_SCHEMA_VERSION: u32 = 1;
@@ -340,11 +340,13 @@ struct WorkspaceLifecycleRegistry {
 struct WorkspaceLifecycleSlot {
     canonical_root: PathBuf,
     transition: Mutex<WorkspaceLifecycleState>,
+    changed: Condvar,
 }
 
 #[derive(Default)]
 struct WorkspaceLifecycleState {
     active: Option<RegisteredWorkspace>,
+    deactivating: bool,
 }
 
 #[derive(Clone)]
@@ -353,6 +355,32 @@ struct RegisteredWorkspace {
     binding: String,
     token: AssetWorkspaceToken,
     store: AssetStore,
+}
+
+struct DeactivationClaim {
+    slot: Arc<WorkspaceLifecycleSlot>,
+    armed: bool,
+}
+
+impl DeactivationClaim {
+    fn finish(mut self) {
+        self.clear();
+    }
+
+    fn clear(&mut self) {
+        if !self.armed {
+            return;
+        }
+        lock(&self.slot.transition).deactivating = false;
+        self.slot.changed.notify_all();
+        self.armed = false;
+    }
+}
+
+impl Drop for DeactivationClaim {
+    fn drop(&mut self) {
+        self.clear();
+    }
 }
 
 #[derive(Clone)]
@@ -459,6 +487,7 @@ impl AssetService {
                 let slot = Arc::new(WorkspaceLifecycleSlot {
                     canonical_root: canonical_root.to_path_buf(),
                     transition: Mutex::new(WorkspaceLifecycleState::default()),
+                    changed: Condvar::new(),
                 });
                 registry
                     .paths
@@ -543,7 +572,6 @@ impl AssetService {
     }
 
     fn invalidate_workspace_store(&self, store: &AssetStore) -> Result<(), AssetError> {
-        let _persistence = write_lock(&store.state.persistence_gate);
         let _operation = write_lock(&store.state.operation_gate);
         {
             let mut accounting = lock(&store.state.accounting);
@@ -604,6 +632,9 @@ impl AssetService {
             attempted.wait();
         }
         let mut lifecycle = lock(&slot.transition);
+        while lifecycle.deactivating {
+            lifecycle = wait_condvar(&slot.changed, lifecycle);
+        }
         #[cfg(feature = "test-support")]
         let activation_pause = lock(&self.activation_transition_pause).take();
         #[cfg(feature = "test-support")]
@@ -697,7 +728,10 @@ impl AssetService {
             .lifecycle_slot_for_token(token)
             .ok_or(AssetError::StaleBinding)?;
         let registered = {
-            let lifecycle = lock(&slot.transition);
+            let mut lifecycle = lock(&slot.transition);
+            while lifecycle.deactivating {
+                lifecycle = wait_condvar(&slot.changed, lifecycle);
+            }
             lifecycle
                 .active
                 .as_ref()
@@ -720,33 +754,101 @@ impl AssetService {
         Ok(registered.store.clone())
     }
 
-    pub fn deactivate_workspace(&self, token: &AssetWorkspaceToken) -> Result<bool, AssetError> {
-        token.revoke();
+    pub async fn deactivate_workspace(
+        &self,
+        token: &AssetWorkspaceToken,
+    ) -> Result<bool, AssetError> {
         let Some(slot) = self.lifecycle_slot_for_token(token) else {
+            token.revoke();
             return Ok(false);
         };
-        let mut lifecycle = lock(&slot.transition);
-        #[cfg(feature = "test-support")]
-        let deactivation_pause = lock(&self.deactivation_transition_pause).take();
-        #[cfg(feature = "test-support")]
-        if let Some((reached, resume)) = deactivation_pause {
-            reached.wait();
-            resume.wait();
-        }
-        let Some(registered) = lifecycle
-            .active
-            .take_if(|registered| registered.token.id == token.id)
-        else {
-            drop(lifecycle);
-            self.release_lifecycle_slot_after_transition(slot, token);
-            return Ok(false);
+        let registered = {
+            let mut lifecycle = lock(&slot.transition);
+            #[cfg(feature = "test-support")]
+            let deactivation_pause = lock(&self.deactivation_transition_pause).take();
+            #[cfg(feature = "test-support")]
+            if let Some((reached, resume)) = deactivation_pause {
+                reached.wait();
+                resume.wait();
+            }
+            if lifecycle.deactivating {
+                return Ok(false);
+            }
+            let Some(registered) = lifecycle
+                .active
+                .as_ref()
+                .filter(|registered| registered.token.id == token.id)
+                .cloned()
+            else {
+                drop(lifecycle);
+                token.revoke();
+                self.release_lifecycle_slot_after_transition(slot, token);
+                return Ok(false);
+            };
+            lifecycle.deactivating = true;
+            registered
+        };
+        let claim = DeactivationClaim {
+            slot: Arc::clone(&slot),
+            armed: true,
         };
         #[cfg(feature = "test-support")]
         if let Some(attempted) = lock(&self.deactivate_attempt).take() {
             attempted.wait();
         }
+        let persistence = registered.store.state.persistence.close().await;
+        #[cfg(feature = "test-support")]
+        registered.store.wait_at_persistence_transition();
+        persistence.wait_for_idle().await;
+        token.revoke();
         let invalidation = self.invalidate_workspace_store(&registered.store);
+        lock(&slot.transition)
+            .active
+            .take_if(|active| active.token.id == token.id);
+        drop(persistence);
+        claim.finish();
+        self.release_lifecycle_slot_after_transition(slot, token);
+        invalidation?;
+        Ok(true)
+    }
+
+    pub fn try_deactivate_workspace(
+        &self,
+        token: &AssetWorkspaceToken,
+    ) -> Result<bool, AssetError> {
+        let Some(slot) = self.lifecycle_slot_for_token(token) else {
+            token.revoke();
+            return Ok(false);
+        };
+        let mut lifecycle = lock(&slot.transition);
+        if lifecycle.deactivating {
+            return Err(AssetError::StaleBinding);
+        }
+        let Some(registered) = lifecycle
+            .active
+            .as_ref()
+            .filter(|registered| registered.token.id == token.id)
+            .cloned()
+        else {
+            drop(lifecycle);
+            token.revoke();
+            self.release_lifecycle_slot_after_transition(slot, token);
+            return Ok(false);
+        };
+        lifecycle.deactivating = true;
         drop(lifecycle);
+        let claim = DeactivationClaim {
+            slot: Arc::clone(&slot),
+            armed: true,
+        };
+        let persistence = registered.store.state.persistence.try_close()?;
+        token.revoke();
+        let invalidation = self.invalidate_workspace_store(&registered.store);
+        lock(&slot.transition)
+            .active
+            .take_if(|active| active.token.id == token.id);
+        drop(persistence);
+        claim.finish();
         self.release_lifecycle_slot_after_transition(slot, token);
         invalidation?;
         Ok(true)
@@ -1150,11 +1252,10 @@ struct FileIdentity {
 
 #[derive(Default)]
 struct WorkspaceAssetState {
-    // Generation transitions acquire persistence_gate before operation_gate.
-    // Persistence holds a read lease through staged cleanup, and operations
-    // that need accounting acquire operation_gate before accounting.
+    // Generation transitions close persistence admission before operation_gate.
+    // A stage lease spans tempfile creation through staged cleanup.
     accounting: Mutex<AccountingState>,
-    persistence_gate: RwLock<()>,
+    persistence: Arc<PersistenceLifecycle>,
     operation_gate: RwLock<()>,
     health: HealthUsageCache,
     #[cfg(feature = "test-support")]
@@ -1166,6 +1267,8 @@ struct WorkspaceAssetState {
     #[cfg(feature = "test-support")]
     before_staged_cleanup_pause: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
     #[cfg(feature = "test-support")]
+    persistence_transition_pause: Mutex<Option<(Arc<Barrier>, Arc<Barrier>)>>,
+    #[cfg(feature = "test-support")]
     hash_lock_attempts: AtomicU64,
     #[cfg(feature = "test-support")]
     free_space_override: Mutex<Option<(u64, u64)>>,
@@ -1173,6 +1276,108 @@ struct WorkspaceAssetState {
     materialize_pause: Mutex<Option<MaterializePause>>,
     #[cfg(feature = "test-support")]
     after_free_space_sample_wait: Mutex<Option<FreeSpaceSampleWait>>,
+}
+
+#[derive(Default)]
+struct PersistenceLifecycle {
+    state: Mutex<PersistenceLifecycleState>,
+    changed: Notify,
+}
+
+#[derive(Default)]
+struct PersistenceLifecycleState {
+    inflight: usize,
+    closing: bool,
+}
+
+struct PersistenceLease {
+    lifecycle: Arc<PersistenceLifecycle>,
+}
+
+struct PersistenceTransition {
+    lifecycle: Arc<PersistenceLifecycle>,
+}
+
+impl PersistenceLifecycle {
+    fn begin(self: &Arc<Self>) -> Result<PersistenceLease, AssetError> {
+        let mut state = lock(&self.state);
+        if state.closing {
+            return Err(AssetError::StaleBinding);
+        }
+        state.inflight = state
+            .inflight
+            .checked_add(1)
+            .ok_or(AssetError::Invariant("asset persistence count overflow"))?;
+        Ok(PersistenceLease {
+            lifecycle: Arc::clone(self),
+        })
+    }
+
+    async fn close(self: &Arc<Self>) -> PersistenceTransition {
+        loop {
+            let changed = self.changed.notified();
+            {
+                let mut state = lock(&self.state);
+                if !state.closing {
+                    state.closing = true;
+                    return PersistenceTransition {
+                        lifecycle: Arc::clone(self),
+                    };
+                }
+            }
+            changed.await;
+        }
+    }
+
+    fn try_close(self: &Arc<Self>) -> Result<PersistenceTransition, AssetError> {
+        let mut state = lock(&self.state);
+        if state.closing || state.inflight != 0 {
+            return Err(AssetError::StaleBinding);
+        }
+        state.closing = true;
+        Ok(PersistenceTransition {
+            lifecycle: Arc::clone(self),
+        })
+    }
+}
+
+impl PersistenceTransition {
+    async fn wait_for_idle(&self) {
+        loop {
+            let changed = self.lifecycle.changed.notified();
+            let idle = {
+                let state = lock(&self.lifecycle.state);
+                state.inflight == 0
+            };
+            if idle {
+                return;
+            }
+            changed.await;
+        }
+    }
+}
+
+impl Drop for PersistenceLease {
+    fn drop(&mut self) {
+        let mut state = lock(&self.lifecycle.state);
+        if state.inflight == 0 {
+            tracing::error!("asset persistence lease released without an inflight owner");
+        } else {
+            state.inflight -= 1;
+        }
+        let idle = state.inflight == 0;
+        drop(state);
+        if idle {
+            self.lifecycle.changed.notify_waiters();
+        }
+    }
+}
+
+impl Drop for PersistenceTransition {
+    fn drop(&mut self) {
+        lock(&self.lifecycle.state).closing = false;
+        self.lifecycle.changed.notify_waiters();
+    }
 }
 
 #[derive(Default)]
@@ -1233,6 +1438,7 @@ pub struct StagedAsset {
     generation: u64,
     binding: String,
     root: PathBuf,
+    _persistence: Option<PersistenceLease>,
 }
 
 struct GenerationLockedStagedAsset(StagedAsset);
@@ -1284,6 +1490,7 @@ struct AssetStager<'a> {
     size: u64,
     inspection_prefix: Vec<u8>,
     reservation: Option<AssetReservation>,
+    persistence: Option<PersistenceLease>,
 }
 
 pub struct HashLock {
@@ -1413,7 +1620,7 @@ impl AssetStore {
             ));
         }
         let root = workspace_root.join(".gitim-runtime/assets/v1");
-        let _persistence = write_lock(&state.persistence_gate);
+        let _persistence = state.persistence.try_close()?;
         let _operation = write_lock(&state.operation_gate);
         let generation = {
             let mut accounting = lock(&state.accounting);
@@ -1643,14 +1850,10 @@ impl AssetStore {
         staged: StagedAsset,
         source: AssetSource,
     ) -> Result<PersistOutcome, AssetError> {
-        let store = self.clone();
-        tokio::task::spawn_blocking(move || store.persist_staged_with_acquired_lock(staged, source))
+        staged.validate_generation_for(self)?;
+        let hash_lock = HashLock::acquire(self, &staged.sha256).await?;
+        self.persist_staged_with_lock_outcome(staged, source, hash_lock)
             .await
-            .map_err(|error| {
-                AssetError::Store(std::io::Error::other(format!(
-                    "asset persistence task failed: {error}"
-                )))
-            })?
     }
 
     pub async fn persist_staged_with_lock(
@@ -1686,33 +1889,11 @@ impl AssetStore {
         source: AssetSource,
         hash_lock: &HashLock,
     ) -> Result<PersistOutcome, AssetError> {
-        let persistence = read_lock(&self.state.persistence_gate);
         let mut staged = GenerationLockedStagedAsset(staged);
         let operation = write_lock(&self.state.operation_gate);
         let result = self.persist_staged_locked_inner(&mut staged.0, source, hash_lock);
+        drop(staged);
         drop(operation);
-        drop(staged);
-        drop(persistence);
-        result
-    }
-
-    fn persist_staged_with_acquired_lock(
-        &self,
-        staged: StagedAsset,
-        source: AssetSource,
-    ) -> Result<PersistOutcome, AssetError> {
-        let persistence = read_lock(&self.state.persistence_gate);
-        let mut staged = GenerationLockedStagedAsset(staged);
-        let result = (|| {
-            staged.0.validate_generation_for(self)?;
-            let hash_lock = HashLock::acquire_blocking(self, &staged.0.sha256)?;
-            let operation = write_lock(&self.state.operation_gate);
-            let result = self.persist_staged_locked_inner(&mut staged.0, source, &hash_lock);
-            drop(operation);
-            result
-        })();
-        drop(staged);
-        drop(persistence);
         result
     }
 
@@ -2030,7 +2211,8 @@ impl AssetStore {
             ));
         }
         let staged = self.stage_bytes_blocking("attachment", bytes)?;
-        self.persist_staged_with_acquired_lock(staged, source)
+        let hash_lock = HashLock::acquire_blocking(self, &staged.sha256)?;
+        self.persist_staged_locked(staged, source, &hash_lock)
             .map(|outcome| outcome.metadata)
     }
 
@@ -2043,6 +2225,7 @@ impl AssetStore {
                 limit: self.limits.max_file_bytes,
             });
         }
+        let persistence = self.state.persistence.begin()?;
         let mut reservation = self.reserve(size)?;
         let tmp = self.root.join("tmp");
         create_private_dir(&tmp)?;
@@ -2072,6 +2255,7 @@ impl AssetStore {
             generation: self.generation,
             binding: self.binding.clone(),
             root: self.root.clone(),
+            _persistence: Some(persistence),
         })
     }
 
@@ -2174,6 +2358,21 @@ impl AssetStore {
     #[doc(hidden)]
     pub fn inject_before_staged_cleanup_pause(&self, reached: Arc<Barrier>, resume: Arc<Barrier>) {
         *lock(&self.state.before_staged_cleanup_pause) = Some((reached, resume));
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_persistence_transition_pause(&self, reached: Arc<Barrier>, resume: Arc<Barrier>) {
+        *lock(&self.state.persistence_transition_pause) = Some((reached, resume));
+    }
+
+    #[cfg(feature = "test-support")]
+    fn wait_at_persistence_transition(&self) {
+        let pause = lock(&self.state.persistence_transition_pause).take();
+        if let Some((reached, resume)) = pause {
+            reached.wait();
+            resume.wait();
+        }
     }
 
     #[cfg(feature = "test-support")]
@@ -2830,7 +3029,7 @@ impl StagedAsset {
         let Some(path) = self.path.take() else {
             return;
         };
-        remove_staged_path_if_current_under_operation(&self.state, self.generation, &path);
+        remove_staged_path_if_generation_current(&self.state, self.generation, &path);
     }
 
     pub fn name(&self) -> &str {
@@ -2893,6 +3092,7 @@ impl StagedAsset {
 
 impl<'a> AssetStager<'a> {
     fn new(store: &'a AssetStore, name: String) -> Result<Self, AssetError> {
+        let persistence = store.state.persistence.begin()?;
         let _operation = read_lock(&store.state.operation_gate);
         store.validate_current()?;
         let tmp = store.root.join("tmp");
@@ -2920,6 +3120,7 @@ impl<'a> AssetStager<'a> {
                 generation: store.generation,
                 released: false,
             }),
+            persistence: Some(persistence),
         })
     }
 
@@ -2992,6 +3193,7 @@ impl<'a> AssetStager<'a> {
             generation: self.store.generation,
             binding: self.store.binding.clone(),
             root: self.store.root.clone(),
+            _persistence: self.persistence.take(),
         })
     }
 }
@@ -3007,10 +3209,10 @@ impl Drop for AssetStager<'_> {
 
 fn remove_staged_path_if_current(state: &Arc<WorkspaceAssetState>, generation: u64, path: &Path) {
     let _operation = read_lock(&state.operation_gate);
-    remove_staged_path_if_current_under_operation(state, generation, path);
+    remove_staged_path_if_generation_current(state, generation, path);
 }
 
-fn remove_staged_path_if_current_under_operation(
+fn remove_staged_path_if_generation_current(
     state: &WorkspaceAssetState,
     generation: u64,
     path: &Path,
@@ -3797,6 +3999,12 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+fn wait_condvar<'a, T>(condvar: &Condvar, guard: MutexGuard<'a, T>) -> MutexGuard<'a, T> {
+    condvar
+        .wait(guard)
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn read_lock<T>(lock: &RwLock<T>) -> RwLockReadGuard<'_, T> {
     lock.read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -3999,7 +4207,7 @@ mod tests {
             .expect("persist old object");
 
         assert!(service
-            .deactivate_workspace(&old_token)
+            .try_deactivate_workspace(&old_token)
             .expect("deactivate old workspace"));
         assert!(matches!(
             service.open_registered_store(workspace.path(), "local:old", &old_token),
@@ -4039,7 +4247,7 @@ mod tests {
         let token = AssetWorkspaceToken::new();
 
         assert!(!service
-            .deactivate_workspace(&token)
+            .try_deactivate_workspace(&token)
             .expect("revoke pending workspace"));
         assert!(matches!(
             service.activate_workspace(workspace.path(), "local:late", &token),

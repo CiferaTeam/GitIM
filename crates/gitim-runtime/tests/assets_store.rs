@@ -1119,10 +1119,10 @@ async fn cancelled_hash_lock_waiter_cleans_staging_before_deactivation() {
 
     let deactivate_attempted = Arc::new(Barrier::new(2));
     service.inject_deactivate_attempt(Arc::clone(&deactivate_attempted));
-    let mut deactivate = tokio::task::spawn_blocking({
+    let mut deactivate = tokio::spawn({
         let service = Arc::clone(&service);
         let token = token.clone();
-        move || service.deactivate_workspace(&token)
+        async move { service.deactivate_workspace(&token).await }
     });
     tokio::task::spawn_blocking(move || deactivate_attempted.wait())
         .await
@@ -1182,10 +1182,10 @@ async fn blocking_put_hash_wait_cleans_staging_before_deactivation() {
 
     let deactivate_attempted = Arc::new(Barrier::new(2));
     service.inject_deactivate_attempt(Arc::clone(&deactivate_attempted));
-    let mut deactivate = tokio::task::spawn_blocking({
+    let mut deactivate = tokio::spawn({
         let service = Arc::clone(&service);
         let token = token.clone();
-        move || service.deactivate_workspace(&token)
+        async move { service.deactivate_workspace(&token).await }
     });
     tokio::task::spawn_blocking(move || deactivate_attempted.wait())
         .await
@@ -1280,46 +1280,28 @@ async fn direct_put_uses_the_same_cross_process_hash_lock() {
 }
 
 #[tokio::test]
-async fn staged_and_lock_capabilities_become_stale_after_namespace_rebind() {
+async fn namespace_rebind_rejects_live_staged_capabilities() {
     let workspace = TempDir::new().unwrap();
     let old = open_store(workspace.path(), 1024);
     let staged = old.stage_bytes("old.txt", b"old").await.unwrap();
     let hash = staged.sha256().to_string();
-    let staged_temp = owned_temp_files(&old).pop().unwrap();
-    let staged_basename = staged_temp.file_name().unwrap().to_owned();
     let lock = HashLock::acquire(&old, &hash).await.unwrap();
-    let current = AssetStore::open(workspace.path(), "local:new", limits(1024)).unwrap();
-    let sentinel = current.root().join("tmp").join(staged_basename);
-    fs::write(&sentinel, b"new-generation-sentinel").unwrap();
-    let untouched_hash = sha256_hex(b"stale-lock-must-not-create");
-    let current_lock_path = current.lock_path(&untouched_hash).unwrap();
+    assert!(matches!(
+        AssetStore::open(workspace.path(), "local:new", limits(1024)),
+        Err(AssetError::StaleBinding)
+    ));
+    lock.ensure_current().unwrap();
+    drop((lock, staged));
+    assert!(owned_temp_files(&old).is_empty());
 
-    assert_eq!(
-        lock.ensure_current().unwrap_err().error_code(),
-        "asset_store_stale"
-    );
-    assert_eq!(
-        HashLock::acquire(&old, &untouched_hash)
-            .await
-            .unwrap_err()
-            .error_code(),
-        "asset_store_stale"
-    );
-    assert!(!current_lock_path.exists());
-    assert_eq!(
-        old.persist_staged(staged, AssetSource::LocalUpload)
-            .await
-            .unwrap_err()
-            .error_code(),
-        "asset_store_stale"
-    );
-    assert_eq!(fs::read(&sentinel).unwrap(), b"new-generation-sentinel");
+    let current = AssetStore::open(workspace.path(), "local:new", limits(1024)).unwrap();
+    assert!(matches!(old.usage(), Err(AssetError::StaleBinding)));
     assert_eq!(current.usage().unwrap(), AssetUsage::default());
     assert_eq!(current.reserved_bytes().unwrap(), 0);
 }
 
 #[tokio::test]
-async fn unfinished_stager_drop_cannot_unlink_a_new_generation_sentinel() {
+async fn namespace_rebind_rejects_an_unfinished_stager() {
     let workspace = TempDir::new().unwrap();
     let old = Arc::new(open_store(workspace.path(), 1024));
     let old_for_stage = Arc::clone(&old);
@@ -1331,24 +1313,25 @@ async fn unfinished_stager_drop_cannot_unlink_a_new_generation_sentinel() {
             .stage_stream("pending.bin", chunks, &mut budget)
             .await
     });
-    let old_temp = tokio::time::timeout(Duration::from_secs(2), async {
+    tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Some(path) = owned_temp_files(&old).pop() {
-                break path;
+            if !owned_temp_files(&old).is_empty() {
+                break;
             }
             tokio::task::yield_now().await;
         }
     })
     .await
     .unwrap();
-    let basename = old_temp.file_name().unwrap().to_owned();
-    let current = AssetStore::open(workspace.path(), "local:new-stager", limits(1024)).unwrap();
-    let sentinel = current.root().join("tmp").join(basename);
-    fs::write(&sentinel, b"new-stager-sentinel").unwrap();
+    assert!(matches!(
+        AssetStore::open(workspace.path(), "local:new-stager", limits(1024)),
+        Err(AssetError::StaleBinding)
+    ));
 
     staging.abort();
     assert!(staging.await.unwrap_err().is_cancelled());
-    assert_eq!(fs::read(&sentinel).unwrap(), b"new-stager-sentinel");
+    assert!(owned_temp_files(&old).is_empty());
+    AssetStore::open(workspace.path(), "local:new-stager", limits(1024)).unwrap();
 }
 
 #[cfg(unix)]
@@ -1924,9 +1907,9 @@ async fn workspace_deactivation_waits_for_an_inflight_publish_then_invalidates_h
 
     let deactivate_attempted = Arc::new(Barrier::new(2));
     service.inject_deactivate_attempt(Arc::clone(&deactivate_attempted));
-    let mut deactivate = tokio::task::spawn_blocking({
+    let mut deactivate = tokio::spawn({
         let service = Arc::clone(&service);
-        move || service.deactivate_workspace(&token)
+        async move { service.deactivate_workspace(&token).await }
     });
     tokio::task::spawn_blocking(move || deactivate_attempted.wait())
         .await
@@ -1945,6 +1928,123 @@ async fn workspace_deactivation_waits_for_an_inflight_publish_then_invalidates_h
     assert!(deactivate.await.unwrap().unwrap());
     assert!(matches!(store.usage(), Err(AssetError::StaleBinding)));
     assert!(owned_temp_files(&store).is_empty());
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn staged_asset_lease_blocks_deactivation_until_drop_cleanup() {
+    let workspace = TempDir::new().unwrap();
+    let service = Arc::new(AssetService::new(limits(1024)));
+    let token = AssetWorkspaceToken::new();
+    let store = service
+        .activate_workspace(workspace.path(), "local:staged-lease", &token)
+        .unwrap();
+    let staged = store
+        .stage_bytes("staged-lease.bin", b"staged-lease")
+        .await
+        .unwrap();
+    assert_eq!(owned_temp_files(&store).len(), 1);
+
+    let deactivate_attempted = Arc::new(Barrier::new(2));
+    service.inject_deactivate_attempt(Arc::clone(&deactivate_attempted));
+    let mut deactivate = tokio::spawn({
+        let service = Arc::clone(&service);
+        let token = token.clone();
+        async move { service.deactivate_workspace(&token).await }
+    });
+    tokio::task::spawn_blocking(move || deactivate_attempted.wait())
+        .await
+        .unwrap();
+    let early_deactivation = tokio::time::timeout(Duration::from_secs(1), &mut deactivate).await;
+    let deactivation_was_blocked = early_deactivation.is_err();
+
+    drop(staged);
+    let deactivated = match early_deactivation {
+        Ok(result) => result.unwrap(),
+        Err(_) => deactivate.await.unwrap(),
+    };
+    assert!(deactivated.unwrap());
+    assert!(
+        deactivation_was_blocked,
+        "deactivation advanced while a staged asset owned its temp file"
+    );
+    assert!(owned_temp_files(&store).is_empty());
+    assert_eq!(service.lifecycle_registry_entries(), (0, 0));
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn closed_persistence_generation_rejects_later_batch_staging() {
+    let workspace = TempDir::new().unwrap();
+    let service = Arc::new(AssetService::new(limits(1024)));
+    let token = AssetWorkspaceToken::new();
+    let store = service
+        .activate_workspace(workspace.path(), "local:batch-close", &token)
+        .unwrap();
+    let first = store.stage_bytes("first.bin", b"first").await.unwrap();
+
+    let transition_reached = Arc::new(Barrier::new(2));
+    let transition_resume = Arc::new(Barrier::new(2));
+    store.inject_persistence_transition_pause(
+        Arc::clone(&transition_reached),
+        Arc::clone(&transition_resume),
+    );
+    let deactivate = tokio::spawn({
+        let service = Arc::clone(&service);
+        let token = token.clone();
+        async move { service.deactivate_workspace(&token).await }
+    });
+    tokio::task::spawn_blocking(move || transition_reached.wait())
+        .await
+        .unwrap();
+
+    let second = store.stage_bytes("second.bin", b"second").await;
+    drop(first);
+    tokio::task::spawn_blocking(move || transition_resume.wait())
+        .await
+        .unwrap();
+    assert!(deactivate.await.unwrap().unwrap());
+    assert!(matches!(second, Err(AssetError::StaleBinding)));
+    assert!(owned_temp_files(&store).is_empty());
+    assert_eq!(service.lifecycle_registry_entries(), (0, 0));
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cancelled_deactivation_reopens_admission_and_can_be_retried() {
+    let workspace = TempDir::new().unwrap();
+    let service = Arc::new(AssetService::new(limits(1024)));
+    let token = AssetWorkspaceToken::new();
+    let store = service
+        .activate_workspace(workspace.path(), "local:cancel-deactivate", &token)
+        .unwrap();
+    let first = store.stage_bytes("first.bin", b"first").await.unwrap();
+
+    let transition_reached = Arc::new(Barrier::new(2));
+    let transition_resume = Arc::new(Barrier::new(2));
+    store.inject_persistence_transition_pause(
+        Arc::clone(&transition_reached),
+        Arc::clone(&transition_resume),
+    );
+    let deactivate = tokio::spawn({
+        let service = Arc::clone(&service);
+        let token = token.clone();
+        async move { service.deactivate_workspace(&token).await }
+    });
+    tokio::task::spawn_blocking(move || transition_reached.wait())
+        .await
+        .unwrap();
+    deactivate.abort();
+    tokio::task::spawn_blocking(move || transition_resume.wait())
+        .await
+        .unwrap();
+    assert!(deactivate.await.unwrap_err().is_cancelled());
+
+    let second = store.stage_bytes("second.bin", b"second").await.unwrap();
+    drop((first, second));
+    assert!(service.deactivate_workspace(&token).await.unwrap());
+    assert!(owned_temp_files(&store).is_empty());
+    assert_eq!(service.lifecycle_registry_entries(), (0, 0));
 }
 
 #[cfg(feature = "test-support")]
@@ -1975,10 +2075,10 @@ async fn staged_cleanup_completes_before_deactivation_can_advance_the_generation
 
     let deactivate_attempted = Arc::new(Barrier::new(2));
     service.inject_deactivate_attempt(Arc::clone(&deactivate_attempted));
-    let mut deactivate = tokio::task::spawn_blocking({
+    let mut deactivate = tokio::spawn({
         let service = Arc::clone(&service);
         let token = token.clone();
-        move || service.deactivate_workspace(&token)
+        async move { service.deactivate_workspace(&token).await }
     });
     tokio::task::spawn_blocking(move || deactivate_attempted.wait())
         .await
@@ -2042,10 +2142,10 @@ async fn dedupe_and_error_results_cleanup_staging_before_deactivation() {
 
         let deactivate_attempted = Arc::new(Barrier::new(2));
         service.inject_deactivate_attempt(Arc::clone(&deactivate_attempted));
-        let mut deactivate = tokio::task::spawn_blocking({
+        let mut deactivate = tokio::spawn({
             let service = Arc::clone(&service);
             let token = token.clone();
-            move || service.deactivate_workspace(&token)
+            async move { service.deactivate_workspace(&token).await }
         });
         tokio::task::spawn_blocking(move || deactivate_attempted.wait())
             .await
@@ -2108,10 +2208,10 @@ async fn cancelled_persistence_keeps_cleanup_inside_the_operation_generation() {
 
     let deactivate_attempted = Arc::new(Barrier::new(2));
     service.inject_deactivate_attempt(Arc::clone(&deactivate_attempted));
-    let mut deactivate = tokio::task::spawn_blocking({
+    let mut deactivate = tokio::spawn({
         let service = Arc::clone(&service);
         let token = token.clone();
-        move || service.deactivate_workspace(&token)
+        async move { service.deactivate_workspace(&token).await }
     });
     tokio::task::spawn_blocking(move || deactivate_attempted.wait())
         .await
@@ -2155,10 +2255,10 @@ async fn deactivation_handoff_keeps_one_slot_for_registered_waiters() {
         Arc::clone(&deactivate_reached),
         Arc::clone(&deactivate_resume),
     );
-    let deactivate_a = tokio::task::spawn_blocking({
+    let deactivate_a = tokio::spawn({
         let service = Arc::clone(&service);
         let token_a = token_a.clone();
-        move || service.deactivate_workspace(&token_a)
+        async move { service.deactivate_workspace(&token_a).await }
     });
     tokio::task::spawn_blocking(move || deactivate_reached.wait())
         .await
@@ -2210,10 +2310,10 @@ async fn deactivation_handoff_keeps_one_slot_for_registered_waiters() {
     let b_succeeded = b_result.is_ok();
     let c_was_rejected = matches!(&c_result, Err(AssetError::Invariant(_)));
     if b_succeeded {
-        let _ = service.deactivate_workspace(&token_b).unwrap();
+        let _ = service.deactivate_workspace(&token_b).await.unwrap();
     }
     if c_result.is_ok() {
-        let _ = service.deactivate_workspace(&token_c).unwrap();
+        let _ = service.deactivate_workspace(&token_c).await.unwrap();
     }
     assert!(shared_slot, "token C entered a second lifecycle slot");
     assert!(b_succeeded);
@@ -2292,10 +2392,10 @@ async fn activation_failure_handoff_keeps_one_slot_for_registered_waiters() {
     let b_succeeded = b_result.is_ok();
     let c_was_rejected = matches!(&c_result, Err(AssetError::Invariant(_)));
     if b_succeeded {
-        let _ = service.deactivate_workspace(&token_b).unwrap();
+        let _ = service.deactivate_workspace(&token_b).await.unwrap();
     }
     if c_result.is_ok() {
-        let _ = service.deactivate_workspace(&token_c).unwrap();
+        let _ = service.deactivate_workspace(&token_c).await.unwrap();
     }
     assert!(shared_slot, "token C entered a second lifecycle slot");
     assert!(b_succeeded);
@@ -2414,9 +2514,9 @@ async fn paused_deactivation_does_not_block_registered_open_for_another_workspac
         Arc::clone(&deactivate_attempted),
         Arc::clone(&deactivate_resume),
     );
-    let deactivate_a = tokio::task::spawn_blocking({
+    let deactivate_a = tokio::spawn({
         let service = Arc::clone(&service);
-        move || service.deactivate_workspace(&token_a)
+        async move { service.deactivate_workspace(&token_a).await }
     });
     tokio::task::spawn_blocking(move || deactivate_attempted.wait())
         .await
@@ -2456,7 +2556,7 @@ fn repeated_workspace_activation_and_deletion_keeps_lifecycle_registry_bounded()
         service
             .activate_workspace(&workspace, format!("local:{index}"), &token)
             .unwrap();
-        assert!(service.deactivate_workspace(&token).unwrap());
+        assert!(service.try_deactivate_workspace(&token).unwrap());
         assert_eq!(service.lifecycle_registry_entries(), (0, 0));
     }
 }
@@ -2484,7 +2584,7 @@ fn rejected_same_token_reactivation_preserves_the_original_registry_mapping() {
         .open_registered_store(workspace.path(), "local:original", &token)
         .unwrap();
     assert_eq!(service.lifecycle_registry_entries(), (1, 1));
-    assert!(service.deactivate_workspace(&token).unwrap());
+    assert!(service.try_deactivate_workspace(&token).unwrap());
     assert_eq!(service.lifecycle_registry_entries(), (0, 0));
 }
 

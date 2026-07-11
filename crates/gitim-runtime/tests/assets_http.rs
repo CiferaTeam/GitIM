@@ -1632,9 +1632,9 @@ async fn stale_http_snapshot_cannot_reopen_a_same_path_workspace_after_reactivat
 
     fixture.state.lock().unwrap().workspaces.remove("room");
     let service_for_deactivate = Arc::clone(&service);
-    tokio::task::spawn_blocking(move || service_for_deactivate.deactivate_workspace(&old_token))
+    service_for_deactivate
+        .deactivate_workspace(&old_token)
         .await
-        .unwrap()
         .unwrap();
 
     let new_created_at = "2026-07-12T00:00:00Z";

@@ -5736,15 +5736,10 @@ async fn workspaces_delete(
         initialization.wait().await;
     }
     let _workspace_transition_guard = transition.lock_owned().await;
-    let (mut removed, assets) = {
-        let mut s = crate::preconditions::arc_mutex_lock(&state);
+    let assets = {
+        let s = crate::preconditions::arc_mutex_lock(&state);
         match s.workspaces.get(&slug) {
-            Some(workspace) if workspace.asset_token == expected_token => {
-                let Some(removed) = s.workspaces.remove(&slug) else {
-                    return Json(OkAckResponse { ok: true }).into_response();
-                };
-                (removed, Arc::clone(&s.assets))
-            }
+            Some(workspace) if workspace.asset_token == expected_token => Arc::clone(&s.assets),
             None | Some(_) => {
                 // The workspace targeted by this DELETE no longer exists.
                 // A replacement using the same slug is a separate lifecycle.
@@ -5752,9 +5747,21 @@ async fn workspaces_delete(
             }
         }
     };
-    if let Err(error) = assets.deactivate_workspace(&removed.asset_token) {
+    if let Err(error) = assets.deactivate_workspace(&expected_token).await {
         tracing::warn!(slug = %slug, error = %error, "failed to deactivate asset store");
     }
+    let mut removed = {
+        let mut s = crate::preconditions::arc_mutex_lock(&state);
+        match s.workspaces.get(&slug) {
+            Some(workspace) if workspace.asset_token == expected_token => {
+                let Some(removed) = s.workspaces.remove(&slug) else {
+                    return Json(OkAckResponse { ok: true }).into_response();
+                };
+                removed
+            }
+            None | Some(_) => return Json(OkAckResponse { ok: true }).into_response(),
+        }
+    };
 
     // Abort in-process agent loop tasks before killing their daemons. Mirrors
     // the cleanup `/agents/remove` and `/agents/stop` already perform — without
@@ -5849,7 +5856,7 @@ fn rollback_workspace_creation(
             tracing::warn!(slug, error = %error, "failed to remove rolled-back workspace config");
         }
     }
-    if let Err(error) = assets.deactivate_workspace(expected_token) {
+    if let Err(error) = assets.try_deactivate_workspace(expected_token) {
         tracing::warn!(slug, error = %error, "failed to deactivate rolled-back asset store");
     }
     let owned_by_another_token = {
