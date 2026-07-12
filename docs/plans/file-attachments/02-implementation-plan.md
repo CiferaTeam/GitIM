@@ -1877,7 +1877,7 @@ regression first, make the smallest coherent fix, rerun the owning scoped suite,
 and record rejected false positives only in transient review notes, not project
 artifacts.
 
-- [ ] **Step 3: Run a fresh second review**
+- [x] **Step 3: Run a fresh second review**
 
 Review the post-fix diff with fresh context. The gate requires zero unresolved
 P0/P1, zero known data-loss/security gap, and no P2 without an explicit current
@@ -1911,7 +1911,7 @@ required command, and success criterion to a current file/test/runtime evidence
 location. Any missing, indirect, stale, or scope-mismatched evidence keeps the
 Goal active and returns execution to the owning task.
 
-- [ ] **Step 6: Update review report and declare integration-ready**
+- [x] **Step 6: Update review report and declare integration-ready**
 
 Append the two code-review runs and final verdict to the existing final GSTACK
 report section, keeping it last. Confirm `git status`, branch name, ahead count,
@@ -1931,5 +1931,5 @@ verification evidence, live E2E result, and available finishing options.
 - [x] Workspace path reuse cannot expose an old asset namespace.
 - [x] No task adds automatic deletion, cloud storage, background prefetch, or
   browser/WASM byte storage.
-- [ ] Final verification includes full Rust, frontend, WASM, Playwright, two
+- [x] Final verification includes full Rust, frontend, WASM, Playwright, two
   independent reviews, and live two-node browser/Agent/Git audits.
