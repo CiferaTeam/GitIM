@@ -1,3 +1,5 @@
+import { parseAssetRef, type AssetRef } from "./asset-ref";
+
 export type Fragment =
   | { type: "text"; content: string }
   | { type: "mention"; handler: string }
@@ -9,7 +11,8 @@ export type Fragment =
   | { type: "code-block"; language?: string; code: string }
   | { type: "inline-code"; code: string }
   | { type: "bold"; content: string }
-  | { type: "italic"; content: string };
+  | { type: "italic"; content: string }
+  | { type: "asset"; asset: AssetRef };
 
 // Handler validation: lowercase a-z 0-9 hyphen, 1-39 chars
 // Must not start/end with hyphen
@@ -30,14 +33,19 @@ function isValidCardId(s: string): boolean {
 }
 
 // Combined inline pattern — ordered by priority:
-// 1. GitIM links: <[@#~!]content>
+// 1. GitIM links: <[@#~!^]content>
 // 2. Inline code: `code`
 // 3. Bold: **text**
 // 4. Italic: *text* (not part of **)
 const INLINE_RE =
-  /(^|(?<![\w/<]))#([a-z0-9]+(?:-[a-z0-9]+)*)\/([0-9a-f-]{1,20})(?:\s+L(\d+))?|<([#~!@])([^>\n]+)>|`([^`\n]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
+  /(^|(?<![\w/<]))#([a-z0-9]+(?:-[a-z0-9]+)*)\/([0-9a-f-]{1,20})(?:\s+L(\d+))?|<([#~!@^])([^>\n]+)>|`([^`\n]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
 
 function parseGitimLink(prefix: string, content: string): Fragment | null {
+  if (prefix === "^") {
+    const asset = parseAssetRef(`<^${content}>`);
+    return asset ? { type: "asset", asset } : null;
+  }
+
   if (prefix === "@") {
     if (!isValidHandler(content)) return null;
     return { type: "mention", handler: content };
