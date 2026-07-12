@@ -301,8 +301,9 @@ function validateUploadFiles(files: File[]): ApiResponse<never> | null {
     if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_ASSET_FILE_BYTES) {
       return invalidUpload("Each asset must be no larger than 50 MiB.");
     }
-    if (ASSET_UTF8.encode(file.name).length > MAX_ASSET_FILENAME_BYTES) {
-      return invalidUpload("Asset filenames must be no longer than 255 UTF-8 bytes.");
+    const filenameBytes = ASSET_UTF8.encode(file.name).length;
+    if (filenameBytes < 1 || filenameBytes > MAX_ASSET_FILENAME_BYTES) {
+      return invalidUpload("Asset filenames must be between 1 and 255 UTF-8 bytes.");
     }
     total += file.size;
     if (!Number.isSafeInteger(total) || total > MAX_ASSET_REQUEST_BYTES) {
@@ -351,6 +352,13 @@ function invalidAssetResponse(): ApiResponse<never> {
   };
 }
 
+function isAbortError(error: unknown): error is Error | DOMException {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
 export async function uploadAssets(
   slug: string,
   files: File[],
@@ -371,15 +379,15 @@ export async function uploadAssets(
       ...(signal && { signal }),
     });
   } catch (error) {
-    if (error instanceof DOMException && error.name === "AbortError") throw error;
-    if (error instanceof Error && error.name === "AbortError") throw error;
+    if (isAbortError(error)) throw error;
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
 
   let body: unknown;
   try {
     body = await response.json();
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) throw error;
     return response.ok
       ? invalidAssetResponse()
       : { ok: false, error: `HTTP ${response.status}` };

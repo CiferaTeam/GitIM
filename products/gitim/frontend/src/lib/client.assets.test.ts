@@ -113,7 +113,7 @@ describe("uploadAssets", () => {
   it("normalizes a complete Runtime success body", async () => {
     const client = await setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, successBody()));
-    const result = await client.uploadAssets("room", [new File(["a"], "a.txt")]);
+    const result = await client.uploadAssets("room", [new File(["a"], "a")]);
     expect(result).toEqual({
       ok: true,
       data: {
@@ -163,6 +163,30 @@ describe("uploadAssets", () => {
     await expect(client.uploadAssets("room", [new File(["a"], "a.txt")])).rejects.toBe(error);
   });
 
+  it("preserves AbortError while reading the response body", async () => {
+    const client = await setup();
+    const error = new DOMException("aborted", "AbortError");
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockRejectedValue(error),
+    } as unknown as Response);
+    await expect(client.uploadAssets("room", [new File(["a"], "a.txt")])).rejects.toBe(error);
+  });
+
+  it("normalizes ordinary response body parse failures", async () => {
+    const client = await setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: vi.fn().mockRejectedValue(new SyntaxError("invalid JSON")),
+    } as unknown as Response);
+    await expect(client.uploadAssets("room", [new File(["a"], "a.txt")])).resolves.toMatchObject({
+      ok: false,
+      error_code: "invalid_response",
+    });
+  });
+
   it.each([
     ["missing assets", { ok: true }],
     ["noncanonical ref", { ok: true, assets: [{ ...successBody().assets[0], ref: "invalid" }] }],
@@ -181,6 +205,7 @@ describe("uploadAssets", () => {
     ["more than ten files", Array.from({ length: 11 }, (_, i) => sizedFile(`${i}.txt`, 1))],
     ["a file over 50 MiB", [sizedFile("large.bin", 50 * 1024 * 1024 + 1)]],
     ["an aggregate over 200 MiB", Array.from({ length: 5 }, (_, i) => sizedFile(`${i}.bin`, 50 * 1024 * 1024))],
+    ["an empty filename", [new File(["x"], "")]],
     ["a filename over 255 UTF-8 bytes", [sizedFile(`${"é".repeat(128)}.txt`, 1)]],
   ])("rejects %s before fetch", async (_label, files) => {
     const client = await setup();
