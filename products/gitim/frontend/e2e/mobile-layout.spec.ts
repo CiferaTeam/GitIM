@@ -3,6 +3,16 @@ import { expect, test, type Page } from "@playwright/test";
 const runtimePort = 49322;
 const slug = "mobile";
 const localPollIntervalMs = 7000;
+const assetOrigin = "3c6a295e-744a-41dc-ba60-5c21bb94e5a2";
+const assetHash = "8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88";
+const portraitPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+  "base64",
+);
+
+function portraitAssetRef(size: number): string {
+  return `<^v1/${assetOrigin}/sha256:${assetHash}?name=portrait.png&type=image%2Fpng&size=${size}&width=1000&height=10000>`;
+}
 
 interface BrowserWorkspaceRecordFixture {
   id: string;
@@ -239,6 +249,36 @@ async function stubRuntime(
             entries: mobileMessages(options.messageCount ?? 1),
           },
         },
+      });
+      return;
+    }
+    if (url.pathname === `/workspaces/${slug}/assets`) {
+      const ref = portraitAssetRef(portraitPng.length);
+      await route.fulfill({
+        json: {
+          ok: true,
+          assets: [{
+            ref,
+            sha256: assetHash,
+            name: "portrait.png",
+            media_type: "image/png",
+            size: portraitPng.length,
+            width: 1000,
+            height: 10000,
+          }],
+        },
+      });
+      return;
+    }
+    if (
+      url.pathname ===
+        `/workspaces/${slug}/assets/resolve/${assetOrigin}/${assetHash}`
+    ) {
+      await route.fulfill({
+        status: 200,
+        contentType: "image/png",
+        headers: { "Access-Control-Allow-Origin": "*" },
+        body: portraitPng,
       });
       return;
     }
@@ -621,6 +661,75 @@ test("mobile chat Enter inserts newline and send button sends", async ({ page })
     body: "<@alice> hello\nworld",
   });
   await expect(input).toHaveValue("");
+});
+
+test("mobile attachment stays within the composer and message column", async ({ page }) => {
+  const sentBodies: Array<Record<string, unknown>> = [];
+  await page.setViewportSize({ width: 390, height: 844 });
+  await stubRuntime(page, sentBodies);
+  await page.goto("/chat");
+
+  const fileChooserPromise = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Attach files" }).click();
+  const fileChooser = await fileChooserPromise;
+  await fileChooser.setFiles({
+    name: "portrait.png",
+    mimeType: "image/png",
+    buffer: portraitPng,
+  });
+
+  const draftStrip = page.locator("[data-attachment-draft-strip]");
+  await expect(draftStrip).toBeVisible();
+  const composer = draftStrip.locator("..");
+  const preview = draftStrip.locator("img");
+  const remove = page.getByRole("button", { name: "Remove portrait.png" });
+  const send = page.getByRole("button", { name: "Send message" });
+  await expect(preview).toBeVisible();
+  await expect(remove).toBeVisible();
+
+  const composerBox = await composer.boundingBox();
+  expect(composerBox).not.toBeNull();
+  for (const control of [preview, remove, send]) {
+    const box = await control.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.x).toBeGreaterThanOrEqual(composerBox!.x);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(
+      composerBox!.x + composerBox!.width,
+    );
+  }
+
+  await page.getByPlaceholder("Type a message...").fill("<@alice> portrait");
+  await send.click();
+  await expect.poll(() => sentBodies.length).toBe(1);
+  expect(sentBodies[0].body).toBe(
+    `<@alice> portrait\n${portraitAssetRef(portraitPng.length)}`,
+  );
+
+  const image = page.locator("[data-asset-image]");
+  const frame = page.locator("[data-asset-frame]");
+  await expect(image).toBeVisible();
+  await expect(image).toHaveCSS("max-width", "100%");
+
+  const messageBody = image.locator("xpath=ancestor::*[@data-message-body][1]");
+  const layout = await Promise.all([
+    image.boundingBox(),
+    frame.boundingBox(),
+    messageBody.boundingBox(),
+  ]);
+  const [imageBox, frameBox, messageBox] = layout;
+  expect(imageBox).not.toBeNull();
+  expect(frameBox).not.toBeNull();
+  expect(messageBox).not.toBeNull();
+  expect(imageBox!.x).toBeGreaterThanOrEqual(messageBox!.x);
+  expect(imageBox!.x + imageBox!.width).toBeLessThanOrEqual(
+    messageBox!.x + messageBox!.width,
+  );
+  expect(frameBox!.height / frameBox!.width).toBeCloseTo(4, 1);
+  expect(frameBox!.height).toBeLessThanOrEqual(440);
+  expect(frameBox!.width).toBeLessThanOrEqual(110);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+    await page.evaluate(() => document.documentElement.clientWidth),
+  );
 });
 
 test("mobile card detail uses the shared bottom tabs once", async ({ page }) => {
