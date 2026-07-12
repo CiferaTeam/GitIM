@@ -83,7 +83,7 @@ workspace + hash validation
                     └────────────────────────────────────┘
                                       │
                                       ▼
-                     immutable/range-safe local response
+                      verified/range-safe local response
 
 Browser/WASM mode: parse metadata → show Runtime-required state; no byte path.
 ```

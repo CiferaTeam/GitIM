@@ -846,9 +846,10 @@ or filesystem awaits.
 Local lookup validates hash, sidecar, length, and mtime. Exact SHA ETag match
 returns 304 before opening the file. Otherwise call
 `ServeFile::new_with_mime(path, &mime).oneshot(request)` and overwrite only the
-approved `Content-Type`, immutable/private cache, ETag, nosniff, and safe
-Content-Disposition headers. Non-inline MIME always sets attachment; `download=1`
-forces attachment. Do not implement a custom Range parser.
+approved `Content-Type`, browser-no-store or peer-immutable cache policy, ETag,
+nosniff, and safe Content-Disposition headers. Non-inline MIME always sets
+attachment; `download=1` forces attachment. Do not implement a custom Range
+parser.
 
 - [x] **Step 6: Expose service health and recover stores**
 

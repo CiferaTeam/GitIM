@@ -597,7 +597,7 @@ Retries reuse returned references and do not re-upload successful objects.
 The frontend parser gains an `asset` fragment matching the core grammar.
 
 - Verified raster types render as bounded inline images with filename and size.
-- Clicking an image opens the immutable resolver URL in a new tab.
+- Clicking an image opens the verified resolver URL in a new tab.
 - Other types render a file card with name, media type, size, origin hint, and a
   Download action.
 - Loading states reserve image dimensions when available.
