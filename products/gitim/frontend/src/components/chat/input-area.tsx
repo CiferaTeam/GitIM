@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -7,6 +8,7 @@ import {
   type ClipboardEvent,
   type KeyboardEvent,
 } from "react";
+import { create } from "zustand";
 import {
   computeCardDraftRecipients,
   computeDraftRecipients,
@@ -69,9 +71,81 @@ interface InputAreaProps {
 const MAX_HEIGHT = 200;
 const DESKTOP_ENTER_HINT = " (Enter to send, Shift+Enter for newline)";
 const ATTACHMENT_RECIPIENT_SENTINEL = "attachment";
+const RUNTIME_ATTACHMENT_HELP = "Attachments require a GitIM Runtime connection.";
+const MAX_COMPLETION_EVENTS = 32;
+
+interface ComposerCompletion {
+  readonly sequence: number;
+  readonly attachmentKey: string;
+  readonly text: string;
+  readonly clearText: boolean;
+  readonly replyLine: number | null;
+}
+
+interface ComposerLifecycleState {
+  readonly textBusyKeys: ReadonlySet<string>;
+  readonly completionSequence: number;
+  readonly completions: readonly ComposerCompletion[];
+  claimTextSend: (key: string) => boolean;
+  releaseTextSend: (key: string) => void;
+  publishCompletion: (
+    completion: Omit<ComposerCompletion, "sequence">,
+  ) => void;
+}
+
+const useComposerLifecycleStore = create<ComposerLifecycleState>((set) => ({
+  textBusyKeys: new Set<string>(),
+  completionSequence: 0,
+  completions: [],
+  claimTextSend: (key) => {
+    let claimed = false;
+    set((state) => {
+      if (state.textBusyKeys.has(key)) return state;
+      claimed = true;
+      const textBusyKeys = new Set(state.textBusyKeys);
+      textBusyKeys.add(key);
+      return { textBusyKeys };
+    });
+    return claimed;
+  },
+  releaseTextSend: (key) => {
+    set((state) => {
+      if (!state.textBusyKeys.has(key)) return state;
+      const textBusyKeys = new Set(state.textBusyKeys);
+      textBusyKeys.delete(key);
+      return { textBusyKeys };
+    });
+  },
+  publishCompletion: (completion) => {
+    set((state) => {
+      const sequence = state.completionSequence + 1;
+      return {
+        completionSequence: sequence,
+        completions: [
+          ...state.completions,
+          { ...completion, sequence },
+        ].slice(-MAX_COMPLETION_EVENTS),
+      };
+    });
+  },
+}));
 
 function draftKey(workspaceKey: string, scopeKey: string) {
   return `gitim:draft:${workspaceKey}:${scopeKey}`;
+}
+
+function clearCapturedTextStorage(
+  workspaceKey: string,
+  scopeKey: string,
+  capturedText: string,
+): boolean {
+  const key = draftKey(workspaceKey, scopeKey);
+  const current = localStorage.getItem(key);
+  if (current === capturedText) {
+    localStorage.removeItem(key);
+    return true;
+  }
+  return current === null;
 }
 
 function resolvedPlaceholder(placeholder: string | undefined, isMobile: boolean) {
@@ -98,7 +172,6 @@ export function InputArea({
   placeholder,
 }: InputAreaProps) {
   const [text, setText] = useState("");
-  const [, setTextBusyRevision] = useState(0);
   const [sendErrors, setSendErrors] = useState<Record<string, string>>({});
 
   const [mentionOpen, setMentionOpen] = useState(false);
@@ -108,7 +181,13 @@ export function InputArea({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const textBusyKeysRef = useRef(new Set<string>());
+  const attachmentHelpId = useId();
+  const textRef = useRef(text);
+  textRef.current = text;
+  const replyRef = useRef(replyTo);
+  replyRef.current = replyTo;
+  const replyChangeRef = useRef(onReplyToChange);
+  replyChangeRef.current = onReplyToChange;
   const renderedScopeRef = useRef({ workspaceKey, scopeKey });
   renderedScopeRef.current = { workspaceKey, scopeKey };
   const activeScopeRef = useRef(renderedScopeRef.current);
@@ -119,6 +198,14 @@ export function InputArea({
   const currentAttachmentKey = workspaceKey && scopeKey
     ? attachmentDraftKey(workspaceKey, scopeKey)
     : null;
+  const textBusy = useComposerLifecycleStore((state) =>
+    currentAttachmentKey ? state.textBusyKeys.has(currentAttachmentKey) : false);
+  const completionSequence = useComposerLifecycleStore(
+    (state) => state.completionSequence,
+  );
+  const lastCompletionSequenceRef = useRef(
+    useComposerLifecycleStore.getState().completionSequence,
+  );
   const attachmentDraft = useAttachmentDraftStore((state) =>
     currentAttachmentKey ? state.drafts[currentAttachmentKey] : undefined);
   const addFiles = useAttachmentDraftStore((state) => state.addFiles);
@@ -132,9 +219,6 @@ export function InputArea({
   const hasAttachments = (attachmentDraft?.items.length ?? 0) > 0;
   const attachmentBusy = attachmentDraft?.status === "uploading" ||
     attachmentDraft?.status === "sending";
-  const textBusy = currentAttachmentKey
-    ? textBusyKeysRef.current.has(currentAttachmentKey)
-    : false;
   const busy = attachmentBusy || textBusy;
   const routingBody = text.trim().length > 0
     ? text
@@ -178,6 +262,28 @@ export function InputArea({
     setMentionOpen(false);
     setConfirmingEmpty(false);
   }, [workspaceKey, scopeKey]);
+
+  useEffect(() => {
+    const lifecycle = useComposerLifecycleStore.getState();
+    const completions = lifecycle.completions.filter(
+      (completion) => completion.sequence > lastCompletionSequenceRef.current,
+    );
+    lastCompletionSequenceRef.current = lifecycle.completionSequence;
+    if (!mountedRef.current || !currentAttachmentKey) return;
+
+    for (const completion of completions) {
+      if (completion.attachmentKey !== currentAttachmentKey) continue;
+      if (completion.clearText && textRef.current === completion.text) {
+        textRef.current = "";
+        setText("");
+      }
+      const currentReplyLine = replyRef.current?.line_number ?? null;
+      if (completion.replyLine !== null && currentReplyLine === completion.replyLine) {
+        replyChangeRef.current(null);
+      }
+      textareaRef.current?.focus();
+    }
+  }, [completionSequence, currentAttachmentKey]);
 
   // Auto-resize textarea up to MAX_HEIGHT
   useEffect(() => {
@@ -230,17 +336,6 @@ export function InputArea({
     setSendErrors((current) => ({ ...current, [key]: message }));
   }
 
-  function setTextBusy(key: string, value: boolean) {
-    if (value) {
-      textBusyKeysRef.current.add(key);
-    } else {
-      textBusyKeysRef.current.delete(key);
-    }
-    if (mountedRef.current) {
-      setTextBusyRevision((revision) => revision + 1);
-    }
-  }
-
   function isCurrentSendScope(requestWorkspaceKey: string, requestScopeKey: string) {
     return mountedRef.current &&
       activeScopeRef.current.workspaceKey === requestWorkspaceKey &&
@@ -257,6 +352,27 @@ export function InputArea({
     if (!attachmentCapable || files.length === 0) return;
     clearSendError(activeAttachmentKey);
     addFiles(activeAttachmentKey, files);
+  }
+
+  function handleAttachmentAction() {
+    if (busy) return;
+    if (!attachmentCapable) {
+      setSendError(activeAttachmentKey, RUNTIME_ATTACHMENT_HELP);
+      return;
+    }
+    fileInputRef.current?.click();
+  }
+
+  function failAttachmentInvariant(
+    key: string,
+    generation: number,
+    message: string,
+    requestWorkspaceKey: string,
+    requestScopeKey: string,
+  ) {
+    const failed = failOperation(key, generation, message);
+    if (failed) focusCurrentScope(requestWorkspaceKey, requestScopeKey);
+    return failed;
   }
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -290,8 +406,8 @@ export function InputArea({
     const capturedText = text;
     const capturedHumanBody = capturedText.trim();
     const capturedReply = replyTo;
+    const capturedReplyLine = capturedReply?.line_number ?? null;
     const capturedOnSend = onSend;
-    const capturedOnReplyToChange = onReplyToChange;
     const capturedDraft = useAttachmentDraftStore.getState().drafts[capturedAttachmentKey];
     const useAttachments = attachmentCapable && (capturedDraft?.items.length ?? 0) > 0;
 
@@ -317,7 +433,16 @@ export function InputArea({
           }
           mappings = pendingItems.map((item, index) => ({ id: item.id, asset: assets[index] }));
         }
-        if (!markUploaded(capturedAttachmentKey, operation.generation, mappings)) return;
+        if (!markUploaded(capturedAttachmentKey, operation.generation, mappings)) {
+          failAttachmentInvariant(
+            capturedAttachmentKey,
+            operation.generation,
+            "Uploaded attachments did not match the selected files. Try again.",
+            capturedWorkspaceKey,
+            capturedScopeKey,
+          );
+          return;
+        }
 
         const uploadedDraft = useAttachmentDraftStore.getState().drafts[capturedAttachmentKey];
         if (
@@ -325,11 +450,27 @@ export function InputArea({
           uploadedDraft.generation !== operation.generation ||
           uploadedDraft.items.some((item) => item.uploaded === undefined)
         ) {
+          failAttachmentInvariant(
+            capturedAttachmentKey,
+            operation.generation,
+            "Uploaded attachment state was incomplete. Try again.",
+            capturedWorkspaceKey,
+            capturedScopeKey,
+          );
           return;
         }
         const refs = uploadedDraft.items.map((item) => item.uploaded!.ref);
         const finalBody = [capturedHumanBody, ...refs].filter(Boolean).join("\n");
-        if (!markSending(capturedAttachmentKey, operation.generation)) return;
+        if (!markSending(capturedAttachmentKey, operation.generation)) {
+          failAttachmentInvariant(
+            capturedAttachmentKey,
+            operation.generation,
+            "Attachments were not ready to send. Try again.",
+            capturedWorkspaceKey,
+            capturedScopeKey,
+          );
+          return;
+        }
 
         const sendResult = await capturedOnSend(
           finalBody,
@@ -346,13 +487,17 @@ export function InputArea({
         }
         if (!completeSuccess(capturedAttachmentKey, operation.generation)) return;
 
-        localStorage.removeItem(draftKey(capturedWorkspaceKey, capturedScopeKey));
-        if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
-          setText("");
-          capturedOnReplyToChange(null);
-          clearSendError(capturedAttachmentKey);
-          textareaRef.current?.focus();
-        }
+        const clearText = clearCapturedTextStorage(
+          capturedWorkspaceKey,
+          capturedScopeKey,
+          capturedText,
+        );
+        useComposerLifecycleStore.getState().publishCompletion({
+          attachmentKey: capturedAttachmentKey,
+          text: capturedText,
+          clearText,
+          replyLine: capturedReplyLine,
+        });
       } catch (caught) {
         failOperation(
           capturedAttachmentKey,
@@ -364,9 +509,9 @@ export function InputArea({
       return;
     }
 
-    if (textBusyKeysRef.current.has(capturedAttachmentKey)) return;
-    setTextBusy(capturedAttachmentKey, true);
+    if (!useComposerLifecycleStore.getState().claimTextSend(capturedAttachmentKey)) return;
 
+    let completed = false;
     try {
       const sendResult = await capturedOnSend(
         capturedHumanBody,
@@ -378,12 +523,18 @@ export function InputArea({
         }
         return;
       }
-      localStorage.removeItem(draftKey(capturedWorkspaceKey, capturedScopeKey));
-      if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
-        setText("");
-        capturedOnReplyToChange(null);
-        clearSendError(capturedAttachmentKey);
-      }
+      const clearText = clearCapturedTextStorage(
+        capturedWorkspaceKey,
+        capturedScopeKey,
+        capturedText,
+      );
+      useComposerLifecycleStore.getState().publishCompletion({
+        attachmentKey: capturedAttachmentKey,
+        text: capturedText,
+        clearText,
+        replyLine: capturedReplyLine,
+      });
+      completed = true;
     } catch (caught) {
       if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
         setSendError(
@@ -392,8 +543,8 @@ export function InputArea({
         );
       }
     } finally {
-      setTextBusy(capturedAttachmentKey, false);
-      focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
+      useComposerLifecycleStore.getState().releaseTextSend(capturedAttachmentKey);
+      if (!completed) focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
     }
   }
 
@@ -472,7 +623,7 @@ export function InputArea({
       {attachmentDraft && (
         <AttachmentDraftStrip
           draft={attachmentDraft}
-          error={attachmentDraft.error ?? sendError}
+          error={sendError ?? attachmentDraft.error}
           onRemove={(id) => removeAttachment(activeAttachmentKey, id)}
         />
       )}
@@ -512,14 +663,20 @@ export function InputArea({
         <button
           type="button"
           aria-label={attachmentActionLabel}
+          aria-disabled={!attachmentCapable || busy}
+          aria-describedby={!attachmentCapable ? attachmentHelpId : undefined}
           title={attachmentActionLabel}
-          disabled={!attachmentCapable || busy}
-          onClick={() => fileInputRef.current?.click()}
-          onMouseDown={(event) => event.preventDefault()}
+          disabled={busy}
+          onClick={handleAttachmentAction}
           className="absolute bottom-2 left-2 flex size-8 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-hover hover:text-foreground disabled:cursor-not-allowed disabled:text-text-faint"
         >
           <Paperclip className="size-4" />
         </button>
+        {!attachmentCapable && (
+          <span id={attachmentHelpId} className="sr-only">
+            {RUNTIME_ATTACHMENT_HELP}
+          </span>
+        )}
 
         {isMobile ? (
           <button

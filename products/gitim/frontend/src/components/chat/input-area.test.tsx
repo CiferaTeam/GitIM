@@ -673,6 +673,324 @@ describe("InputArea attachments", () => {
       .toContain("text send failed");
   });
 
+  it("keeps a remounted same-key text draft busy and clears its captured caption on success", async () => {
+    const send = deferred<{ ok: true }>();
+    const onSend = vi.fn(() => send.promise);
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    await act(async () => {
+      setTextareaValue(container.querySelector("textarea")!, "same caption");
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      root?.unmount();
+      root = null;
+      await Promise.resolve();
+    });
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    const remounted = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(remounted.value).toBe("same caption");
+    expect(remounted.disabled).toBe(true);
+    await act(async () => {
+      pressEnter(remounted);
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      send.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(remounted.value).toBe("");
+    expect(remounted.disabled).toBe(false);
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
+  });
+
+  it("clears a remounted same-key attachment caption when the captured send succeeds", async () => {
+    const file = new File(["asset"], "remount.txt", { type: "text/plain" });
+    const asset = uploadedAsset(file);
+    const send = deferred<{ ok: true }>();
+    const onSend = vi.fn(() => send.promise);
+    uploadAssetsMock.mockResolvedValue({ ok: true, data: { assets: [asset] } });
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    await act(async () => {
+      pasteFiles(container.querySelector("textarea")!, [file]);
+      setTextareaValue(container.querySelector("textarea")!, "attachment caption");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      root?.unmount();
+      root = null;
+      await Promise.resolve();
+    });
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    const remounted = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(remounted.value).toBe("attachment caption");
+    expect(remounted.disabled).toBe(true);
+
+    await act(async () => {
+      send.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(remounted.value).toBe("");
+    expect(remounted.disabled).toBe(false);
+    expect(container.querySelector("[data-attachment-draft-strip]")).toBeNull();
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
+  });
+
+  it("preserves a newer same-key stored caption when an old text send succeeds", async () => {
+    const send = deferred<{ ok: true }>();
+    const onSend = vi.fn(() => send.promise);
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    await act(async () => {
+      setTextareaValue(container.querySelector("textarea")!, "old caption");
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      root?.unmount();
+      root = null;
+      localStorage.setItem("gitim:draft:ws:general", "new caption");
+      await Promise.resolve();
+    });
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    const remounted = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(remounted.value).toBe("new caption");
+    expect(remounted.disabled).toBe(true);
+
+    await act(async () => {
+      send.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(remounted.value).toBe("new caption");
+    expect(remounted.disabled).toBe(false);
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBe("new caption");
+  });
+
+  it("releases shared text busy and retains the remounted caption after failure", async () => {
+    const send = deferred<{ ok: false; error: string }>();
+    const onSend = vi.fn(() => send.promise);
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    await act(async () => {
+      setTextareaValue(container.querySelector("textarea")!, "retry caption");
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      root?.unmount();
+      root = null;
+      await Promise.resolve();
+    });
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    const remounted = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(remounted.disabled).toBe(true);
+
+    await act(async () => {
+      send.resolve({ ok: false, error: "offline" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(remounted.disabled).toBe(false);
+    expect(remounted.value).toBe("retry caption");
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBe("retry caption");
+  });
+
+  it("preserves a newer reply while a text send completes in the same scope", async () => {
+    const send = deferred<{ ok: true }>();
+    const onSend = vi.fn(() => send.promise);
+    const onReplyToChange = vi.fn();
+    const firstReply = { author: "owner", body: "first", line_number: 11, point_to: 0 } as Message;
+    const newerReply = { author: "owner", body: "newer", line_number: 12, point_to: 0 } as Message;
+
+    await renderInput(
+      <InputArea
+        {...defaultInputProps}
+        replyTo={firstReply}
+        onReplyToChange={onReplyToChange}
+        onSend={onSend}
+      />,
+    );
+    await act(async () => {
+      setTextareaValue(container.querySelector("textarea")!, "reply text");
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      root!.render(
+        <InputArea
+          {...defaultInputProps}
+          replyTo={newerReply}
+          onReplyToChange={onReplyToChange}
+          onSend={onSend}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      send.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onReplyToChange).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("newer");
+  });
+
+  it("preserves a newer reply while an attachment send completes in the same scope", async () => {
+    const file = new File(["asset"], "reply-update.txt", { type: "text/plain" });
+    const asset = uploadedAsset(file);
+    const send = deferred<{ ok: true }>();
+    const onSend = vi.fn(() => send.promise);
+    const onReplyToChange = vi.fn();
+    const firstReply = { author: "owner", body: "first", line_number: 21, point_to: 0 } as Message;
+    const newerReply = { author: "owner", body: "newer", line_number: 22, point_to: 0 } as Message;
+    uploadAssetsMock.mockResolvedValue({ ok: true, data: { assets: [asset] } });
+
+    await renderInput(
+      <InputArea
+        {...defaultInputProps}
+        replyTo={firstReply}
+        onReplyToChange={onReplyToChange}
+        onSend={onSend}
+      />,
+    );
+    await act(async () => {
+      pasteFiles(container.querySelector("textarea")!, [file]);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      await Promise.resolve();
+      root!.render(
+        <InputArea
+          {...defaultInputProps}
+          replyTo={newerReply}
+          onReplyToChange={onReplyToChange}
+          onSend={onSend}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      send.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onReplyToChange).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("newer");
+  });
+
+  it("clears an unchanged reply by line identity after success", async () => {
+    const send = deferred<{ ok: true }>();
+    const onSend = vi.fn(() => send.promise);
+    const onReplyToChange = vi.fn();
+    const firstReply = { author: "owner", body: "first", line_number: 31, point_to: 0 } as Message;
+    const refreshedReply = { ...firstReply, body: "refreshed object" };
+
+    await renderInput(
+      <InputArea
+        {...defaultInputProps}
+        replyTo={firstReply}
+        onReplyToChange={onReplyToChange}
+        onSend={onSend}
+      />,
+    );
+    await act(async () => {
+      setTextareaValue(container.querySelector("textarea")!, "same reply");
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      root!.render(
+        <InputArea
+          {...defaultInputProps}
+          replyTo={refreshedReply}
+          onReplyToChange={onReplyToChange}
+          onSend={onSend}
+        />,
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      send.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onReplyToChange).toHaveBeenCalledOnce();
+    expect(onReplyToChange).toHaveBeenCalledWith(null);
+  });
+
+  it("recovers when uploaded assets do not match the captured file order", async () => {
+    const files = [new File(["a"], "a.txt"), new File(["bb"], "b.txt")];
+    const assets = files.map(uploadedAsset);
+    uploadAssetsMock
+      .mockResolvedValueOnce({ ok: true, data: { assets: [assets[1], assets[0]] } })
+      .mockResolvedValueOnce({ ok: true, data: { assets } });
+    const onSend = vi.fn(async () => ({ ok: true as const }));
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    await act(async () => {
+      selectFiles(container.querySelector('input[type="file"]')!, files);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const key = attachmentDraftKey("ws", "general");
+    expect(useAttachmentDraftStore.getState().drafts[key]?.status).toBe("error");
+    expect(container.textContent).toContain("did not match");
+    expect(container.querySelector<HTMLTextAreaElement>("textarea")?.disabled).toBe(false);
+    expect(container.querySelector<HTMLInputElement>('input[type="file"]')?.disabled).toBe(false);
+    for (const button of container.querySelectorAll<HTMLButtonElement>('[aria-label^="Remove "]')) {
+      expect(button.disabled).toBe(false);
+    }
+
+    await act(async () => {
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(uploadAssetsMock).toHaveBeenCalledTimes(2);
+    expect(onSend).toHaveBeenCalledWith(`${assets[0].ref}\n${assets[1].ref}`, 0);
+  });
+
+  it("keeps ten mobile attachments in an internal horizontal strip", async () => {
+    mediaState.mobile = true;
+    const files = Array.from({ length: 10 }, (_, index) =>
+      new File([String(index)], `mobile-${index}.txt`, { type: "text/plain" }));
+
+    await renderInput(<InputArea {...defaultInputProps} />);
+    await act(async () => {
+      selectFiles(container.querySelector('input[type="file"]')!, files);
+      await Promise.resolve();
+    });
+
+    const strip = container.querySelector("[data-attachment-draft-strip]")!;
+    const scrollRegion = strip.querySelector("[data-attachment-scroll-region]")!;
+    expect(scrollRegion).not.toBeNull();
+    expect(scrollRegion.className).toContain("overflow-x-auto");
+    expect(scrollRegion.className).toContain("flex-nowrap");
+    expect(scrollRegion.querySelectorAll("[data-attachment-draft-item]")).toHaveLength(10);
+    expect(scrollRegion.querySelector("[data-attachment-draft-item]")?.className)
+      .toContain("min-w-[11.625rem]");
+    expect(scrollRegion.contains(container.querySelector('[aria-label="Attach files"]'))).toBe(false);
+    expect(scrollRegion.contains(container.querySelector('[aria-label="Send message"]'))).toBe(false);
+    expect(strip.innerHTML).not.toMatch(/text-\[(?:9|10)px\]/);
+  });
+
   it("captures the old scope while a deferred upload leaves the new scope usable", async () => {
     const oldFile = new File(["old"], "old.txt");
     const newFile = new File(["new"], "new.txt");
@@ -755,6 +1073,8 @@ describe("InputArea attachments", () => {
     });
     expect(onSend).not.toHaveBeenCalled();
     expect(container.textContent).toContain("new.png");
+    expect(useAttachmentDraftStore.getState().drafts[JSON.stringify(["ws", "general"])]?.status)
+      .toBe("idle");
     expect(revoke).not.toHaveBeenCalledWith("blob:preview-2");
   });
 
@@ -767,7 +1087,19 @@ describe("InputArea attachments", () => {
       await Promise.resolve();
     });
     const attach = container.querySelector<HTMLButtonElement>('button[aria-label*="Runtime"]')!;
-    expect(attach.disabled).toBe(true);
+    expect(attach.disabled).toBe(false);
+    expect(attach.getAttribute("aria-disabled")).toBe("true");
+    const descriptionId = attach.getAttribute("aria-describedby");
+    expect(descriptionId).not.toBeNull();
+    expect(document.getElementById(descriptionId!)?.textContent).toContain("Runtime");
+    attach.focus();
+    expect(document.activeElement).toBe(attach);
+    await act(async () => {
+      attach.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Runtime");
+    expect(uploadAssetsMock).not.toHaveBeenCalled();
     await act(async () => {
       setTextareaValue(container.querySelector("textarea")!, "browser text");
       pressEnter(container.querySelector("textarea")!);

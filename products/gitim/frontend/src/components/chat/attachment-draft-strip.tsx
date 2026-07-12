@@ -38,13 +38,17 @@ export function AttachmentDraftStrip({ draft, error, onRemove }: AttachmentDraft
 
   return (
     <div data-attachment-draft-strip className="mb-2 min-w-0">
-      <div className="flex min-w-0 flex-wrap gap-2 overflow-hidden">
+      <div
+        data-attachment-scroll-region
+        className="flex min-w-0 flex-nowrap gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-x-visible sm:pb-0"
+      >
         {draft.items.map((item) => {
           const name = displayBasename(item.file.name);
           return (
             <div
               key={item.id}
-              className="grid w-full min-w-0 max-w-full grid-cols-[2.5rem_minmax(0,1fr)_1.75rem] items-center gap-2 rounded-lg border border-border-strong bg-surface px-1.5 py-1.5 sm:w-[13rem]"
+              data-attachment-draft-item
+              className="grid w-[11.625rem] min-w-[11.625rem] shrink-0 grid-cols-[2.5rem_minmax(0,1fr)_1.75rem] items-center gap-2 rounded-lg border border-border-strong bg-surface px-1.5 py-1.5 sm:w-[13rem] sm:min-w-0"
             >
               {item.previewUrl ? (
                 <img
@@ -53,16 +57,16 @@ export function AttachmentDraftStrip({ draft, error, onRemove }: AttachmentDraft
                   className="size-10 rounded-md border border-border object-cover"
                 />
               ) : (
-                <div className="flex size-10 flex-col items-center justify-center rounded-md border border-border bg-background text-[9px] font-medium text-text-muted">
+                <div className="flex size-10 flex-col items-center justify-center rounded-md border border-border bg-background text-xs font-medium leading-none text-text-muted">
                   <FileText className="mb-0.5 size-3.5" />
                   {fileType(name, item.file.type)}
                 </div>
               )}
               <div className="min-w-0">
-                <div className="truncate text-[11px] font-medium text-foreground" title={name}>
+                <div className="truncate text-xs font-medium leading-tight text-foreground" title={name}>
                   {name}
                 </div>
-                <div className="truncate text-[10px] text-text-muted">
+                <div className="truncate text-xs leading-tight text-text-muted">
                   {formatBinarySize(item.file.size)}
                 </div>
               </div>
