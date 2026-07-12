@@ -1,17 +1,68 @@
+import { createHash } from "node:crypto";
+import { deflateSync } from "node:zlib";
 import { expect, test, type Page } from "@playwright/test";
 
 const runtimePort = 49322;
 const slug = "mobile";
 const localPollIntervalMs = 7000;
 const assetOrigin = "3c6a295e-744a-41dc-ba60-5c21bb94e5a2";
-const assetHash = "8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88";
-const portraitPng = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-  "base64",
-);
+const assetWidth = 100;
+const assetHeight = 1000;
+
+function crc32(bytes: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc >>> 1) ^ (0xedb88320 & -(crc & 1));
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+function pngChunk(type: string, data: Buffer): Buffer {
+  const typeBytes = Buffer.from(type, "ascii");
+  const chunk = Buffer.alloc(12 + data.length);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  chunk.writeUInt32BE(crc32(Buffer.concat([typeBytes, data])), 8 + data.length);
+  return chunk;
+}
+
+function createPortraitPng(width: number, height: number): Buffer {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8;
+  ihdr[9] = 6;
+
+  const scanlineBytes = width * 4 + 1;
+  const pixels = Buffer.alloc(scanlineBytes * height);
+  for (let row = 0; row < height; row += 1) {
+    pixels[row * scanlineBytes] = 0;
+  }
+
+  return Buffer.concat([
+    Buffer.from("89504e470d0a1a0a", "hex"),
+    pngChunk("IHDR", ihdr),
+    pngChunk("IDAT", deflateSync(pixels)),
+    pngChunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+const portraitPng = createPortraitPng(assetWidth, assetHeight);
+const assetHash = createHash("sha256").update(portraitPng).digest("hex");
+
+function pngDimensions(png: Buffer): { width: number; height: number } {
+  return {
+    width: png.readUInt32BE(16),
+    height: png.readUInt32BE(20),
+  };
+}
 
 function portraitAssetRef(size: number): string {
-  return `<^v1/${assetOrigin}/sha256:${assetHash}?name=portrait.png&type=image%2Fpng&size=${size}&width=1000&height=10000>`;
+  return `<^v1/${assetOrigin}/sha256:${assetHash}?name=portrait.png&type=image%2Fpng&size=${size}&width=${assetWidth}&height=${assetHeight}>`;
 }
 
 interface BrowserWorkspaceRecordFixture {
@@ -263,8 +314,8 @@ async function stubRuntime(
             name: "portrait.png",
             media_type: "image/png",
             size: portraitPng.length,
-            width: 1000,
-            height: 10000,
+            width: assetWidth,
+            height: assetHeight,
           }],
         },
       });
@@ -668,6 +719,12 @@ test("mobile attachment stays within the composer and message column", async ({ 
   await page.setViewportSize({ width: 390, height: 844 });
   await stubRuntime(page, sentBodies);
   await page.goto("/chat");
+
+  expect(pngDimensions(portraitPng)).toEqual({
+    width: assetWidth,
+    height: assetHeight,
+  });
+  expect(createHash("sha256").update(portraitPng).digest("hex")).toBe(assetHash);
 
   const fileChooserPromise = page.waitForEvent("filechooser");
   await page.getByRole("button", { name: "Attach files" }).click();
