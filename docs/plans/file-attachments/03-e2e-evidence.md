@@ -230,6 +230,85 @@ npm exec vitest -- run \
 # 3 files passed, 42 tests passed
 ```
 
+The final completion gate also passed the complete repository matrix:
+
+| Command | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` | Passed. |
+| `cargo clippy --workspace --all-targets --no-deps --locked` | Passed. |
+| `cargo test -p gitim-core --locked` | Passed, including 23 AssetRef integration tests. |
+| `cargo test -p gitim-runtime --locked` | Passed after the Pi subprocess tests were given a shared serial isolation boundary. |
+| `cargo test -p gitim-agent-provider --locked` | Passed. |
+| `cargo test -p gitim-runtime --features test-support --test assets_store --locked` | 111 passed, 2 ignored child helpers. |
+| `cargo test --workspace --locked --quiet` | Passed with zero failures. |
+| `npm test` | 74 files, 714 tests passed. |
+| `npm run lint` | Passed. |
+| `npm run build` | Passed. |
+| `npm run build:wasm` | Passed; the checked-in package was unchanged after regeneration. |
+| `npm run test:e2e` | 22 Playwright tests passed. |
+| `git diff --check` | Passed. |
+
+## Requirement completion audit
+
+### Included scope
+
+| Included item | Current evidence |
+| --- | --- |
+| Runtime-backed channel, DM, card-thread, and reply composers | Shared `InputArea` integration in `input-area.tsx`; send-path coverage in `input-area.test.tsx`; final DM paste/send above. |
+| Image paste and multi-file selection | `input-area.test.tsx`; final Kimi paste/send and picker preview/remove above. |
+| In-memory pending previews | `use-attachment-draft-store.test.ts`, `attachment-draft-strip.tsx`, and final picker/paste smoke. |
+| Inline verified PNG/JPEG/GIF/WebP/AVIF | `assets_store.rs` inspection tests and `message-body.test.tsx` renderer matrix. |
+| Download cards for other types | `message-body.test.tsx` PDF/text/unknown card matrix and `assets_http.rs::unsafe_types_force_attachment_and_unicode_filename_is_rfc5987_encoded`. |
+| Typed Rust and frontend AssetRef | `asset_ref_test.rs`, shared `testdata/protocol/asset_refs_v1.json`, and `asset-ref.test.ts`. |
+| Workspace-local SHA-256 Runtime store | `assets_store.rs` plus the final object/sidecar and Git-exclusion assertions above. |
+| Local/Fleet reads, integrity, and persistent replicas | `assets_http.rs`, `assets_fleet.rs`, and final fresh Fleet/offline-replica proof. |
+| Runtime CLI Agent upload/download | `cli_asset.rs` and final-head CLI SHA-256 round trip. |
+| Browser/WASM metadata-only history | `gitim-wasm/src/lib.rs`, regenerated `gitim-wasm/pkg`, and Browser-mode renderer tests. |
+| Desktop/mobile layouts | `wireframe.html` and 22 final Playwright layout/interaction tests. |
+
+### Architectural invariants
+
+| Invariant | Current assertion |
+| --- | --- |
+| 1. Bytes never enter a Git clone | Store root is `.gitim-runtime/assets/v1`; final `git ls-files`/thread/commit audit found only text refs. |
+| 2. SHA-256 is the content identity; protocol has no path | Shared canonical grammar tests reject paths/noncanonical hashes; final refs contain UUID + hash + display metadata only. |
+| 3. Origin ID is a hint; any verified replica may serve | `local_hash_wins_even_when_the_origin_hint_names_another_runtime`, Fleet fallback tests, and offline local replica proof. |
+| 4. Objects and replicas persist in v1 | No deletion/GC path exists; final origin-offline replica remained readable; workspace DELETE preserved its asset namespace. |
+| 5. Workspace isolation | Binding/quarantine/store-token tests plus final same-slug different-path `404 asset_missing` with browser `no-store`. |
+| 6. Cross-node mapping uses workspace identity | `workspace_identity_filters_candidates_before_network_access` and final `github.com/flame4/room` mapping. |
+| 7. Browser uses only its local Runtime | Browser-origin middleware, peer-route 403, local-only DOM/response URLs, and no peer address exposure. |
+| 8. Received bytes are hashed before visibility | Store staging/dedupe tests, Fleet mismatch/corruption tests, CLI verification, and exact final SHA checks. |
+| 9. Message metadata is untrusted | Authoritative MIME/dimension/sidecar tests, `nosniff`, forced-download tests, and remote HEAD MIME regression. |
+| 10. Older clients keep readable text | Invalid/unknown asset syntax remains text in Rust and frontend parser compatibility tests. |
+
+### Required commands
+
+| Requirement command | Evidence |
+| --- | --- |
+| `cargo test -p gitim-core --locked` | Final completion matrix: passed. |
+| `cargo test -p gitim-runtime --locked` | Final completion matrix: passed. |
+| `cargo test -p gitim-agent-provider --locked` | Final completion matrix: passed. |
+| `npm test` | Final completion matrix: 714 passed. |
+| `npm run lint` | Final completion matrix: passed. |
+| `npm run build` | Final completion matrix: passed. |
+| `npm run build:wasm` | Final completion matrix: passed and deterministic. |
+| `cargo test --workspace --locked` | Final completion matrix: passed with zero failures. |
+| `git diff --check` | Final completion matrix: passed. |
+| Live two-node E2E | Exact final revision and binary hashes, fresh Fleet transfer, offline replica, browser, CLI, Git, and restoration evidence above. |
+
+### Success criteria
+
+| Criterion | Current evidence |
+| --- | --- |
+| Pasted image sends/renders without binary Git data | Final Kimi DM `L000091`, local resolver render, and Git refs-only audit. |
+| Arbitrary file sends/downloads with safe headers | Text/binary CLI round trips, unsafe-type HTTP forced-download coverage, and frontend file-card tests. |
+| Mac mini origin resolves through MacBook Fleet | Fresh `b229...3650` final-head transfer. |
+| MacBook serves its verified replica while origin is offline | Final browser GET/HEAD/render after Mac mini Runtime stop. |
+| Agent put/get preserves SHA-256 | Final `623b...c64a` CLI round trip and `cli_asset.rs`. |
+| Invalid input and corrupt bytes never become stored objects | Core boundary tests; store symlink/corruption/quota tests; HTTP origin/limit tests; Fleet mismatch/oversize/timeout tests. |
+| Browser/WASM history stays readable without byte claims | Metadata-only renderer and WASM serialization tests. |
+| Existing text/send behavior is unchanged | Core legacy link/parser suites, existing composer send tests, full Rust workspace, and 714-test frontend suite. |
+
 ## Mutations and restoration
 
 The run intentionally retained only DM line `L000091`, its Git text ref, and

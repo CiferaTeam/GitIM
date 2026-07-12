@@ -1862,14 +1862,14 @@ git commit -m "test(e2e): verify fleet attachment round trip" \
 - Update: `docs/plans/file-attachments/01-engineering-review.md`
 - Update: `docs/plans/file-attachments/03-e2e-evidence.md`
 
-- [ ] **Step 1: Run first independent code review**
+- [x] **Step 1: Run first independent code review**
 
 Use `superpowers:requesting-code-review` over the complete branch diff. Review
 against every invariant/success criterion in `00-requirements.md`, not only style.
 Separately run the Codex adversarial challenge in read-only mode. Classify every
 finding by severity and confidence; reproduce before changing code.
 
-- [ ] **Step 2: Fix every confirmed P0/P1/P2 and add regression tests**
+- [x] **Step 2: Fix every confirmed P0/P1/P2 and add regression tests**
 
 Follow `superpowers:receiving-code-review`: verify technically, write the failing
 regression first, make the smallest coherent fix, rerun the owning scoped suite,
@@ -1882,7 +1882,7 @@ Review the post-fix diff with fresh context. The gate requires zero unresolved
 P0/P1, zero known data-loss/security gap, and no P2 without an explicit current
 design rationale. Repeat regression repair if needed.
 
-- [ ] **Step 4: Rerun completion verification from clean current state**
+- [x] **Step 4: Rerun completion verification from clean current state**
 
 Use `superpowers:verification-before-completion` and rerun:
 
@@ -1903,7 +1903,7 @@ git diff --check
 Then re-check the live E2E evidence is from the final binaries or rerun affected
 steps if review fixes changed Runtime/Fleet/frontend behavior.
 
-- [ ] **Step 5: Requirement-by-requirement completion audit**
+- [x] **Step 5: Requirement-by-requirement completion audit**
 
 Create a table in `03-e2e-evidence.md` mapping every Included item, invariant,
 required command, and success criterion to a current file/test/runtime evidence
@@ -1921,14 +1921,14 @@ verification evidence, live E2E result, and available finishing options.
 
 ## Plan Self-Review Checklist
 
-- [ ] Every Included requirement maps to Tasks 1–15.
-- [ ] Every architectural invariant has a unit/integration/E2E assertion.
-- [ ] Every new HTTP/CLI/frontend error is recoverable and user-visible.
-- [ ] Shared protocol changes regenerate and test the checked-in WASM package.
-- [ ] Runtime uploads/downloads are streaming and resource bounded.
-- [ ] Local and remote corruption cannot become a served or dedupe-winning object.
-- [ ] Workspace path reuse cannot expose an old asset namespace.
-- [ ] No task adds automatic deletion, cloud storage, background prefetch, or
+- [x] Every Included requirement maps to Tasks 1–15.
+- [x] Every architectural invariant has a unit/integration/E2E assertion.
+- [x] Every new HTTP/CLI/frontend error is recoverable and user-visible.
+- [x] Shared protocol changes regenerate and test the checked-in WASM package.
+- [x] Runtime uploads/downloads are streaming and resource bounded.
+- [x] Local and remote corruption cannot become a served or dedupe-winning object.
+- [x] Workspace path reuse cannot expose an old asset namespace.
+- [x] No task adds automatic deletion, cloud storage, background prefetch, or
   browser/WASM byte storage.
 - [ ] Final verification includes full Rust, frontend, WASM, Playwright, two
   independent reviews, and live two-node browser/Agent/Git audits.

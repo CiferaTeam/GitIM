@@ -1,6 +1,6 @@
 # File Attachments v1 — Engineering Review
 
-Status: FINAL VERIFICATION IN PROGRESS
+Status: FINAL REVIEW IN PROGRESS
 
 Reviewed: 2026-07-12
 
@@ -143,40 +143,39 @@ surfaces.
 ## Test Review
 
 ```text
-CODE PATHS                                              USER FLOWS
-[PLANNED ★★★] Core AssetRef grammar                     [PLANNED ★★★ →E2E] Paste image + optional text + send
-  ├─ canonical parse/format/serde                         ├─ pending preview/remove/scope switch
-  ├─ every field boundary and percent encoding            ├─ upload then existing IM send
-  └─ invalid ref remains plain text                        └─ rendered immutable image
+CODE PATHS                                               USER FLOWS
+[VERIFIED ★★★] Core AssetRef grammar                    [VERIFIED ★★★ →E2E] Paste image + optional text + send
+  ├─ canonical parse/format/serde                          ├─ pending preview/remove/scope switch
+  ├─ every field boundary and percent encoding             ├─ upload then existing IM send
+  └─ invalid ref remains plain text                         └─ rendered no-store image
 
-[PLANNED ★★★] Runtime upload                            [PLANNED ★★★ →E2E] Pick arbitrary file + download
-  ├─ multipart stream/count/file/aggregate limits          ├─ file card and safe filename
-  ├─ tmp cleanup + magic MIME + dimensions                 └─ range/download/hash match
+[VERIFIED ★★★] Runtime upload                           [VERIFIED ★★★ →E2E] Pick arbitrary file + download
+  ├─ multipart stream/count/file/aggregate limits           ├─ file card and safe filename
+  ├─ tmp cleanup + magic MIME + dimensions                  └─ range/download/hash match
   └─ binding/quota/reserve + atomic dedupe/repair
 
-[PLANNED ★★★] Runtime resolve/Fleet                     [PLANNED ★★★ →E2E] Mac mini origin → MacBook replica
-  ├─ local GET/HEAD/ETag/range                            ├─ resolve through SSH tunnel
-  ├─ origin mapping + legacy ID backfill                  ├─ verify stored replica
-  ├─ timeout/404/oversize/corrupt/hash mismatch            └─ origin offline, replica still renders
+[VERIFIED ★★★] Runtime resolve/Fleet                    [VERIFIED ★★★ →E2E] Mac mini origin → MacBook replica
+  ├─ local GET/HEAD/ETag/range                             ├─ resolve through existing tunnel
+  ├─ origin mapping + legacy ID backfill                   ├─ verify stored replica
+  ├─ timeout/404/oversize/corrupt/hash mismatch             └─ origin offline, replica still renders
   └─ fallback bound + singleflight + transfer semaphore
 
-[PLANNED ★★★] Browser security                         [PLANNED ★★★] Recoverable user errors
-  ├─ allowed/rejected Origin and Fetch Metadata            ├─ upload failure keeps draft and refs
-  ├─ user-activated navigation exception                   ├─ unavailable card + Retry
-  └─ node-local browser rejection                          └─ rapid resubmit/scope change/unmount cleanup
+[VERIFIED ★★★] Browser security                        [VERIFIED ★★★] Recoverable user errors
+  ├─ allowed/rejected Origin and Fetch Metadata             ├─ upload failure keeps draft and refs
+  ├─ browser resolve no-store across slug reuse             ├─ unavailable card + Retry
+  └─ node-local browser rejection                           └─ stale generations and workspace disposal
 
-[PLANNED ★★★] Agent CLI                                [PLANNED ★★★ →E2E] Agent put/ref/send/get
-  ├─ workspace selection + streaming multipart             └─ destination SHA-256 equals source
+[VERIFIED ★★★] Agent CLI                               [VERIFIED ★★★ →E2E] Agent put/ref/send/get
+  ├─ workspace selection + streaming multipart              └─ destination SHA-256 equals source
   └─ temp output/hash/overwrite protection
 
-[PLANNED ★★★] WASM/frontend parser and renderer        [PLANNED ★★★] Browser/WASM metadata history
-  ├─ shared grammar fixtures                               └─ Runtime-required action is disabled
+[VERIFIED ★★★] WASM/frontend parser and renderer       [VERIFIED ★★★] Browser/WASM metadata history
+  ├─ shared grammar fixtures                                └─ Runtime-required action is disabled
   ├─ code-span/plain-text behavior
   └─ image/file/loading/unavailable/mobile states
 
-PLAN COVERAGE: all identified branches have a named unit, integration, or E2E
-test requirement. Implementation coverage starts at 0 and is proven milestone by
-milestone; no test is credited before it exists and runs.
+COVERAGE: every included requirement and architectural invariant maps to a
+unit, integration, browser, or final two-node assertion in 03-e2e-evidence.md.
 ```
 
 Legend: ★★★ behavior + boundary + error coverage; `→E2E` crosses three or more
@@ -258,34 +257,45 @@ conflicts in shared manifests or generated WASM output.
   concurrency/security/failure bounds locked.
 - Code Quality Review: module boundaries, shared fixtures, typed errors, and
   atomic config updates required.
-- Test Review: coverage diagram produced; every identified gap is now a concrete
-  plan requirement.
+- Test Review: the protocol, store, HTTP/Fleet, CLI, frontend, WASM, desktop,
+  mobile, and two-node matrices are implemented and passing.
 - Performance Review: streaming, singleflight, lazy rendering, bounded fallback,
   and global transfer concurrency required.
 - NOT in scope: recorded in the requirements document.
 - What already exists: recorded above.
 - Failure modes: zero silent untested critical gaps.
-- Outside voice: Codex challenge ran; validated storage-pressure, integrity,
-  binding, fallback-discovery, ref-length, draft-race, and cross-process tests
-  are incorporated.
+- Outside voice: the Codex challenge and first independent review identified
+  nine concrete merge blockers. Exact-quota retry, cross-process quota,
+  Fleet-prefix routing, remote HEAD MIME, workspace draft disposal,
+  registration rollback, namespace continuity, browser cache isolation, and
+  config-only rollback all have current regressions and are closed.
 - Parallelization: three dependency lanes, executed as sequential milestones.
 - Lake Score: complete option selected for every engineering coverage decision.
-- Unresolved decisions: 0.
+- Full verification: Rust workspace, feature-gated store suite, frontend unit,
+  lint, production build, regenerated WASM, Playwright, and final-head release
+  binaries passed.
+- Live verification: final-head MacBook/Mac mini Fleet transfer, offline
+  replica, browser/peer cache split, CLI integrity, Git exclusion, composer,
+  and workspace lifecycle isolation passed.
+- Unresolved implementation decisions: 0.
 
 ## GSTACK REVIEW REPORT
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |---|---|---|---:|---|---|
 | CEO Review | `/plan-ceo-review` | Scope and strategy | 0 | — | Product requirements were approved directly. |
-| Codex Review | `/codex review` | Independent second opinion | 1 | ISSUES INCORPORATED | 11 challenges; 7 engineering gaps incorporated and 2 existing product boundaries clarified. |
+| Codex Challenge | `/codex challenge` | Adversarial implementation audit | 1 | ISSUES CLOSED | Found browser-cache workspace isolation and lifecycle/quota/Fleet gaps; all confirmed findings have regressions. |
 | Eng Review | `/plan-eng-review` | Architecture and tests (required) | 1 | CLEAR | 8 issues resolved, 0 critical gaps, 0 unresolved decisions. |
+| Independent Review 1 | Task 16 | Full branch implementation gate | 1 + follow-ups | PASS | Zero unresolved P0/P1/P2 after confirmed fixes. |
+| Independent Review 2 | Task 16 | Fresh final-context gate | 1 | FOLLOW-UP PENDING | Code audit found no implementation defect; final evidence and audit gates are now updated for re-review. |
 | Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | Interaction wireframe approved; visual QA remains in implementation E2E. |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | Not required for this feature. |
 
-- **CODEX:** Added quotas, corruption checks, workspace binding, complete fallback
-  discovery, encoded-ref limits, draft generations, and cross-process tests.
+- **CODEX:** The adversarial challenge is closed by current tests for quotas,
+  workspace binding/lifecycle, complete fallback discovery, encoded-ref limits,
+  draft generations, peer metadata, and browser cache isolation.
 - **CROSS-MODEL:** Both reviews require content integrity, bounded resource use,
   and recoverable failures; the approved demand-driven/Tailnet trust posture is
   preserved.
-- **UNRESOLVED:** 0
-- **VERDICT:** ENG CLEARED — ready for the TDD implementation plan.
+- **UNRESOLVED:** final documentation-only follow-up review.
+- **VERDICT:** IMPLEMENTATION VERIFIED; FINAL REVIEW PENDING.
