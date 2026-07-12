@@ -16,6 +16,8 @@ const INLINE_IMAGE_TYPES = new Set([
 
 const MAX_DIMENSION_HINT = 4096;
 const MAX_FRAME_SIZE = 440;
+const MAX_INLINE_IMAGE_AXIS = 32_768;
+const MAX_INLINE_IMAGE_PIXELS = 100_000_000;
 const MAX_ASPECT_RATIO = 4;
 const MIN_ASPECT_RATIO = 1 / MAX_ASPECT_RATIO;
 
@@ -72,6 +74,16 @@ function stopAssetEvent(event: MouseEvent<HTMLElement>) {
   event.stopPropagation();
 }
 
+function isInlineSafeImage(asset: AssetRef): boolean {
+  const { width, height } = asset;
+  return INLINE_IMAGE_TYPES.has(asset.mediaType)
+    && width !== undefined
+    && height !== undefined
+    && width <= MAX_INLINE_IMAGE_AXIS
+    && height <= MAX_INLINE_IMAGE_AXIS
+    && width * height <= MAX_INLINE_IMAGE_PIXELS;
+}
+
 function AssetMetadata({ asset }: { asset: AssetRef }) {
   return (
     <span className="min-w-0 flex-1">
@@ -124,52 +136,78 @@ function FileCard({ asset, url }: { asset: AssetRef; url: string }) {
     <span className="flex items-center gap-2.5 rounded-lg border border-border-strong bg-surface p-3">
       <FileText aria-hidden="true" className="size-5 shrink-0 text-text-muted" />
       <AssetMetadata asset={asset} />
-      <a
-        href={url}
-        target="_blank"
-        rel="noopener noreferrer"
-        aria-label={`Download ${asset.name}`}
-        title={`Download ${asset.name}`}
-        onClick={stopAssetEvent}
-        onDoubleClick={stopAssetEvent}
-        className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-text-secondary transition-colors duration-75 hover:bg-surface-hover hover:text-foreground"
-      >
-        <Download aria-hidden="true" className="size-3" />
-        Download
-      </a>
+      <DownloadLink asset={asset} url={url} />
     </span>
   );
 }
 
-function UnavailableCard({ asset, onRetry }: { asset: AssetRef; onRetry: () => void }) {
+function DownloadLink({ asset, url }: { asset: AssetRef; url: string }) {
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={`Download ${asset.name}`}
+      title={`Download ${asset.name}`}
+      onClick={stopAssetEvent}
+      onDoubleClick={stopAssetEvent}
+      className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-text-secondary transition-colors duration-75 hover:bg-surface-hover hover:text-foreground"
+    >
+      <Download aria-hidden="true" className="size-3" />
+      Download
+    </a>
+  );
+}
+
+function UnavailableCard({
+  asset,
+  downloadUrl,
+  onRetry,
+}: {
+  asset: AssetRef;
+  downloadUrl: string;
+  onRetry: () => void;
+}) {
   return (
     <span
-      role="alert"
+      role="status"
+      aria-live="polite"
       className="block rounded-lg border border-dashed border-border-strong bg-surface p-3"
     >
       <span className="block text-xs font-medium text-foreground">Unavailable</span>
       <span className="mt-2 flex items-center gap-2.5">
         <FileText aria-hidden="true" className="size-5 shrink-0 text-text-muted" />
         <AssetMetadata asset={asset} />
-        <button
-          type="button"
-          aria-label={`Retry loading ${asset.name}`}
-          onClick={(event) => {
-            event.stopPropagation();
-            onRetry();
-          }}
-          onDoubleClick={stopAssetEvent}
-          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-text-secondary transition-colors duration-75 hover:bg-surface-hover hover:text-foreground"
-        >
-          <RefreshCw aria-hidden="true" className="size-3" />
-          Retry
-        </button>
+        <span className="flex shrink-0 items-center gap-1.5">
+          <DownloadLink asset={asset} url={downloadUrl} />
+          <button
+            type="button"
+            aria-label={`Retry loading ${asset.name}`}
+            onClick={(event) => {
+              event.stopPropagation();
+              onRetry();
+            }}
+            onDoubleClick={stopAssetEvent}
+            className="inline-flex shrink-0 items-center gap-1 rounded-md border border-border px-2 py-1 text-xs font-medium text-text-secondary transition-colors duration-75 hover:bg-surface-hover hover:text-foreground"
+          >
+            <RefreshCw aria-hidden="true" className="size-3" />
+            Retry
+          </button>
+        </span>
       </span>
     </span>
   );
 }
 
-function ImageCard({ asset, url }: { asset: AssetRef; url: string }) {
+function ImageCard({
+  asset,
+  downloadUrl,
+  url,
+}: {
+  asset: AssetRef;
+  downloadUrl: string;
+  url: string;
+}) {
   const [state, setState] = useState<"loading" | "loaded" | "unavailable">("loading");
   const [attempt, setAttempt] = useState(0);
   const geometry = imageGeometry(asset.width, asset.height);
@@ -178,6 +216,7 @@ function ImageCard({ asset, url }: { asset: AssetRef; url: string }) {
     return (
       <UnavailableCard
         asset={asset}
+        downloadUrl={downloadUrl}
         onRetry={() => {
           setAttempt((current) => current + 1);
           setState("loading");
@@ -240,12 +279,14 @@ export function AssetFragment({ asset }: { asset: AssetRef }) {
   const mode = useConnectionStore((state) => state.mode);
   const activeSlug = useWorkspaceStore((state) => state.activeSlug);
   const runtimeCapable = mode === "remote" && activeSlug !== null;
-  const isInlineImage = INLINE_IMAGE_TYPES.has(asset.mediaType);
-  const url = useMemo(() => {
+  const isInlineImage = isInlineSafeImage(asset);
+  const resolvedUrls = useMemo(() => {
     if (!runtimeCapable || activeSlug === null) return null;
-    return isInlineImage
-      ? assetResolveUrl(activeSlug, asset)
-      : assetResolveUrl(activeSlug, asset, { download: true });
+    const downloadUrl = assetResolveUrl(activeSlug, asset, { download: true });
+    return {
+      downloadUrl,
+      viewUrl: isInlineImage ? assetResolveUrl(activeSlug, asset) : downloadUrl,
+    };
   }, [activeSlug, asset, isInlineImage, runtimeCapable]);
 
   return (
@@ -255,12 +296,17 @@ export function AssetFragment({ asset }: { asset: AssetRef }) {
       onDoubleClick={stopAssetEvent}
       className="my-2 block w-full max-w-[440px] text-xs"
     >
-      {url === null ? (
+      {resolvedUrls === null ? (
         <MetadataCard asset={asset} />
       ) : isInlineImage ? (
-        <ImageCard asset={asset} url={url} />
+        <ImageCard
+          key={resolvedUrls.viewUrl}
+          asset={asset}
+          downloadUrl={resolvedUrls.downloadUrl}
+          url={resolvedUrls.viewUrl}
+        />
       ) : (
-        <FileCard asset={asset} url={url} />
+        <FileCard asset={asset} url={resolvedUrls.downloadUrl} />
       )}
     </span>
   );

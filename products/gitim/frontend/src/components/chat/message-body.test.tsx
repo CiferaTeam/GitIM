@@ -66,19 +66,21 @@ function assetRef({
   name = "fleet-assets.png",
   mediaType = "image/png",
   size = 184_203,
+  sha256 = HASH,
   width,
   height,
 }: {
   name?: string;
   mediaType?: string;
   size?: number;
+  sha256?: string;
   width?: number;
   height?: number;
 } = {}): string {
   return formatAssetRef({
     version: 1,
     originRuntimeId: ORIGIN,
-    sha256: HASH,
+    sha256,
     name,
     mediaType,
     size,
@@ -157,8 +159,8 @@ describe("MessageBody", () => {
     const normal = assetRef({ width: 1600, height: 900 });
     const extreme = assetRef({
       name: "extreme.png",
-      width: 0xffff_ffff,
-      height: 1,
+      width: 10_000,
+      height: 1000,
     });
     await renderBody(`${normal}\n${extreme}`);
 
@@ -174,7 +176,7 @@ describe("MessageBody", () => {
     expect(images[0].getAttribute("width")).toBe("1600");
     expect(images[0].getAttribute("height")).toBe("900");
     expect(frames[1].style.aspectRatio).toBe("4 / 1");
-    expect(images[1].getAttribute("width")).not.toBe(String(0xffff_ffff));
+    expect(images[1].getAttribute("width")).not.toBe("10000");
     expect(frames[1].className).toContain("max-h-[440px]");
     expect(frames[1].className).toContain("min-h-");
   });
@@ -182,8 +184,8 @@ describe("MessageBody", () => {
   it("preserves the clamped portrait ratio within the frame bounds", async () => {
     await renderBody(assetRef({
       name: "portrait.png",
-      width: 1,
-      height: 0xffff_ffff,
+      width: 1000,
+      height: 10_000,
     }));
 
     const frame = container.querySelector<HTMLElement>("[data-asset-frame]")!;
@@ -192,6 +194,67 @@ describe("MessageBody", () => {
     expect(frame.style.maxWidth).toBe("110px");
     expect(frame.className).toContain("max-h-[440px]");
     expect(frame.className).not.toContain("w-full");
+  });
+
+  it.each([
+    ["missing dimensions", assetRef({ name: "missing.png" })],
+    ["an oversized axis", assetRef({ name: "wide.png", width: 32_769, height: 1 })],
+    ["an oversized pixel count", assetRef({ name: "huge.png", width: 10_001, height: 10_000 })],
+  ])("renders a PNG with %s as a downloadable file card", async (_reason, ref) => {
+    await renderBody(ref);
+
+    expect(container.querySelector("img[data-asset-image]")).toBeNull();
+    const download = container.querySelector<HTMLAnchorElement>('a[aria-label^="Download "]');
+    expect(download).not.toBeNull();
+    expect(download?.href).toContain("download=1");
+    expect(assetResolveUrlMock).toHaveBeenCalledWith(
+      "workspace",
+      expect.objectContaining({ mediaType: "image/png" }),
+      { download: true },
+    );
+  });
+
+  it("resets a failed image when the resolved asset URL changes", async () => {
+    const first = assetRef({
+      name: "first.png",
+      sha256: "a".repeat(64),
+      width: 800,
+      height: 600,
+    });
+    const second = assetRef({
+      name: "second.png",
+      sha256: "b".repeat(64),
+      width: 800,
+      height: 600,
+    });
+    await renderBody(first);
+    const staleImage = container.querySelector<HTMLImageElement>("img[data-asset-image]")!;
+    act(() => staleImage.dispatchEvent(new Event("error")));
+    expect(container.querySelector("img[data-asset-image]")).toBeNull();
+
+    await renderBody(second);
+    const currentImage = container.querySelector<HTMLImageElement>("img[data-asset-image]")!;
+    expect(currentImage).not.toBe(staleImage);
+    expect(currentImage.alt).toBe("second.png");
+
+    act(() => staleImage.dispatchEvent(new Event("error")));
+    expect(container.querySelector("img[data-asset-image]")).toBe(currentImage);
+    expect(container.textContent).not.toContain("Unavailable");
+  });
+
+  it("resets a failed image when the active workspace resolver URL changes", async () => {
+    const ref = assetRef({ width: 800, height: 600 });
+    await renderBody(ref);
+    const firstImage = container.querySelector<HTMLImageElement>("img[data-asset-image]")!;
+    act(() => firstImage.dispatchEvent(new Event("error")));
+
+    workspaceState.activeSlug = "second-workspace";
+    await renderBody(ref);
+
+    const secondImage = container.querySelector<HTMLImageElement>("img[data-asset-image]")!;
+    expect(secondImage).not.toBe(firstImage);
+    expect(secondImage.src).toContain("/workspaces/second-workspace/assets/resolve/");
+    expect(container.textContent).not.toContain("Unavailable");
   });
 
   it("moves from loading to loaded and supports stable repeated image retries", async () => {
@@ -208,6 +271,14 @@ describe("MessageBody", () => {
     expect(container.querySelector("img[data-asset-image]")).toBeNull();
     expect(container.textContent).toContain("Unavailable");
     expect(container.textContent).toContain("fleet-assets.png");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Unavailable");
+    const fallbackDownload = container.querySelector<HTMLAnchorElement>(
+      'a[aria-label="Download fleet-assets.png"]',
+    );
+    expect(fallbackDownload?.href).toContain("download=1");
+    expect(fallbackDownload?.getAttribute("target")).toBe("_blank");
+    expect(fallbackDownload?.getAttribute("rel")).toBe("noopener noreferrer");
 
     const firstRetry = container.querySelector<HTMLButtonElement>(
       'button[aria-label="Retry loading fleet-assets.png"]',
@@ -375,6 +446,17 @@ describe("MessageBody", () => {
 
     const liveImage = container.querySelector<HTMLImageElement>("img[data-asset-image]")!;
     act(() => liveImage.dispatchEvent(new Event("error")));
+    const fallbackDownload = container.querySelector<HTMLAnchorElement>(
+      'a[aria-label="Download fleet-assets.png"]',
+    )!;
+    const fallbackClick = new MouseEvent("click", { bubbles: true, cancelable: true });
+    const fallbackDoubleClick = new MouseEvent("dblclick", { bubbles: true, cancelable: true });
+    act(() => {
+      fallbackDownload.dispatchEvent(fallbackDoubleClick);
+      fallbackDownload.dispatchEvent(fallbackClick);
+    });
+    expect(fallbackClick.defaultPrevented).toBe(false);
+    expect(fallbackDoubleClick.defaultPrevented).toBe(false);
     const retry = container.querySelector<HTMLButtonElement>('button[aria-label^="Retry loading "]')!;
     const retryClick = new MouseEvent("click", { bubbles: true, cancelable: true });
     const retryDoubleClick = new MouseEvent("dblclick", { bubbles: true, cancelable: true });
