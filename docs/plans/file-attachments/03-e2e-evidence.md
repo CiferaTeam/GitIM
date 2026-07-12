@@ -1,13 +1,13 @@
-# File Attachments: Final-HEAD Two-Node Live E2E Evidence
+# File Attachments: Final Code Revision Two-Node Live E2E Evidence
 
 Date: 2026-07-12 (Asia/Shanghai)
 
-Branch / revision: `codex/file-attachments` /
+Branch / tested code revision: `codex/file-attachments` /
 `15a3fe9c33df53f4964c5d6af9f3fee2eaed8e32`
 
 ## Result
 
-The final branch head passed the affected release matrix on an arm64 MacBook
+The tested code revision passed the affected release matrix on an arm64 MacBook
 and an arm64 Mac mini. The live run covered browser and peer cache contracts,
 fresh Fleet pull-through, offline replica use, Agent CLI integrity, Git text-only
 storage, frontend paste/send and picker-preview paths, and workspace
@@ -20,9 +20,44 @@ to the peer-only object route was rejected. Every browser-rendered asset URL
 remained on the local Runtime origin; no Fleet peer endpoint or remote node
 address reached the DOM or Fetch response URL.
 
+## Merge-candidate tree equivalence
+
+The commits after the tested code revision close only the requirements, review,
+plan, and evidence documents in this directory. They do not change a binary,
+frontend, WASM, manifest, lockfile, workflow, or release input. This is a
+reproducible assertion against the current branch tip rather than a claim that
+the later documentation commits were present in the live-built worktree:
+
+```text
+git diff --name-status 15a3fe9c..HEAD
+M docs/plans/file-attachments/00-requirements.md
+M docs/plans/file-attachments/01-engineering-review.md
+M docs/plans/file-attachments/02-implementation-plan.md
+M docs/plans/file-attachments/03-e2e-evidence.md
+
+git diff --quiet 15a3fe9c..HEAD -- \
+  Cargo.toml Cargo.lock crates products .github scripts
+# exit 0
+```
+
+The relevant Git object IDs are identical at `15a3fe9c` and `HEAD`:
+
+| Input | Git object ID at both revisions |
+| --- | --- |
+| `Cargo.toml` | `39723e144ed5d6b258e57da1a0f203618904c196` |
+| `Cargo.lock` | `038cb849e880d2a0a2a962d890b3395082662833` |
+| `crates/` | `cf2359a4fd1528fd43e535ea204f99a589de3f43` |
+| `products/` | `5882bf1fc569f03ac4889e418358df0f4e6f7954` |
+| `.github/` | `1e53bfe2311bc4b1a787f50549f36eae4d686067` |
+| `scripts/` | `1839290fce957c722553a0a8c26976dc2163f3fd` |
+
+Therefore the recorded binary hashes and two-node behavior attest the exact
+code and build inputs of the current merge candidate, while the branch tip may
+advance through documentation-only completion commits.
+
 ## Final binary provenance
 
-The worktree was clean at the exact revision above before the build.
+The worktree was clean at the tested code revision before the build.
 
 ```text
 cargo build --release \
@@ -50,7 +85,7 @@ directory. Both copies and all raw run artifacts were removed after the run.
 | --- | --- | --- |
 | Architecture | `arm64` | `arm64` |
 | Runtime ID | `24a6489c-762e-4461-9247-a824807a6080` | `3c6a295e-744a-41dc-ba60-5c21bb94e5a2` |
-| Final-head feature version | `0.9.3` | `0.9.3` |
+| Tested feature version | `0.9.3` | `0.9.3` |
 | Feature Runtime PID | `56154` | `73359` |
 | Workspace | `room` | `room` |
 | Workspace identity | `github.com/flame4/room` | `github.com/flame4/room` |
@@ -104,7 +139,7 @@ local Runtime URL.
 
 ## Fresh Fleet transfer and offline replica
 
-The Mac mini final-head CLI published a fresh deterministic PNG that was absent
+The Mac mini tested-revision CLI published a fresh deterministic PNG that was absent
 from the MacBook store:
 
 ```text
@@ -133,7 +168,7 @@ after the proof because no message referenced it.
 
 ## Agent CLI integrity and Git storage
 
-Final-head `gitim-runtime asset put` published a local PNG and returned:
+The tested-revision `gitim-runtime asset put` published a local PNG and returned:
 
 ```text
 sha256: 623b35be5cdac05b8554e02a4cfd0adf81c8f0f326339845da1ebcc6f04bc64a
@@ -200,7 +235,7 @@ Runtime registry again contained only `room`.
 
 ## Verification commands
 
-The following final-head checks passed:
+The following tested-revision checks passed:
 
 ```text
 cargo build --release -p gitim-runtime --bin gitim-runtime \
@@ -262,7 +297,7 @@ The final completion gate also passed the complete repository matrix:
 | Typed Rust and frontend AssetRef | `asset_ref_test.rs`, shared `testdata/protocol/asset_refs_v1.json`, and `asset-ref.test.ts`. |
 | Workspace-local SHA-256 Runtime store | `assets_store.rs` plus the final object/sidecar and Git-exclusion assertions above. |
 | Local/Fleet reads, integrity, and persistent replicas | `assets_http.rs`, `assets_fleet.rs`, and final fresh Fleet/offline-replica proof. |
-| Runtime CLI Agent upload/download | `cli_asset.rs` and final-head CLI SHA-256 round trip. |
+| Runtime CLI Agent upload/download | `cli_asset.rs` and tested-revision CLI SHA-256 round trip. |
 | Browser/WASM metadata-only history | `gitim-wasm/src/lib.rs`, regenerated `gitim-wasm/pkg`, and Browser-mode renderer tests. |
 | Desktop/mobile layouts | `wireframe.html` and 22 final Playwright layout/interaction tests. |
 
@@ -302,7 +337,7 @@ The final completion gate also passed the complete repository matrix:
 | --- | --- |
 | Pasted image sends/renders without binary Git data | Final Kimi DM `L000091`, local resolver render, and Git refs-only audit. |
 | Arbitrary file sends/downloads with safe headers | Text/binary CLI round trips, unsafe-type HTTP forced-download coverage, and frontend file-card tests. |
-| Mac mini origin resolves through MacBook Fleet | Fresh `b229...3650` final-head transfer. |
+| Mac mini origin resolves through MacBook Fleet | Fresh `b229...3650` tested-revision transfer. |
 | MacBook serves its verified replica while origin is offline | Final browser GET/HEAD/render after Mac mini Runtime stop. |
 | Agent put/get preserves SHA-256 | Final `623b...c64a` CLI round trip and `cli_asset.rs`. |
 | Invalid input and corrupt bytes never become stored objects | Core boundary tests; store symlink/corruption/quota tests; HTTP origin/limit tests; Fleet mismatch/oversize/timeout tests. |
@@ -329,10 +364,10 @@ Final restoration state:
 - Fleet tunnel PID `40303` was a child of the MacBook Runtime; Fleet returned
   `connected`, `retry_count: 0`, and the expected `room` mapping.
 - Vite, WebBridge network capture, the task tab group, isolated Runtime
-  workspaces, and every final-head feature Runtime/daemon were stopped or
+  workspaces, and every tested-revision feature Runtime/daemon were stopped or
   removed.
 - Exact process-path audits found no executable remaining under the temporary
-  final-head binary directory on either node.
+  tested-revision binary directory on either node.
 - The unreferenced Fleet test object was removed from both nodes. Mac mini
   returned to its original single object; MacBook retained the original object
   plus the intentional `L000091` object.
@@ -341,7 +376,7 @@ Final restoration state:
 
 ## Residual harness boundary
 
-The final-head picker proof exercised the production input `change` path with a
+The tested-revision picker proof exercised the production input `change` path with a
 WebBridge-injected browser `FileList`; it did not repeat an OS-native macOS file
 panel interaction. The production paste/upload/send/render path, picker
 preview/removal path, and deletion draft lifecycle were all exercised at their
