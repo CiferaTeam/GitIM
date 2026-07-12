@@ -553,7 +553,8 @@ async fn exact_quota_retry_deduplicates_object_left_by_sidecar_failure() {
         .unwrap_err();
 
     assert_eq!(error.error_code(), "asset_store_failed");
-    assert_eq!(store.read(&hash).unwrap(), b"durable");
+    assert!(store.object_path(&hash).unwrap().exists());
+    assert!(!store.metadata_path(&hash).unwrap().exists());
     assert_eq!(store.usage().unwrap().bytes, 7);
 
     let retry = store.stage_bytes("retry.txt", b"durable").await.unwrap();
@@ -570,6 +571,7 @@ async fn exact_quota_retry_deduplicates_object_left_by_sidecar_failure() {
             objects: 1
         }
     );
+    assert!(store.metadata_path(&hash).unwrap().exists());
     assert_eq!(store.reserved_bytes().unwrap(), 0);
 }
 
