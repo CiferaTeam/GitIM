@@ -78,7 +78,6 @@ interface ComposerCompletion {
   readonly sequence: number;
   readonly attachmentKey: string;
   readonly text: string;
-  readonly clearText: boolean;
   readonly replyLine: number | null;
 }
 
@@ -138,14 +137,11 @@ function clearCapturedTextStorage(
   workspaceKey: string,
   scopeKey: string,
   capturedText: string,
-): boolean {
+): void {
   const key = draftKey(workspaceKey, scopeKey);
-  const current = localStorage.getItem(key);
-  if (current === capturedText) {
+  if (localStorage.getItem(key) === capturedText) {
     localStorage.removeItem(key);
-    return true;
   }
-  return current === null;
 }
 
 function resolvedPlaceholder(placeholder: string | undefined, isMobile: boolean) {
@@ -181,6 +177,7 @@ export function InputArea({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const preserveSendErrorThroughNextChangeRef = useRef(false);
   const attachmentHelpId = useId();
   const textRef = useRef(text);
   textRef.current = text;
@@ -273,10 +270,9 @@ export function InputArea({
 
     for (const completion of completions) {
       if (completion.attachmentKey !== currentAttachmentKey) continue;
-      if (completion.clearText && textRef.current === completion.text) {
-        textRef.current = "";
-        setText("");
-      }
+      if (textRef.current !== completion.text) continue;
+      textRef.current = "";
+      setText("");
       const currentReplyLine = replyRef.current?.line_number ?? null;
       if (completion.replyLine !== null && currentReplyLine === completion.replyLine) {
         replyChangeRef.current(null);
@@ -317,7 +313,11 @@ export function InputArea({
   function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const value = e.target.value;
     setText(value);
-    clearSendError(activeAttachmentKey);
+    if (preserveSendErrorThroughNextChangeRef.current) {
+      preserveSendErrorThroughNextChangeRef.current = false;
+    } else {
+      clearSendError(activeAttachmentKey);
+    }
     localStorage.setItem(draftKey(activeWorkspaceKey, activeScopeKey), value);
     const cursor = e.target.selectionStart ?? value.length;
     detectMention(value, cursor);
@@ -384,6 +384,18 @@ export function InputArea({
   function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
     const files = Array.from(event.clipboardData.files ?? []);
     if (files.length === 0) return;
+    if (!attachmentCapable) {
+      if (event.clipboardData.getData("text/plain")) {
+        preserveSendErrorThroughNextChangeRef.current = true;
+        queueMicrotask(() => {
+          preserveSendErrorThroughNextChangeRef.current = false;
+        });
+      } else {
+        event.preventDefault();
+      }
+      setSendError(activeAttachmentKey, RUNTIME_ATTACHMENT_HELP);
+      return;
+    }
     event.preventDefault();
     addSelectedFiles(files);
   }
@@ -487,7 +499,7 @@ export function InputArea({
         }
         if (!completeSuccess(capturedAttachmentKey, operation.generation)) return;
 
-        const clearText = clearCapturedTextStorage(
+        clearCapturedTextStorage(
           capturedWorkspaceKey,
           capturedScopeKey,
           capturedText,
@@ -495,7 +507,6 @@ export function InputArea({
         useComposerLifecycleStore.getState().publishCompletion({
           attachmentKey: capturedAttachmentKey,
           text: capturedText,
-          clearText,
           replyLine: capturedReplyLine,
         });
       } catch (caught) {
@@ -523,7 +534,7 @@ export function InputArea({
         }
         return;
       }
-      const clearText = clearCapturedTextStorage(
+      clearCapturedTextStorage(
         capturedWorkspaceKey,
         capturedScopeKey,
         capturedText,
@@ -531,7 +542,6 @@ export function InputArea({
       useComposerLifecycleStore.getState().publishCompletion({
         attachmentKey: capturedAttachmentKey,
         text: capturedText,
-        clearText,
         replyLine: capturedReplyLine,
       });
       completed = true;

@@ -76,10 +76,13 @@ function uploadedAsset(file: File): UploadedAsset {
   return { ...base, raw: ref, ref };
 }
 
-function pasteFiles(target: HTMLTextAreaElement, files: File[]) {
+function pasteFiles(target: HTMLTextAreaElement, files: File[], textPlain = "") {
   const event = new Event("paste", { bubbles: true, cancelable: true });
   Object.defineProperty(event, "clipboardData", {
-    value: { files },
+    value: {
+      files,
+      getData: (type: string) => type === "text/plain" ? textPlain : "",
+    },
   });
   target.dispatchEvent(event);
   return event;
@@ -710,6 +713,85 @@ describe("InputArea attachments", () => {
     expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
   });
 
+  it("clears only same-key subscribers that own the captured text and reply", async () => {
+    const secondContainer = document.createElement("div");
+    document.body.appendChild(secondContainer);
+    let secondRoot: Root | null = null;
+    const send = deferred<{ ok: true }>();
+    const firstSend = vi.fn(() => send.promise);
+    const secondSend = vi.fn(async () => ({ ok: true as const }));
+    const firstReplyChange = vi.fn();
+    const secondReplyChange = vi.fn();
+    const reply = { author: "owner", body: "shared", line_number: 41, point_to: 0 } as Message;
+
+    try {
+      await renderInput(
+        <InputArea
+          {...defaultInputProps}
+          replyTo={reply}
+          onReplyToChange={firstReplyChange}
+          onSend={firstSend}
+        />,
+      );
+      await act(async () => {
+        secondRoot = createRoot(secondContainer);
+        secondRoot.render(
+          <InputArea
+            {...defaultInputProps}
+            replyTo={{ ...reply }}
+            onReplyToChange={secondReplyChange}
+            onSend={secondSend}
+          />,
+        );
+        await Promise.resolve();
+      });
+      const firstTextarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+      const secondTextarea = secondContainer.querySelector<HTMLTextAreaElement>("textarea")!;
+      const firstFocus = vi.spyOn(firstTextarea, "focus");
+      const secondFocus = vi.spyOn(secondTextarea, "focus");
+
+      await act(async () => {
+        setTextareaValue(firstTextarea, "old");
+        await Promise.resolve();
+        setTextareaValue(secondTextarea, "new");
+        await Promise.resolve();
+      });
+      expect(localStorage.getItem("gitim:draft:ws:general")).toBe("new");
+      await act(async () => {
+        pressEnter(firstTextarea);
+        await Promise.resolve();
+      });
+      expect(firstSend).toHaveBeenCalledWith("old", 41);
+      firstFocus.mockClear();
+      secondFocus.mockClear();
+
+      await act(async () => {
+        send.resolve({ ok: true });
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(firstTextarea.value).toBe("");
+      expect(secondTextarea.value).toBe("new");
+      expect(localStorage.getItem("gitim:draft:ws:general")).toBe("new");
+      expect(firstReplyChange).toHaveBeenCalledWith(null);
+      expect(secondReplyChange).not.toHaveBeenCalled();
+      expect(firstFocus).toHaveBeenCalledOnce();
+      expect(secondFocus).not.toHaveBeenCalled();
+      await act(async () => {
+        pressEnter(firstTextarea);
+        await Promise.resolve();
+      });
+      expect(firstSend).toHaveBeenCalledTimes(1);
+    } finally {
+      await act(async () => {
+        secondRoot?.unmount();
+        await Promise.resolve();
+      });
+      secondContainer.remove();
+    }
+  });
+
   it("clears a remounted same-key attachment caption when the captured send succeeds", async () => {
     const file = new File(["asset"], "remount.txt", { type: "text/plain" });
     const asset = uploadedAsset(file);
@@ -1106,6 +1188,50 @@ describe("InputArea attachments", () => {
       await Promise.resolve();
     });
     expect(onSend).toHaveBeenCalledWith("browser text", 0);
+    expect(uploadAssetsMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps mixed clipboard text native in browser mode and explains skipped files", async () => {
+    connectionState.mode = "local";
+    const file = new File(["binary"], "mixed.png", { type: "image/png" });
+    await renderInput(<InputArea {...defaultInputProps} />);
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    await act(async () => {
+      setTextareaValue(textarea, "existing text");
+      await Promise.resolve();
+    });
+
+    let pasteEvent!: Event;
+    await act(async () => {
+      pasteEvent = pasteFiles(textarea, [file], "clipboard text");
+      setTextareaValue(textarea, "existing textclipboard text");
+      await Promise.resolve();
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(false);
+    expect(textarea.value).toBe("existing textclipboard text");
+    expect(localStorage.getItem("gitim:draft:ws:general"))
+      .toBe("existing textclipboard text");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Runtime");
+    expect(container.querySelector("[data-attachment-draft-strip]")).toBeNull();
+    expect(uploadAssetsMock).not.toHaveBeenCalled();
+  });
+
+  it("suppresses file-only clipboard placeholders in browser mode and explains Runtime", async () => {
+    connectionState.mode = "local";
+    const file = new File(["binary"], "file-only.png", { type: "image/png" });
+    await renderInput(<InputArea {...defaultInputProps} />);
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+
+    let pasteEvent!: Event;
+    await act(async () => {
+      pasteEvent = pasteFiles(textarea, [file]);
+      await Promise.resolve();
+    });
+
+    expect(pasteEvent.defaultPrevented).toBe(true);
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Runtime");
+    expect(container.querySelector("[data-attachment-draft-strip]")).toBeNull();
     expect(uploadAssetsMock).not.toHaveBeenCalled();
   });
 
