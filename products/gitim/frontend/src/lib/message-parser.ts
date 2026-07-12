@@ -33,19 +33,14 @@ function isValidCardId(s: string): boolean {
 }
 
 // Combined inline pattern — ordered by priority:
-// 1. GitIM links: <[@#~!^]content>
+// 1. GitIM links: <[@#~!]content> and asset references
 // 2. Inline code: `code`
 // 3. Bold: **text**
 // 4. Italic: *text* (not part of **)
 const INLINE_RE =
-  /(^|(?<![\w/<]))#([a-z0-9]+(?:-[a-z0-9]+)*)\/([0-9a-f-]{1,20})(?:\s+L(\d+))?|<([#~!@^])([^>\n]+)>|`([^`\n]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
+  /(^|(?<![\w/<]))#([a-z0-9]+(?:-[a-z0-9]+)*)\/([0-9a-f-]{1,20})(?:\s+L(\d+))?|<([#~!@])([^>\n]+)>|<\^([^<>\n]+)>|`([^`\n]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
 
 function parseGitimLink(prefix: string, content: string): Fragment | null {
-  if (prefix === "^") {
-    const asset = parseAssetRef(`<^${content}>`);
-    return asset ? { type: "asset", asset } : null;
-  }
-
   if (prefix === "@") {
     if (!isValidHandler(content)) return null;
     return { type: "mention", handler: content };
@@ -124,6 +119,7 @@ function parseInline(text: string): Fragment[] {
       legacyLine,
       gitimPrefix,
       gitimContent,
+      assetContent,
       inlineCode,
       boldContent,
       italicContent,
@@ -146,6 +142,13 @@ function parseInline(text: string): Fragment[] {
         fragments.push(fragment);
       } else {
         // Invalid format — emit as plain text
+        fragments.push({ type: "text", content: full });
+      }
+    } else if (assetContent !== undefined) {
+      const asset = parseAssetRef(full);
+      if (asset) {
+        fragments.push({ type: "asset", asset });
+      } else {
         fragments.push({ type: "text", content: full });
       }
     } else if (inlineCode !== undefined) {

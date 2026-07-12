@@ -132,6 +132,38 @@ describe("parseMessageBody", () => {
         "asset",
       ]);
     });
+
+    it.each([
+      ["channel", "<#general>", "channel-link"],
+      ["user", "<~bob>", "user-profile"],
+      ["mention", "<@alice>", "mention"],
+      ["soft link", "<!https://gitim.io>", "external-link"],
+    ])("does not swallow a nested %s link in a malformed asset opener", (_label, link, type) => {
+      const fragments = parseMessageBody(`<^not-an-asset ${link}>`);
+      expect(collectTypes(fragments)).toContain(type);
+      expect(
+        fragments
+          .filter((fragment): fragment is Extract<Fragment, { type: "text" }> => fragment.type === "text")
+          .map((fragment) => fragment.content)
+          .join(""),
+      ).toBe("<^not-an-asset >");
+    });
+
+    it("recovers valid links after a long malformed asset opener", () => {
+      const fragments = parseMessageBody(
+        `<^${"x".repeat(2_000)} <#general>> tail <@alice>`,
+      );
+      expect(collectTypes(fragments)).toEqual([
+        "text",
+        "channel-link",
+        "text",
+        "mention",
+      ]);
+      expect(findFirst(fragments, "channel-link")).toEqual({
+        type: "channel-link",
+        channel: "general",
+      });
+    });
   });
 
   describe("card-link", () => {

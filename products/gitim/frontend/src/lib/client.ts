@@ -301,9 +301,9 @@ function validateUploadFiles(files: File[]): ApiResponse<never> | null {
     if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_ASSET_FILE_BYTES) {
       return invalidUpload("Each asset must be no larger than 50 MiB.");
     }
-    const filenameBytes = ASSET_UTF8.encode(file.name).length;
-    if (filenameBytes < 1 || filenameBytes > MAX_ASSET_FILENAME_BYTES) {
-      return invalidUpload("Asset filenames must be between 1 and 255 UTF-8 bytes.");
+    const filenameBytes = ASSET_UTF8.encode(sanitizedAssetName(file.name)).length;
+    if (filenameBytes > MAX_ASSET_FILENAME_BYTES) {
+      return invalidUpload("Asset filenames must be no longer than 255 UTF-8 bytes.");
     }
     total += file.size;
     if (!Number.isSafeInteger(total) || total > MAX_ASSET_REQUEST_BYTES) {

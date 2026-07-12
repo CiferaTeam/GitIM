@@ -201,11 +201,26 @@ describe("uploadAssets", () => {
   });
 
   it.each([
+    ["an empty filename", ""],
+    ["a control-only filename", "\u0000\n"],
+    ["a long raw path with a short basename", `${"x".repeat(300)}/a`],
+    ["a one-byte filename", "a"],
+    ["a normal filename", "report.txt"],
+  ])("allows %s to reach Runtime normalization", async (_label, name) => {
+    const client = await setup();
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      jsonResponse(200, successBody()),
+    );
+    const result = await client.uploadAssets("room", [new File(["x"], name)]);
+    expect(result.ok).toBe(true);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it.each([
     ["zero files", []],
     ["more than ten files", Array.from({ length: 11 }, (_, i) => sizedFile(`${i}.txt`, 1))],
     ["a file over 50 MiB", [sizedFile("large.bin", 50 * 1024 * 1024 + 1)]],
     ["an aggregate over 200 MiB", Array.from({ length: 5 }, (_, i) => sizedFile(`${i}.bin`, 50 * 1024 * 1024))],
-    ["an empty filename", [new File(["x"], "")]],
     ["a filename over 255 UTF-8 bytes", [sizedFile(`${"é".repeat(128)}.txt`, 1)]],
   ])("rejects %s before fetch", async (_label, files) => {
     const client = await setup();
