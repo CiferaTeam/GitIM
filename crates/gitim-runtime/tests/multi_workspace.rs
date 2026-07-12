@@ -368,7 +368,9 @@ async fn recover_agent_error_event_carries_workspace_id() {
 // subscriber should observe a `RecvError::Closed` on the next recv.
 
 #[tokio::test]
+#[serial(home_env)]
 async fn delete_workspace_closes_broadcast() {
+    let _home_guard = HomeGuard::install();
     let (router, state) = create_router();
     let tmp = TempDir::new().unwrap();
     insert_ws(&state, "dying-ws", tmp.path());
