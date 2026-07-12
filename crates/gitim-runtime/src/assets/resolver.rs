@@ -3,7 +3,6 @@ use super::{
 };
 use axum::body::Bytes;
 use futures::StreamExt;
-use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use reqwest::header::{self, HeaderMap};
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -82,6 +81,7 @@ impl Default for ResolverBudgets {
 struct ValidatedPeerResponse {
     response: reqwest::Response,
     size: u64,
+    media_type: String,
 }
 
 #[derive(Default)]
@@ -737,7 +737,7 @@ async fn probe_candidate(
     let validated = validate_peer_response(response, hash, max_file_bytes)?;
     Ok(HeadAvailability {
         size: validated.size,
-        media_type: "application/octet-stream".to_string(),
+        media_type: validated.media_type,
         peer: peer.clone(),
         locality: AssetLocality::Remote,
     })
@@ -874,7 +874,7 @@ fn validate_peer_response(
     }
     let media_type = singleton_header(headers, header::CONTENT_TYPE)?
         .ok_or_else(|| AssetError::PeerInvalid("peer omitted content-type".to_string()))?;
-    media_type
+    let media_type = media_type
         .parse::<mime::Mime>()
         .map_err(|_| AssetError::PeerInvalid("peer content-type is invalid".to_string()))?;
     let expected_etag = format!("\"sha256-{hash}\"");
@@ -912,7 +912,11 @@ fn validate_peer_response(
             "peer returned partial or ambiguous framing metadata".to_string(),
         ));
     }
-    Ok(ValidatedPeerResponse { response, size })
+    Ok(ValidatedPeerResponse {
+        response,
+        size,
+        media_type: media_type.to_string(),
+    })
 }
 
 fn singleton_header(
@@ -976,8 +980,16 @@ fn peer_object_url(peer: &AssetPeer, hash: &str) -> Result<reqwest::Url, AssetEr
     {
         return Err(AssetError::OriginUnavailable);
     }
-    let workspace = utf8_percent_encode(&peer.remote_workspace_slug, NON_ALPHANUMERIC).to_string();
-    url.set_path(&format!("/workspaces/{workspace}/assets/objects/{hash}"));
+    url.path_segments_mut()
+        .map_err(|()| AssetError::OriginUnavailable)?
+        .pop_if_empty()
+        .extend([
+            "workspaces",
+            peer.remote_workspace_slug.as_str(),
+            "assets",
+            "objects",
+            hash,
+        ]);
     Ok(url)
 }
 

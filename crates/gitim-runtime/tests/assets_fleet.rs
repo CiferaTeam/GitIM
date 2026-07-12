@@ -311,7 +311,19 @@ impl MockPeer {
         Self::spawn_with_runtime_id(None, behavior).await
     }
 
+    async fn spawn_under_prefix(runtime_id: &str, behavior: PeerBehavior, prefix: &str) -> Self {
+        Self::spawn_with_runtime_id_and_prefix(Some(runtime_id), behavior, Some(prefix)).await
+    }
+
     async fn spawn_with_runtime_id(runtime_id: Option<&str>, behavior: PeerBehavior) -> Self {
+        Self::spawn_with_runtime_id_and_prefix(runtime_id, behavior, None).await
+    }
+
+    async fn spawn_with_runtime_id_and_prefix(
+        runtime_id: Option<&str>,
+        behavior: PeerBehavior,
+        prefix: Option<&str>,
+    ) -> Self {
         let state = Arc::new(MockPeerState {
             runtime_id: runtime_id.map(str::to_string),
             behavior,
@@ -328,20 +340,25 @@ impl MockPeer {
             #[cfg(feature = "test-support")]
             head_release: Semaphore::new(0),
         });
-        let app = Router::new()
+        let routes = Router::new()
             .route("/health", get(peer_health))
             .route(
                 "/workspaces/{slug}/assets/objects/{hash}",
                 get(peer_object).head(peer_object),
             )
             .with_state(Arc::clone(&state));
+        let app = if let Some(prefix) = prefix {
+            Router::new().nest(prefix, routes)
+        } else {
+            routes
+        };
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let task = tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
         Self {
-            base_url: format!("http://{address}"),
+            base_url: format!("http://{address}{}", prefix.unwrap_or_default()),
             state,
             task,
         }
@@ -1035,6 +1052,38 @@ async fn remote_get_verifies_persists_and_survives_origin_shutdown() {
         .unwrap();
     assert_eq!(second.status(), StatusCode::OK);
     assert_eq!(response_bytes(second).await.as_ref(), PNG_1X1);
+}
+
+#[tokio::test]
+async fn remote_get_preserves_peer_base_path_prefix() {
+    let peer = MockPeer::spawn_under_prefix(
+        ORIGIN_RUNTIME_ID,
+        PeerBehavior::Object(PNG_1X1.to_vec()),
+        "/gitim",
+    )
+    .await;
+    let fixture = fixture();
+    add_peer(
+        &fixture,
+        "origin",
+        &peer,
+        Some(ORIGIN_RUNTIME_ID),
+        WORKSPACE_IDENTITY,
+    );
+
+    let response = fixture
+        .app
+        .oneshot(resolve_request(
+            Method::GET,
+            ORIGIN_RUNTIME_ID,
+            &sha256(PNG_1X1),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response_bytes(response).await.as_ref(), PNG_1X1);
+    assert_eq!(peer.object_gets(), 1);
 }
 
 #[tokio::test]
@@ -2073,8 +2122,7 @@ async fn head_remote_availability_never_persists_or_sends_browser_headers() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response.headers().get(header::CONTENT_TYPE).unwrap(),
-        "application/octet-stream",
-        "remote HEAD validates but does not trust peer MIME metadata"
+        "image/png"
     );
     assert_eq!(peer.object_gets(), 0);
     assert_eq!(peer.object_heads(), 1);
