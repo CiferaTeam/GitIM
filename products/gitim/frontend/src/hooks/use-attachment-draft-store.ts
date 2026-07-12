@@ -6,17 +6,17 @@ import type { UploadedAsset } from "@/lib/client";
 export type AttachmentDraftStatus = "idle" | "uploading" | "sending" | "error";
 
 export interface PendingAttachment {
-  id: string;
-  file: File;
-  previewUrl?: string;
-  uploaded?: UploadedAsset;
+  readonly id: string;
+  readonly file: File;
+  readonly previewUrl?: string;
+  readonly uploaded?: UploadedAsset;
 }
 
 export interface AttachmentDraft {
-  generation: number;
-  status: AttachmentDraftStatus;
-  items: PendingAttachment[];
-  error?: string;
+  readonly generation: number;
+  readonly status: AttachmentDraftStatus;
+  readonly items: readonly PendingAttachment[];
+  readonly error?: string;
 }
 
 export type AttachmentRejectionCode =
@@ -30,19 +30,19 @@ export type AttachmentRejectionCode =
   | "busy";
 
 export interface AttachmentRejection {
-  code: AttachmentRejectionCode;
-  message: string;
-  file: File;
+  readonly code: AttachmentRejectionCode;
+  readonly message: string;
+  readonly file: File;
 }
 
 export interface AddFilesResult {
-  accepted: PendingAttachment[];
-  rejected: AttachmentRejection[];
+  readonly accepted: readonly PendingAttachment[];
+  readonly rejected: readonly AttachmentRejection[];
 }
 
 export interface UploadedAttachmentMapping {
-  id: string;
-  asset: UploadedAsset;
+  readonly id: string;
+  readonly asset: UploadedAsset;
 }
 
 export interface AttachmentOperationSnapshot {
@@ -52,7 +52,7 @@ export interface AttachmentOperationSnapshot {
 }
 
 interface AttachmentDraftStore {
-  drafts: Record<string, AttachmentDraft>;
+  readonly drafts: Readonly<Record<string, AttachmentDraft>>;
   addFiles: (key: string, files: readonly File[]) => AddFilesResult;
   removeItem: (key: string, id: string) => boolean;
   beginOperation: (key: string) => AttachmentOperationSnapshot | null;
@@ -94,6 +94,7 @@ const REJECTION_MESSAGES: Record<AttachmentRejectionCode, string> = {
   invalid_file: "The selected file has invalid browser metadata.",
   busy: "Wait for the current attachment operation to finish.",
 };
+const EMPTY_DRAFTS: Readonly<Record<string, AttachmentDraft>> = Object.freeze({});
 
 export function attachmentDraftKey(workspaceKey: string, scopeKey: string): string {
   return JSON.stringify([workspaceKey, scopeKey]);
@@ -134,7 +135,45 @@ function canFormatRuntimeReference(name: string, size: number): boolean {
 }
 
 function rejection(file: File, code: AttachmentRejectionCode): AttachmentRejection {
-  return { file, code, message: REJECTION_MESSAGES[code] };
+  return Object.freeze({ file, code, message: REJECTION_MESSAGES[code] });
+}
+
+function addFilesResult(
+  accepted: readonly PendingAttachment[],
+  rejected: readonly AttachmentRejection[],
+): AddFilesResult {
+  return Object.freeze({
+    accepted: Object.freeze([...accepted]),
+    rejected: Object.freeze([...rejected]),
+  });
+}
+
+function publishedDraft(
+  generation: number,
+  status: AttachmentDraftStatus,
+  items: readonly PendingAttachment[],
+  error?: string,
+): AttachmentDraft {
+  return Object.freeze({
+    generation,
+    status,
+    items: Object.freeze([...items]),
+    ...(error !== undefined && { error }),
+  });
+}
+
+function replaceDraft(
+  drafts: Readonly<Record<string, AttachmentDraft>>,
+  key: string,
+  draft?: AttachmentDraft,
+): Readonly<Record<string, AttachmentDraft>> {
+  const next = { ...drafts };
+  if (draft === undefined) {
+    delete next[key];
+  } else {
+    next[key] = draft;
+  }
+  return Object.freeze(next);
 }
 
 function createPreviewUrl(file: File): string | undefined {
@@ -154,7 +193,11 @@ function revokeUrls(items: readonly PendingAttachment[]): void {
   );
   if (typeof URL.revokeObjectURL !== "function") return;
   for (const url of urls) {
-    URL.revokeObjectURL(url);
+    try {
+      URL.revokeObjectURL(url);
+    } catch {
+      // Object URL cleanup is best-effort; state ownership has already ended.
+    }
   }
 }
 
@@ -189,15 +232,12 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
   const allocateGeneration = (): number => nextGeneration++;
 
   return {
-    drafts: {},
+    drafts: EMPTY_DRAFTS,
 
     addFiles: (key, files) => {
       const current = get().drafts[key];
       if (current !== undefined && isBusy(current)) {
-        return {
-          accepted: [],
-          rejected: files.map((file) => rejection(file, "busy")),
-        };
+        return addFilesResult([], files.map((file) => rejection(file, "busy")));
       }
 
       const items = current === undefined ? [] : [...current.items];
@@ -260,19 +300,20 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         const generation = current?.generation ?? allocateGeneration();
         const validationError = rejected[0]?.message;
         set((state) => ({
-          drafts: {
-            ...state.drafts,
-            [key]: {
+          drafts: replaceDraft(
+            state.drafts,
+            key,
+            publishedDraft(
               generation,
-              status: validationError === undefined ? "idle" : "error",
+              validationError === undefined ? "idle" : "error",
               items,
-              ...(validationError !== undefined && { error: validationError }),
-            },
-          },
+              validationError,
+            ),
+          ),
         }));
       }
 
-      return { accepted, rejected };
+      return addFilesResult(accepted, rejected);
     },
 
     removeItem: (key, id) => {
@@ -282,21 +323,13 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       if (index < 0) return false;
 
       const removed = current.items[index];
-      revokeUrls([removed]);
       const items = current.items.filter((_, itemIndex) => itemIndex !== index);
-      set((state) => {
-        const drafts = { ...state.drafts };
-        if (items.length === 0) {
-          delete drafts[key];
-        } else {
-          drafts[key] = {
-            generation: current.generation,
-            status: "idle",
-            items,
-          };
-        }
-        return { drafts };
-      });
+      const draft =
+        items.length === 0
+          ? undefined
+          : publishedDraft(current.generation, "idle", items);
+      set((state) => ({ drafts: replaceDraft(state.drafts, key, draft) }));
+      revokeUrls([removed]);
       return true;
     },
 
@@ -306,14 +339,11 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
 
       const generation = allocateGeneration();
       set((state) => ({
-        drafts: {
-          ...state.drafts,
-          [key]: {
-            generation,
-            status: "uploading",
-            items: current.items,
-          },
-        },
+        drafts: replaceDraft(
+          state.drafts,
+          key,
+          publishedDraft(generation, "uploading", current.items),
+        ),
       }));
       return operationSnapshot(key, generation, current.items);
     },
@@ -328,15 +358,25 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         return false;
       }
 
-      const pendingIds = new Set(
-        current.items.filter((item) => item.uploaded === undefined).map((item) => item.id),
+      const pendingItems = new Map(
+        current.items
+          .filter((item) => item.uploaded === undefined)
+          .map((item) => [item.id, item] as const),
       );
       const mappedIds = new Set<string>();
       for (const mapping of mappings) {
-        if (!pendingIds.has(mapping.id) || mappedIds.has(mapping.id)) return false;
+        const item = pendingItems.get(mapping.id);
+        if (
+          item === undefined ||
+          mappedIds.has(mapping.id) ||
+          mapping.asset.name !== normalizedFilename(item.file.name) ||
+          mapping.asset.size !== item.file.size
+        ) {
+          return false;
+        }
         mappedIds.add(mapping.id);
       }
-      if (mappedIds.size !== pendingIds.size) return false;
+      if (mappedIds.size !== pendingItems.size) return false;
 
       const assets = new Map(mappings.map((mapping) => [mapping.id, frozenAsset(mapping.asset)]));
       const items = current.items.map((item) => {
@@ -344,10 +384,11 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         return asset === undefined ? item : Object.freeze({ ...item, uploaded: asset });
       });
       set((state) => ({
-        drafts: {
-          ...state.drafts,
-          [key]: { ...current, items },
-        },
+        drafts: replaceDraft(
+          state.drafts,
+          key,
+          publishedDraft(current.generation, current.status, items, current.error),
+        ),
       }));
       return true;
     },
@@ -363,10 +404,11 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         return false;
       }
       set((state) => ({
-        drafts: {
-          ...state.drafts,
-          [key]: { ...current, status: "sending" },
-        },
+        drafts: replaceDraft(
+          state.drafts,
+          key,
+          publishedDraft(current.generation, "sending", current.items),
+        ),
       }));
       return true;
     },
@@ -381,10 +423,11 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         return false;
       }
       set((state) => ({
-        drafts: {
-          ...state.drafts,
-          [key]: { ...current, status: "error", error },
-        },
+        drafts: replaceDraft(
+          state.drafts,
+          key,
+          publishedDraft(current.generation, "error", current.items, error),
+        ),
       }));
       return true;
     },
@@ -398,31 +441,23 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       ) {
         return false;
       }
+      set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
       revokeUrls(current.items);
-      set((state) => {
-        const drafts = { ...state.drafts };
-        delete drafts[key];
-        return { drafts };
-      });
       return true;
     },
 
     resetDraft: (key) => {
       const current = get().drafts[key];
       if (current === undefined) return false;
+      set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
       revokeUrls(current.items);
-      set((state) => {
-        const drafts = { ...state.drafts };
-        delete drafts[key];
-        return { drafts };
-      });
       return true;
     },
 
     disposeAll: () => {
       const drafts = get().drafts;
+      set({ drafts: EMPTY_DRAFTS });
       revokeUrls(Object.values(drafts).flatMap((draft) => draft.items));
-      set({ drafts: {} });
     },
   };
 });

@@ -1,17 +1,21 @@
 // @vitest-environment jsdom
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { formatAssetRef } from "@/lib/asset-ref";
 import type { UploadedAsset } from "@/lib/client";
 import {
   attachmentDraftKey,
+  type AttachmentDraft,
+  type PendingAttachment,
   useAttachmentDraftStore,
 } from "./use-attachment-draft-store";
 
 const ORIGIN = "3c6a295e-744a-41dc-ba60-5c21bb94e5a2";
 const HASH = "8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88";
 const MIB = 1024 * 1024;
+const ORIGINAL_CREATE_OBJECT_URL = Object.getOwnPropertyDescriptor(URL, "createObjectURL");
+const ORIGINAL_REVOKE_OBJECT_URL = Object.getOwnPropertyDescriptor(URL, "revokeObjectURL");
 
 function file(
   name: string,
@@ -216,6 +220,41 @@ describe("attachment draft selection", () => {
     expect(throwing.accepted[0].previewUrl).toBeUndefined();
     expect(store().drafts[key].items).toHaveLength(2);
   });
+
+  it("publishes frozen readonly draft state and accepted selections", () => {
+    const key = attachmentDraftKey("workspace", "readonly");
+    const result = store().addFiles(key, [png("readonly.png")]);
+    const drafts = store().drafts;
+    const draft = drafts[key];
+    const originalId = draft.items[0].id;
+
+    expect(Object.isFrozen(drafts)).toBe(true);
+    expect(Object.isFrozen(draft)).toBe(true);
+    expect(Object.isFrozen(draft.items)).toBe(true);
+    expect(Object.isFrozen(draft.items[0])).toBe(true);
+    expect(Object.isFrozen(result.accepted)).toBe(true);
+    expect(result.accepted[0]).toBe(draft.items[0]);
+
+    expect(() => {
+      (drafts as Record<string, AttachmentDraft>).other = draft;
+    }).toThrow(TypeError);
+    expect(() => {
+      (draft as { status: string }).status = "error";
+    }).toThrow(TypeError);
+    expect(() => {
+      (draft.items as PendingAttachment[]).push(result.accepted[0]);
+    }).toThrow(TypeError);
+    expect(() => {
+      (draft.items[0] as { id: string }).id = "mutated";
+    }).toThrow(TypeError);
+    expect(() => {
+      (result.accepted as PendingAttachment[]).pop();
+    }).toThrow(TypeError);
+
+    expect(store().drafts[key]).toBe(draft);
+    expect(store().drafts[key].items).toHaveLength(1);
+    expect(store().drafts[key].items[0].id).toBe(originalId);
+  });
 });
 
 describe("attachment draft operations", () => {
@@ -334,6 +373,38 @@ describe("attachment draft operations", () => {
     ]);
   });
 
+  it("rejects swapped upload mappings by normalized filename and size", () => {
+    const key = attachmentDraftKey("workspace", "swapped-mapping");
+    store().addFiles(key, [
+      file("folder/a.txt", { size: 3, lastModified: 1 }),
+      file("folder\\b.txt", { size: 7, lastModified: 2 }),
+    ]);
+    const operation = store().beginOperation(key)!;
+    const [a, b] = operation.items;
+
+    expect(store().markUploaded(key, operation.generation, [
+      { id: a.id, asset: uploaded("b.txt", 7) },
+      { id: b.id, asset: uploaded("a.txt", 3) },
+    ])).toBe(false);
+    expect(store().drafts[key].items.every((item) => item.uploaded === undefined)).toBe(true);
+  });
+
+  it("rejects a stale mismatched asset without applying valid sibling mappings", () => {
+    const key = attachmentDraftKey("workspace", "stale-mapping");
+    store().addFiles(key, [
+      file("current.txt", { size: 4, lastModified: 1 }),
+      file("sibling.txt", { size: 8, lastModified: 2 }),
+    ]);
+    const operation = store().beginOperation(key)!;
+    const [current, sibling] = operation.items;
+
+    expect(store().markUploaded(key, operation.generation, [
+      { id: current.id, asset: uploaded("old.txt", 3) },
+      { id: sibling.id, asset: uploaded("sibling.txt", 8) },
+    ])).toBe(false);
+    expect(store().drafts[key].items.every((item) => item.uploaded === undefined)).toBe(true);
+  });
+
   it("marks sending only after every current item has an uploaded reference", () => {
     const key = attachmentDraftKey("workspace", "sending");
     store().addFiles(key, [file("a.txt"), file("b.txt", { lastModified: 2 })]);
@@ -414,6 +485,58 @@ describe("attachment preview lifecycle", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith(first.accepted[0].previewUrl);
     expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:new.png");
   });
+
+  it("finishes every cleanup transition when individual URL revocations throw", () => {
+    const removeKey = attachmentDraftKey("workspace", "remove-throw");
+    const resetKey = attachmentDraftKey("workspace", "reset-throw");
+    const successKey = attachmentDraftKey("workspace", "success-throw");
+    const disposeKey = attachmentDraftKey("workspace", "dispose-throw");
+    const removed = store().addFiles(removeKey, [png("remove-fail.png")]).accepted[0];
+    store().addFiles(resetKey, [
+      png("reset-fail.png"),
+      png("reset-ok.png", { lastModified: 2 }),
+    ]);
+    store().addFiles(successKey, [
+      png("success-fail.png"),
+      png("success-ok.png", { lastModified: 2 }),
+    ]);
+    store().addFiles(disposeKey, [
+      png("dispose-fail.png"),
+      png("dispose-ok.png", { lastModified: 2 }),
+    ]);
+    const attempted: string[] = [];
+    vi.mocked(URL.revokeObjectURL).mockImplementation((url) => {
+      attempted.push(url);
+      if (url.includes("fail")) throw new Error("revocation failed");
+    });
+
+    expect(store().removeItem(removeKey, removed.id)).toBe(true);
+    expect(store().drafts[removeKey]).toBeUndefined();
+    expect(store().resetDraft(resetKey)).toBe(true);
+    expect(store().drafts[resetKey]).toBeUndefined();
+
+    const operation = store().beginOperation(successKey)!;
+    expect(store().markUploaded(successKey, operation.generation, operation.items.map((item) => ({
+      id: item.id,
+      asset: uploaded(item.file.name),
+    })))).toBe(true);
+    expect(store().markSending(successKey, operation.generation)).toBe(true);
+    expect(store().completeSuccess(successKey, operation.generation)).toBe(true);
+    expect(store().drafts[successKey]).toBeUndefined();
+
+    store().disposeAll();
+    store().disposeAll();
+    expect(store().drafts).toEqual({});
+    expect(attempted).toEqual([
+      "blob:remove-fail.png",
+      "blob:reset-fail.png",
+      "blob:reset-ok.png",
+      "blob:success-fail.png",
+      "blob:success-ok.png",
+      "blob:dispose-fail.png",
+      "blob:dispose-ok.png",
+    ]);
+  });
 });
 
 beforeEach(() => {
@@ -431,4 +554,17 @@ beforeEach(() => {
 afterEach(() => {
   useAttachmentDraftStore.getState().disposeAll();
   vi.restoreAllMocks();
+});
+
+afterAll(() => {
+  for (const [name, descriptor] of [
+    ["createObjectURL", ORIGINAL_CREATE_OBJECT_URL],
+    ["revokeObjectURL", ORIGINAL_REVOKE_OBJECT_URL],
+  ] as const) {
+    if (descriptor === undefined) {
+      delete (URL as unknown as Record<string, unknown>)[name];
+    } else {
+      Object.defineProperty(URL, name, descriptor);
+    }
+  }
 });
