@@ -5706,10 +5706,11 @@ async fn workspaces_get(
 }
 
 /// Remove the workspace entry from memory and the user config file.
-/// On-disk user files at `workspace` root are preserved — only `.gitim-runtime/`
-/// artifacts are cleaned by the daemon-kill path. If the config file write
-/// fails the caller is told (500), because the API would otherwise lie about
-/// durable state (workspace gone from memory, resurrects on restart).
+/// On-disk workspace files and the attachment namespace are preserved. Owned
+/// daemon processes are stopped and the durable Runtime registry entry is
+/// removed. If the config file write fails the caller is told (500), because
+/// the API would otherwise lie about durable state (workspace gone from
+/// memory, resurrects on restart).
 async fn workspaces_delete(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
@@ -5794,16 +5795,54 @@ async fn workspaces_delete(
     Json(OkAckResponse { ok: true }).into_response()
 }
 
-/// Best-effort rollback for a failed `POST /workspaces`. Kills any daemon the
-/// partial provisioning started, then removes `.gitim-runtime/` (which holds
-/// `human/` + any token-carrying config). We do NOT delete user-owned files
-/// at `workspace` root (e.g. the local bare `repo.git`) — those existed before
-/// we touched the directory or were created by us but are safe to leave; the
-/// plan's "file hygiene" rule is to preserve local files.
-fn cleanup_partial_workspace(workspace: &Path) {
+/// Best-effort rollback for a failed `POST /workspaces`. Partial human runtime
+/// state is removed. A pre-existing attachment namespace and workspace config
+/// are restored so deletion followed by re-registration keeps durable assets.
+#[derive(Clone)]
+struct WorkspaceRollbackBaseline {
+    preserve_asset_namespace: bool,
+    config: Option<WorkspaceConfig>,
+}
+
+impl WorkspaceRollbackBaseline {
+    fn capture(workspace: &Path) -> Self {
+        Self {
+            preserve_asset_namespace: std::fs::symlink_metadata(
+                workspace.join(".gitim-runtime/assets/v1"),
+            )
+            .is_ok(),
+            config: WorkspaceConfig::read(workspace).ok(),
+        }
+    }
+
+    fn local_created_at(&self, workspace: &Path) -> Option<String> {
+        let config = self.config.as_ref()?;
+        if config.git.provider != GitProvider::Local
+            || chrono::DateTime::parse_from_rfc3339(&config.created_at).is_err()
+        {
+            return None;
+        }
+        let configured = PathBuf::from(&config.workspace);
+        let configured = configured.canonicalize().ok()?;
+        (configured == workspace).then(|| config.created_at.clone())
+    }
+}
+
+fn cleanup_partial_workspace(workspace: &Path, baseline: &WorkspaceRollbackBaseline) {
     cleanup_human_dir(workspace);
     let runtime_dir = workspace.join(".gitim-runtime");
-    let _ = std::fs::remove_dir_all(&runtime_dir);
+    if baseline.preserve_asset_namespace {
+        let config_path = runtime_dir.join("config.json");
+        if let Some(config) = &baseline.config {
+            if let Err(error) = config.write(workspace) {
+                tracing::error!(error = %error, "failed to restore workspace config during rollback");
+            }
+        } else {
+            let _ = std::fs::remove_file(config_path);
+        }
+    } else {
+        let _ = std::fs::remove_dir_all(&runtime_dir);
+    }
 }
 
 fn remove_workspace_config_entry(
@@ -5836,6 +5875,7 @@ async fn rollback_workspace_creation(
     slug: &str,
     workspace: &Path,
     expected_token: &crate::assets::AssetWorkspaceToken,
+    baseline: &WorkspaceRollbackBaseline,
 ) {
     let (assets, owns_context) = {
         let runtime = crate::preconditions::arc_mutex_lock(state);
@@ -5884,7 +5924,7 @@ async fn rollback_workspace_creation(
         (removed_exact_token, owned_by_another_token)
     };
     if removed_exact_token && !owned_by_another_token {
-        cleanup_partial_workspace(workspace);
+        cleanup_partial_workspace(workspace, baseline);
     } else if removed_exact_token {
         tracing::warn!(
             slug,
@@ -5901,6 +5941,7 @@ async fn rollback_workspace_creation(
 /// into the standard `{ ok: false, error_code, error }` body.
 async fn provision_local_workspace(
     workspace: &Path,
+    created_at: Option<String>,
 ) -> Result<(PathBuf, WorkspaceConfig), (&'static str, String)> {
     let repo_path = workspace.join("repo.git");
     std::fs::create_dir_all(&repo_path).map_err(|e| {
@@ -5945,6 +5986,10 @@ async fn provision_local_workspace(
         github_email: None,
     };
 
+    if workspace.join(".gitim-runtime/human").exists() {
+        cleanup_human_dir(workspace);
+    }
+
     let human_dir = provision_human(workspace, &remote_url, "git", auth)
         .await
         .map_err(|e| {
@@ -5958,7 +6003,7 @@ async fn provision_local_workspace(
 
     let config = WorkspaceConfig {
         workspace: workspace.to_string_lossy().into_owned(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: created_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
         git: GitConfig {
             provider: GitProvider::Local,
             remote_url: None,
@@ -6190,6 +6235,7 @@ async fn workspaces_create(
         runtime.workspace_transitions.slot(&workspace)
     };
     let workspace_transition_guard = Arc::clone(&workspace_transition).lock_owned().await;
+    let rollback_baseline = WorkspaceRollbackBaseline::capture(&workspace);
 
     // `workspace_name` defaults to the basename *as-is* (case/spaces/unicode
     // preserved) so the UI can show a human-friendly label even when the slug
@@ -6306,6 +6352,7 @@ async fn workspaces_create(
     let join_workspace = workspace.clone();
     let join_initialization = Arc::clone(&initialization);
     let join_asset_token = asset_token.clone();
+    let join_rollback_baseline = rollback_baseline.clone();
     let finalization = tokio::spawn(async move {
         let _initialization_guard = WorkspaceInitializationGuard(initialization);
         let _workspace_transition_guard = workspace_transition_guard;
@@ -6313,13 +6360,18 @@ async fn workspaces_create(
         let supervisor_slug = slug.clone();
         let supervisor_workspace = workspace.clone();
         let supervisor_asset_token = asset_token;
+        let supervisor_rollback_baseline = rollback_baseline;
         let inner_asset_token = supervisor_asset_token.clone();
+        let inner_rollback_baseline = supervisor_rollback_baseline.clone();
         let inner = tokio::spawn(async move {
             // Async provisioning runs without the state lock held. On any failure
             // below we must re-lock and drop the placeholder so a retry can succeed.
             let provider_str = req.git.provider.as_str();
             let provisioned = match provider_str {
-                "local" => provision_local_workspace(&workspace).await,
+                "local" => {
+                    let created_at = inner_rollback_baseline.local_created_at(&workspace);
+                    provision_local_workspace(&workspace, created_at).await
+                }
                 "github" => {
                     let token = match req.git.token.as_ref() {
                         Some(t) if !t.is_empty() => t.clone(),
@@ -6329,6 +6381,7 @@ async fn workspaces_create(
                                 &slug,
                                 &workspace,
                                 &inner_asset_token,
+                                &inner_rollback_baseline,
                             )
                             .await;
                             return (
@@ -6349,6 +6402,7 @@ async fn workspaces_create(
                                 &slug,
                                 &workspace,
                                 &inner_asset_token,
+                                &inner_rollback_baseline,
                             )
                             .await;
                             return (
@@ -6364,8 +6418,14 @@ async fn workspaces_create(
                     provision_github_workspace(&state, &workspace, remote_url, token).await
                 }
                 other => {
-                    rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token)
-                        .await;
+                    rollback_workspace_creation(
+                        &state,
+                        &slug,
+                        &workspace,
+                        &inner_asset_token,
+                        &inner_rollback_baseline,
+                    )
+                    .await;
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorBody::with_code(
@@ -6380,8 +6440,14 @@ async fn workspaces_create(
             let (human_dir, config) = match provisioned {
                 Ok(x) => x,
                 Err((error_code, message)) => {
-                    rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token)
-                        .await;
+                    rollback_workspace_creation(
+                        &state,
+                        &slug,
+                        &workspace,
+                        &inner_asset_token,
+                        &inner_rollback_baseline,
+                    )
+                    .await;
                     // All provisioning failures surface as 400: they're all "your input
                     // or environment caused this" (bad token, bad URL, clone failed).
                     // None are 500-class — the runtime itself is still fine.
@@ -6408,7 +6474,14 @@ async fn workspaces_create(
                 }
             };
             if !placeholder_updated {
-                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token).await;
+                rollback_workspace_creation(
+                    &state,
+                    &slug,
+                    &workspace,
+                    &inner_asset_token,
+                    &inner_rollback_baseline,
+                )
+                .await;
                 return (
                     StatusCode::CONFLICT,
                     Json(ErrorBody::with_code(
@@ -6432,7 +6505,14 @@ async fn workspaces_create(
             .await
             {
                 assets.record_store_failure(&slug, &error);
-                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token).await;
+                rollback_workspace_creation(
+                    &state,
+                    &slug,
+                    &workspace,
+                    &inner_asset_token,
+                    &inner_rollback_baseline,
+                )
+                .await;
                 return (
                     error.status_code(),
                     Json(ErrorBody::with_code(
@@ -6453,7 +6533,14 @@ async fn workspaces_create(
             };
             if let Err(e) = crate::user_config::mutate(|config| config.upsert(workspace_entry)) {
                 tracing::error!(slug = %slug, error = %e, "failed to persist workspace entry");
-                rollback_workspace_creation(&state, &slug, &workspace, &inner_asset_token).await;
+                rollback_workspace_creation(
+                    &state,
+                    &slug,
+                    &workspace,
+                    &inner_asset_token,
+                    &inner_rollback_baseline,
+                )
+                .await;
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorBody::with_code(
@@ -6499,6 +6586,7 @@ async fn workspaces_create(
                     &supervisor_slug,
                     &supervisor_workspace,
                     &supervisor_asset_token,
+                    &supervisor_rollback_baseline,
                 )
                 .await;
                 tracing::error!(slug = %supervisor_slug, error = %error, "workspace finalization task failed");
@@ -6532,6 +6620,7 @@ async fn workspaces_create(
                 &join_slug,
                 &join_workspace,
                 &join_asset_token,
+                &join_rollback_baseline,
             )
             .await;
             join_initialization.finish();

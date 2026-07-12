@@ -1053,6 +1053,120 @@ async fn all_workspace_alias_forms_leave_an_active_workspace_byte_for_byte_uncha
     );
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn deleted_local_workspace_assets_survive_failed_and_successful_reregistration() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("asset-reregister");
+    std::fs::create_dir(&workspace).unwrap();
+    let canonical = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+
+    let (status, body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "asset-reregister",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (assets, token, original_created_at) = {
+        let runtime = state.lock().unwrap();
+        let context = &runtime.workspaces["asset-reregister"];
+        (
+            std::sync::Arc::clone(&runtime.assets),
+            context.asset_token.clone(),
+            context.git_config.as_ref().unwrap().created_at.clone(),
+        )
+    };
+    let store = assets
+        .open_registered_store(&canonical, &format!("local:{original_created_at}"), &token)
+        .unwrap();
+    let stored = store
+        .put_bytes(b"preserved-attachment", AssetSource::LocalUpload)
+        .unwrap();
+    let object_path = store.object_path(&stored.sha256).unwrap();
+    let metadata_path = store.metadata_path(&stored.sha256).unwrap();
+
+    assert_eq!(
+        send(
+            router.clone(),
+            "DELETE",
+            "/workspaces/asset-reregister",
+            None,
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (failed_status, failed_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "asset-reregister",
+            "git": {
+                "provider": "github",
+                "remote_url": "https://github.com/acme/room"
+            },
+        })),
+    )
+    .await;
+    assert_eq!(failed_status, StatusCode::BAD_REQUEST);
+    assert_eq!(failed_body["error_code"], "missing_token");
+    assert!(object_path.exists());
+    assert!(metadata_path.exists());
+    assert_eq!(
+        WorkspaceConfig::read(&canonical).unwrap().created_at,
+        original_created_at
+    );
+
+    let (recreated_status, recreated_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "asset-reregister",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(recreated_status, StatusCode::CREATED, "{recreated_body}");
+    let (new_token, new_created_at) = {
+        let runtime = state.lock().unwrap();
+        let context = &runtime.workspaces["asset-reregister"];
+        (
+            context.asset_token.clone(),
+            context.git_config.as_ref().unwrap().created_at.clone(),
+        )
+    };
+    assert_eq!(new_created_at, original_created_at);
+    let reopened = assets
+        .open_registered_store(&canonical, &format!("local:{new_created_at}"), &new_token)
+        .unwrap();
+    assert_eq!(
+        reopened.read(&stored.sha256).unwrap(),
+        b"preserved-attachment"
+    );
+    assert!(!canonical.join(".gitim-runtime/orphaned-assets").exists());
+
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/asset-reregister", None,)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
 #[cfg(all(unix, feature = "test-support"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial(http_workspaces_home)]
