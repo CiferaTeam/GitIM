@@ -4,6 +4,7 @@ import type { AttachmentDraft } from "../../hooks/use-attachment-draft-store";
 
 interface AttachmentDraftStripProps {
   draft: AttachmentDraft;
+  error?: string;
   onRemove: (id: string) => void;
 }
 
@@ -27,7 +28,7 @@ function fileType(name: string, mediaType: string): string {
   return mediaType.split("/").at(-1)?.slice(0, 5).toUpperCase() || "FILE";
 }
 
-export function AttachmentDraftStrip({ draft, onRemove }: AttachmentDraftStripProps) {
+export function AttachmentDraftStrip({ draft, error, onRemove }: AttachmentDraftStripProps) {
   const busy = draft.status === "uploading" || draft.status === "sending";
   const operationLabel = draft.status === "uploading"
     ? "Uploading…"
@@ -84,10 +85,10 @@ export function AttachmentDraftStrip({ draft, onRemove }: AttachmentDraftStripPr
           {operationLabel}
         </p>
       )}
-      {draft.error && (
+      {error && (
         <p className="mt-1.5 flex items-center gap-1 text-xs text-destructive" role="alert">
           <span className="inline-block size-1 rounded-full bg-destructive" />
-          {draft.error}
+          {error}
         </p>
       )}
     </div>

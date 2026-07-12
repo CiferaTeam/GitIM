@@ -5,7 +5,10 @@ import { createRoot, type Root } from "react-dom/client";
 import { formatAssetRef } from "../../lib/asset-ref";
 import type { UploadedAsset } from "../../lib/client";
 import type { Channel, Message } from "../../lib/types";
-import { useAttachmentDraftStore } from "../../hooks/use-attachment-draft-store";
+import {
+  attachmentDraftKey,
+  useAttachmentDraftStore,
+} from "../../hooks/use-attachment-draft-store";
 import { InputArea } from "./input-area";
 
 const { uploadAssetsMock, mediaState, connectionState } = vi.hoisted(() => ({
@@ -143,6 +146,7 @@ describe("InputArea card recipient preview", () => {
     container.remove();
     useAttachmentDraftStore.getState().disposeAll();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("previews the reporter and assignee for a card draft", async () => {
@@ -239,6 +243,7 @@ describe("InputArea attachments", () => {
     container.remove();
     useAttachmentDraftStore.getState().disposeAll();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("pastes an image and sends an attachment-only message", async () => {
@@ -534,6 +539,138 @@ describe("InputArea attachments", () => {
     expect(localStorage.getItem("gitim:draft:ws:general")).toBe(" keep me ");
     expect(container.textContent).toContain("Reply to");
     expect(container.textContent).toContain("offline");
+  });
+
+  it("finishes a captured attachment send after unmount without mutating component state", async () => {
+    const file = new File(["asset"], "unmount.txt", { type: "text/plain" });
+    const asset = uploadedAsset(file);
+    const send = deferred<{ ok: true }>();
+    const onSend = vi.fn(() => send.promise);
+    const onReplyToChange = vi.fn();
+    const focus = vi.spyOn(HTMLTextAreaElement.prototype, "focus");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    uploadAssetsMock.mockResolvedValue({ ok: true, data: { assets: [asset] } });
+
+    await renderInput(
+      <InputArea
+        {...defaultInputProps}
+        onReplyToChange={onReplyToChange}
+        onSend={onSend}
+      />,
+    );
+    await act(async () => {
+      pasteFiles(container.querySelector("textarea")!, [file]);
+      setTextareaValue(container.querySelector("textarea")!, "caption");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledWith(`caption\n${asset.ref}`, 0);
+    focus.mockClear();
+    consoleError.mockClear();
+
+    await act(async () => {
+      root?.unmount();
+      root = null;
+      await Promise.resolve();
+    });
+    await act(async () => {
+      send.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const key = attachmentDraftKey("ws", "general");
+    expect(useAttachmentDraftStore.getState().drafts[key]).toBeUndefined();
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
+    expect(onReplyToChange).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("finishes a captured text send after unmount without mutating component state", async () => {
+    const send = deferred<{ ok: true }>();
+    const onSend = vi.fn(() => send.promise);
+    const onReplyToChange = vi.fn();
+    const focus = vi.spyOn(HTMLTextAreaElement.prototype, "focus");
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await renderInput(
+      <InputArea
+        {...defaultInputProps}
+        onReplyToChange={onReplyToChange}
+        onSend={onSend}
+      />,
+    );
+    await act(async () => {
+      setTextareaValue(container.querySelector("textarea")!, "text survives");
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledWith("text survives", 0);
+    focus.mockClear();
+    consoleError.mockClear();
+
+    await act(async () => {
+      root?.unmount();
+      root = null;
+      await Promise.resolve();
+    });
+    await act(async () => {
+      send.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
+    expect(onReplyToChange).not.toHaveBeenCalled();
+    expect(focus).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("replaces a text send error with one attachment validation error", async () => {
+    const onSend = vi.fn(async () => ({ ok: false, error: "text send failed" }));
+    const valid = new File(["valid"], "valid.txt", { type: "text/plain" });
+    const invalid = new File(["large"], "large.bin");
+    Object.defineProperty(invalid, "size", { value: 50 * 1024 * 1024 + 1 });
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    await act(async () => {
+      setTextareaValue(container.querySelector("textarea")!, "keep this text");
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).toContain("text send failed");
+
+    await act(async () => {
+      selectFiles(container.querySelector('input[type="file"]')!, [valid, invalid]);
+      await Promise.resolve();
+    });
+
+    expect(container.textContent).not.toContain("text send failed");
+    const errors = container.querySelectorAll('[role="alert"]');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].textContent).toContain("50 MiB");
+    expect(container.textContent).toContain("valid.txt");
+    expect(container.querySelector<HTMLTextAreaElement>("textarea")?.value)
+      .toBe("keep this text");
+  });
+
+  it("announces a text-only send error accessibly", async () => {
+    const onSend = vi.fn(async () => ({ ok: false, error: "text send failed" }));
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    await act(async () => {
+      setTextareaValue(container.querySelector("textarea")!, "keep this text");
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[role="alert"]')?.textContent)
+      .toContain("text send failed");
   });
 
   it("captures the old scope while a deferred upload leaves the new scope usable", async () => {

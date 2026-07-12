@@ -109,8 +109,11 @@ export function InputArea({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textBusyKeysRef = useRef(new Set<string>());
-  const activeScopeRef = useRef({ workspaceKey, scopeKey });
-  activeScopeRef.current = { workspaceKey, scopeKey };
+  const renderedScopeRef = useRef({ workspaceKey, scopeKey });
+  renderedScopeRef.current = { workspaceKey, scopeKey };
+  const activeScopeRef = useRef(renderedScopeRef.current);
+  activeScopeRef.current = renderedScopeRef.current;
+  const mountedRef = useRef(false);
   const isMobile = useIsMobile();
   const connectionMode = useConnectionStore((state) => state.mode);
   const currentAttachmentKey = workspaceKey && scopeKey
@@ -155,6 +158,15 @@ export function InputArea({
           }),
     [routingBody, routing, replyTo, messages, currentUser],
   );
+
+  useEffect(() => {
+    mountedRef.current = true;
+    activeScopeRef.current = renderedScopeRef.current;
+    return () => {
+      mountedRef.current = false;
+      activeScopeRef.current = { workspaceKey: null, scopeKey: null };
+    };
+  }, []);
 
   // Restore draft when scope changes
   useEffect(() => {
@@ -224,11 +236,14 @@ export function InputArea({
     } else {
       textBusyKeysRef.current.delete(key);
     }
-    setTextBusyRevision((revision) => revision + 1);
+    if (mountedRef.current) {
+      setTextBusyRevision((revision) => revision + 1);
+    }
   }
 
   function isCurrentSendScope(requestWorkspaceKey: string, requestScopeKey: string) {
-    return activeScopeRef.current.workspaceKey === requestWorkspaceKey &&
+    return mountedRef.current &&
+      activeScopeRef.current.workspaceKey === requestWorkspaceKey &&
       activeScopeRef.current.scopeKey === requestScopeKey;
   }
 
@@ -240,6 +255,7 @@ export function InputArea({
 
   function addSelectedFiles(files: readonly File[]) {
     if (!attachmentCapable || files.length === 0) return;
+    clearSendError(activeAttachmentKey);
     addFiles(activeAttachmentKey, files);
   }
 
@@ -456,6 +472,7 @@ export function InputArea({
       {attachmentDraft && (
         <AttachmentDraftStrip
           draft={attachmentDraft}
+          error={attachmentDraft.error ?? sendError}
           onRemove={(id) => removeAttachment(activeAttachmentKey, id)}
         />
       )}
@@ -557,8 +574,11 @@ export function InputArea({
         </div>
       )}
 
-      {sendError && (
-        <p className="mt-1.5 text-xs text-destructive flex items-center gap-1">
+      {!attachmentDraft && sendError && (
+        <p
+          className="mt-1.5 text-xs text-destructive flex items-center gap-1"
+          role="alert"
+        >
           <span className="inline-block w-1 h-1 rounded-full bg-destructive" />
           {sendError}
         </p>
