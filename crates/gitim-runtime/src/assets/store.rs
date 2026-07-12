@@ -1573,6 +1573,18 @@ pub struct HashLock {
     hash: String,
 }
 
+struct WorkspaceQuotaLock {
+    file: File,
+}
+
+impl Drop for WorkspaceQuotaLock {
+    fn drop(&mut self) {
+        if let Err(error) = FileExt::unlock(&self.file) {
+            tracing::warn!(error = %error, "failed to release asset workspace quota lock");
+        }
+    }
+}
+
 impl std::fmt::Debug for HashLock {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -2002,6 +2014,24 @@ impl AssetStore {
             DedupeOutcome::Missing | DedupeOutcome::Corrupt => {}
         }
 
+        let _quota_lock = self.acquire_workspace_quota_lock()?;
+        self.reconcile_accounting()?;
+        match self.force_verify_dedupe(&staged.sha256, &source)? {
+            DedupeOutcome::Present(metadata) => {
+                staged
+                    .reservation
+                    .take()
+                    .ok_or(AssetError::Invariant("staged asset reservation is missing"))?
+                    .release()?;
+                return Ok(PersistOutcome {
+                    metadata,
+                    deduplicated: true,
+                });
+            }
+            DedupeOutcome::Missing | DedupeOutcome::Corrupt => {}
+        }
+        self.ensure_new_object_quota(staged.size)?;
+
         #[cfg(feature = "test-support")]
         if let Some((reached, resume)) = lock(&self.state.before_publish_pause).take() {
             reached.wait();
@@ -2108,33 +2138,12 @@ impl AssetStore {
         available: u64,
         total: u64,
     ) -> Result<AssetReservation, AssetError> {
-        let committed_and_reserved = accounting
-            .committed
-            .bytes
-            .checked_add(accounting.reserved)
-            .ok_or(AssetError::QuotaExceeded {
-                used: u64::MAX,
-                quota: self.limits.workspace_quota_bytes,
-            })?;
-        let prospective =
-            committed_and_reserved
-                .checked_add(incoming)
-                .ok_or(AssetError::QuotaExceeded {
-                    used: committed_and_reserved,
-                    quota: self.limits.workspace_quota_bytes,
-                })?;
-        if prospective > self.limits.workspace_quota_bytes {
-            return Err(AssetError::QuotaExceeded {
-                used: committed_and_reserved,
-                quota: self.limits.workspace_quota_bytes,
-            });
-        }
         let pending =
             accounting
                 .reserved
                 .checked_add(incoming)
                 .ok_or(AssetError::QuotaExceeded {
-                    used: committed_and_reserved,
+                    used: accounting.committed.bytes,
                     quota: self.limits.workspace_quota_bytes,
                 })?;
         let unmaterialized =
@@ -2144,7 +2153,7 @@ impl AssetStore {
                 .ok_or(AssetError::Invariant(
                     "asset unmaterialized byte count overflow",
                 ))?;
-        self.check_free_space(unmaterialized, committed_and_reserved, available, total)?;
+        self.check_free_space(unmaterialized, accounting.committed.bytes, available, total)?;
         accounting.reserved = pending;
         accounting.unmaterialized = unmaterialized;
         Ok(AssetReservation {
@@ -2172,33 +2181,12 @@ impl AssetStore {
         let mut accounting = lock(&self.state.accounting);
         self.validate_accounting(&accounting)?;
         let (available, total) = self.free_space()?;
-        let committed_and_reserved = accounting
-            .committed
-            .bytes
-            .checked_add(accounting.reserved)
-            .ok_or(AssetError::QuotaExceeded {
-                used: u64::MAX,
-                quota: self.limits.workspace_quota_bytes,
-            })?;
-        let prospective =
-            committed_and_reserved
-                .checked_add(incoming)
-                .ok_or(AssetError::QuotaExceeded {
-                    used: committed_and_reserved,
-                    quota: self.limits.workspace_quota_bytes,
-                })?;
-        if prospective > self.limits.workspace_quota_bytes {
-            return Err(AssetError::QuotaExceeded {
-                used: committed_and_reserved,
-                quota: self.limits.workspace_quota_bytes,
-            });
-        }
         let reserved =
             accounting
                 .reserved
                 .checked_add(incoming)
                 .ok_or(AssetError::QuotaExceeded {
-                    used: committed_and_reserved,
+                    used: accounting.committed.bytes,
                     quota: self.limits.workspace_quota_bytes,
                 })?;
         let unmaterialized =
@@ -2206,10 +2194,10 @@ impl AssetStore {
                 .unmaterialized
                 .checked_add(incoming)
                 .ok_or(AssetError::QuotaExceeded {
-                    used: committed_and_reserved,
+                    used: accounting.committed.bytes,
                     quota: self.limits.workspace_quota_bytes,
                 })?;
-        self.check_free_space(unmaterialized, committed_and_reserved, available, total)?;
+        self.check_free_space(unmaterialized, accounting.committed.bytes, available, total)?;
         reservation.bytes =
             reservation
                 .bytes
@@ -2605,6 +2593,34 @@ impl AssetStore {
         let path = self.raw_lock_path(hash)?;
         create_private_dir(path.parent().ok_or_else(|| invalid_path(&path))?)?;
         open_hash_lock_file(&path)
+    }
+
+    fn acquire_workspace_quota_lock(&self) -> Result<WorkspaceQuotaLock, AssetError> {
+        let path = self.root.join("locks/quota.lock");
+        let file = open_hash_lock_file(&path)?;
+        FileExt::lock_exclusive(&file)?;
+        Ok(WorkspaceQuotaLock { file })
+    }
+
+    fn ensure_new_object_quota(&self, size: u64) -> Result<(), AssetError> {
+        let accounting = lock(&self.state.accounting);
+        self.validate_accounting(&accounting)?;
+        let prospective =
+            accounting
+                .committed
+                .bytes
+                .checked_add(size)
+                .ok_or(AssetError::QuotaExceeded {
+                    used: accounting.committed.bytes,
+                    quota: self.limits.workspace_quota_bytes,
+                })?;
+        if prospective > self.limits.workspace_quota_bytes {
+            return Err(AssetError::QuotaExceeded {
+                used: accounting.committed.bytes,
+                quota: self.limits.workspace_quota_bytes,
+            });
+        }
+        Ok(())
     }
 
     fn check_free_space(

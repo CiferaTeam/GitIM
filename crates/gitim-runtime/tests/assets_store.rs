@@ -186,6 +186,22 @@ fn spawn_hash_lock_child(workspace: &Path, hash: &str, mode: &str, marker: Optio
     command.spawn().unwrap()
 }
 
+fn spawn_quota_child(workspace: &Path, bytes: &str, ready: &Path, start: &Path) -> Child {
+    Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("quota_process_child")
+        .arg("--ignored")
+        .arg("--nocapture")
+        .env("GITIM_ASSET_QUOTA_CHILD_BYTES", bytes)
+        .env("GITIM_ASSET_QUOTA_WORKSPACE", workspace)
+        .env("GITIM_ASSET_QUOTA_READY", ready)
+        .env("GITIM_ASSET_QUOTA_START", start)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap()
+}
+
 fn wait_for_marker(child: &mut Child, marker: &Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !marker.exists() {
@@ -521,6 +537,40 @@ async fn batch_persistence_error_returns_no_refs_and_retry_converges() {
     assert_eq!(refs[0].sha256, hash);
     assert_eq!(store.reserved_bytes().unwrap(), 0);
     assert!(owned_temp_files(&store).is_empty());
+}
+
+#[tokio::test]
+async fn exact_quota_retry_deduplicates_object_left_by_sidecar_failure() {
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 7);
+    let staged = store.stage_bytes("retry.txt", b"durable").await.unwrap();
+    let hash = staged.sha256().to_string();
+    store.inject_sidecar_write_failure_once();
+
+    let error = store
+        .persist_batch(RUNTIME_ID_1, vec![staged])
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.error_code(), "asset_store_failed");
+    assert_eq!(store.read(&hash).unwrap(), b"durable");
+    assert_eq!(store.usage().unwrap().bytes, 7);
+
+    let retry = store.stage_bytes("retry.txt", b"durable").await.unwrap();
+    let refs = store
+        .persist_batch(RUNTIME_ID_1, vec![retry])
+        .await
+        .unwrap();
+
+    assert_eq!(refs[0].sha256, hash);
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 7,
+            objects: 1
+        }
+    );
+    assert_eq!(store.reserved_bytes().unwrap(), 0);
 }
 
 #[tokio::test]
@@ -1424,6 +1474,32 @@ fn hash_lock_child() {
 }
 
 #[test]
+#[ignore = "child-process helper"]
+fn quota_process_child() {
+    let Some(bytes) = std::env::var_os("GITIM_ASSET_QUOTA_CHILD_BYTES") else {
+        return;
+    };
+    let workspace = PathBuf::from(std::env::var_os("GITIM_ASSET_QUOTA_WORKSPACE").unwrap());
+    let ready = PathBuf::from(std::env::var_os("GITIM_ASSET_QUOTA_READY").unwrap());
+    let start = PathBuf::from(std::env::var_os("GITIM_ASSET_QUOTA_START").unwrap());
+    let store = open_store(&workspace, 6);
+    fs::write(&ready, b"ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !start.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for quota start"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let result = store.put_bytes(bytes.as_encoded_bytes(), AssetSource::LocalUpload);
+    println!(
+        "result={}",
+        result.map_or_else(|error| error.error_code(), |_| "ok")
+    );
+}
+
+#[test]
 fn default_limits_are_bounded() {
     let defaults = AssetLimits::from_environment(|_| None);
     assert_eq!(defaults.workspace_quota_bytes, 20 * 1024 * 1024 * 1024);
@@ -1837,15 +1913,14 @@ fn late_dedupe_sidecar_failure_registers_the_verified_object_once() {
 }
 
 #[test]
-fn reservations_use_checked_aggregate_quota_and_release_on_drop() {
+fn staging_reservations_track_temporary_bytes_and_release_on_drop() {
     let workspace = TempDir::new().unwrap();
     let store = open_store(workspace.path(), 10);
     let reservation = store.reserve(7).unwrap();
     assert_eq!(store.reserved_bytes().unwrap(), 7);
-    assert!(matches!(
-        store.reserve(4),
-        Err(AssetError::QuotaExceeded { .. })
-    ));
+    let second = store.reserve(4).unwrap();
+    assert_eq!(store.reserved_bytes().unwrap(), 11);
+    drop(second);
     drop(reservation);
     assert_eq!(store.reserved_bytes().unwrap(), 0);
     assert!(store.reserve(10).is_ok());
@@ -1871,10 +1946,9 @@ fn asset_service_shares_reservations_across_store_handles() {
 
     let reservation = first.reserve(7).unwrap();
     assert_eq!(second.reserved_bytes().unwrap(), 7);
-    assert!(matches!(
-        second.reserve(4),
-        Err(AssetError::QuotaExceeded { .. })
-    ));
+    let sibling = second.reserve(4).unwrap();
+    assert_eq!(first.reserved_bytes().unwrap(), 11);
+    drop(sibling);
     drop(reservation);
     assert_eq!(second.reserved_bytes().unwrap(), 0);
 }
@@ -2596,10 +2670,9 @@ fn direct_store_handles_share_one_quota_state() {
 
     let reservation = first.reserve(7).unwrap();
     assert_eq!(second.reserved_bytes().unwrap(), 7);
-    assert!(matches!(
-        second.reserve(4),
-        Err(AssetError::QuotaExceeded { .. })
-    ));
+    let sibling = second.reserve(4).unwrap();
+    assert_eq!(first.reserved_bytes().unwrap(), 11);
+    drop(sibling);
     drop(reservation);
 }
 
@@ -2622,14 +2695,13 @@ fn workspace_aliases_share_accounting_and_cached_usage() {
 
     let reservation = first.reserve(7).unwrap();
     assert_eq!(second.reserved_bytes().unwrap(), 7);
-    assert!(matches!(
-        second.reserve(4),
-        Err(AssetError::QuotaExceeded { .. })
-    ));
+    let sibling = second.reserve(4).unwrap();
+    assert_eq!(first.reserved_bytes().unwrap(), 11);
     assert_eq!(
         service.cached_usage(&alias),
         service.cached_usage(&workspace)
     );
+    drop(sibling);
     drop(reservation);
 }
 
@@ -2691,6 +2763,57 @@ fn concurrent_direct_puts_cannot_exceed_workspace_quota() {
         reopened.usage().unwrap(),
         AssetUsage {
             bytes: 6,
+            objects: 1
+        }
+    );
+}
+
+#[test]
+fn independent_processes_cannot_exceed_workspace_quota() {
+    let workspace = TempDir::new().unwrap();
+    let ready_a = workspace.path().join("ready-a");
+    let ready_b = workspace.path().join("ready-b");
+    let start = workspace.path().join("start");
+    let mut first = spawn_quota_child(workspace.path(), "aaaa", &ready_a, &start);
+    let mut second = spawn_quota_child(workspace.path(), "bbbb", &ready_b, &start);
+    wait_for_marker(&mut first, &ready_a);
+    wait_for_marker(&mut second, &ready_b);
+    fs::write(&start, b"start").unwrap();
+
+    let outputs = [
+        first.wait_with_output().unwrap(),
+        second.wait_with_output().unwrap(),
+    ];
+    for output in &outputs {
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = outputs
+        .iter()
+        .map(|output| String::from_utf8_lossy(&output.stdout))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stdout
+            .iter()
+            .filter(|output| output.contains("result=ok"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        stdout
+            .iter()
+            .filter(|output| output.contains("result=asset_quota_exceeded"))
+            .count(),
+        1
+    );
+    let reopened = open_store(workspace.path(), 6);
+    assert_eq!(
+        reopened.usage().unwrap(),
+        AssetUsage {
+            bytes: 4,
             objects: 1
         }
     );
