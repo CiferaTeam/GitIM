@@ -133,6 +133,14 @@ async function stubGitHubIdentity(page: Page) {
   });
 }
 
+async function expectDisconnectedBrowserDiagnostics(page: Page) {
+  await page.getByRole("button", { name: "Connection diagnostics" }).click();
+  const state = page.getByText("Disconnected · Browser", { exact: true });
+  await expect(state).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(state).toBeHidden();
+}
+
 function mobileMessages(count = 1) {
   return Array.from({ length: count }, (_, index) => {
     const line = index + 1;
@@ -1002,7 +1010,7 @@ test("browser mode does not poll the previous backend after activation fails", a
   await page.getByTestId(`workspace-row-${tablet.slug}`).click();
 
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
-  await expect(page.getByRole("button", { name: "Connection diagnostics" })).toBeVisible();
+  await expectDisconnectedBrowserDiagnostics(page);
   await page.getByTestId("workspace-switcher-trigger").click();
   await expect(page.getByTestId(`workspace-reconnect-${tablet.slug}`)).toBeVisible();
   await page.keyboard.press("Escape");
@@ -1058,7 +1066,7 @@ test("browser mode opens cached data without polling when activation needs a tok
 
   await expect(page.getByText("hello tablet cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
-  await expect(page.getByRole("button", { name: "Connection diagnostics" })).toBeVisible();
+  await expectDisconnectedBrowserDiagnostics(page);
   const pollCountAfterCachedActivation = await page.evaluate(() =>
     (
       window as unknown as {
@@ -1128,7 +1136,7 @@ test("browser mode setup opens cached workspace without a session token", async 
 
   await expect(page.getByText("hello phone cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Phone");
-  await expect(page.getByRole("button", { name: "Connection diagnostics" })).toBeVisible();
+  await expectDisconnectedBrowserDiagnostics(page);
   const pollCountAfterCachedOpen = await page.evaluate(() =>
     (
       window as unknown as {
