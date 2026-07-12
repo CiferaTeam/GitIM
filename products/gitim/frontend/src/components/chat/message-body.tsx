@@ -8,6 +8,7 @@ import { resolveDisplayName } from "../../lib/format-handler-display";
 import { CardReferenceLink, MessageReferenceLink } from "./reference-preview";
 import { selectCardById, useCardStore } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import { AssetFragment } from "./asset-fragment";
 
 export interface MessageBodyProps {
   body: string;
@@ -328,6 +329,9 @@ function FragmentRenderer({
           {fragment.content}
         </em>
       );
+
+    case "asset":
+      return <AssetFragment key={index} asset={fragment.asset} />;
 
     default:
       return null;
