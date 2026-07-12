@@ -436,6 +436,40 @@ describe("attachment draft operations", () => {
 });
 
 describe("attachment preview lifecycle", () => {
+  it("disposes every scope for one workspace and invalidates failed-send operations", () => {
+    const workspace = "runtime:room";
+    const idleKey = attachmentDraftKey(workspace, "channel:general");
+    const failedKey = attachmentDraftKey(workspace, "dm:alice");
+    const otherKey = attachmentDraftKey("runtime:other", "channel:general");
+    store().addFiles(idleKey, [png("idle.png")]);
+    store().addFiles(failedKey, [png("uploaded.png")]);
+    store().addFiles(otherKey, [png("other.png")]);
+    const operation = store().beginOperation(failedKey)!;
+    expect(store().markUploaded(failedKey, operation.generation, [{
+      id: operation.items[0].id,
+      asset: { ...uploaded("uploaded.png"), mediaType: "image/png" },
+    }])).toBe(true);
+    expect(store().markSending(failedKey, operation.generation)).toBe(true);
+    expect(store().failOperation(failedKey, operation.generation, "send failed")).toBe(true);
+
+    const disposeWorkspace = (
+      store() as unknown as { disposeWorkspace: (workspaceKey: string) => void }
+    ).disposeWorkspace;
+    disposeWorkspace(workspace);
+
+    expect(store().drafts[idleKey]).toBeUndefined();
+    expect(store().drafts[failedKey]).toBeUndefined();
+    expect(store().drafts[otherKey].items[0].file.name).toBe("other.png");
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:idle.png");
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:uploaded.png");
+    expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:other.png");
+    expect(store().failOperation(failedKey, operation.generation, "late")).toBe(false);
+
+    store().addFiles(failedKey, [png("replacement.png", { lastModified: 2 })]);
+    const replacement = store().beginOperation(failedKey)!;
+    expect(replacement.generation).toBeGreaterThan(operation.generation);
+  });
+
   it("revokes previews exactly once across removal, reset, success, and disposal", () => {
     const removeKey = attachmentDraftKey("workspace", "remove");
     const resetKey = attachmentDraftKey("workspace", "reset");

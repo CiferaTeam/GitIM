@@ -65,6 +65,7 @@ interface AttachmentDraftStore {
   failOperation: (key: string, generation: number, error: string) => boolean;
   completeSuccess: (key: string, generation: number) => boolean;
   resetDraft: (key: string) => boolean;
+  disposeWorkspace: (workspaceKey: string) => void;
   disposeAll: () => void;
 }
 
@@ -225,6 +226,17 @@ function operationSnapshot(
 
 function isBusy(draft: AttachmentDraft): boolean {
   return draft.status === "uploading" || draft.status === "sending";
+}
+
+function draftWorkspaceKey(key: string): string | undefined {
+  try {
+    const tuple: unknown = JSON.parse(key);
+    return Array.isArray(tuple) && tuple.length === 2 && typeof tuple[0] === "string"
+      ? tuple[0]
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) => {
@@ -452,6 +464,19 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
       revokeUrls(current.items);
       return true;
+    },
+
+    disposeWorkspace: (workspaceKey) => {
+      const drafts = get().drafts;
+      const disposed = Object.entries(drafts).filter(
+        ([key]) => draftWorkspaceKey(key) === workspaceKey,
+      );
+      if (disposed.length === 0) return;
+      const next = Object.fromEntries(
+        Object.entries(drafts).filter(([key]) => draftWorkspaceKey(key) !== workspaceKey),
+      );
+      set({ drafts: Object.freeze(next) });
+      revokeUrls(disposed.flatMap(([, draft]) => draft.items));
     },
 
     disposeAll: () => {

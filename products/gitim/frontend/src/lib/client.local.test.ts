@@ -480,6 +480,11 @@ describe("client local browser workspaces", () => {
   it("forgets a browser workspace and cache after shutting down the active backend", async () => {
     const { createBrowserWorkspace, loadBrowserWorkspaces, loadSessionToken, saveSessionToken } =
       await import("./browser-workspaces");
+    const { useAttachmentDraftStore } = await import("@/hooks/use-attachment-draft-store");
+    const disposeWorkspace = vi.spyOn(
+      useAttachmentDraftStore.getState(),
+      "disposeWorkspace",
+    );
     const client = await import("./client");
     const record = createBrowserWorkspace({
       remoteUrl: "https://github.com/acme/phone",
@@ -495,6 +500,7 @@ describe("client local browser workspaces", () => {
     expect(wipedFsNames).toEqual([record.storage.fsName]);
     expect(loadBrowserWorkspaces()).toEqual([]);
     expect(loadSessionToken(record.id)).toBeUndefined();
+    expect(disposeWorkspace).toHaveBeenCalledWith(`browser:${record.id}`);
   });
 
   it("forgets an inactive browser workspace and cache without shutting down the active backend", async () => {
@@ -533,6 +539,8 @@ describe("client local browser workspaces", () => {
       migrateLegacyBrowserWorkspace,
       saveSessionToken,
     } = await import("./browser-workspaces");
+    const { useAttachmentDraftStore } = await import("@/hooks/use-attachment-draft-store");
+    const disposeAll = vi.spyOn(useAttachmentDraftStore.getState(), "disposeAll");
     const client = await import("./client");
     localStorage.setItem(
       "gitim-local-config",
@@ -556,5 +564,6 @@ describe("client local browser workspaces", () => {
     expect(wipedFsNames).toEqual([legacy.storage.fsName, record.storage.fsName]);
     expect(loadBrowserWorkspaces()).toEqual([]);
     expect(loadSessionToken(record.id)).toBeUndefined();
+    expect(disposeAll).toHaveBeenCalledOnce();
   });
 });

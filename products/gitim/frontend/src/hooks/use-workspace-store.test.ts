@@ -196,6 +196,11 @@ describe("useWorkspaceStore", () => {
     const client = await import("@/lib/client");
     const { useConnectionStore } = await import("./use-connection-store");
     useConnectionStore.setState({ mode: "remote" });
+    const { useAttachmentDraftStore } = await import("./use-attachment-draft-store");
+    const disposeWorkspace = vi.spyOn(
+      useAttachmentDraftStore.getState(),
+      "disposeWorkspace",
+    );
     const { useWorkspaceStore } = await import("./use-workspace-store");
 
     const ws: WorkspaceSummary = {
@@ -230,6 +235,41 @@ describe("useWorkspaceStore", () => {
     expect(localStorage.getItem("gitim-ui-state:" + key)).toBeNull();
     expect(readActiveChatScope(key)).toBeNull();
     expect(readChatScopeViewAnchor(key, "channel:general")).toBeNull();
+    expect(disposeWorkspace).toHaveBeenCalledOnce();
+    expect(disposeWorkspace).toHaveBeenCalledWith(key);
+  });
+
+  it("keeps attachment drafts when workspace removal fails", async () => {
+    const client = await import("@/lib/client");
+    const { useConnectionStore } = await import("./use-connection-store");
+    useConnectionStore.setState({ mode: "remote" });
+    const { useAttachmentDraftStore } = await import("./use-attachment-draft-store");
+    const disposeWorkspace = vi.spyOn(
+      useAttachmentDraftStore.getState(),
+      "disposeWorkspace",
+    );
+    const { useWorkspaceStore } = await import("./use-workspace-store");
+    const ws: WorkspaceSummary = {
+      slug: "kept-ws",
+      workspace_name: "Kept",
+      path: "/tmp/kept",
+      provider: "local",
+      initialized: true,
+    };
+    useWorkspaceStore.setState({
+      workspaces: [ws],
+      activeSlug: ws.slug,
+      loading: false,
+      error: null,
+      errorCode: null,
+    });
+    vi.mocked(client.deleteWorkspace).mockResolvedValueOnce({
+      ok: false,
+      error: "still in use",
+    });
+
+    expect(await useWorkspaceStore.getState().remove(ws.slug)).toBe(false);
+    expect(disposeWorkspace).not.toHaveBeenCalled();
   });
 
   it("does not refresh when an old workspace reports unavailable after switching", async () => {

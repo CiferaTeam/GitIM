@@ -69,6 +69,7 @@ import {
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useConnectionDiagnosticsStore } from "@/hooks/use-connection-diagnostics-store";
+import { useAttachmentDraftStore } from "@/hooks/use-attachment-draft-store";
 import { DEFAULT_GIT_CORS_PROXY } from "./git-cors-proxy";
 import { localNetworkFetch } from "./local-network-fetch";
 import { parseAssetRef, type AssetRef } from "./asset-ref";
@@ -670,6 +671,7 @@ export async function forgetBrowserWorkspaceAndCache(
     shutdownBrowserWorkspace();
   }
   await forgetBrowserWorkspaceAndWipeCache(record.id);
+  useAttachmentDraftStore.getState().disposeWorkspace(`browser:${record.id}`);
   return { ok: true, data: { activeAffected } };
 }
 
@@ -678,6 +680,7 @@ export async function startOverBrowserWorkspaces(): Promise<ApiResponse<BrowserC
   shutdownBrowserWorkspace();
   await wipeAllBrowserWorkspaceCaches();
   clearAllBrowserWorkspaces();
+  useAttachmentDraftStore.getState().disposeAll();
   return { ok: true, data: { activeAffected } };
 }
 

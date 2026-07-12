@@ -2,6 +2,7 @@ import { create } from "zustand";
 import * as client from "@/lib/client";
 import { activeWorkspaceStorageKey, workspaceIdentity } from "@/lib/workspace-key";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+import { useAttachmentDraftStore } from "@/hooks/use-attachment-draft-store";
 import { clearChatUiState } from "@/lib/chat-ui-state";
 import { clearUiState } from "@/lib/ui-state";
 import type { CreateWorkspaceRequest, WorkspaceSummary } from "@/lib/types";
@@ -126,6 +127,7 @@ export const useWorkspaceStore = create<WorkspaceStore>((set, get) => ({
       const workspaceKey = workspaceIdentity(mode, workspace);
       clearUiState(workspaceKey);
       clearChatUiState(workspaceKey);
+      useAttachmentDraftStore.getState().disposeWorkspace(workspaceKey);
     }
     await get().fetchAll();
     return true;
