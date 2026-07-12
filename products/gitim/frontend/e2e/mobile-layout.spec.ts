@@ -686,9 +686,9 @@ test("mobile chat uses drawer navigation and bottom tabs", async ({ page }) => {
   await page.getByRole("button", { name: "Open conversations" }).click();
   const drawer = page.locator(".fixed.inset-0.z-50").first();
   await expect(drawer.getByRole("button", { name: "general", exact: true })).toBeVisible();
-  await expect(drawer.getByRole("button", { name: "alice", exact: true })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "Open DM alice" })).toBeVisible();
   await expect(drawer.getByText("Others", { exact: true })).toBeVisible();
-  await expect(drawer.getByRole("button", { name: "bob ↔ carol", exact: true })).toBeVisible();
+  await expect(drawer.getByRole("button", { name: "Open DM bob ↔ carol" })).toBeVisible();
 });
 
 test("mobile chat Enter inserts newline and send button sends", async ({ page }) => {
@@ -794,7 +794,7 @@ test("mobile card detail uses the shared bottom tabs once", async ({ page }) => 
   await stubRuntime(page);
   await page.goto("/cards/general/card-1");
 
-  await expect(page.getByText("Mobile card")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Mobile card" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Chat", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Cards", exact: true })).toHaveCount(1);
   await expect(page.getByRole("button", { name: "Agents", exact: true })).toHaveCount(0);
@@ -1002,7 +1002,7 @@ test("browser mode does not poll the previous backend after activation fails", a
   await page.getByTestId(`workspace-row-${tablet.slug}`).click();
 
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
-  await expect(page.locator('[title="Disconnected"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connection diagnostics" })).toBeVisible();
   await page.getByTestId("workspace-switcher-trigger").click();
   await expect(page.getByTestId(`workspace-reconnect-${tablet.slug}`)).toBeVisible();
   await page.keyboard.press("Escape");
@@ -1058,7 +1058,7 @@ test("browser mode opens cached data without polling when activation needs a tok
 
   await expect(page.getByText("hello tablet cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Tablet");
-  await expect(page.locator('[title="Disconnected"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connection diagnostics" })).toBeVisible();
   const pollCountAfterCachedActivation = await page.evaluate(() =>
     (
       window as unknown as {
@@ -1128,7 +1128,7 @@ test("browser mode setup opens cached workspace without a session token", async 
 
   await expect(page.getByText("hello phone cards")).toBeVisible();
   await expect(page.getByTestId("workspace-switcher-trigger")).toContainText("Phone");
-  await expect(page.locator('[title="Disconnected"]')).toBeVisible();
+  await expect(page.getByRole("button", { name: "Connection diagnostics" })).toBeVisible();
   const pollCountAfterCachedOpen = await page.evaluate(() =>
     (
       window as unknown as {
@@ -1230,7 +1230,12 @@ test("browser mode mobile cards can be created and discussed", async ({ page }) 
   const noteInput = page.getByPlaceholder("Write a note");
   await noteInput.fill("first browser note");
   await page.getByRole("button", { name: "Send message" }).click();
-  await expect(page.getByText("first browser note")).toBeVisible();
+  const emptyRecipientsDialog = page.getByRole("dialog", {
+    name: "No one will receive this",
+  });
+  await emptyRecipientsDialog.getByRole("button", { name: "Send anyway" }).click();
+  await expect(noteInput).toHaveValue("");
+  await expect(page.getByText("first browser note", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "Archive" }).click();
   await expect(page).toHaveURL(/\/cards$/);
