@@ -1167,6 +1167,91 @@ async fn deleted_local_workspace_assets_survive_failed_and_successful_reregistra
     );
 }
 
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn failed_reregistration_restores_valid_config_without_existing_assets() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("config-reregister");
+    std::fs::create_dir(&workspace).unwrap();
+    let canonical = workspace.canonicalize().unwrap();
+    let (router, _state) = create_router();
+
+    let (status, body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "config-reregister",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let original_created_at = WorkspaceConfig::read(&canonical).unwrap().created_at;
+    assert_eq!(
+        send(
+            router.clone(),
+            "DELETE",
+            "/workspaces/config-reregister",
+            None,
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    std::fs::remove_dir_all(canonical.join(".gitim-runtime/assets")).unwrap();
+    assert!(!canonical.join(".gitim-runtime/assets/v1").exists());
+
+    let (failed_status, failed_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "config-reregister",
+            "git": {
+                "provider": "github",
+                "remote_url": "https://github.com/acme/room"
+            },
+        })),
+    )
+    .await;
+    assert_eq!(failed_status, StatusCode::BAD_REQUEST);
+    assert_eq!(failed_body["error_code"], "missing_token");
+    assert_eq!(
+        WorkspaceConfig::read(&canonical).unwrap().created_at,
+        original_created_at
+    );
+    assert!(!canonical.join(".gitim-runtime/assets/v1").exists());
+
+    let (recreated_status, recreated_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "config-reregister",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(recreated_status, StatusCode::CREATED, "{recreated_body}");
+    assert_eq!(
+        WorkspaceConfig::read(&canonical).unwrap().created_at,
+        original_created_at
+    );
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/config-reregister", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
 #[cfg(all(unix, feature = "test-support"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial(http_workspaces_home)]

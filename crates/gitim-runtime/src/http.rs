@@ -5842,6 +5842,11 @@ fn cleanup_partial_workspace(workspace: &Path, baseline: &WorkspaceRollbackBasel
         }
     } else {
         let _ = std::fs::remove_dir_all(&runtime_dir);
+        if let Some(config) = &baseline.config {
+            if let Err(error) = config.write(workspace) {
+                tracing::error!(error = %error, "failed to restore workspace config during rollback");
+            }
+        }
     }
 }
 
