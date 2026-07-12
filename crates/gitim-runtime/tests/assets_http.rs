@@ -973,10 +973,7 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
     assert_eq!(get.status(), StatusCode::OK);
     assert_eq!(get.headers()[header::CONTENT_TYPE], "image/png");
     assert_eq!(get.headers()["x-content-type-options"], "nosniff");
-    assert_eq!(
-        get.headers()[header::CACHE_CONTROL],
-        "private, immutable, max-age=31536000"
-    );
+    assert_eq!(get.headers()[header::CACHE_CONTROL], "private, no-store");
     assert_eq!(get.headers()[header::ETAG], etag);
     assert!(get.headers()[header::CONTENT_DISPOSITION]
         .to_str()
@@ -997,6 +994,7 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         .await
         .unwrap();
     assert_eq!(head.status(), StatusCode::OK);
+    assert_eq!(head.headers()[header::CACHE_CONTROL], "private, no-store");
     assert_eq!(
         head.headers()[header::CONTENT_LENGTH],
         PNG_1X1.len().to_string()
@@ -1034,6 +1032,11 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
             .unwrap();
         assert_eq!(response.status(), expected_status, "{range}");
         assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store",
+            "{range}"
+        );
+        assert_eq!(
             response.headers()[header::CONTENT_RANGE],
             expected_content_range,
             "{range}"
@@ -1064,6 +1067,11 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
             .await
             .unwrap();
         assert_eq!(response.status(), expected_status, "{range}");
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store",
+            "{range}"
+        );
         if expected_status == StatusCode::RANGE_NOT_SATISFIABLE {
             assert_eq!(
                 response.headers()[header::CONTENT_RANGE],
@@ -1110,7 +1118,7 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         assert_eq!(response.headers()["x-content-type-options"], "nosniff");
         assert_eq!(
             response.headers()[header::CACHE_CONTROL],
-            "private, immutable, max-age=31536000"
+            "private, no-store"
         );
         assert_eq!(response.headers()[header::ETAG], etag);
         assert!(response_bytes(response).await.is_empty());
@@ -1130,6 +1138,10 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         .append(header::RANGE, "bytes=2-3".parse().unwrap());
     let conditional_head = fixture.app.clone().oneshot(conditional_head).await.unwrap();
     assert_eq!(conditional_head.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        conditional_head.headers()[header::CACHE_CONTROL],
+        "private, no-store"
+    );
     assert!(response_bytes(conditional_head).await.is_empty());
 
     let not_modified = fixture
@@ -1145,6 +1157,10 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         .await
         .unwrap();
     assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        not_modified.headers()[header::CACHE_CONTROL],
+        "private, no-store"
+    );
     assert!(response_bytes(not_modified).await.is_empty());
 
     let weak = fixture
@@ -1160,6 +1176,7 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         .await
         .unwrap();
     assert_eq!(weak.status(), StatusCode::OK);
+    assert_eq!(weak.headers()[header::CACHE_CONTROL], "private, no-store");
 
     let mut duplicate_etag = Request::builder().uri(&uri).body(Body::empty()).unwrap();
     duplicate_etag
@@ -1168,9 +1185,11 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
     duplicate_etag
         .headers_mut()
         .append(header::IF_NONE_MATCH, "\"another\"".parse().unwrap());
+    let duplicate_etag = fixture.app.oneshot(duplicate_etag).await.unwrap();
+    assert_eq!(duplicate_etag.status(), StatusCode::OK);
     assert_eq!(
-        fixture.app.oneshot(duplicate_etag).await.unwrap().status(),
-        StatusCode::OK
+        duplicate_etag.headers()[header::CACHE_CONTROL],
+        "private, no-store"
     );
 }
 
@@ -1298,6 +1317,10 @@ async fn invalid_route_parameters_and_unknown_workspace_are_typed() {
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "private, no-store"
+        );
+        assert_eq!(
             response_json(response).await["error_code"],
             "invalid_asset_ref"
         );
@@ -1367,6 +1390,28 @@ async fn node_local_object_is_originless_local_only_and_has_same_headers() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png");
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
+        "private, immutable, max-age=31536000"
+    );
+    let etag = response.headers()[header::ETAG].clone();
+    let not_modified = fixture
+        .app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(&uri)
+                .header(header::IF_NONE_MATCH, etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        not_modified.headers()[header::CACHE_CONTROL],
+        "private, immutable, max-age=31536000"
+    );
 
     let missing = fixture
         .app

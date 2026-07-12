@@ -24,6 +24,7 @@ use crate::http::{SharedRuntimeState, WorkspaceSlug};
 
 const MAX_UPLOAD_HTTP_BYTES: usize = 201 * 1024 * 1024;
 const CACHE_CONTROL_VALUE: &str = "private, immutable, max-age=31536000";
+const BROWSER_CACHE_CONTROL_VALUE: &str = "private, no-store";
 const MAX_INLINE_IMAGE_AXIS: u32 = 32_768;
 const MAX_INLINE_IMAGE_PIXELS: u64 = 100_000_000;
 const FILENAME_ENCODE_SET: &AsciiSet = &CONTROLS
@@ -272,7 +273,7 @@ async fn guard_resolve_browser(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if browser_request_allowed(
+    let mut response = if browser_request_allowed(
         request.headers(),
         BrowserRoute::Resolve,
         request.method(),
@@ -281,7 +282,12 @@ async fn guard_resolve_browser(
         next.run(request).await
     } else {
         forbidden_response()
-    }
+    };
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(BROWSER_CACHE_CONTROL_VALUE),
+    );
+    response
 }
 
 async fn reject_browser_context(request: Request<Body>, next: Next) -> Response {

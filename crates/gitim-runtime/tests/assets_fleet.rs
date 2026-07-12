@@ -2159,7 +2159,7 @@ async fn remote_alias_named_local_remains_remote_head_availability() {
 }
 
 #[tokio::test]
-async fn remote_head_honors_exact_strong_validator_and_immutable_headers() {
+async fn remote_head_honors_exact_strong_validator_and_browser_no_store() {
     let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
     let fixture = fixture();
     add_peer(
@@ -2187,10 +2187,7 @@ async fn remote_head_honors_exact_strong_validator_and_immutable_headers() {
         .unwrap();
     assert_eq!(ok.status(), StatusCode::OK);
     assert_eq!(ok.headers()[header::ETAG], etag);
-    assert_eq!(
-        ok.headers()[header::CACHE_CONTROL],
-        "private, immutable, max-age=31536000"
-    );
+    assert_eq!(ok.headers()[header::CACHE_CONTROL], "private, no-store");
     assert_eq!(ok.headers()[header::ACCEPT_RANGES], "bytes");
     assert_eq!(ok.headers()["x-content-type-options"], "nosniff");
     assert!(response_bytes(ok).await.is_empty());
@@ -2212,7 +2209,7 @@ async fn remote_head_honors_exact_strong_validator_and_immutable_headers() {
     assert_eq!(not_modified.headers()[header::ETAG], etag);
     assert_eq!(
         not_modified.headers()[header::CACHE_CONTROL],
-        "private, immutable, max-age=31536000"
+        "private, no-store"
     );
     assert_eq!(not_modified.headers()[header::ACCEPT_RANGES], "bytes");
     assert_eq!(not_modified.headers()["x-content-type-options"], "nosniff");
@@ -2237,7 +2234,30 @@ async fn remote_head_honors_exact_strong_validator_and_immutable_headers() {
         .await
         .unwrap();
     assert_eq!(conditional_range.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        conditional_range.headers()[header::CACHE_CONTROL],
+        "private, no-store"
+    );
     assert!(response_bytes(conditional_range).await.is_empty());
+
+    let mut duplicate_range = Request::builder()
+        .method(Method::HEAD)
+        .uri(&uri)
+        .body(Body::empty())
+        .unwrap();
+    duplicate_range
+        .headers_mut()
+        .append(header::RANGE, "bytes=0-1".parse().unwrap());
+    duplicate_range
+        .headers_mut()
+        .append(header::RANGE, "bytes=2-3".parse().unwrap());
+    let duplicate_range = fixture.app.clone().oneshot(duplicate_range).await.unwrap();
+    assert_eq!(duplicate_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+    assert_eq!(
+        duplicate_range.headers()[header::CACHE_CONTROL],
+        "private, no-store"
+    );
+    assert!(response_bytes(duplicate_range).await.is_empty());
 
     let weak = fixture
         .app
@@ -2252,7 +2272,8 @@ async fn remote_head_honors_exact_strong_validator_and_immutable_headers() {
         .await
         .unwrap();
     assert_eq!(weak.status(), StatusCode::OK);
-    assert_eq!(peer.object_heads(), 4);
+    assert_eq!(weak.headers()[header::CACHE_CONTROL], "private, no-store");
+    assert_eq!(peer.object_heads(), 5);
     assert_eq!(peer.object_gets(), 0);
     assert!(object_files(fixture.workspace.path()).is_empty());
 }
