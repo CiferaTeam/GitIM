@@ -143,7 +143,7 @@ only the MacBook resolver at `127.0.0.1:16868`. Evidence:
 
 `/tmp/gitim-file-attachments-e2e-20260712T091308Z/fleet-origin-l112-dom-success.json`
 
-Artifact SHA-256 is
+The artifact is mode `0600`. Its SHA-256 is
 `4f80e7e26fe4d6ff7375f0be3c161a2ca1395ad68315fe05a9ee75215971b54f`.
 The L112 image also reported `crossOrigin: anonymous`. The replica was:
 
@@ -313,52 +313,28 @@ security assertion without risking `room` or the prepared native-picker page.
 Computer Use clicked the real WebUI `Attach files` button, opened the macOS
 native `打开` panel, used Go to Folder for the deterministic file, selected the
 actual PNG shown by Finder as `754x714`, and clicked native `打开`. Chrome
-returned to GitIM with preview text
-`GitIM-Task15-native-picker-0558422f.png / 86 KiB` and button
-`Remove GitIM-Task15-native-picker-0558422f.png`.
+returned to GitIM with an `86 KiB` attachment preview and its remove action.
 
 Independent Computer Use provenance:
 
-- Native panel screenshot
-  `/tmp/gitim-file-attachments-e2e-20260712T091308Z/screenshots/native-picker-panel-selected.jpeg`,
-  SHA-256 `d7692f9f76d8c0353d3b04dd807b4271824e6493bc9f07d2271045bbca8cd528`.
-  It visibly shows the selected Downloads PNG, Finder preview, and enabled
-  native `打开` button.
-- Native panel accessibility tree
-  `/tmp/gitim-file-attachments-e2e-20260712T091308Z/native-picker-computer-use-panel.txt`,
-  SHA-256 `b58e17a344f4a6fc63eaf2637d4e4f767647d682969a897846db2a40c8781cdf`.
-  It records native Window `打开`, the selected Downloads file, Finder preview
-  metadata `754x714`, and enabled `打开` button.
-- Post-open Chrome screenshot
-  `/tmp/gitim-file-attachments-e2e-20260712T091308Z/screenshots/native-picker-computer-use-preview.jpeg`,
-  SHA-256 `331cbd3662aa793d0e777174753604f90c0ac0b0f197807a42eda0188907aaab`.
-- Post-open accessibility tree
-  `/tmp/gitim-file-attachments-e2e-20260712T091308Z/native-picker-computer-use-preview.txt`,
-  SHA-256 `e3687b432a368ee586e85f1906d7f2237cba4c3ee0eb85a7be4cfb04ddb4dcfe`.
-  It records the `86 KiB` preview and its exact remove action. These artifacts
-  independently establish native file selection before the Kimi snapshot.
+- Redacted native-panel screenshot:
+  `/tmp/gitim-file-attachments-e2e-20260712T091308Z/screenshots/native-picker-panel-selected-redacted.jpeg`,
+  SHA-256 `c5d345e287dd79ba0288e1cd2e1a98eca46a2c29c96fceafcc82bf28b3d14fcf`.
+- Minimal native-panel accessibility excerpt:
+  `/tmp/gitim-file-attachments-e2e-20260712T091308Z/native-picker-panel-redacted.txt`,
+  SHA-256 `1039e187ecc3e7d706ff8610f90b9e2f93f66c8a8a33230d10edaf2213b39db7`.
+- Redacted post-open composer-preview crop:
+  `/tmp/gitim-file-attachments-e2e-20260712T091308Z/screenshots/native-picker-computer-use-preview-redacted.jpeg`,
+  SHA-256 `ba391c6f84b0b059b43cae0a621407717006063e7e79ddeab11a854ff536df59`.
+- Minimal preview/removal accessibility excerpt:
+  `/tmp/gitim-file-attachments-e2e-20260712T091308Z/native-picker-preview-redacted.txt`,
+  SHA-256 `6c8036cbc8ff909ac1273b8ca279fc858a4ae1fc0b1e529cf3330b38b5a1f30a`.
 
-Selected file:
-
-`/Users/lewisliu/Downloads/GitIM-Task15-native-picker-0558422f.png`
-
-It is `88510` bytes with SHA-256
-`0558422fb26ac353e279c97762f8d2eb22a5cecbc8a4e8627deb38c9479f6c71`.
-The before-selection browser snapshot is
-`/tmp/gitim-file-attachments-e2e-20260712T091308Z/native-picker-ready-snapshot.json`.
-The resulting accessibility snapshot is
-`/tmp/gitim-file-attachments-e2e-20260712T091308Z/native-picker-preview-snapshot.json`.
-The visible preview screenshot is:
-
-`/tmp/gitim-file-attachments-e2e-20260712T091308Z/screenshots/native-picker-preview.png`
-
-It is `133549` bytes with SHA-256
-`7c2f233c4171a23ac1b26ed3e4955d6bf4fdc195c65290bf5e3bf7c186615b2c`.
-No send was performed. WebBridge then clicked the exact remove button; the
-post-removal snapshot
-`/tmp/gitim-file-attachments-e2e-20260712T091308Z/native-picker-after-remove-snapshot.json`
-contains neither the filename nor its remove action and still contains
-`Attach files`.
+All four retained artifacts are mode `0600`. They preserve only the native
+selection, composer preview, and removal assertions; unrelated UI and files are
+cropped or omitted. No send was performed, and the minimal post-removal excerpt
+records that the preview and remove action are absent while `Attach files`
+remains available.
 
 ## Agent CLI and Git exclusion proof
 
