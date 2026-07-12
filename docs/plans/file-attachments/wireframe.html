@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>GitIM attachments wireframe</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #141416;
+      color: #ededee;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 28px; background: #141416; }
+    .page { max-width: 1380px; margin: 0 auto; }
+    .eyebrow { margin: 0 0 8px; color: #9b9ba1; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 0 0 6px; font-size: 22px; font-weight: 650; }
+    .intro { margin: 0 0 22px; color: #a9a9ae; font-size: 13px; }
+    .frames { display: grid; grid-template-columns: minmax(660px, 1.6fr) minmax(340px, .8fr); gap: 20px; align-items: start; }
+    .frame { border: 1px solid #4a4a50; border-radius: 12px; overflow: hidden; background: #1c1c1e; box-shadow: 0 12px 40px rgba(0,0,0,.24); }
+    .frame-label { display: flex; justify-content: space-between; border-bottom: 1px solid #343438; padding: 10px 14px; color: #adadb3; font-size: 11px; }
+    .app { display: grid; grid-template-columns: 184px minmax(0,1fr); min-height: 680px; }
+    .sidebar { border-right: 1px solid #343438; padding: 16px 12px; background: #19191b; }
+    .brand { font-size: 14px; font-weight: 700; margin-bottom: 22px; }
+    .nav-label { color: #77777e; font-size: 10px; margin: 18px 8px 7px; text-transform: uppercase; letter-spacing: .08em; }
+    .nav-item { padding: 8px; border-radius: 7px; color: #aaaab0; font-size: 12px; }
+    .nav-item.active { color: #ededee; border: 1px solid #4b4b51; background: #242427; }
+    .chat { display: flex; min-width: 0; flex-direction: column; }
+    .topbar { display:flex; justify-content: space-between; align-items:center; min-height: 52px; border-bottom: 1px solid #343438; padding: 0 16px; }
+    .topbar strong { font-size: 13px; }
+    .topbar span { color: #87878d; font-size: 11px; }
+    .messages { flex: 1; padding: 18px 20px 22px; overflow: hidden; }
+    .message { display: grid; grid-template-columns: 30px 1fr; gap: 10px; margin-bottom: 20px; }
+    .avatar { width: 30px; height: 30px; border: 1px solid #55555b; border-radius: 999px; display:grid; place-items:center; font-size:10px; color:#bdbdc2; }
+    .meta { font-size: 11px; color: #77777e; margin-bottom: 5px; }
+    .meta strong { color: #d7d7da; font-size: 12px; margin-right: 6px; }
+    .bubble-text { font-size: 13px; line-height: 1.45; }
+    .image-card { width: min(440px, 100%); margin-top: 9px; border: 1px solid #48484e; border-radius: 9px; overflow: hidden; background: #202023; }
+    .diagram { aspect-ratio: 16 / 9; display: grid; grid-template-columns: 1fr 56px 1fr; place-items: center; gap: 8px; padding: 24px; background-image: linear-gradient(#29292d 1px, transparent 1px), linear-gradient(90deg,#29292d 1px, transparent 1px); background-size: 18px 18px; }
+    .node { width: 110px; border: 1px solid #77777d; border-radius: 7px; padding: 13px 8px; text-align:center; font-size: 11px; background:#1b1b1e; }
+    .arrow { color:#8e8e94; font-size: 22px; letter-spacing: -5px; }
+    .asset-caption { display:flex; justify-content:space-between; gap:12px; padding: 9px 11px; border-top: 1px solid #3d3d42; color:#aaaab0; font-size:11px; }
+    .asset-caption strong { color:#d4d4d7; font-weight:550; }
+    .file-card { width: min(440px,100%); margin-top: 9px; display:flex; align-items:center; gap:10px; border:1px solid #48484e; border-radius:9px; padding:11px; background:#202023; }
+    .file-icon { width:34px; height:40px; display:grid; place-items:center; border:1px solid #66666c; border-radius:5px; font-size:9px; }
+    .file-copy { min-width:0; flex:1; }
+    .file-copy strong { display:block; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .file-copy span { color:#88888f; font-size:10px; }
+    .download { border:1px solid #55555c; border-radius:6px; padding:6px 9px; font-size:10px; color:#c4c4c8; }
+    .composer { border-top:1px solid #343438; padding: 12px 14px 14px; background:#1a1a1c; }
+    .pending { display:flex; gap:8px; overflow:hidden; margin-bottom:9px; }
+    .pending-card { display:grid; grid-template-columns:44px minmax(0,1fr) 18px; align-items:center; gap:8px; width:210px; border:1px solid #4b4b51; border-radius:8px; padding:6px; background:#222225; }
+    .thumb { height:38px; border:1px solid #5b5b61; border-radius:5px; display:grid; place-items:center; font-size:8px; color:#9f9fa5; }
+    .pending-copy { min-width:0; }
+    .pending-copy strong { display:block; font-size:10px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .pending-copy span { color:#818188; font-size:9px; }
+    .remove { color:#88888f; font-size:13px; }
+    .input-row { display:grid; grid-template-columns:32px 1fr 34px; align-items:end; gap:7px; }
+    .attach, .send { height:32px; border:1px solid #55555b; border-radius:8px; display:grid; place-items:center; font-size:15px; }
+    textarea { height:48px; resize:none; border:1px solid #55555b; border-radius:9px; background:#151517; color:#dddde0; padding:10px 11px; font: 12px/1.35 inherit; outline:none; }
+    .hint { margin:7px 2px 0 39px; color:#73737a; font-size:9px; }
+    .mobile { width: 100%; max-width: 390px; margin: 0 auto; min-height: 680px; display:flex; flex-direction:column; background:#1c1c1e; }
+    .mobile .topbar { padding:0 13px; }
+    .mobile .messages { padding: 16px 13px; }
+    .mobile .composer { margin-top:auto; padding:10px; }
+    .mobile .pending { overflow-x:auto; }
+    .mobile .pending-card { min-width:186px; }
+    .unavailable { width:100%; margin-top:9px; border:1px dashed #5b5b61; border-radius:9px; padding:13px; }
+    .unavailable strong { display:block; font-size:12px; }
+    .unavailable p { margin:5px 0 9px; color:#8b8b91; font-size:10px; line-height:1.4; }
+    .retry { display:inline-block; border:1px solid #55555b; border-radius:6px; padding:6px 9px; font-size:10px; }
+    .legend { display:grid; gap:7px; margin-top:15px; color:#8d8d93; font-size:10px; line-height:1.4; }
+    @media (max-width: 980px) { .frames { grid-template-columns: 1fr; } .app { grid-template-columns: 150px 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <p class="eyebrow">Interaction sketch · content-addressed fleet assets</p>
+    <h1>Attachments remain ordinary messages</h1>
+    <p class="intro">The composer manages pending local files. Sent messages render typed asset refs without exposing node paths.</p>
+    <section class="frames">
+      <!-- Desktop combines the two primary states: pending draft and successfully resolved assets. -->
+      <article class="frame">
+        <div class="frame-label"><span>Desktop runtime mode</span><span>resolved + pending</span></div>
+        <div class="app">
+          <aside class="sidebar">
+            <div class="brand">GitIM</div>
+            <div class="nav-label">Workspace</div>
+            <div class="nav-item active"># general</div>
+            <div class="nav-item"># build-log</div>
+            <div class="nav-label">Direct messages</div>
+            <div class="nav-item">agent-kimi</div>
+          </aside>
+          <section class="chat">
+            <header class="topbar"><strong># general</strong><span>3 members · runtime connected</span></header>
+            <div class="messages">
+              <div class="message">
+                <div class="avatar">LL</div>
+                <div>
+                  <div class="meta"><strong>Lewis</strong>10:42</div>
+                  <div class="bubble-text">This is the fleet asset flow I mean.</div>
+                  <div class="image-card">
+                    <div class="diagram">
+                      <div class="node">Web runtime<br/>local replica</div>
+                      <div class="arrow">→→</div>
+                      <div class="node">Origin runtime<br/>SHA-256 object</div>
+                    </div>
+                    <div class="asset-caption"><strong>fleet-assets.png</strong><span>PNG · 180 KB · cached locally</span></div>
+                  </div>
+                </div>
+              </div>
+              <div class="message">
+                <div class="avatar">KA</div>
+                <div>
+                  <div class="meta"><strong>kimi-agent</strong>10:43</div>
+                  <div class="bubble-text">I exported the protocol notes.</div>
+                  <div class="file-card">
+                    <div class="file-icon">PDF</div>
+                    <div class="file-copy"><strong>asset-protocol-notes.pdf</strong><span>PDF · 1.8 MB · from Mac mini</span></div>
+                    <div class="download">Download</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <footer class="composer">
+              <div class="pending">
+                <div class="pending-card">
+                  <div class="thumb">preview</div>
+                  <div class="pending-copy"><strong>diagram-v2.png</strong><span>244 KB · local draft</span></div>
+                  <div class="remove">×</div>
+                </div>
+                <div class="pending-card">
+                  <div class="thumb">TXT</div>
+                  <div class="pending-copy"><strong>notes.txt</strong><span>8 KB · local draft</span></div>
+                  <div class="remove">×</div>
+                </div>
+              </div>
+              <div class="input-row">
+                <div class="attach">+</div>
+                <textarea aria-label="Message draft">Updated diagram and raw notes.</textarea>
+                <div class="send">↑</div>
+              </div>
+              <div class="hint">Paste images anywhere in the composer · files upload when you send</div>
+            </footer>
+          </section>
+        </div>
+      </article>
+
+      <!-- Mobile focuses on the degraded state: metadata remains useful while the origin is offline. -->
+      <article class="frame">
+        <div class="frame-label"><span>Mobile layout</span><span>origin unavailable</span></div>
+        <div class="mobile">
+          <header class="topbar"><strong>‹ &nbsp; # general</strong><span>Runtime</span></header>
+          <div class="messages">
+            <div class="message">
+              <div class="avatar">KA</div>
+              <div>
+                <div class="meta"><strong>kimi-agent</strong>10:49</div>
+                <div class="bubble-text">The source capture is attached.</div>
+                <div class="unavailable">
+                  <strong>screen-recording.mp4</strong>
+                  <p>MP4 · 24.6 MB<br/>Origin node is currently unavailable. Metadata remains in message history.</p>
+                  <span class="retry">Retry from fleet</span>
+                </div>
+              </div>
+            </div>
+          </div>
+          <footer class="composer">
+            <div class="pending">
+              <div class="pending-card">
+                <div class="thumb">image</div>
+                <div class="pending-copy"><strong>photo.png</strong><span>1.2 MB</span></div>
+                <div class="remove">×</div>
+              </div>
+            </div>
+            <div class="input-row">
+              <div class="attach">+</div>
+              <textarea aria-label="Mobile message draft" placeholder="Type a message..."></textarea>
+              <div class="send">↑</div>
+            </div>
+          </footer>
+        </div>
+      </article>
+    </section>
+    <div class="legend">
+      <span>1. Pending attachments are local to the draft and removable before send.</span>
+      <span>2. Resolved images render inline; arbitrary files remain explicit download cards.</span>
+      <span>3. Offline assets preserve filename, type and size, with a single retry action.</span>
+    </div>
+  </main>
+</body>
+</html>
