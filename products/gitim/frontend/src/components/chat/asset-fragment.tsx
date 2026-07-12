@@ -15,11 +15,13 @@ const INLINE_IMAGE_TYPES = new Set([
 ]);
 
 const MAX_DIMENSION_HINT = 4096;
+const MAX_FRAME_SIZE = 440;
 const MAX_ASPECT_RATIO = 4;
 const MIN_ASPECT_RATIO = 1 / MAX_ASPECT_RATIO;
 
 interface ImageGeometry {
   aspectRatio: string;
+  frameWidth: number;
   width: number;
   height: number;
 }
@@ -29,15 +31,26 @@ function imageGeometry(width?: number, height?: number): ImageGeometry | undefin
 
   const ratio = width / height;
   if (ratio > MAX_ASPECT_RATIO) {
-    return { aspectRatio: "4 / 1", width: 1024, height: 256 };
+    return {
+      aspectRatio: "4 / 1",
+      frameWidth: MAX_FRAME_SIZE,
+      width: 1024,
+      height: 256,
+    };
   }
   if (ratio < MIN_ASPECT_RATIO) {
-    return { aspectRatio: "1 / 4", width: 256, height: 1024 };
+    return {
+      aspectRatio: "1 / 4",
+      frameWidth: MAX_FRAME_SIZE * MIN_ASPECT_RATIO,
+      width: 256,
+      height: 1024,
+    };
   }
 
   const scale = Math.min(1, MAX_DIMENSION_HINT / width, MAX_DIMENSION_HINT / height);
   return {
     aspectRatio: `${width} / ${height}`,
+    frameWidth: ratio >= 1 ? MAX_FRAME_SIZE : MAX_FRAME_SIZE * ratio,
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
   };
@@ -185,8 +198,12 @@ function ImageCard({ asset, url }: { asset: AssetRef; url: string }) {
     >
       <span
         data-asset-frame
-        className="relative flex w-full max-w-[440px] max-h-[440px] min-h-20 items-center justify-center overflow-hidden bg-background"
-        style={geometry ? { aspectRatio: geometry.aspectRatio } : undefined}
+        className={`relative flex max-w-[440px] max-h-[440px] min-h-20 items-center justify-center overflow-hidden bg-background ${geometry ? "mx-auto" : "w-full"}`}
+        style={geometry ? {
+          aspectRatio: geometry.aspectRatio,
+          width: "100%",
+          maxWidth: `${geometry.frameWidth}px`,
+        } : undefined}
       >
         <img
           key={attempt}

@@ -179,6 +179,21 @@ describe("MessageBody", () => {
     expect(frames[1].className).toContain("min-h-");
   });
 
+  it("preserves the clamped portrait ratio within the frame bounds", async () => {
+    await renderBody(assetRef({
+      name: "portrait.png",
+      width: 1,
+      height: 0xffff_ffff,
+    }));
+
+    const frame = container.querySelector<HTMLElement>("[data-asset-frame]")!;
+    expect(frame.style.aspectRatio).toBe("1 / 4");
+    expect(frame.style.width).toBe("100%");
+    expect(frame.style.maxWidth).toBe("110px");
+    expect(frame.className).toContain("max-h-[440px]");
+    expect(frame.className).not.toContain("w-full");
+  });
+
   it("moves from loading to loaded and supports stable repeated image retries", async () => {
     await renderBody(assetRef({ width: 800, height: 600 }));
 
