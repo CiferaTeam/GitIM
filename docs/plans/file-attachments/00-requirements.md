@@ -414,12 +414,18 @@ Successful responses include:
 - authoritative `Content-Type`;
 - `Content-Length`;
 - `ETag: "sha256-{hash}"`;
-- `Cache-Control: private, immutable, max-age=31536000`;
+- browser-facing `/assets/resolve` responses use
+  `Cache-Control: private, no-store`, including `HEAD`, conditional, range, and
+  error responses, so workspace slug reuse cannot expose bytes from a prior
+  browser cache entry;
+- node-local `/assets/objects` responses use
+  `Cache-Control: private, immutable, max-age=31536000` because the URL is
+  content-addressed and unavailable to browser contexts;
 - `X-Content-Type-Options: nosniff`;
 - safe `Content-Disposition`;
 - single-range `Accept-Ranges: bytes` support for local objects.
 
-An exact `If-None-Match` for the immutable SHA-256 ETag returns `304`. File
+An exact `If-None-Match` for the SHA-256 ETag returns `304`. File
 streaming and single-range parsing reuse Tower HTTP's `ServeFile` implementation;
 GitIM only supplies verified MIME/disposition/cache headers and the content hash
 ETag rather than maintaining a second hand-written range engine.
