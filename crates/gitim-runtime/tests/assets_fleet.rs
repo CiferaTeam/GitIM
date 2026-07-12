@@ -1582,7 +1582,14 @@ async fn unresolved_legacy_peer_remains_a_get_and_head_fallback() {
     assert_eq!(response_bytes(get).await.as_ref(), PNG_1X1);
     assert_eq!(peer.object_heads(), 2);
     assert_eq!(peer.object_gets(), 1);
-    assert!(peer.health_requests() >= 1);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while peer.health_requests() == 0 && std::time::Instant::now() < deadline {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        peer.health_requests() >= 1,
+        "legacy health backfill did not start before the deadline"
+    );
 }
 
 #[tokio::test]
