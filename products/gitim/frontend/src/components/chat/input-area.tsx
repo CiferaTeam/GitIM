@@ -1,13 +1,28 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ClipboardEvent,
+  type KeyboardEvent,
+} from "react";
 import {
   computeCardDraftRecipients,
   computeDraftRecipients,
 } from "../../lib/recipient-preview";
+import { uploadAssets, type UploadedAsset } from "../../lib/client";
 import type { ApiResponse, Card, Channel, Message } from "../../lib/types";
+import {
+  attachmentDraftKey,
+  useAttachmentDraftStore,
+} from "../../hooks/use-attachment-draft-store";
+import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useIsMobile } from "../../hooks/use-media-query";
 import { MentionPopup } from "./mention-popup";
 import { HandlerName } from "./handler-name";
-import { CornerDownLeft, SendHorizontal, UserCheck, X } from "lucide-react";
+import { AttachmentDraftStrip } from "./attachment-draft-strip";
+import { CornerDownLeft, Paperclip, SendHorizontal, UserCheck, X } from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -28,6 +43,8 @@ export type RecipientRouting =
   | { kind: "card"; card: Pick<Card, "created_by" | "assignee"> | null };
 
 interface InputAreaProps {
+  /** Runtime workspace slug used by the remote asset upload endpoint. */
+  workspaceSlug: string | null;
   /** Workspace identity from workspaceIdentity(mode, activeWorkspace). */
   workspaceKey: string | null;
   /** Unique key for this input's scope — used for localStorage draft keying.
@@ -51,6 +68,7 @@ interface InputAreaProps {
 
 const MAX_HEIGHT = 200;
 const DESKTOP_ENTER_HINT = " (Enter to send, Shift+Enter for newline)";
+const ATTACHMENT_RECIPIENT_SENTINEL = "attachment";
 
 function draftKey(workspaceKey: string, scopeKey: string) {
   return `gitim:draft:${workspaceKey}:${scopeKey}`;
@@ -66,6 +84,7 @@ function resolvedPlaceholder(placeholder: string | undefined, isMobile: boolean)
 }
 
 export function InputArea({
+  workspaceSlug,
   workspaceKey,
   scopeKey,
   replyTo,
@@ -79,8 +98,8 @@ export function InputArea({
   placeholder,
 }: InputAreaProps) {
   const [text, setText] = useState("");
-  const [sending, setSending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [, setTextBusyRevision] = useState(0);
+  const [sendErrors, setSendErrors] = useState<Record<string, string>>({});
 
   const [mentionOpen, setMentionOpen] = useState(false);
   const [mentionFilter, setMentionFilter] = useState("");
@@ -88,25 +107,53 @@ export function InputArea({
   const [confirmingEmpty, setConfirmingEmpty] = useState(false);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const textBusyKeysRef = useRef(new Set<string>());
   const activeScopeRef = useRef({ workspaceKey, scopeKey });
   activeScopeRef.current = { workspaceKey, scopeKey };
   const isMobile = useIsMobile();
+  const connectionMode = useConnectionStore((state) => state.mode);
+  const currentAttachmentKey = workspaceKey && scopeKey
+    ? attachmentDraftKey(workspaceKey, scopeKey)
+    : null;
+  const attachmentDraft = useAttachmentDraftStore((state) =>
+    currentAttachmentKey ? state.drafts[currentAttachmentKey] : undefined);
+  const addFiles = useAttachmentDraftStore((state) => state.addFiles);
+  const removeAttachment = useAttachmentDraftStore((state) => state.removeItem);
+  const beginOperation = useAttachmentDraftStore((state) => state.beginOperation);
+  const markUploaded = useAttachmentDraftStore((state) => state.markUploaded);
+  const markSending = useAttachmentDraftStore((state) => state.markSending);
+  const failOperation = useAttachmentDraftStore((state) => state.failOperation);
+  const completeSuccess = useAttachmentDraftStore((state) => state.completeSuccess);
+  const attachmentCapable = connectionMode === "remote" && workspaceSlug !== null;
+  const hasAttachments = (attachmentDraft?.items.length ?? 0) > 0;
+  const attachmentBusy = attachmentDraft?.status === "uploading" ||
+    attachmentDraft?.status === "sending";
+  const textBusy = currentAttachmentKey
+    ? textBusyKeysRef.current.has(currentAttachmentKey)
+    : false;
+  const busy = attachmentBusy || textBusy;
+  const routingBody = text.trim().length > 0
+    ? text
+    : hasAttachments
+      ? ATTACHMENT_RECIPIENT_SENTINEL
+      : "";
   const draftRecipients = useMemo(
     () =>
       routing.kind === "card"
         ? computeCardDraftRecipients({
-            body: text,
+            body: routingBody,
             card: routing.card,
             excludeSelf: currentUser,
           })
         : computeDraftRecipients({
-            body: text,
+            body: routingBody,
             channel: routing.channel,
             replyTo,
             messages,
             excludeSelf: currentUser,
           }),
-    [text, routing, replyTo, messages, currentUser],
+    [routingBody, routing, replyTo, messages, currentUser],
   );
 
   // Restore draft when scope changes
@@ -116,6 +163,8 @@ export function InputArea({
       return;
     }
     setText(localStorage.getItem(draftKey(workspaceKey, scopeKey)) ?? "");
+    setMentionOpen(false);
+    setConfirmingEmpty(false);
   }, [workspaceKey, scopeKey]);
 
   // Auto-resize textarea up to MAX_HEIGHT
@@ -130,7 +179,8 @@ export function InputArea({
   // After the guard above, workspaceKey and scopeKey are non-null for the rest of render.
   const activeWorkspaceKey: string = workspaceKey;
   const activeScopeKey: string = scopeKey;
-  const canSend = text.trim().length > 0 && !sending;
+  const activeAttachmentKey = attachmentDraftKey(activeWorkspaceKey, activeScopeKey);
+  const canSend = (text.trim().length > 0 || (attachmentCapable && hasAttachments)) && !busy;
 
   function detectMention(value: string, cursorPos: number) {
     const textBeforeCursor = value.slice(0, cursorPos);
@@ -149,15 +199,65 @@ export function InputArea({
   function handleChange(e: React.ChangeEvent<HTMLTextAreaElement>) {
     const value = e.target.value;
     setText(value);
-    setError(null);
+    clearSendError(activeAttachmentKey);
     localStorage.setItem(draftKey(activeWorkspaceKey, activeScopeKey), value);
     const cursor = e.target.selectionStart ?? value.length;
     detectMention(value, cursor);
   }
 
+  function clearSendError(key: string) {
+    setSendErrors((current) => {
+      if (current[key] === undefined) return current;
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+  }
+
+  function setSendError(key: string, message: string) {
+    setSendErrors((current) => ({ ...current, [key]: message }));
+  }
+
+  function setTextBusy(key: string, value: boolean) {
+    if (value) {
+      textBusyKeysRef.current.add(key);
+    } else {
+      textBusyKeysRef.current.delete(key);
+    }
+    setTextBusyRevision((revision) => revision + 1);
+  }
+
+  function isCurrentSendScope(requestWorkspaceKey: string, requestScopeKey: string) {
+    return activeScopeRef.current.workspaceKey === requestWorkspaceKey &&
+      activeScopeRef.current.scopeKey === requestScopeKey;
+  }
+
+  function focusCurrentScope(requestWorkspaceKey: string, requestScopeKey: string) {
+    if (isCurrentSendScope(requestWorkspaceKey, requestScopeKey)) {
+      textareaRef.current?.focus();
+    }
+  }
+
+  function addSelectedFiles(files: readonly File[]) {
+    if (!attachmentCapable || files.length === 0) return;
+    addFiles(activeAttachmentKey, files);
+  }
+
+  function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    addSelectedFiles(files);
+    event.currentTarget.value = "";
+  }
+
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData.files ?? []);
+    if (files.length === 0) return;
+    event.preventDefault();
+    addSelectedFiles(files);
+  }
+
   function requestSend() {
-    const trimmed = text.trim();
-    if (!trimmed) return;
+    if (!canSend) return;
     if (draftRecipients.length === 0) {
       setMentionOpen(false);
       setConfirmingEmpty(true);
@@ -167,47 +267,117 @@ export function InputArea({
   }
 
   async function performSend() {
-    const trimmed = text.trim();
-    if (!trimmed) return;
+    const capturedWorkspaceSlug = workspaceSlug;
+    const capturedWorkspaceKey = activeWorkspaceKey;
+    const capturedScopeKey = activeScopeKey;
+    const capturedAttachmentKey = activeAttachmentKey;
+    const capturedText = text;
+    const capturedHumanBody = capturedText.trim();
+    const capturedReply = replyTo;
+    const capturedOnSend = onSend;
+    const capturedOnReplyToChange = onReplyToChange;
+    const capturedDraft = useAttachmentDraftStore.getState().drafts[capturedAttachmentKey];
+    const useAttachments = attachmentCapable && (capturedDraft?.items.length ?? 0) > 0;
 
-    const savedText = text;
-    const savedReplyTo = replyTo;
-    const requestWorkspaceKey = activeWorkspaceKey;
-    const requestScopeKey = activeScopeKey;
+    if (!capturedHumanBody && !useAttachments) return;
+    setMentionOpen(false);
+    clearSendError(capturedAttachmentKey);
 
-    function isCurrentSendScope() {
-      return activeScopeRef.current.workspaceKey === requestWorkspaceKey &&
-        activeScopeRef.current.scopeKey === requestScopeKey;
+    if (useAttachments && capturedWorkspaceSlug !== null) {
+      const operation = beginOperation(capturedAttachmentKey);
+      if (!operation) return;
+
+      try {
+        const pendingItems = operation.items.filter((item) => item.uploaded === undefined);
+        let mappings: { id: string; asset: UploadedAsset }[] = [];
+        if (pendingItems.length > 0) {
+          const uploadResult = await uploadAssets(
+            capturedWorkspaceSlug,
+            pendingItems.map((item) => item.file),
+          );
+          const assets = uploadResult.data?.assets;
+          if (!uploadResult.ok || !assets || assets.length !== pendingItems.length) {
+            throw new Error(uploadResult.error ?? "Upload failed");
+          }
+          mappings = pendingItems.map((item, index) => ({ id: item.id, asset: assets[index] }));
+        }
+        if (!markUploaded(capturedAttachmentKey, operation.generation, mappings)) return;
+
+        const uploadedDraft = useAttachmentDraftStore.getState().drafts[capturedAttachmentKey];
+        if (
+          !uploadedDraft ||
+          uploadedDraft.generation !== operation.generation ||
+          uploadedDraft.items.some((item) => item.uploaded === undefined)
+        ) {
+          return;
+        }
+        const refs = uploadedDraft.items.map((item) => item.uploaded!.ref);
+        const finalBody = [capturedHumanBody, ...refs].filter(Boolean).join("\n");
+        if (!markSending(capturedAttachmentKey, operation.generation)) return;
+
+        const sendResult = await capturedOnSend(
+          finalBody,
+          capturedReply?.line_number ?? 0,
+        );
+        if (!sendResult.ok) {
+          failOperation(
+            capturedAttachmentKey,
+            operation.generation,
+            sendResult.error ?? "Send failed",
+          );
+          focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
+          return;
+        }
+        if (!completeSuccess(capturedAttachmentKey, operation.generation)) return;
+
+        localStorage.removeItem(draftKey(capturedWorkspaceKey, capturedScopeKey));
+        if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
+          setText("");
+          capturedOnReplyToChange(null);
+          clearSendError(capturedAttachmentKey);
+          textareaRef.current?.focus();
+        }
+      } catch (caught) {
+        failOperation(
+          capturedAttachmentKey,
+          operation.generation,
+          caught instanceof Error ? caught.message : "Send failed",
+        );
+        focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
+      }
+      return;
     }
 
-    setText("");
-    onReplyToChange(null);
-    setMentionOpen(false);
-    setSending(true);
-    setError(null);
+    if (textBusyKeysRef.current.has(capturedAttachmentKey)) return;
+    setTextBusy(capturedAttachmentKey, true);
 
     try {
-      const res = await onSend(trimmed, savedReplyTo?.line_number ?? 0);
-      if (!res.ok) {
-        if (isCurrentSendScope()) {
-          setText(savedText);
-          onReplyToChange(savedReplyTo);
-          setError(res.error ?? "Send failed");
+      const sendResult = await capturedOnSend(
+        capturedHumanBody,
+        capturedReply?.line_number ?? 0,
+      );
+      if (!sendResult.ok) {
+        if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
+          setSendError(capturedAttachmentKey, sendResult.error ?? "Send failed");
         }
-      } else {
-        localStorage.removeItem(draftKey(activeWorkspaceKey, activeScopeKey));
+        return;
       }
-    } catch (err) {
-      if (isCurrentSendScope()) {
-        setText(savedText);
-        onReplyToChange(savedReplyTo);
-        setError(err instanceof Error ? err.message : "Send failed");
+      localStorage.removeItem(draftKey(capturedWorkspaceKey, capturedScopeKey));
+      if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
+        setText("");
+        capturedOnReplyToChange(null);
+        clearSendError(capturedAttachmentKey);
+      }
+    } catch (caught) {
+      if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
+        setSendError(
+          capturedAttachmentKey,
+          caught instanceof Error ? caught.message : "Send failed",
+        );
       }
     } finally {
-      setSending(false);
-      if (isCurrentSendScope()) {
-        textareaRef.current?.focus();
-      }
+      setTextBusy(capturedAttachmentKey, false);
+      focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
     }
   }
 
@@ -240,6 +410,7 @@ export function InputArea({
     const inserted = `<@${handle}> `;
     const newText = before + inserted + after;
     setText(newText);
+    localStorage.setItem(draftKey(activeWorkspaceKey, activeScopeKey), newText);
     setMentionOpen(false);
 
     requestAnimationFrame(() => {
@@ -249,6 +420,11 @@ export function InputArea({
       ta.setSelectionRange(newCursor, newCursor);
     });
   }
+
+  const sendError = sendErrors[activeAttachmentKey];
+  const attachmentActionLabel = attachmentCapable
+    ? "Attach files"
+    : "Attachments require the GitIM Runtime";
 
   return (
     <div className="border-t border-border bg-card/60 px-4 py-3 shrink-0">
@@ -277,6 +453,13 @@ export function InputArea({
         </div>
       )}
 
+      {attachmentDraft && (
+        <AttachmentDraftStrip
+          draft={attachmentDraft}
+          onRemove={(id) => removeAttachment(activeAttachmentKey, id)}
+        />
+      )}
+
       <div className="relative">
         {mentionOpen && (
           <MentionPopup
@@ -293,12 +476,33 @@ export function InputArea({
           value={text}
           onChange={handleChange}
           onKeyDown={handleKeyDown}
-          disabled={sending}
+          onPaste={handlePaste}
+          disabled={busy}
           placeholder={resolvedPlaceholder(placeholder, isMobile)}
           enterKeyHint={isMobile ? "enter" : "send"}
-          className="w-full resize-none rounded-xl border border-border bg-background px-4 py-2.5 text-sm placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-ring/40 focus:border-ring/60 disabled:opacity-50 transition-all overflow-y-auto pr-12 md:pr-10"
+          className="w-full resize-none overflow-y-auto rounded-xl border border-border bg-background py-2.5 pl-12 pr-12 text-sm transition-all placeholder:text-text-muted focus:border-ring/60 focus:outline-none focus:ring-2 focus:ring-ring/40 disabled:opacity-50 md:pr-10"
           style={{ maxHeight: `${MAX_HEIGHT}px` }}
         />
+
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          hidden
+          disabled={!attachmentCapable || busy}
+          onChange={handleFileChange}
+        />
+        <button
+          type="button"
+          aria-label={attachmentActionLabel}
+          title={attachmentActionLabel}
+          disabled={!attachmentCapable || busy}
+          onClick={() => fileInputRef.current?.click()}
+          onMouseDown={(event) => event.preventDefault()}
+          className="absolute bottom-2 left-2 flex size-8 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-hover hover:text-foreground disabled:cursor-not-allowed disabled:text-text-faint"
+        >
+          <Paperclip className="size-4" />
+        </button>
 
         {isMobile ? (
           <button
@@ -314,7 +518,7 @@ export function InputArea({
           </button>
         ) : (
           <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1.5 pointer-events-none">
-            {sending ? (
+            {textBusy ? (
               <span className="text-xs text-text-muted">Sending...</span>
             ) : (
               <CornerDownLeft className="size-3.5 text-text-faint" />
@@ -323,7 +527,7 @@ export function InputArea({
         )}
       </div>
 
-      {text.trim().length > 0 && (
+      {(text.trim().length > 0 || hasAttachments) && (
         <div
           data-recipient-preview
           className="mt-2 flex min-h-6 flex-wrap items-center gap-1.5 text-[11px] leading-none text-text-muted"
@@ -353,10 +557,10 @@ export function InputArea({
         </div>
       )}
 
-      {error && (
+      {sendError && (
         <p className="mt-1.5 text-xs text-destructive flex items-center gap-1">
           <span className="inline-block w-1 h-1 rounded-full bg-destructive" />
-          {error}
+          {sendError}
         </p>
       )}
 

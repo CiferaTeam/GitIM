@@ -371,6 +371,7 @@ export function ChatLayout() {
               onClick={() => scrollMessagesToBottom()}
             />
             <InputArea
+              workspaceSlug={activeSlug}
               workspaceKey={workspaceKey}
               scopeKey={currentChannel}
               replyTo={replyTo}
