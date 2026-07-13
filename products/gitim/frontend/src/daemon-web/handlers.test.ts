@@ -1384,6 +1384,66 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
+  it("classifies active quick session metadata and transcript changes", async () => {
+    const sessionId = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    dirs.set("/repo/quick-sessions", [sessionId]);
+    dirs.set(`/repo/quick-sessions/${sessionId}`, [
+      "session.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/quick-sessions/${sessionId}/session.meta.yaml`,
+      [
+        `id: ${sessionId}`,
+        "title_source: none",
+        "agent_id: alice",
+        "created_by: lewis",
+        "status: needs_title",
+        "created_at: 20260711T010203Z",
+        "updated_at: 20260711T010203Z",
+        "last_message_preview: hello",
+        "last_human_line: 1",
+        "revision: 2",
+        "",
+      ].join("\n"),
+    );
+    files.set(
+      `/repo/quick-sessions/${sessionId}/discussion.thread`,
+      "[L000001][P000000][@lewis][20260711T010203Z] hello\n",
+    );
+    vi.mocked(await import("./git")).diffTrees.mockResolvedValueOnce([
+      `quick-sessions/${sessionId}/session.meta.yaml`,
+      `quick-sessions/${sessionId}/discussion.thread`,
+    ]);
+    vi.mocked(await import("./git")).resolveHead.mockResolvedValueOnce("next-head");
+
+    const res = await poll("base");
+
+    expect(res.data?.changes).toEqual([
+      {
+        channel: sessionId,
+        kind: "quick_session_meta",
+        entries: [{
+          type: "quick_session_meta",
+          session_id: sessionId,
+          agent_id: "alice",
+          status: "needs_title",
+          revision: 2,
+          recipients: ["alice"],
+        }],
+      },
+      {
+        channel: sessionId,
+        kind: "quick_session_thread",
+        entries: [expect.objectContaining({
+          line_number: 1,
+          body: "hello",
+          recipients: ["alice"],
+        })],
+      },
+    ]);
+  });
+
   it("reports archived channel changes from poll", async () => {
     vi.mocked(await import("./git")).diffTrees.mockResolvedValueOnce([
       "archive/channels/general.meta.yaml",

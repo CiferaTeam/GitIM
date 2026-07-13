@@ -1,0 +1,868 @@
+import * as gitOps from "./git";
+import {
+  exists,
+  mkdir,
+  readFile,
+  readdir,
+  removeDir,
+  removeFile,
+  writeFile,
+} from "./storage";
+import { getState, setState } from "./state";
+import { parseThread, type ThreadEntry } from "./parser";
+import { formatMessage } from "./formatter";
+import { runSync } from "./sync";
+import { isAuthFailure } from "./auth-errors";
+import {
+  applyQuickSessionTransition,
+  parseQuickSessionMeta,
+  validateAppend,
+  validateQuickSessionId,
+} from "gitim-wasm";
+import { ensureWasmReady } from "./wasm-ready";
+import { validateHandler } from "./paths";
+import { withRepoLock } from "./repo-lock";
+
+export type ApiResponse = {
+  ok: boolean;
+  data?: Record<string, unknown>;
+  error?: string;
+  error_code?: string;
+};
+
+export interface CreateQuickSessionInput {
+  session_id: string;
+  agent_id: string;
+  first_message: string;
+}
+
+export interface QuickSessionListQuery {
+  archived?: boolean;
+  agent_id?: string;
+  actionable?: boolean;
+  limit?: number;
+}
+
+export interface SendQuickSessionInput {
+  body: string;
+  request_id: string;
+}
+
+type QuickSessionStatus =
+  | "needs_title"
+  | "running"
+  | "active"
+  | "error"
+  | "archived";
+
+interface QuickSessionMeta {
+  id: string;
+  title?: string;
+  title_source: "none" | "api_set";
+  agent_id: string;
+  created_by: string;
+  status: QuickSessionStatus;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string;
+  archived_from?: QuickSessionStatus;
+  summary?: string;
+  summary_updated_at?: string;
+  last_message_preview: string;
+  error?: string;
+  processing_input_line?: number;
+  processing_started_at?: string;
+  attempt_id?: string;
+  last_completed_attempt_id?: string;
+  last_completed_input_line?: number;
+  last_completed_line?: number;
+  last_failed_attempt_id?: string;
+  last_human_request_id?: string;
+  last_human_line?: number;
+  revision: number;
+}
+
+interface QuickSessionTransitionResult {
+  meta: QuickSessionMeta;
+  outcome: { kind: "applied" } | { kind: "duplicate"; line_number?: number };
+}
+
+interface LocatedQuickSession {
+  relDir: string;
+  absDir: string;
+  archived: boolean;
+}
+
+interface QuickSessionMutation {
+  data: Record<string, unknown>;
+  committed: boolean;
+}
+
+export interface ClassifiedQuickSessionPollChange {
+  channel: string;
+  kind: "quick_session_meta" | "quick_session_thread";
+  entries: Array<Record<string, unknown> | ThreadEntry>;
+}
+
+function ok(data: Record<string, unknown> = {}): ApiResponse {
+  return { ok: true, data };
+}
+
+function err(error: string): ApiResponse {
+  return { ok: false, error };
+}
+
+function errCode(error: string, error_code: string): ApiResponse & { error_code: string } {
+  return { ok: false, error, error_code };
+}
+
+function assertNotRedirected(): ApiResponse | null {
+  if (!getState().epochRedirected) return null;
+  return errCode(
+    "This workspace has rotated to a new epoch branch. Reload the page to reconnect.",
+    "epoch_redirected",
+  );
+}
+
+function reconnectRequired(): ApiResponse & { error_code: string } {
+  return errCode(
+    "Reconnect token to send from this browser workspace.",
+    "reconnect_required",
+  );
+}
+
+function errorMessage(error: unknown): string {
+  return String((error as Error).message ?? error);
+}
+
+async function syncAfterCommit(): Promise<{
+  status: "pushed" | "commit_only";
+  commit_id?: string;
+  error?: string;
+  error_code?: string;
+  needs_token?: boolean;
+}> {
+  try {
+    await runSync({ forceNewCycle: true });
+    return { status: "pushed" };
+  } catch (error) {
+    if (isAuthFailure(error)) {
+      setState({ token: null, syncStatus: "reconnect_required" });
+      return {
+        status: "commit_only",
+        error: errorMessage(error),
+        error_code: "reconnect_required",
+        needs_token: true,
+      };
+    }
+    return { status: "commit_only", error: errorMessage(error) };
+  }
+}
+
+// --- Quick Session handlers ---
+
+export async function createQuickSession(
+  input: CreateQuickSessionInput,
+): Promise<ApiResponse> {
+  try {
+    const mutation = await withRepoLock(async (): Promise<QuickSessionMutation | ApiResponse> => {
+      const writeError = await quickSessionWriteError();
+      if (writeError) return writeError;
+      const s = getState();
+      const idError = quickSessionIdError(input.session_id);
+      if (idError) return idError;
+      const bodyError = validateQuickSessionBody(input.first_message);
+      if (bodyError) return bodyError;
+      const creatorError = await ensureActiveQuickSessionHandler(s.me.handler, "creator");
+      if (creatorError) return creatorError;
+      const agentError = await ensureActiveQuickSessionHandler(input.agent_id, "agent");
+      if (agentError) return agentError;
+
+      const creator = s.me.handler;
+      const body = canonicalQuickSessionBody(creator, input.first_message);
+      const existing = await locateQuickSession(input.session_id);
+      if (existing) {
+        const detail = await quickSessionDetail(existing);
+        const first = detail.entries[0];
+        const matches =
+          detail.meta.id === input.session_id &&
+          detail.meta.agent_id === input.agent_id &&
+          detail.meta.created_by === creator &&
+          first?.type === "message" &&
+          first.line_number === 1 &&
+          first.point_to === 0 &&
+          first.author === creator &&
+          first.body === body;
+        if (!matches) {
+          return errCode(
+            "quick session id collides with a different object",
+            "quick_session_id_collision",
+          );
+        }
+        return {
+          committed: false,
+          data: {
+            session: detail,
+            line_number: 1,
+            ref: `session:${input.session_id}`,
+          },
+        };
+      }
+
+      const now = utcTimestamp();
+      const initial: QuickSessionMeta = {
+        id: input.session_id,
+        title_source: "none",
+        agent_id: input.agent_id,
+        created_by: creator,
+        status: "needs_title",
+        created_at: now,
+        updated_at: now,
+        last_message_preview: "",
+        revision: 1,
+      };
+      const transitioned = applyQuickSessionTransition(
+        initial,
+        {
+          kind: "human_message",
+          actor: creator,
+          line_number: 1,
+          preview: body,
+          now,
+        },
+      ) as QuickSessionTransitionResult;
+      const thread = formatMessage(1, 0, creator, now, body);
+      const activeHandlers = await quickSessionActiveHandlers();
+      validateAppend("", thread, activeHandlers, [creator, input.agent_id]);
+
+      const relDir = quickSessionRelDir(input.session_id, false);
+      const absDir = `${s.repoDir}/${relDir}`;
+      const metaRel = `${relDir}/session.meta.yaml`;
+      const threadRel = `${relDir}/discussion.thread`;
+      await mkdirp(absDir);
+      try {
+        await writeFile(`${absDir}/session.meta.yaml`, stringifyQuickSessionMeta(transitioned.meta));
+        await writeFile(`${absDir}/discussion.thread`, thread);
+        await gitOps.addAndCommit(
+          s.repoDir,
+          [metaRel, threadRel],
+          `session: create ${input.session_id} for @${input.agent_id} by @${creator}`,
+          creator,
+        );
+      } catch (error) {
+        await removeQuickSessionDirectory(absDir);
+        throw error;
+      }
+
+      return {
+        committed: true,
+        data: {
+          session: {
+            meta: transitioned.meta,
+            entries: parseThread(thread).entries,
+            archived: false,
+          },
+          line_number: 1,
+          ref: `session:${input.session_id}`,
+        },
+      };
+    });
+    if ("ok" in mutation) return mutation;
+    if (!mutation.committed) return ok(mutation.data);
+    return ok({ ...mutation.data, ...(await syncAfterCommit()) });
+  } catch (error) {
+    return quickSessionErrorResponse(error);
+  }
+}
+
+export async function listQuickSessions(
+  query: QuickSessionListQuery = {},
+): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    if (query.agent_id) {
+      const invalid = validateHandler(query.agent_id);
+      if (invalid) return err(`invalid agent: ${invalid}`);
+    }
+    const s = getState();
+    const archived = query.archived ?? false;
+    const root = `${s.repoDir}/${archived ? "archive/quick-sessions" : "quick-sessions"}`;
+    const sessions: Array<Record<string, unknown>> = [];
+    if (await exists(root)) {
+      for (const id of await readdir(root)) {
+        if (quickSessionIdError(id)) continue;
+        const located: LocatedQuickSession = {
+          relDir: quickSessionRelDir(id, archived),
+          absDir: `${root}/${id}`,
+          archived,
+        };
+        if (!(await exists(`${located.absDir}/session.meta.yaml`))) continue;
+        try {
+          const detail = await quickSessionDetail(located);
+          const meta = detail.meta;
+          if (query.agent_id && meta.agent_id !== query.agent_id) continue;
+          if (query.actionable) {
+            if (meta.status !== "needs_title" && meta.status !== "active") continue;
+            const newestCreatorLine = detail.entries.reduce(
+              (newest, entry) =>
+                entry.type === "message" && entry.author === meta.created_by
+                  ? Math.max(newest, entry.line_number)
+                  : newest,
+              0,
+            );
+            if (
+              newestCreatorLine === 0 ||
+              (meta.last_completed_input_line !== undefined &&
+                newestCreatorLine <= meta.last_completed_input_line)
+            ) {
+              continue;
+            }
+          }
+          sessions.push(quickSessionListItem(meta, archived));
+        } catch {
+          continue;
+        }
+      }
+    }
+    sessions.sort((left, right) => {
+      const updated = String(right.updated_at).localeCompare(String(left.updated_at));
+      return updated || String(left.id).localeCompare(String(right.id));
+    });
+    const limit = Math.min(100, Math.max(1, query.limit ?? 100));
+    return ok({ sessions: sessions.slice(0, limit) });
+  } catch (error) {
+    return quickSessionErrorResponse(error);
+  }
+}
+
+export async function readQuickSession(sessionId: string): Promise<ApiResponse> {
+  try {
+    await ensureWasmReady();
+    const idError = quickSessionIdError(sessionId);
+    if (idError) return idError;
+    const located = await locateQuickSession(sessionId);
+    if (!located) return err("quick session not found");
+    return ok({ session: await quickSessionDetail(located) });
+  } catch (error) {
+    return quickSessionErrorResponse(error);
+  }
+}
+
+export async function sendQuickSessionMessage(
+  sessionId: string,
+  input: SendQuickSessionInput,
+): Promise<ApiResponse> {
+  try {
+    const mutation = await withRepoLock(async (): Promise<QuickSessionMutation | ApiResponse> => {
+      const writeError = await quickSessionWriteError();
+      if (writeError) return writeError;
+      const idError = quickSessionIdError(sessionId);
+      if (idError) return idError;
+      const bodyError = validateQuickSessionBody(input.body);
+      if (bodyError) return bodyError;
+      if (!input.request_id?.trim()) {
+        return errCode(
+          "creator messages require request_id",
+          "invalid_quick_session_message",
+        );
+      }
+
+      const s = getState();
+      const creatorError = await ensureActiveQuickSessionHandler(s.me.handler, "author");
+      if (creatorError) return creatorError;
+      const located = await locateQuickSession(sessionId);
+      if (!located) return err("quick session not found");
+      if (located.archived) {
+        return errCode(
+          "quick session transition is not valid from the current state",
+          "quick_session_invalid_state",
+        );
+      }
+      const meta = await loadQuickSessionMeta(located);
+      if (meta.created_by !== s.me.handler) {
+        return errCode(
+          "quick session actor is not authorized for this transition",
+          "quick_session_forbidden",
+        );
+      }
+      const oldThread = await readFile(`${located.absDir}/discussion.thread`);
+      const entries = parseThread(oldThread).entries;
+      const nextLine = (entries.at(-1)?.line_number ?? 0) + 1;
+      const now = utcTimestamp();
+      const transitioned = applyQuickSessionTransition(
+        meta,
+        {
+          kind: "human_message",
+          actor: s.me.handler,
+          line_number: nextLine,
+          request_id: input.request_id,
+          preview: input.body,
+          now,
+        },
+      ) as QuickSessionTransitionResult;
+      if (transitioned.outcome.kind === "duplicate") {
+        return {
+          committed: false,
+          data: quickSessionSendResponse(
+            transitioned.meta,
+            transitioned.outcome.line_number ?? nextLine,
+          ),
+        };
+      }
+
+      const line = formatMessage(nextLine, 0, s.me.handler, now, input.body);
+      validateAppend(
+        oldThread,
+        line,
+        await quickSessionActiveHandlers(),
+        [meta.created_by, meta.agent_id],
+      );
+      const newThread = `${oldThread}${line}`;
+      const metaPath = `${located.absDir}/session.meta.yaml`;
+      const threadPath = `${located.absDir}/discussion.thread`;
+      const oldMeta = await readFile(metaPath);
+      try {
+        await writeFile(metaPath, stringifyQuickSessionMeta(transitioned.meta));
+        await writeFile(threadPath, newThread);
+        await gitOps.addAndCommit(
+          s.repoDir,
+          [`${located.relDir}/session.meta.yaml`, `${located.relDir}/discussion.thread`],
+          `session-msg: @${s.me.handler} -> ${sessionId} L${String(nextLine).padStart(6, "0")}`,
+          s.me.handler,
+        );
+      } catch (error) {
+        await writeFile(metaPath, oldMeta);
+        await writeFile(threadPath, oldThread);
+        throw error;
+      }
+      return {
+        committed: true,
+        data: quickSessionSendResponse(transitioned.meta, nextLine),
+      };
+    });
+    if ("ok" in mutation) return mutation;
+    if (!mutation.committed) return ok(mutation.data);
+    return ok({
+      ...mutation.data,
+      ...quickSessionSyncFields(await syncAfterCommit()),
+    });
+  } catch (error) {
+    return quickSessionErrorResponse(error);
+  }
+}
+
+export async function archiveQuickSession(sessionId: string): Promise<ApiResponse> {
+  return moveQuickSession(sessionId, true);
+}
+
+export async function unarchiveQuickSession(sessionId: string): Promise<ApiResponse> {
+  return moveQuickSession(sessionId, false);
+}
+
+async function moveQuickSession(sessionId: string, archive: boolean): Promise<ApiResponse> {
+  try {
+    const mutation = await withRepoLock(async (): Promise<QuickSessionMutation | ApiResponse> => {
+      const writeError = await quickSessionWriteError();
+      if (writeError) return writeError;
+      const idError = quickSessionIdError(sessionId);
+      if (idError) return idError;
+      const s = getState();
+      const creatorError = await ensureActiveQuickSessionHandler(s.me.handler, "creator");
+      if (creatorError) return creatorError;
+      const located = await locateQuickSession(sessionId);
+      if (!located) return err("quick session not found");
+      if (located.archived === archive) {
+        return errCode(
+          "quick session transition is not valid from the current state",
+          "quick_session_invalid_state",
+        );
+      }
+      const meta = await loadQuickSessionMeta(located);
+      const now = utcTimestamp();
+      const transitioned = applyQuickSessionTransition(
+        meta,
+        {
+          kind: archive ? "archive" : "unarchive",
+          actor: s.me.handler,
+          now,
+        },
+      ) as QuickSessionTransitionResult;
+      const targetRel = quickSessionRelDir(sessionId, archive);
+      const targetAbs = `${s.repoDir}/${targetRel}`;
+      if (await exists(`${targetAbs}/session.meta.yaml`)) {
+        return err("quick session target already exists");
+      }
+      const thread = await readFile(`${located.absDir}/discussion.thread`);
+      await mkdirp(targetAbs);
+      try {
+        await writeFile(
+          `${targetAbs}/session.meta.yaml`,
+          stringifyQuickSessionMeta(transitioned.meta),
+        );
+        await writeFile(`${targetAbs}/discussion.thread`, thread);
+        await gitOps.addRemoveAndCommit(
+          s.repoDir,
+          [`${targetRel}/session.meta.yaml`, `${targetRel}/discussion.thread`],
+          [
+            `${located.relDir}/session.meta.yaml`,
+            `${located.relDir}/discussion.thread`,
+          ],
+          `session: ${archive ? "archive" : "unarchive"} ${sessionId} by @${s.me.handler}`,
+          s.me.handler,
+        );
+      } catch (error) {
+        await removeQuickSessionDirectory(targetAbs);
+        throw error;
+      }
+      await removeQuickSessionDirectory(located.absDir);
+      return {
+        committed: true,
+        data: archive
+          ? {
+              session_id: sessionId,
+              status: transitioned.meta.status,
+              revision: transitioned.meta.revision,
+              archived_at: transitioned.meta.archived_at ?? "",
+            }
+          : {
+              session_id: sessionId,
+              status: transitioned.meta.status,
+              revision: transitioned.meta.revision,
+            },
+      };
+    });
+    if ("ok" in mutation) return mutation;
+    return ok({
+      ...mutation.data,
+      ...quickSessionSyncFields(await syncAfterCommit()),
+    });
+  } catch (error) {
+    return quickSessionErrorResponse(error);
+  }
+}
+
+
+async function quickSessionWriteError(): Promise<ApiResponse | null> {
+  await ensureWasmReady();
+  const fenced = assertNotRedirected();
+  if (fenced) return fenced;
+  return getState().token ? null : reconnectRequired();
+}
+
+function quickSessionIdError(sessionId: string): ApiResponse | null {
+  try {
+    validateQuickSessionId(sessionId);
+    return null;
+  } catch (error) {
+    return errCode(errorMessage(error), "invalid_quick_session_id");
+  }
+}
+
+function validateQuickSessionBody(body: string): ApiResponse | null {
+  if (body.trim().length === 0) {
+    return errCode(
+      "quick session message cannot be empty",
+      "invalid_quick_session_message",
+    );
+  }
+  if (new TextEncoder().encode(body).length > 64 * 1024) {
+    return errCode(
+      "quick session message exceeds 64 KB",
+      "invalid_quick_session_message",
+    );
+  }
+  return null;
+}
+
+function quickSessionErrorResponse(error: unknown): ApiResponse {
+  const message = errorMessage(error);
+  if (message.includes("not authorized")) {
+    return errCode(message, "quick_session_forbidden");
+  }
+  if (
+    message.includes("not valid from the current state") ||
+    message.includes("not newer than the completed input") ||
+    message.includes("must target the claimed input line") ||
+    message.includes("line number is invalid")
+  ) {
+    return errCode(message, "quick_session_invalid_state");
+  }
+  if (message.includes("invalid quick session id")) {
+    return errCode(message, "invalid_quick_session_id");
+  }
+  return err(message);
+}
+
+async function ensureActiveQuickSessionHandler(
+  handler: string,
+  role: string,
+): Promise<ApiResponse | null> {
+  const invalid = validateHandler(handler);
+  if (invalid) return err(`invalid ${role}: ${invalid}`);
+  const repoDir = getState().repoDir;
+  if (await exists(`${repoDir}/archive/users/${handler}.meta.yaml`)) {
+    return err(`${role} @${handler} is departed`);
+  }
+  if (!(await exists(`${repoDir}/users/${handler}.meta.yaml`))) {
+    return err(`unknown ${role}: ${handler}`);
+  }
+  return null;
+}
+
+async function quickSessionActiveHandlers(): Promise<string[]> {
+  const root = `${getState().repoDir}/users`;
+  if (!(await exists(root))) return [];
+  return (await readdir(root))
+    .filter((name) => name.endsWith(".meta.yaml"))
+    .map((name) => name.slice(0, -".meta.yaml".length))
+    .filter((handler) => validateHandler(handler) === null)
+    .sort();
+}
+
+function canonicalQuickSessionBody(author: string, body: string): string {
+  const normalized = parseThread(
+    formatMessage(1, 0, author, "19700101T000000Z", body),
+  ).entries[0];
+  if (normalized?.type !== "message") {
+    throw new Error("failed to normalize message");
+  }
+  return normalized.body;
+}
+
+function quickSessionRelDir(sessionId: string, archived: boolean): string {
+  validateQuickSessionId(sessionId);
+  return `${archived ? "archive/quick-sessions" : "quick-sessions"}/${sessionId}`;
+}
+
+async function locateQuickSession(
+  sessionId: string,
+): Promise<LocatedQuickSession | null> {
+  validateQuickSessionId(sessionId);
+  const repoDir = getState().repoDir;
+  const activeRel = quickSessionRelDir(sessionId, false);
+  const active: LocatedQuickSession = {
+    relDir: activeRel,
+    absDir: `${repoDir}/${activeRel}`,
+    archived: false,
+  };
+  if (await exists(`${active.absDir}/session.meta.yaml`)) return active;
+  const archivedRel = quickSessionRelDir(sessionId, true);
+  const archived: LocatedQuickSession = {
+    relDir: archivedRel,
+    absDir: `${repoDir}/${archivedRel}`,
+    archived: true,
+  };
+  return (await exists(`${archived.absDir}/session.meta.yaml`)) ? archived : null;
+}
+
+async function loadQuickSessionMeta(
+  located: LocatedQuickSession,
+): Promise<QuickSessionMeta> {
+  return parseQuickSessionMeta(
+    await readFile(`${located.absDir}/session.meta.yaml`),
+  ) as QuickSessionMeta;
+}
+
+async function quickSessionDetail(located: LocatedQuickSession): Promise<{
+  meta: QuickSessionMeta;
+  entries: ThreadEntry[];
+  archived: boolean;
+}> {
+  const meta = await loadQuickSessionMeta(located);
+  const thread = await readFile(`${located.absDir}/discussion.thread`);
+  return { meta, entries: parseThread(thread).entries, archived: located.archived };
+}
+
+function quickSessionListItem(
+  meta: QuickSessionMeta,
+  archived: boolean,
+): Record<string, unknown> {
+  return {
+    id: meta.id,
+    title: meta.title ?? null,
+    agent_id: meta.agent_id,
+    created_by: meta.created_by,
+    status: meta.status,
+    updated_at: meta.updated_at,
+    last_message_preview: meta.last_message_preview,
+    revision: meta.revision,
+    archived,
+    ref: `session:${meta.id}`,
+  };
+}
+
+function quickSessionSendResponse(
+  meta: QuickSessionMeta,
+  lineNumber: number,
+): Record<string, unknown> {
+  return {
+    session_id: meta.id,
+    line_number: lineNumber,
+    status: meta.status,
+    revision: meta.revision,
+    ref: `session:${meta.id}`,
+  };
+}
+
+function quickSessionSyncFields(
+  sync: Awaited<ReturnType<typeof syncAfterCommit>>,
+): Record<string, unknown> {
+  return {
+    sync_status: sync.status,
+    ...(sync.commit_id ? { commit_id: sync.commit_id } : {}),
+    ...(sync.error ? { sync_error: sync.error } : {}),
+    ...(sync.error_code ? { error_code: sync.error_code } : {}),
+    ...(sync.needs_token ? { needs_token: true } : {}),
+  };
+}
+
+const QUICK_SESSION_META_FIELDS: Array<keyof QuickSessionMeta> = [
+  "id",
+  "title",
+  "title_source",
+  "agent_id",
+  "created_by",
+  "status",
+  "created_at",
+  "updated_at",
+  "archived_at",
+  "archived_from",
+  "summary",
+  "summary_updated_at",
+  "last_message_preview",
+  "error",
+  "processing_input_line",
+  "processing_started_at",
+  "attempt_id",
+  "last_completed_attempt_id",
+  "last_completed_input_line",
+  "last_completed_line",
+  "last_failed_attempt_id",
+  "last_human_request_id",
+  "last_human_line",
+  "revision",
+];
+
+function stringifyQuickSessionMeta(meta: QuickSessionMeta): string {
+  return `${QUICK_SESSION_META_FIELDS.flatMap((field) => {
+    const value = meta[field];
+    return value === undefined ? [] : [`${field}: ${quickSessionYamlScalar(value)}`];
+  }).join("\n")}\n`;
+}
+
+function quickSessionYamlScalar(value: string | number): string {
+  if (typeof value === "number") return String(value);
+  const yamlKeyword = /^(?:null|true|false|yes|no|on|off|~)$/i;
+  if (
+    value.length > 0 &&
+    value.trim() === value &&
+    !yamlKeyword.test(value) &&
+    /^[A-Za-z0-9_@./+-]+(?: [A-Za-z0-9_@./+-]+)*$/.test(value)
+  ) {
+    return value;
+  }
+  return JSON.stringify(value);
+}
+
+async function removeQuickSessionDirectory(absDir: string): Promise<void> {
+  for (const name of ["session.meta.yaml", "discussion.thread"]) {
+    try {
+      await removeFile(`${absDir}/${name}`);
+    } catch {
+      // The tracked file may not have been created before rollback began.
+    }
+  }
+  try {
+    await removeDir(absDir);
+  } catch {
+    // Git tracks the files; empty parent cleanup is best-effort.
+  }
+}
+
+async function mkdirp(path: string): Promise<void> {
+  const parts = path.split("/").filter(Boolean);
+  let current = path.startsWith("/") ? "" : ".";
+  for (const part of parts) {
+    current = current === "" ? `/${part}` : `${current}/${part}`;
+    if (!(await exists(current))) await mkdir(current);
+  }
+}
+
+function utcTimestamp(): string {
+  const now = new Date();
+  const pad = (value: number, length = 2) => String(value).padStart(length, "0");
+  return (
+    `${now.getUTCFullYear()}${pad(now.getUTCMonth() + 1)}${pad(now.getUTCDate())}` +
+    `T${pad(now.getUTCHours())}${pad(now.getUTCMinutes())}${pad(now.getUTCSeconds())}Z`
+  );
+}
+
+
+function quickSessionChangeFromPath(path: string): {
+  archived: boolean;
+  sessionId: string;
+  file: "meta" | "thread";
+} | null {
+  const match = path.match(
+    /^(archive\/)?quick-sessions\/([^/]+)\/(session\.meta\.yaml|discussion\.thread)$/,
+  );
+  if (!match || quickSessionIdError(match[2])) return null;
+  return {
+    archived: match[1] !== undefined,
+    sessionId: match[2],
+    file: match[3] === "session.meta.yaml" ? "meta" : "thread",
+  };
+}
+
+
+export async function classifyQuickSessionPollChange(
+  path: string,
+): Promise<ClassifiedQuickSessionPollChange | null | undefined> {
+  await ensureWasmReady();
+  const parsed = quickSessionChangeFromPath(path);
+  if (!parsed) return undefined;
+
+  const s = getState();
+  const relDir = quickSessionRelDir(parsed.sessionId, parsed.archived);
+  const located: LocatedQuickSession = {
+    relDir,
+    absDir: `${s.repoDir}/${relDir}`,
+    archived: parsed.archived,
+  };
+  if (!(await exists(`${located.absDir}/session.meta.yaml`))) return null;
+
+  let meta: QuickSessionMeta;
+  try {
+    meta = await loadQuickSessionMeta(located);
+  } catch {
+    return null;
+  }
+  const routesToAgent = !located.archived && meta.status !== "archived";
+  if (parsed.file === "meta") {
+    return {
+      channel: meta.id,
+      kind: "quick_session_meta",
+      entries: [{
+        type: "quick_session_meta",
+        session_id: meta.id,
+        agent_id: meta.agent_id,
+        status: meta.status,
+        revision: meta.revision,
+        ...(routesToAgent ? { recipients: [meta.agent_id] } : {}),
+      }],
+    };
+  }
+
+  if (!(await exists(`${located.absDir}/discussion.thread`))) return null;
+  const thread = parseThread(await readFile(`${located.absDir}/discussion.thread`));
+  if (thread.entries.length === 0) return null;
+  return {
+    channel: meta.id,
+    kind: "quick_session_thread",
+    entries: thread.entries.map((entry) =>
+      routesToAgent && entry.type === "message"
+        ? { ...entry, recipients: [meta.agent_id] }
+        : entry
+    ),
+  };
+}

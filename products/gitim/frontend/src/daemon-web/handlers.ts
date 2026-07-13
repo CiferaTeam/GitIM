@@ -46,6 +46,21 @@ import {
 import type { Card, CardStatus } from "../lib/types";
 import { tokenAuth } from "./auth";
 import { withRepoLock } from "./repo-lock";
+import { classifyQuickSessionPollChange } from "./quick-session-handlers";
+
+export {
+  archiveQuickSession,
+  createQuickSession,
+  listQuickSessions,
+  readQuickSession,
+  sendQuickSessionMessage,
+  unarchiveQuickSession,
+} from "./quick-session-handlers";
+export type {
+  CreateQuickSessionInput,
+  QuickSessionListQuery,
+  SendQuickSessionInput,
+} from "./quick-session-handlers";
 
 type ApiResponse = {
   ok: boolean;
@@ -359,6 +374,14 @@ export async function poll(since?: string): Promise<ApiResponse> {
     const emittedBoards = new Set<string>();
 
     for (const fp of changedFiles) {
+      const quickSessionChange = await classifyQuickSessionPollChange(fp);
+      if (quickSessionChange !== undefined) {
+        if (quickSessionChange) {
+          changes.push(quickSessionChange);
+        }
+        continue;
+      }
+
       const boardHandler = boardHandlerFromPath(fp);
       if (boardHandler) {
         if (!emittedBoards.has(boardHandler)) {

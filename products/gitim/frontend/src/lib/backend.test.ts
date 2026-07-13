@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { LocalBackend } from "./backend";
+import { LocalBackend, type QuickSessionBackend } from "./backend";
 import type { WorkerEvent, WorkerResponse } from "../daemon-web/worker";
 
 class StubWorker {
@@ -350,5 +350,59 @@ describe("LocalBackend", () => {
       error_code: "reconnect_required",
     });
     expect(loadSessionToken("ws_current")).toBeUndefined();
+  });
+
+  it("maps the Quick Session interface to scoped worker RPCs", async () => {
+    const backend = new LocalBackend({
+      workspaceId: "ws_current",
+      generation: 2,
+    }) as LocalBackend & QuickSessionBackend;
+    const worker = StubWorker.instances[0];
+    const sessionId = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    const calls: Array<[Promise<unknown>, string, unknown[]]> = [
+      [
+        backend.createQuickSession({
+          session_id: sessionId,
+          agent_id: "alice",
+          first_message: "hello",
+        }),
+        "createQuickSession",
+        [{ session_id: sessionId, agent_id: "alice", first_message: "hello" }],
+      ],
+      [
+        backend.listQuickSessions({ archived: true, agent_id: "alice" }),
+        "listQuickSessions",
+        [{ archived: true, agent_id: "alice" }],
+      ],
+      [backend.readQuickSession(sessionId), "readQuickSession", [sessionId]],
+      [
+        backend.sendQuickSessionMessage(sessionId, {
+          body: "follow-up",
+          request_id: "request-2",
+        }),
+        "sendQuickSessionMessage",
+        [sessionId, { body: "follow-up", request_id: "request-2" }],
+      ],
+      [backend.archiveQuickSession(sessionId), "archiveQuickSession", [sessionId]],
+      [backend.unarchiveQuickSession(sessionId), "unarchiveQuickSession", [sessionId]],
+    ];
+
+    for (let index = 0; index < calls.length; index += 1) {
+      const [pending, method, args] = calls[index];
+      expect(worker.messages[index]).toEqual({
+        id: index + 1,
+        method,
+        args,
+        workspaceId: "ws_current",
+        generation: 2,
+      });
+      worker.emit({
+        id: index + 1,
+        workspaceId: "ws_current",
+        generation: 2,
+        result: { ok: true, data: { method } },
+      });
+      await expect(pending).resolves.toEqual({ ok: true, data: { method } });
+    }
   });
 });
