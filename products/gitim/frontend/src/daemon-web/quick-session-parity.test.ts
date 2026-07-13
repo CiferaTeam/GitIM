@@ -12,9 +12,21 @@ const stagedPaths = vi.hoisted(() => new Set<string>());
 const committedIndexes = vi.hoisted(() => [] as string[][]);
 const failures = vi.hoisted(() => ({
   commit: false,
+  commitBlock: null as Promise<void> | null,
   removePath: null as string | null,
 }));
-const runSyncMock = vi.hoisted(() => vi.fn(async () => undefined));
+const commitStarted = vi.hoisted(() => vi.fn());
+const runSyncMock = vi.hoisted(() => vi.fn(async () => ({
+  beforeHead: "base",
+  afterHead: "published-head",
+  changed: true,
+  status: "pushed" as
+    | "idle"
+    | "pushed"
+    | "fast_forwarded"
+    | "rebased"
+    | "reconnect_required",
+})));
 
 function parent(path: string): string | null {
   const index = path.lastIndexOf("/");
@@ -82,6 +94,8 @@ vi.mock("./git", () => ({
     author: string,
   ) => {
     paths.forEach((path) => stagedPaths.add(path));
+    commitStarted();
+    if (failures.commitBlock) await failures.commitBlock;
     if (failures.commit) {
       failures.commit = false;
       throw new Error("injected commit failure");
@@ -100,6 +114,8 @@ vi.mock("./git", () => ({
     author: string,
   ) => {
     [...adds, ...removes].forEach((path) => stagedPaths.add(path));
+    commitStarted();
+    if (failures.commitBlock) await failures.commitBlock;
     if (failures.commit) {
       failures.commit = false;
       throw new Error("injected commit failure");
@@ -170,9 +186,16 @@ function seed(): void {
   stagedPaths.clear();
   committedIndexes.length = 0;
   failures.commit = false;
+  failures.commitBlock = null;
   failures.removePath = null;
+  commitStarted.mockClear();
   runSyncMock.mockReset();
-  runSyncMock.mockResolvedValue(undefined);
+  runSyncMock.mockResolvedValue({
+    beforeHead: "base",
+    afterHead: "published-head",
+    changed: true,
+    status: "pushed",
+  });
   ensureDirectory("/repo/users");
   files.set(
     "/repo/users/lewis.meta.yaml",
@@ -523,6 +546,51 @@ describe("daemon-web Quick Session parity", () => {
     ]);
   });
 
+  it("keeps read snapshots behind an in-flight mutation until rollback", async () => {
+    const created = responseData(await quick.createQuickSession({
+      session_id: SESSION_ID,
+      agent_id: "alice",
+      first_message: "original",
+    }));
+    const original = created.session as {
+      meta: { revision: number };
+      entries: Array<{ line_number: number; body: string }>;
+    };
+    commitStarted.mockClear();
+
+    let releaseCommit!: () => void;
+    failures.commitBlock = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+    failures.commit = true;
+    const sending = quick.sendQuickSessionMessage(SESSION_ID, {
+      body: "uncommitted",
+      request_id: "request-uncommitted",
+    });
+    await vi.waitFor(() => expect(commitStarted).toHaveBeenCalledTimes(1));
+
+    let readSettled = false;
+    const reading = quick.readQuickSession(SESSION_ID).then((response) => {
+      readSettled = true;
+      return response;
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(readSettled).toBe(false);
+
+    releaseCommit();
+    await expect(sending).resolves.toMatchObject({
+      ok: false,
+      error: "injected commit failure",
+    });
+    const snapshot = responseData(await reading).session as {
+      meta: { revision: number };
+      entries: Array<{ line_number: number; body: string }>;
+    };
+    expect(snapshot.meta.revision).toBe(original.meta.revision);
+    expect(snapshot.entries).toEqual(original.entries);
+  });
+
   it("rolls archive and unarchive back when source cleanup fails", async () => {
     await quick.createQuickSession({
       session_id: SESSION_ID,
@@ -622,6 +690,77 @@ describe("daemon-web Quick Session parity", () => {
         error_code: "reconnect_required",
         needs_token: true,
       },
+    });
+  });
+
+  it("maps a resolved reconnect sync result to commit-only", async () => {
+    runSyncMock.mockResolvedValueOnce({
+      beforeHead: "base",
+      afterHead: "base",
+      changed: false,
+      status: "reconnect_required",
+    });
+
+    const response = await quick.createQuickSession({
+      session_id: SESSION_ID,
+      agent_id: "alice",
+      first_message: "saved locally",
+    });
+
+    expect(response).toMatchObject({
+      ok: true,
+      data: {
+        status: "commit_only",
+        error_code: "reconnect_required",
+        needs_token: true,
+      },
+    });
+  });
+
+  it("maps a latched epoch redirect to commit-only", async () => {
+    runSyncMock.mockImplementationOnce(async () => {
+      setState({ epochRedirected: true, syncStatus: "epoch_redirected" });
+      return {
+        beforeHead: "base",
+        afterHead: "local-rebased-head",
+        changed: true,
+        status: "rebased" as const,
+      };
+    });
+
+    const response = await quick.createQuickSession({
+      session_id: SESSION_ID,
+      agent_id: "alice",
+      first_message: "saved on sealed epoch",
+    });
+
+    expect(response).toMatchObject({
+      ok: true,
+      data: {
+        status: "commit_only",
+        error_code: "epoch_redirected",
+      },
+    });
+    expect(response.data).not.toHaveProperty("needs_token");
+  });
+
+  it("does not report pushed when sync resolves without publishing", async () => {
+    runSyncMock.mockResolvedValueOnce({
+      beforeHead: "base",
+      afterHead: "base",
+      changed: false,
+      status: "idle",
+    });
+
+    const response = await quick.createQuickSession({
+      session_id: SESSION_ID,
+      agent_id: "alice",
+      first_message: "still local",
+    });
+
+    expect(response).toMatchObject({
+      ok: true,
+      data: { status: "commit_only" },
     });
   });
 });

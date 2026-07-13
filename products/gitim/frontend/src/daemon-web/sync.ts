@@ -9,6 +9,11 @@ import { isAuthFailure } from "./auth-errors";
 import { validateHandler } from "./paths";
 import { withRepoLock } from "./repo-lock";
 import { ensureWasmReady } from "./wasm-ready";
+import {
+  mergeQuickSessionMeta,
+  parseQuickSessionMeta,
+  serializeQuickSessionMeta,
+} from "gitim-wasm";
 
 interface RunSyncOptions {
   forceNewCycle?: boolean;
@@ -43,6 +48,28 @@ function boardHandlerFromPath(path: string): string | null {
   const match = /^showboards\/([^/]+)\/board\.md$/.exec(path);
   if (!match) return null;
   return validateHandler(match[1]) ? null : match[1];
+}
+
+interface QuickSessionChangedPaths {
+  id: string;
+  metaPath?: string;
+  threadPath?: string;
+}
+
+function quickSessionFileFromPath(path: string): {
+  archived: boolean;
+  id: string;
+  file: "meta" | "thread";
+} | null {
+  const match = /^(archive\/)?quick-sessions\/([^/]+)\/(session\.meta\.yaml|discussion\.thread)$/.exec(
+    path,
+  );
+  if (!match) return null;
+  return {
+    archived: match[1] !== undefined,
+    id: match[2],
+    file: match[3] === "session.meta.yaml" ? "meta" : "thread",
+  };
 }
 
 function parentPath(path: string): string {
@@ -186,11 +213,118 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     );
 
     const { readFile } = await import("./storage");
-    const { extractThreadAdditions } = await import("./conflict");
+    const { extractThreadAdditions, resolveConflicts } = await import(
+      "./conflict"
+    );
     const localAdditions: Record<string, string> = {};
     const remoteContents: Record<string, string> = {};
     const localBoards: Record<string, string> = {};
+    const quickSessionPaths = new Set<string>();
+    const quickSessionChanges = new Map<string, QuickSessionChangedPaths>();
+
     for (const fp of changedFiles) {
+      const quickFile = quickSessionFileFromPath(fp);
+      if (!quickFile) {
+        if (
+          fp.startsWith("quick-sessions/") ||
+          fp.startsWith("archive/quick-sessions/")
+        ) {
+          throw new Error(`Cannot auto-merge local browser sync change: ${fp}`);
+        }
+        continue;
+      }
+      if (quickFile.archived) {
+        throw new Error(
+          "Quick session archive transitions require manual resolution",
+        );
+      }
+      quickSessionPaths.add(fp);
+      const changed = quickSessionChanges.get(quickFile.id) ?? {
+        id: quickFile.id,
+      };
+      if (quickFile.file === "meta") changed.metaPath = fp;
+      else changed.threadPath = fp;
+      quickSessionChanges.set(quickFile.id, changed);
+    }
+
+    const quickSessionMerges: Array<{
+      metaPath: string;
+      threadPath: string;
+      localMeta: string;
+      baseMeta: string;
+      remoteMeta: string;
+      remoteThread: string;
+    }> = [];
+    const quickSessionCreates: Record<string, string> = {};
+
+    for (const changed of quickSessionChanges.values()) {
+      if (!changed.metaPath) {
+        throw new Error(
+          `Quick session ${changed.id} changed without session.meta.yaml`,
+        );
+      }
+      const threadPath =
+        changed.threadPath ??
+        `quick-sessions/${changed.id}/discussion.thread`;
+      const [localMeta, baseMeta, remoteMeta, baseThread, remoteThread] =
+        await Promise.all([
+          readFile(`${s.repoDir}/${changed.metaPath}`),
+          gitOps.readFileAtCommit(s.repoDir, s.headCommit, changed.metaPath),
+          gitOps.readFileAtCommit(s.repoDir, remoteHead, changed.metaPath),
+          gitOps.readFileAtCommit(s.repoDir, s.headCommit, threadPath),
+          gitOps.readFileAtCommit(s.repoDir, remoteHead, threadPath),
+        ]);
+
+      if (baseMeta === null) {
+        if (!changed.threadPath) {
+          throw new Error(
+            `Quick session ${changed.id} create is missing discussion.thread`,
+          );
+        }
+        if (remoteMeta !== null || remoteThread !== null || baseThread !== null) {
+          throw new Error(
+            `Quick session ${changed.id} create conflict requires manual resolution`,
+          );
+        }
+        quickSessionCreates[changed.metaPath] = localMeta;
+        quickSessionCreates[threadPath] = await readFile(
+          `${s.repoDir}/${threadPath}`,
+        );
+        continue;
+      }
+
+      if (remoteMeta === null || remoteThread === null || baseThread === null) {
+        throw new Error(
+          `Quick session ${changed.id} remote transaction is incomplete`,
+        );
+      }
+      if (!remoteThread.startsWith(baseThread)) {
+        throw new Error(
+          `Quick session ${changed.id} remote thread changed outside append-only shape`,
+        );
+      }
+      if (changed.threadPath) {
+        const localThread = await readFile(`${s.repoDir}/${threadPath}`);
+        const additions = extractThreadAdditions(
+          threadPath,
+          localThread,
+          baseThread,
+        );
+        if (additions.trim()) localAdditions[threadPath] = additions;
+      }
+      remoteContents[threadPath] = remoteThread;
+      quickSessionMerges.push({
+        metaPath: changed.metaPath,
+        threadPath,
+        localMeta,
+        baseMeta,
+        remoteMeta,
+        remoteThread,
+      });
+    }
+
+    for (const fp of changedFiles) {
+      if (quickSessionPaths.has(fp)) continue;
       if (boardHandlerFromPath(fp)) {
         try {
           localBoards[fp] = await readFile(`${s.repoDir}/${fp}`);
@@ -224,21 +358,55 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       }
     }
 
+    // Resolve every content and metadata conflict before the destructive
+    // reset. Quick Session metadata uses the same Rust merge function as the
+    // native daemon, including title/claim/completion conflict rejection and
+    // line-number translation.
+    const resolved = resolveConflicts(localAdditions, remoteContents);
+    const quickSessionMetas: Record<string, string> = {};
+    for (const quick of quickSessionMerges) {
+      const mergedThread = resolved.files[quick.threadPath] ?? quick.remoteThread;
+      const mappings = resolved.mappings.filter(
+        (mapping) => mapping.file === quick.threadPath,
+      );
+      const localLinesUnchanged = mappings.every(
+        (mapping) => mapping.old_line === mapping.new_line,
+      );
+      if (quick.remoteMeta === quick.baseMeta && localLinesUnchanged) {
+        quickSessionMetas[quick.metaPath] = quick.localMeta;
+        continue;
+      }
+      const mergedMeta = mergeQuickSessionMeta(
+        parseQuickSessionMeta(quick.localMeta),
+        parseQuickSessionMeta(quick.remoteMeta),
+        mergedThread,
+        mappings,
+        quick.threadPath,
+      );
+      quickSessionMetas[quick.metaPath] = serializeQuickSessionMeta(mergedMeta);
+    }
+
     // Reset working tree to remote HEAD
     await gitOps.resetToRemote(
       s.repoDir,
       `refs/remotes/origin/${s.defaultBranch}`,
     );
 
-    // Resolve via parser-based renumbering
-    const { resolveConflicts } = await import("./conflict");
-    const resolved = resolveConflicts(localAdditions, remoteContents);
-
     // Write resolved files back
     const { writeFile, exists, mkdir } = await import("./storage");
     const filePaths: string[] = [];
     for (const [fp, content] of Object.entries(resolved.files)) {
       await writeFile(`${s.repoDir}/${fp}`, content);
+      filePaths.push(fp);
+    }
+    for (const [fp, content] of Object.entries(quickSessionMetas)) {
+      await writeFile(`${s.repoDir}/${fp}`, content);
+      filePaths.push(fp);
+    }
+    for (const [fp, content] of Object.entries(quickSessionCreates)) {
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
       filePaths.push(fp);
     }
     for (const [fp, content] of Object.entries(localBoards)) {
@@ -251,9 +419,15 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     // Commit the merge result
     const hasThreadFiles = Object.keys(resolved.files).length > 0;
     const hasBoardFiles = Object.keys(localBoards).length > 0;
-    const commitMessage = hasBoardFiles && !hasThreadFiles
-      ? "board: sync after rebase"
-      : resolved.commitMessage;
+    const hasQuickSessionFiles =
+      Object.keys(quickSessionMetas).length > 0 ||
+      Object.keys(quickSessionCreates).length > 0;
+    const commitMessage =
+      hasBoardFiles && !hasThreadFiles && !hasQuickSessionFiles
+        ? "board: sync after rebase"
+        : hasQuickSessionFiles && !hasThreadFiles
+          ? "session: sync after rebase"
+          : resolved.commitMessage;
     await gitOps.addAndCommit(
       s.repoDir,
       filePaths,

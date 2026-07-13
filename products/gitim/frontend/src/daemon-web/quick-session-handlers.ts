@@ -144,8 +144,30 @@ async function syncAfterCommit(): Promise<{
   needs_token?: boolean;
 }> {
   try {
-    await runSync({ forceNewCycle: true });
-    return { status: "pushed" };
+    const result = await runSync({ forceNewCycle: true });
+    const state = getState();
+    if (state.epochRedirected) {
+      return {
+        status: "commit_only",
+        error: "Workspace epoch is redirected; the local commit was not published.",
+        error_code: "epoch_redirected",
+      };
+    }
+    if (result.status === "reconnect_required") {
+      return {
+        status: "commit_only",
+        error: "Reconnect token to publish the local commit.",
+        error_code: "reconnect_required",
+        needs_token: true,
+      };
+    }
+    const published =
+      result.status === "pushed" ||
+      result.status === "rebased" ||
+      (result.status === "idle" && result.changed);
+    return published
+      ? { status: "pushed", commit_id: result.afterHead }
+      : { status: "commit_only" };
   } catch (error) {
     if (isAuthFailure(error)) {
       setState({ token: null, syncStatus: "reconnect_required" });
@@ -293,55 +315,61 @@ export async function listQuickSessions(
       const invalid = validateHandler(query.agent_id);
       if (invalid) return err(`invalid agent: ${invalid}`);
     }
-    const s = getState();
-    const archived = query.archived ?? false;
-    const root = `${s.repoDir}/${archived ? "archive/quick-sessions" : "quick-sessions"}`;
-    const sessions: Array<Record<string, unknown>> = [];
-    if (await exists(root)) {
-      for (const id of await readdir(root)) {
-        if (quickSessionIdError(id)) continue;
-        const located: LocatedQuickSession = {
-          relDir: quickSessionRelDir(id, archived),
-          absDir: `${root}/${id}`,
-          archived,
-        };
-        if (!(await exists(`${located.absDir}/session.meta.yaml`))) continue;
-        try {
-          const detail = await quickSessionDetail(located);
-          const meta = detail.meta;
-          if (query.agent_id && meta.agent_id !== query.agent_id) continue;
-          if (query.actionable) {
-            if (meta.status !== "needs_title" && meta.status !== "active") continue;
-            const newestCreatorLine = detail.entries.reduce(
-              (newest, entry) =>
-                entry.type === "message" && entry.author === meta.created_by
-                  ? Math.max(newest, entry.line_number)
-                  : newest,
-              0,
-            );
-            if (
-              newestCreatorLine === 0 ||
-              (meta.last_completed_input_line !== undefined &&
-                newestCreatorLine <= meta.last_completed_input_line)
-            ) {
-              continue;
-            }
-          }
-          sessions.push(quickSessionListItem(meta, archived));
-        } catch {
-          continue;
-        }
-      }
-    }
-    sessions.sort((left, right) => {
-      const updated = String(right.updated_at).localeCompare(String(left.updated_at));
-      return updated || String(left.id).localeCompare(String(right.id));
-    });
-    const limit = Math.min(100, Math.max(1, query.limit ?? 100));
-    return ok({ sessions: sessions.slice(0, limit) });
+    return await withRepoLock(() => listQuickSessionsSnapshot(query));
   } catch (error) {
     return quickSessionErrorResponse(error);
   }
+}
+
+async function listQuickSessionsSnapshot(
+  query: QuickSessionListQuery,
+): Promise<ApiResponse> {
+  const s = getState();
+  const archived = query.archived ?? false;
+  const root = `${s.repoDir}/${archived ? "archive/quick-sessions" : "quick-sessions"}`;
+  const sessions: Array<Record<string, unknown>> = [];
+  if (await exists(root)) {
+    for (const id of await readdir(root)) {
+      if (quickSessionIdError(id)) continue;
+      const located: LocatedQuickSession = {
+        relDir: quickSessionRelDir(id, archived),
+        absDir: `${root}/${id}`,
+        archived,
+      };
+      if (!(await exists(`${located.absDir}/session.meta.yaml`))) continue;
+      try {
+        const detail = await quickSessionDetail(located);
+        const meta = detail.meta;
+        if (query.agent_id && meta.agent_id !== query.agent_id) continue;
+        if (query.actionable) {
+          if (meta.status !== "needs_title" && meta.status !== "active") continue;
+          const newestCreatorLine = detail.entries.reduce(
+            (newest, entry) =>
+              entry.type === "message" && entry.author === meta.created_by
+                ? Math.max(newest, entry.line_number)
+                : newest,
+            0,
+          );
+          if (
+            newestCreatorLine === 0 ||
+            (meta.last_completed_input_line !== undefined &&
+              newestCreatorLine <= meta.last_completed_input_line)
+          ) {
+            continue;
+          }
+        }
+        sessions.push(quickSessionListItem(meta, archived));
+      } catch {
+        continue;
+      }
+    }
+  }
+  sessions.sort((left, right) => {
+    const updated = String(right.updated_at).localeCompare(String(left.updated_at));
+    return updated || String(left.id).localeCompare(String(right.id));
+  });
+  const limit = Math.min(100, Math.max(1, query.limit ?? 100));
+  return ok({ sessions: sessions.slice(0, limit) });
 }
 
 export async function readQuickSession(sessionId: string): Promise<ApiResponse> {
@@ -349,9 +377,11 @@ export async function readQuickSession(sessionId: string): Promise<ApiResponse> 
     await ensureWasmReady();
     const idError = quickSessionIdError(sessionId);
     if (idError) return idError;
-    const located = await locateQuickSession(sessionId);
-    if (!located) return err("quick session not found");
-    return ok({ session: await quickSessionDetail(located) });
+    return await withRepoLock(async () => {
+      const located = await locateQuickSession(sessionId);
+      if (!located) return err("quick session not found");
+      return ok({ session: await quickSessionDetail(located) });
+    });
   } catch (error) {
     return quickSessionErrorResponse(error);
   }
@@ -831,6 +861,7 @@ function quickSessionChangeFromPath(path: string): {
 
 export async function classifyQuickSessionPollChange(
   path: string,
+  baseline?: string,
 ): Promise<ClassifiedQuickSessionPollChange | null | undefined> {
   await ensureWasmReady();
   const parsed = quickSessionChangeFromPath(path);
@@ -868,7 +899,24 @@ export async function classifyQuickSessionPollChange(
   }
 
   if (!(await exists(`${located.absDir}/discussion.thread`))) return null;
-  const thread = parseThread(await readFile(`${located.absDir}/discussion.thread`));
+  const currentThread = await readFile(`${located.absDir}/discussion.thread`);
+  let addedThread = currentThread;
+  if (baseline) {
+    const baselineThread = await gitOps.readFileAtCommit(
+      s.repoDir,
+      baseline,
+      `${relDir}/discussion.thread`,
+    );
+    if (baselineThread !== null) {
+      if (!currentThread.startsWith(baselineThread)) {
+        throw new Error(
+          `Quick session ${meta.id} transcript changed outside append-only shape`,
+        );
+      }
+      addedThread = currentThread.slice(baselineThread.length);
+    }
+  }
+  const thread = parseThread(addedThread);
   if (thread.entries.length === 0) return null;
   return {
     channel: meta.id,

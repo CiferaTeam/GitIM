@@ -1444,6 +1444,62 @@ describe("daemon-web handlers", () => {
     ]);
   });
 
+  it("emits only quick session transcript entries added since the poll baseline", async () => {
+    const sessionId = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    const threadPath = `quick-sessions/${sessionId}/discussion.thread`;
+    const firstEntry =
+      "[L000001][P000000][@lewis][20260711T010203Z] first\n";
+    const secondEntry =
+      "[L000002][P000001][@lewis][20260711T010303Z] second\n";
+    dirs.set("/repo/quick-sessions", [sessionId]);
+    dirs.set(`/repo/quick-sessions/${sessionId}`, [
+      "session.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/quick-sessions/${sessionId}/session.meta.yaml`,
+      [
+        `id: ${sessionId}`,
+        "title_source: none",
+        "agent_id: alice",
+        "created_by: lewis",
+        "status: needs_title",
+        "created_at: 20260711T010203Z",
+        "updated_at: 20260711T010303Z",
+        "last_message_preview: second",
+        "last_human_request_id: request-second",
+        "last_human_line: 2",
+        "revision: 3",
+        "",
+      ].join("\n"),
+    );
+    files.set(`/repo/${threadPath}`, firstEntry + secondEntry);
+    const git = vi.mocked(await import("./git"));
+    setState({ headCommit: "worker-sync-baseline" });
+    git.diffTrees.mockResolvedValueOnce([threadPath]);
+    git.resolveHead.mockResolvedValueOnce("local-unpushed-head");
+    git.readFileAtCommit.mockImplementationOnce(async () => firstEntry);
+
+    const res = await poll("caller-baseline");
+
+    expect(res.data?.changes).toEqual([
+      {
+        channel: sessionId,
+        kind: "quick_session_thread",
+        entries: [expect.objectContaining({
+          line_number: 2,
+          body: "second",
+          recipients: ["alice"],
+        })],
+      },
+    ]);
+    expect(git.readFileAtCommit).toHaveBeenCalledWith(
+      "/repo",
+      "caller-baseline",
+      threadPath,
+    );
+  });
+
   it("reports archived channel changes from poll", async () => {
     vi.mocked(await import("./git")).diffTrees.mockResolvedValueOnce([
       "archive/channels/general.meta.yaml",

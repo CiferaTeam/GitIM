@@ -7,7 +7,10 @@ const gitMocks = vi.hoisted(() => ({
   diffTrees: vi.fn(async () => [] as string[]),
   fetchOrigin: vi.fn(async () => undefined),
   push: vi.fn(async () => undefined),
-  readFileAtCommit: vi.fn(async () => null as string | null),
+  readFileAtCommit: vi.fn(async (...args: [string, string, string]) => {
+    if (args.length !== 3) throw new Error("invalid readFileAtCommit call");
+    return null as string | null;
+  }),
   resetToRemote: vi.fn(async () => undefined),
   resolveHead: vi.fn(async () => "local-head"),
   resolveRemoteHead: vi.fn(async () => "remote-head"),
@@ -48,6 +51,10 @@ vi.mock("./auth-errors", () => ({
 import { getState, initState, setState } from "./state";
 import { withRepoLock } from "./repo-lock";
 import { runSync } from "./sync";
+import {
+  parseQuickSessionMeta,
+  serializeQuickSessionMeta,
+} from "gitim-wasm";
 
 const baseThread = "[L000001][P000000][@alice][20260317T120000Z] base\n";
 const localThread =
@@ -70,6 +77,34 @@ const localBoard = [
   "local board",
   "",
 ].join("\n");
+const sessionId = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+const sessionDir = `/repo/quick-sessions/${sessionId}`;
+const sessionMetaPath = `quick-sessions/${sessionId}/session.meta.yaml`;
+const sessionThreadPath = `quick-sessions/${sessionId}/discussion.thread`;
+
+function quickSessionMeta(overrides: Record<string, unknown> = {}): string {
+  return serializeQuickSessionMeta({
+    id: sessionId,
+    title_source: "none",
+    agent_id: "alice",
+    created_by: "lewis",
+    status: "needs_title",
+    created_at: "20260711T010203Z",
+    updated_at: "20260711T010203Z",
+    last_message_preview: "base",
+    last_human_line: 1,
+    last_human_request_id: "request-base",
+    revision: 2,
+    ...overrides,
+  });
+}
+
+function seedQuickSession(meta: string, thread: string): void {
+  dirs.add("/repo/quick-sessions");
+  dirs.add(sessionDir);
+  files.set(`${sessionDir}/session.meta.yaml`, meta);
+  files.set(`${sessionDir}/discussion.thread`, thread);
+}
 
 function initSyncState() {
   initState({
@@ -341,5 +376,224 @@ describe("daemon-web sync", () => {
     expect(result.status).toBe("rebased");
     expect(getState().headCommit).toBe("merged-head");
     expect(getState().syncStatus).toBe("idle");
+  });
+
+  it("replays a local quick session transaction after an unrelated remote commit", async () => {
+    const localMeta = quickSessionMeta({
+      last_message_preview: "new session",
+      last_human_request_id: "request-create",
+    });
+    const localSessionThread =
+      "[L000001][P000000][@lewis][20260711T010203Z] new session\n";
+    seedQuickSession(localMeta, localSessionThread);
+    gitMocks.resolveHead
+      .mockResolvedValueOnce("local-head")
+      .mockResolvedValueOnce("merged-head");
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockResolvedValueOnce(undefined);
+    gitMocks.diffTrees.mockResolvedValueOnce([
+      sessionMetaPath,
+      sessionThreadPath,
+    ]);
+    gitMocks.resetToRemote.mockImplementationOnce(async () => {
+      files.delete(`${sessionDir}/session.meta.yaml`);
+      files.delete(`${sessionDir}/discussion.thread`);
+      dirs.delete(sessionDir);
+    });
+
+    const result = await runSync({ forceNewCycle: true });
+
+    expect(files.get(`${sessionDir}/session.meta.yaml`)).toBe(localMeta);
+    expect(files.get(`${sessionDir}/discussion.thread`)).toBe(localSessionThread);
+    expect(gitMocks.addAndCommit).toHaveBeenCalledWith(
+      "/repo",
+      [sessionMetaPath, sessionThreadPath],
+      expect.any(String),
+      "lewis",
+    );
+    expect(result.status).toBe("rebased");
+  });
+
+  it("preserves an exact local quick session send after an unrelated remote commit", async () => {
+    const baseSessionThread =
+      "[L000001][P000000][@lewis][20260711T010203Z] base\n";
+    const localSessionThread =
+      baseSessionThread +
+      "[L000002][P000001][@lewis][20260711T010303Z] local follow-up\n";
+    const baseMeta = quickSessionMeta();
+    const localMeta = quickSessionMeta({
+      updated_at: "20260711T010303Z",
+      last_message_preview: "local follow-up",
+      last_human_line: 2,
+      last_human_request_id: "request-local",
+      revision: 3,
+    });
+    seedQuickSession(localMeta, localSessionThread);
+    gitMocks.resolveHead
+      .mockResolvedValueOnce("local-head")
+      .mockResolvedValueOnce("merged-head");
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockResolvedValueOnce(undefined);
+    gitMocks.diffTrees.mockResolvedValueOnce([
+      sessionMetaPath,
+      sessionThreadPath,
+    ]);
+    gitMocks.readFileAtCommit.mockImplementation(
+      async (...args: [string, string, string]) => {
+        const path = args[2];
+        if (path === sessionMetaPath) return baseMeta;
+        if (path === sessionThreadPath) return baseSessionThread;
+        return null;
+      },
+    );
+    gitMocks.resetToRemote.mockImplementationOnce(async () => {
+      files.set(`${sessionDir}/session.meta.yaml`, baseMeta);
+      files.set(`${sessionDir}/discussion.thread`, baseSessionThread);
+    });
+
+    const result = await runSync({ forceNewCycle: true });
+
+    expect(files.get(`${sessionDir}/session.meta.yaml`)).toBe(localMeta);
+    expect(files.get(`${sessionDir}/discussion.thread`)).toBe(localSessionThread);
+    expect(gitMocks.addAndCommit).toHaveBeenCalledWith(
+      "/repo",
+      [sessionThreadPath, sessionMetaPath],
+      expect.any(String),
+      "lewis",
+    );
+    expect(result.status).toBe("rebased");
+  });
+
+  it("merges concurrent quick session sends and regenerates line metadata", async () => {
+    const baseSessionThread =
+      "[L000001][P000000][@lewis][20260711T010203Z] base\n";
+    const localSessionThread =
+      baseSessionThread +
+      "[L000002][P000001][@lewis][20260711T010303Z] local follow-up\n";
+    const remoteSessionThread =
+      baseSessionThread +
+      "[L000002][P000001][@lewis][20260711T010253Z] remote follow-up\n";
+    const baseMeta = quickSessionMeta();
+    const localMeta = quickSessionMeta({
+      updated_at: "20260711T010303Z",
+      last_message_preview: "local follow-up",
+      last_human_line: 2,
+      last_human_request_id: "request-local",
+      revision: 3,
+    });
+    const remoteMeta = quickSessionMeta({
+      updated_at: "20260711T010253Z",
+      last_message_preview: "remote follow-up",
+      last_human_line: 2,
+      last_human_request_id: "request-remote",
+      revision: 3,
+    });
+    seedQuickSession(localMeta, localSessionThread);
+    gitMocks.resolveHead
+      .mockResolvedValueOnce("local-head")
+      .mockResolvedValueOnce("merged-head");
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockResolvedValueOnce(undefined);
+    gitMocks.diffTrees.mockResolvedValueOnce([
+      sessionMetaPath,
+      sessionThreadPath,
+    ]);
+    gitMocks.readFileAtCommit.mockImplementation(
+      async (_repo: string, ref: string, path: string) => {
+        if (path === sessionMetaPath) {
+          return ref === "base" ? baseMeta : remoteMeta;
+        }
+        if (path === sessionThreadPath) {
+          return ref === "base" ? baseSessionThread : remoteSessionThread;
+        }
+        return null;
+      },
+    );
+    gitMocks.resetToRemote.mockImplementationOnce(async () => {
+      files.set(`${sessionDir}/session.meta.yaml`, remoteMeta);
+      files.set(`${sessionDir}/discussion.thread`, remoteSessionThread);
+    });
+
+    const result = await runSync({ forceNewCycle: true });
+
+    expect(files.get(`${sessionDir}/discussion.thread`)).toBe(
+      remoteSessionThread +
+      "[L000003][P000001][@lewis][20260711T010303Z] local follow-up\n",
+    );
+    expect(parseQuickSessionMeta(files.get(`${sessionDir}/session.meta.yaml`)!))
+      .toMatchObject({
+        last_message_preview: "local follow-up",
+        last_human_line: 3,
+        last_human_request_id: "request-local",
+        revision: 4,
+      });
+    expect(gitMocks.addAndCommit).toHaveBeenCalledWith(
+      "/repo",
+      [sessionThreadPath, sessionMetaPath],
+      expect.any(String),
+      "lewis",
+    );
+    expect(result.status).toBe("rebased");
+  });
+
+  it("fails before reset when the same quick session gets conflicting titles", async () => {
+    const baseSessionThread =
+      "[L000001][P000000][@lewis][20260711T010203Z] base\n";
+    const localSessionThread =
+      baseSessionThread +
+      "[L000002][P000001][@lewis][20260711T010303Z] local follow-up\n";
+    const remoteSessionThread =
+      baseSessionThread +
+      "[L000002][P000001][@lewis][20260711T010253Z] remote follow-up\n";
+    const baseMeta = quickSessionMeta();
+    const localMeta = quickSessionMeta({
+      title: "Local title",
+      title_source: "api_set",
+      status: "active",
+      updated_at: "20260711T010303Z",
+      last_message_preview: "local follow-up",
+      last_human_line: 2,
+      last_human_request_id: "request-local",
+      revision: 3,
+    });
+    const remoteMeta = quickSessionMeta({
+      title: "Remote title",
+      title_source: "api_set",
+      status: "active",
+      updated_at: "20260711T010253Z",
+      last_message_preview: "remote follow-up",
+      last_human_line: 2,
+      last_human_request_id: "request-remote",
+      revision: 3,
+    });
+    seedQuickSession(localMeta, localSessionThread);
+    gitMocks.resolveHead.mockResolvedValueOnce("local-head");
+    gitMocks.push.mockRejectedValueOnce(new Error("non-fast-forward"));
+    gitMocks.diffTrees.mockResolvedValueOnce([
+      sessionMetaPath,
+      sessionThreadPath,
+    ]);
+    gitMocks.readFileAtCommit.mockImplementation(
+      async (_repo: string, ref: string, path: string) => {
+        if (path === sessionMetaPath) {
+          return ref === "base" ? baseMeta : remoteMeta;
+        }
+        if (path === sessionThreadPath) {
+          return ref === "base" ? baseSessionThread : remoteSessionThread;
+        }
+        return null;
+      },
+    );
+
+    await expect(runSync({ forceNewCycle: true }))
+      .rejects.toThrow("concurrent titles differ");
+
+    expect(gitMocks.resetToRemote).not.toHaveBeenCalled();
+    expect(files.get(`${sessionDir}/session.meta.yaml`)).toBe(localMeta);
+    expect(files.get(`${sessionDir}/discussion.thread`)).toBe(localSessionThread);
+    expect(gitMocks.addAndCommit).not.toHaveBeenCalled();
   });
 });

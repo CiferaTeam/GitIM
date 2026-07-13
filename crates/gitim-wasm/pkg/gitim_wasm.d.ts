@@ -23,6 +23,8 @@ export function githubIdentityFromUserJson(user_json: string): any;
 
 export function mergeChannelMeta(local_yaml: string, remote_yaml: string): any;
 
+export function mergeQuickSessionMeta(local: any, remote: any, merged_thread: string, mappings: any, thread_path: string): any;
+
 export function parseBoardMarkdown(markdown: string): any;
 
 export function parseCardMeta(yaml: string): any;
@@ -107,6 +109,7 @@ export interface InitOutput {
     readonly mergeChannelMeta: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly buildRebaseCommitMsg: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly resolveContentPure: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly mergeQuickSessionMeta: (a: any, b: any, c: number, d: number, e: any, f: number, g: number) => [number, number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

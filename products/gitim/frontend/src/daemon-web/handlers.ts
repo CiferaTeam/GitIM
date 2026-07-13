@@ -354,7 +354,9 @@ export async function poll(since?: string): Promise<ApiResponse> {
   try {
     await ensureWasmReady();
     await runSync();
-    const currentHead = await gitOps.resolveHead(s.repoDir);
+    return await withRepoLock(async () => {
+    const snapshot = getState();
+    const currentHead = await gitOps.resolveHead(snapshot.repoDir);
 
     if (!since || since === currentHead) {
       return ok({ commit_id: currentHead, changes: [] });
@@ -363,7 +365,7 @@ export async function poll(since?: string): Promise<ApiResponse> {
     // Diff to find changed files
     let changedFiles: string[];
     try {
-      changedFiles = await gitOps.diffTrees(s.repoDir, since, currentHead);
+      changedFiles = await gitOps.diffTrees(snapshot.repoDir, since, currentHead);
     } catch {
       return ok({ commit_id: currentHead, changes: [], reset: true });
     }
@@ -374,7 +376,7 @@ export async function poll(since?: string): Promise<ApiResponse> {
     const emittedBoards = new Set<string>();
 
     for (const fp of changedFiles) {
-      const quickSessionChange = await classifyQuickSessionPollChange(fp);
+      const quickSessionChange = await classifyQuickSessionPollChange(fp, since);
       if (quickSessionChange !== undefined) {
         if (quickSessionChange) {
           changes.push(quickSessionChange);
@@ -401,14 +403,14 @@ export async function poll(since?: string): Promise<ApiResponse> {
           changes.push({ channel: scope, kind: "card_thread", entries });
         }
       } else if (fp.startsWith("channels/") && fp.endsWith(".thread")) {
-        if (!(await exists(`${s.repoDir}/${fp}`))) continue;
+        if (!(await exists(`${snapshot.repoDir}/${fp}`))) continue;
         const channelName = fp
           .replace("channels/", "")
           .replace(".thread", "");
         const entries = await readChannelEntries(channelName);
         changes.push({ channel: channelName, kind: "new_messages", entries });
       } else if (fp.startsWith("dm/") && fp.endsWith(".thread")) {
-        if (!(await exists(`${s.repoDir}/${fp}`))) continue;
+        if (!(await exists(`${snapshot.repoDir}/${fp}`))) continue;
         const dmName = dmApiNameFromThreadPath(fp);
         if (!dmName) continue;
         const entries = await readChannelEntries(dmName);
@@ -422,7 +424,7 @@ export async function poll(since?: string): Promise<ApiResponse> {
           continue;
         }
         if (target.kind !== "dm") continue;
-        if (!target.members.includes(s.me.handler)) continue;
+        if (!target.members.includes(snapshot.me.handler)) continue;
         changes.push({
           channel: `dm:${target.members[0]},${target.members[1]}`,
           kind: "dm_archived",
@@ -462,6 +464,7 @@ export async function poll(since?: string): Promise<ApiResponse> {
     }
 
     return ok({ commit_id: currentHead, changes });
+    });
   } catch (e) {
     if (isAuthFailure(e)) {
       setState({ token: null, syncStatus: "reconnect_required" });

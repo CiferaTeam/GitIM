@@ -35,6 +35,7 @@ export const renumberBatch: (a: number, b: number, c: bigint) => [number, number
 export const mergeChannelMeta: (a: number, b: number, c: number, d: number) => [number, number, number];
 export const buildRebaseCommitMsg: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const resolveContentPure: (a: number, b: number, c: number, d: number) => [number, number, number];
+export const mergeQuickSessionMeta: (a: any, b: any, c: number, d: number, e: any, f: number, g: number) => [number, number, number];
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_exn_store: (a: number) => void;

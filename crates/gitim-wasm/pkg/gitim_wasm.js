@@ -232,6 +232,26 @@ export function mergeChannelMeta(local_yaml, remote_yaml) {
 }
 
 /**
+ * @param {any} local
+ * @param {any} remote
+ * @param {string} merged_thread
+ * @param {any} mappings
+ * @param {string} thread_path
+ * @returns {any}
+ */
+export function mergeQuickSessionMeta(local, remote, merged_thread, mappings, thread_path) {
+    const ptr0 = passStringToWasm0(merged_thread, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(thread_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.mergeQuickSessionMeta(local, remote, ptr0, len0, mappings, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * @param {string} markdown
  * @returns {any}
  */
