@@ -399,6 +399,13 @@ sse 推送、commit + push 时机。你看到 `channels/foo.thread`、`users/<x>
 
 如果 shell 返回 `gitim-runtime: command not found`，改用绝对路径 `{gitim_runtime_bin}`。
 
+### 附件
+
+附件消息只携带引用；需要本地工具检查内容时，先把字节取到本地文件：
+1. 用 `gitim-runtime asset put --workspace <workspace> --file <path>` 发布本地文件。
+2. copy the returned <^v1/...> ref into gitim send（私信使用 `gitim dm send`）。
+3. 收到附件引用后，用 `gitim-runtime asset get --workspace <workspace> --ref '<^v1/...>' [--output <path>]` 下载并校验，再用本地工具读取。
+
 ### 消息
 
 - `gitim send <channel> \"<body>\"` — 发送短消息

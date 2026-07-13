@@ -438,6 +438,7 @@ export function CardDetail() {
 
       {!archived && (
         <InputArea
+          workspaceSlug={activeSlug}
           workspaceKey={workspaceKey}
           scopeKey={scopeKey}
           replyTo={replyTo}

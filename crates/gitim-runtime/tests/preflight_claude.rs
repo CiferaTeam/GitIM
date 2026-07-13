@@ -100,6 +100,7 @@ async fn claude_with_config_env_override_reaches_subprocess() {
     let overrides = PreflightOverrides {
         env_override: Some(env),
         model_override: None,
+        effort_override: None,
     };
     let result =
         preflight_claude_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
@@ -122,6 +123,7 @@ async fn claude_with_config_model_override_argv() {
     let overrides = PreflightOverrides {
         env_override: None,
         model_override: Some("test-model-xyz".to_string()),
+        effort_override: None,
     };
     let result =
         preflight_claude_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)

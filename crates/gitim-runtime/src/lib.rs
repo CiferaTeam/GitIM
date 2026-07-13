@@ -5,6 +5,7 @@ pub(crate) mod preconditions;
 
 pub mod agent;
 pub mod agent_loop;
+pub mod assets;
 pub mod background;
 pub mod cli;
 pub mod context_window;

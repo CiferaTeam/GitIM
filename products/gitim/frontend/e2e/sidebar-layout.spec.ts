@@ -202,10 +202,10 @@ test("chat sidebar keeps channels visible when many agents are active", async ({
     sidebarBox!.y + sidebarBox!.height,
   );
   await expect(page.getByRole("button", { name: "general", exact: true })).toBeVisible();
-  await expect(sidebar.getByRole("button", { name: "agent-01", exact: true })).toBeVisible();
-  await expect(sidebar.getByRole("button", { name: "alice", exact: true })).toBeVisible();
-  await expect(sidebar.getByRole("button", { name: "agent-30", exact: true })).toHaveCount(0);
-  await expect(sidebar.getByRole("button", { name: "agent-04 ↔ agent-30", exact: true })).toHaveCount(0);
+  await expect(sidebar.getByRole("button", { name: "@agent-01", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "@alice", exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("button", { name: "@agent-30", exact: true })).toHaveCount(0);
+  await expect(sidebar.getByRole("button", { name: "@agent-04 ↔ @agent-30", exact: true })).toHaveCount(0);
 
   await page.getByRole("button", { name: "Show all agents" }).click();
   await expect(page.getByTestId("agent-full-row")).toHaveCount(24);
@@ -254,8 +254,8 @@ test("chat sidebar pins channels and direct messages per workspace", async ({ pa
     "ops",
   ]);
   await expect(page.getByTestId("sidebar-dm-item")).toHaveText([
-    "agent-01",
-    "alice",
+    "@agent-01",
+    "@alice",
   ]);
 
   await page
@@ -275,8 +275,8 @@ test("chat sidebar pins channels and direct messages per workspace", async ({ pa
     "general",
   ]);
   await expect(page.getByTestId("sidebar-dm-item")).toHaveText([
-    "alice",
-    "agent-01",
+    "@alice",
+    "@agent-01",
   ]);
 
   await expect
@@ -285,7 +285,7 @@ test("chat sidebar pins channels and direct messages per workspace", async ({ pa
         localStorage.getItem("gitim-pinned-conversations:runtime:layout"),
       ),
     )
-    .toBe(JSON.stringify({ channels: ["ops"], dms: ["alice--lewis"] }));
+    .toBe(JSON.stringify({ channels: ["ops"], dms: ["alice--lewis"], projects: [] }));
 
   await page.reload();
 
@@ -294,7 +294,7 @@ test("chat sidebar pins channels and direct messages per workspace", async ({ pa
     "general",
   ]);
   await expect(page.getByTestId("sidebar-dm-item")).toHaveText([
-    "alice",
-    "agent-01",
+    "@alice",
+    "@agent-01",
   ]);
 });

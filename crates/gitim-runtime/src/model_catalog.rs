@@ -17,6 +17,21 @@ const CATALOG_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct ModelOption {
     pub id: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_efforts: Vec<String>,
+}
+
+impl ModelOption {
+    fn plain(id: String, label: String) -> Self {
+        Self {
+            id,
+            label,
+            default_effort: None,
+            supported_efforts: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -334,9 +349,29 @@ pub fn parse_codex_debug_models(stdout: &str) -> Result<Vec<ModelOption>, String
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(slug);
+        let default_effort = model
+            .get("default_reasoning_level")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let mut seen_efforts = HashSet::new();
+        let supported_efforts = model
+            .get("supported_reasoning_levels")
+            .and_then(|value| value.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|level| level.get("effort").and_then(|value| value.as_str()))
+            .map(str::trim)
+            .filter(|effort| !effort.is_empty())
+            .filter(|effort| seen_efforts.insert((*effort).to_string()))
+            .map(str::to_string)
+            .collect();
         out.push(ModelOption {
             id: slug.to_string(),
             label: label.to_string(),
+            default_effort,
+            supported_efforts,
         });
     }
 
@@ -351,10 +386,7 @@ pub fn parse_opencode_models(stdout: &str) -> Vec<ModelOption> {
         if id.is_empty() || !id.contains('/') || !seen.insert(id.to_string()) {
             continue;
         }
-        out.push(ModelOption {
-            id: id.to_string(),
-            label: id.to_string(),
-        });
+        out.push(ModelOption::plain(id.to_string(), id.to_string()));
     }
     out
 }
@@ -385,10 +417,7 @@ pub fn parse_pi_models(stdout: &str) -> Vec<ModelOption> {
             continue;
         }
 
-        out.push(ModelOption {
-            label: id.clone(),
-            id,
-        });
+        out.push(ModelOption::plain(id.clone(), id));
     }
 
     out
@@ -417,10 +446,7 @@ pub fn parse_cursor_models(stdout: &str) -> Vec<ModelOption> {
             continue;
         }
 
-        out.push(ModelOption {
-            id: id.to_string(),
-            label: label.to_string(),
-        });
+        out.push(ModelOption::plain(id.to_string(), label.to_string()));
     }
 
     out
@@ -457,10 +483,7 @@ pub fn parse_kimi_session_models(result: &Value) -> Vec<ModelOption> {
         } else {
             name.to_string()
         };
-        out.push(ModelOption {
-            id: id.to_string(),
-            label,
-        });
+        out.push(ModelOption::plain(id.to_string(), label));
     }
     out
 }

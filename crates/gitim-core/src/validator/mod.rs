@@ -1,3 +1,4 @@
+use crate::types::channel::{ChannelName, ChannelNameError};
 use crate::types::config::Config;
 use crate::types::meta::{ChannelMeta, UserMeta};
 use crate::types::ProjectMeta;
@@ -94,30 +95,22 @@ pub fn validate_project_meta(yaml: &str) -> Result<ProjectMeta, ValidationError>
 }
 
 pub fn validate_channel_name(name: &str) -> Result<(), ValidationError> {
-    if name.is_empty() || name.len() > 32 {
-        return Err(ValidationError::InvalidChannelName(
-            "must be 1-32 characters".into(),
-        ));
-    }
-    if !name
-        .chars()
-        .all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
-    {
-        return Err(ValidationError::InvalidChannelName(
-            "invalid characters".into(),
-        ));
-    }
-    if name.starts_with('-') || name.ends_with('-') {
-        return Err(ValidationError::InvalidChannelName(
-            "must not start or end with hyphen".into(),
-        ));
-    }
-    if name.contains("--") {
-        return Err(ValidationError::InvalidChannelName(
-            "must not contain consecutive hyphens".into(),
-        ));
-    }
-    Ok(())
+    ChannelName::new(name)
+        .map(|_| ())
+        .map_err(|error| match error {
+            ChannelNameError::Empty | ChannelNameError::TooLong => {
+                ValidationError::InvalidChannelName("must be 1-32 characters".into())
+            }
+            ChannelNameError::InvalidChar(_) => {
+                ValidationError::InvalidChannelName("invalid characters".into())
+            }
+            ChannelNameError::HyphenBoundary => {
+                ValidationError::InvalidChannelName("must not start or end with hyphen".into())
+            }
+            ChannelNameError::ConsecutiveHyphens => {
+                ValidationError::InvalidChannelName("must not contain consecutive hyphens".into())
+            }
+        })
 }
 
 pub fn validate_config(yaml: &str) -> Result<Config, ValidationError> {

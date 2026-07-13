@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
-use tokio::sync::broadcast;
+use std::sync::{Arc, Mutex, Weak};
+use tokio::sync::{broadcast, watch};
 
 use crate::git_config::WorkspaceConfig;
 use crate::http::{AgentActivityEvent, AgentInfo};
@@ -19,6 +19,9 @@ pub struct WorkspaceContext {
     /// one broken PAT doesn't mute sync for other workspaces.
     pub auth_failed: Arc<AtomicBool>,
     pub git_config: Option<WorkspaceConfig>,
+    pub asset_token: crate::assets::AssetWorkspaceToken,
+    pub initialization: Option<Arc<WorkspaceInitialization>>,
+    pub transition: Arc<WorkspaceTransitionSlot>,
 }
 
 impl WorkspaceContext {
@@ -34,7 +37,106 @@ impl WorkspaceContext {
             activity_tx,
             auth_failed: Arc::new(AtomicBool::new(false)),
             git_config: None,
+            asset_token: crate::assets::AssetWorkspaceToken::new(),
+            initialization: None,
+            transition: Arc::new(WorkspaceTransitionSlot::new()),
         }
+    }
+}
+
+pub struct WorkspaceTransitionSlot {
+    gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl WorkspaceTransitionSlot {
+    fn new() -> Self {
+        Self {
+            gate: Arc::new(tokio::sync::Mutex::new(())),
+        }
+    }
+
+    pub async fn lock_owned(self: Arc<Self>) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.gate).lock_owned().await
+    }
+}
+
+impl Default for WorkspaceTransitionSlot {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[derive(Default)]
+pub struct WorkspaceTransitionRegistry {
+    slots: Mutex<HashMap<PathBuf, Weak<WorkspaceTransitionSlot>>>,
+}
+
+impl WorkspaceTransitionRegistry {
+    pub fn slot(&self, canonical_workspace: &Path) -> Arc<WorkspaceTransitionSlot> {
+        let mut slots = crate::preconditions::mutex_lock(&self.slots);
+        slots.retain(|_, slot| slot.strong_count() > 0);
+        if let Some(slot) = slots.get(canonical_workspace).and_then(Weak::upgrade) {
+            return slot;
+        }
+        let slot = Arc::new(WorkspaceTransitionSlot::new());
+        slots.insert(canonical_workspace.to_path_buf(), Arc::downgrade(&slot));
+        slot
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn live_entries(&self) -> usize {
+        let mut slots = crate::preconditions::mutex_lock(&self.slots);
+        slots.retain(|_, slot| slot.strong_count() > 0);
+        slots.len()
+    }
+}
+
+pub struct WorkspaceInitialization {
+    finished: watch::Sender<bool>,
+    #[cfg(feature = "test-support")]
+    wait_started: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+}
+
+impl WorkspaceInitialization {
+    pub fn new() -> Self {
+        let (finished, _) = watch::channel(false);
+        Self {
+            finished,
+            #[cfg(feature = "test-support")]
+            wait_started: std::sync::Mutex::new(None),
+        }
+    }
+
+    pub async fn wait(&self) {
+        #[cfg(feature = "test-support")]
+        let wait_started = { crate::preconditions::mutex_lock(&self.wait_started).take() };
+        #[cfg(feature = "test-support")]
+        if let Some(started) = wait_started {
+            started.wait().await;
+        }
+        let mut finished = self.finished.subscribe();
+        while !*finished.borrow_and_update() {
+            if finished.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+
+    pub fn finish(&self) {
+        self.finished.send_replace(true);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn inject_wait_started(&self, started: Arc<tokio::sync::Barrier>) {
+        *crate::preconditions::mutex_lock(&self.wait_started) = Some(started);
+    }
+}
+
+impl Default for WorkspaceInitialization {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

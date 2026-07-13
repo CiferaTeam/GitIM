@@ -97,6 +97,7 @@ async fn codex_with_config_env_override_reaches_subprocess() {
     let overrides = PreflightOverrides {
         env_override: Some(env),
         model_override: None,
+        effort_override: None,
     };
     let result =
         preflight_codex_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
@@ -119,6 +120,7 @@ async fn codex_with_config_model_override_argv() {
     let overrides = PreflightOverrides {
         env_override: None,
         model_override: Some("test-model-xyz".to_string()),
+        effort_override: None,
     };
     let result =
         preflight_codex_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
@@ -136,5 +138,28 @@ async fn codex_with_config_model_override_argv() {
     assert!(
         !err.contains("gpt-5.4-mini"),
         "default model leaked into argv despite override: {err}"
+    );
+}
+
+#[tokio::test]
+async fn codex_with_config_effort_override_argv() {
+    let script = fixture("echo-env-argv.sh");
+    assert!(script.is_file(), "fixture missing: {script:?}");
+
+    let overrides = PreflightOverrides {
+        env_override: None,
+        model_override: None,
+        effort_override: Some("ultra".to_string()),
+    };
+    let result =
+        preflight_codex_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides)
+            .await;
+
+    assert!(!result.available);
+    assert_eq!(result.error_kind, Some(ErrorKind::Other));
+    let err = result.error.expect("error should be set");
+    assert!(
+        err.contains(r#"model_reasoning_effort="ultra""#),
+        "effort override not passed via Codex config argv: {err}"
     );
 }

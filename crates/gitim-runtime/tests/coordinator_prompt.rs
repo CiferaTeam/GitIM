@@ -31,6 +31,9 @@ fn test_build_system_prompt_includes_handler() {
         prompt.contains("subagent"),
         "prompt should mention subagent delegation"
     );
+    assert!(prompt.contains("gitim-runtime asset put"));
+    assert!(prompt.contains("gitim-runtime asset get"));
+    assert!(prompt.contains("copy the returned <^v1/...> ref into gitim send"));
 }
 
 #[test]

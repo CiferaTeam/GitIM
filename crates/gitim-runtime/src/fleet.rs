@@ -16,6 +16,8 @@ const SSE_RECONNECT_INITIAL: Duration = Duration::from_secs(2);
 /// comes back the subscription recovers within a minute.
 const SSE_RECONNECT_MAX: Duration = Duration::from_secs(60);
 
+pub const LEGACY_IDENTITY_DISCOVERY_CONCURRENCY: usize = 8;
+
 /// How often the tunnel watcher probes a healthy tunnel.
 const TUNNEL_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// Initial retry delay after a tunnel watcher failure.
@@ -108,6 +110,14 @@ pub struct FleetAgentSnapshot {
     pub workspace_identity: Option<String>,
     pub workspace_id: String,
     pub agent: AgentInfo,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FleetPeerSnapshot {
+    pub node_id: String,
+    pub runtime_id: Option<String>,
+    pub base_url: String,
+    pub remote_workspace_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -219,14 +229,157 @@ pub fn remove_node(state: &SharedRuntimeState, node_id: &str) -> bool {
     s.fleet_nodes.remove(node_id).is_some()
 }
 
+fn normalized_node_id(node_id: &str) -> String {
+    node_id.trim().to_string()
+}
+
+fn normalized_base_url(base_url: &str) -> String {
+    base_url.trim().trim_end_matches('/').to_string()
+}
+
+fn canonical_runtime_id(runtime_id: Option<&str>) -> Option<uuid::Uuid> {
+    uuid::Uuid::parse_str(runtime_id?.trim()).ok()
+}
+
+fn has_runtime_id_on_other_alias<'a>(
+    entries: impl IntoIterator<Item = &'a FleetNodeEntry>,
+    node_id: &str,
+    runtime_id: uuid::Uuid,
+) -> bool {
+    let node_id = normalized_node_id(node_id);
+    entries.into_iter().any(|entry| {
+        normalized_node_id(&entry.node_id) != node_id
+            && canonical_runtime_id(entry.runtime_id.as_deref()) == Some(runtime_id)
+    })
+}
+
+fn fleet_transition_lock(state: &SharedRuntimeState) -> std::sync::Arc<std::sync::Mutex<()>> {
+    let runtime_state = preconditions::mutex_lock(state);
+    runtime_state.fleet_transition_lock.clone()
+}
+
+pub fn apply_fleet_transition<T>(
+    state: &SharedRuntimeState,
+    persist: impl FnOnce(&mut crate::user_config::UserConfig, &[FleetNodeEntry]) -> T,
+    apply_live: impl FnOnce(&SharedRuntimeState, &T),
+) -> std::io::Result<T> {
+    let transition_lock = fleet_transition_lock(state);
+    let _transition = preconditions::mutex_lock(&transition_lock);
+    let live_nodes: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .map(|runtime| runtime.entry.clone())
+            .collect()
+    };
+    let output = crate::user_config::mutate(|config| persist(config, &live_nodes))?;
+    apply_live(state, &output);
+    Ok(output)
+}
+
+pub fn persist_node_transition(
+    state: &SharedRuntimeState,
+    entry: FleetNodeEntry,
+) -> std::io::Result<bool> {
+    let persisted_entry = entry.clone();
+    apply_fleet_transition(
+        state,
+        move |config, live_nodes| {
+            if let Some(runtime_id) = canonical_runtime_id(persisted_entry.runtime_id.as_deref()) {
+                let duplicate_in_config = has_runtime_id_on_other_alias(
+                    &config.fleet_nodes,
+                    &persisted_entry.node_id,
+                    runtime_id,
+                );
+                let duplicate_live =
+                    has_runtime_id_on_other_alias(live_nodes, &persisted_entry.node_id, runtime_id);
+                if duplicate_in_config || duplicate_live {
+                    return false;
+                }
+            }
+
+            let alias = normalized_node_id(&persisted_entry.node_id);
+            if let Some(existing) = config
+                .fleet_nodes
+                .iter_mut()
+                .find(|existing| normalized_node_id(&existing.node_id) == alias)
+            {
+                *existing = persisted_entry;
+            } else {
+                config.fleet_nodes.push(persisted_entry);
+            }
+            true
+        },
+        move |state, persisted| {
+            if *persisted {
+                activate_node(state.clone(), entry);
+            }
+        },
+    )
+}
+
+pub fn remove_node_transition(state: &SharedRuntimeState, node_id: &str) -> std::io::Result<bool> {
+    let node_id = normalized_node_id(node_id);
+    let persisted_node_id = node_id.clone();
+    apply_fleet_transition(
+        state,
+        move |config, live_nodes| {
+            let before = config.fleet_nodes.len();
+            config
+                .fleet_nodes
+                .retain(|entry| normalized_node_id(&entry.node_id) != persisted_node_id);
+            let config_existed = before != config.fleet_nodes.len();
+            let live_existed = live_nodes
+                .iter()
+                .any(|entry| normalized_node_id(&entry.node_id) == persisted_node_id);
+            config_existed || live_existed
+        },
+        move |state, existed| {
+            if *existed {
+                remove_node(state, &node_id);
+            }
+        },
+    )
+}
+
 pub fn recover_from_config(state: SharedRuntimeState) {
     let cfg = crate::user_config::read();
+    let mut seen_aliases = std::collections::HashSet::new();
+    let mut seen_runtime_ids = std::collections::HashSet::new();
     for entry in cfg.fleet_nodes {
+        let entry = normalize_node(entry);
         if let Err(err) = validate_node(&entry) {
             tracing::warn!(node_id = %entry.node_id, error = %err, "skipping invalid fleet node");
             continue;
         }
-        activate_node(state.clone(), normalize_node(entry));
+        if seen_aliases.contains(&entry.node_id) {
+            tracing::warn!(node_id = %entry.node_id, "suppressing duplicate fleet node alias");
+            continue;
+        }
+        let runtime_id = canonical_runtime_id(entry.runtime_id.as_deref());
+        if runtime_id.is_some_and(|runtime_id| seen_runtime_ids.contains(&runtime_id)) {
+            tracing::warn!(node_id = %entry.node_id, "suppressing duplicate fleet runtime_id");
+            continue;
+        }
+        seen_aliases.insert(entry.node_id.clone());
+        if let Some(runtime_id) = runtime_id {
+            seen_runtime_ids.insert(runtime_id);
+        }
+        let legacy_node_id = entry.runtime_id.is_none().then(|| entry.node_id.clone());
+        activate_node(state.clone(), entry);
+        if let Some(node_id) = legacy_node_id {
+            let state = state.clone();
+            tokio::spawn(async move {
+                if let Err(error) = discover_legacy_runtime_id_once(&state, &node_id).await {
+                    tracing::warn!(
+                        node_id = %node_id,
+                        error = %error,
+                        "fleet legacy runtime identity discovery failed"
+                    );
+                }
+            });
+        }
     }
 }
 
@@ -236,6 +389,10 @@ pub fn validate_node(entry: &FleetNodeEntry) -> Result<(), String> {
     }
     if entry.workspaces.iter().any(|w| w.trim().is_empty()) {
         return Err("workspace names must not be empty".to_string());
+    }
+    if let Some(runtime_id) = &entry.runtime_id {
+        uuid::Uuid::parse_str(runtime_id)
+            .map_err(|error| format!("runtime_id must be a UUID: {error}"))?;
     }
     for mapping in &entry.workspace_mappings {
         if mapping.remote_workspace_id.trim().is_empty()
@@ -270,6 +427,18 @@ pub fn validate_node(entry: &FleetNodeEntry) -> Result<(), String> {
 
 pub fn normalize_node(mut entry: FleetNodeEntry) -> FleetNodeEntry {
     entry.node_id = entry.node_id.trim().to_string();
+    entry.runtime_id = entry.runtime_id.and_then(|value| {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(
+                uuid::Uuid::parse_str(trimmed)
+                    .map(|runtime_id| runtime_id.to_string())
+                    .unwrap_or_else(|_| trimmed.to_string()),
+            )
+        }
+    });
     entry.base_url = entry.base_url.trim().trim_end_matches('/').to_string();
     entry.node_ip = entry.node_ip.and_then(|v| {
         let trimmed = v.trim();
@@ -313,6 +482,410 @@ pub fn normalize_node(mut entry: FleetNodeEntry) -> FleetNodeEntry {
         }
     });
     entry
+}
+
+#[derive(Debug, Deserialize)]
+struct RemoteHealth {
+    service: String,
+    runtime_id: String,
+}
+
+pub async fn fetch_remote_runtime_id(base_url: &str) -> Result<String, String> {
+    const MAX_HEALTH_BYTES: usize = 64 * 1024;
+
+    let url = format!("{}/health", base_url.trim_end_matches('/'));
+    let response = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(8))
+        .build()
+        .map_err(|error| format!("failed to build fleet health client: {error}"))?
+        .get(url)
+        .send()
+        .await
+        .map_err(|error| format!("failed to fetch remote health: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("remote health returned error: {error}"))?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_HEALTH_BYTES as u64)
+    {
+        return Err("remote health response exceeds 64 KiB".to_string());
+    }
+    let mut body = Vec::with_capacity(
+        response
+            .content_length()
+            .unwrap_or_default()
+            .min(MAX_HEALTH_BYTES as u64) as usize,
+    );
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("failed to read remote health: {error}"))?;
+        if chunk.len() > MAX_HEALTH_BYTES.saturating_sub(body.len()) {
+            return Err("remote health response exceeds 64 KiB".to_string());
+        }
+        body.extend_from_slice(&chunk);
+    }
+    let health: RemoteHealth = serde_json::from_slice(&body)
+        .map_err(|error| format!("failed to parse remote health: {error}"))?;
+    if health.service != "gitim-runtime" {
+        return Err(format!(
+            "remote health service must be gitim-runtime, got {}",
+            health.service
+        ));
+    }
+    uuid::Uuid::parse_str(&health.runtime_id)
+        .map(|runtime_id| runtime_id.to_string())
+        .map_err(|error| format!("remote health runtime_id must be a UUID: {error}"))
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyIdentityNode {
+    alias: String,
+    base_url: String,
+}
+
+#[derive(Debug)]
+struct LegacyBackfillDecision {
+    winner: LegacyIdentityNode,
+    losers: Vec<LegacyIdentityNode>,
+}
+
+pub async fn discover_legacy_runtime_id_once(
+    state: &SharedRuntimeState,
+    node_id: &str,
+) -> Result<Option<String>, String> {
+    let requested_alias = normalized_node_id(node_id);
+    let snapshot = {
+        let runtime = preconditions::mutex_lock(state)
+            .fleet_nodes
+            .values()
+            .find(|runtime| normalized_node_id(&runtime.entry.node_id) == requested_alias)
+            .map(|runtime| runtime.entry.clone());
+        runtime.ok_or_else(|| format!("fleet node {node_id} not found"))?
+    };
+    if let Some(runtime_id) = snapshot.runtime_id.as_deref() {
+        return canonical_runtime_id(Some(runtime_id))
+            .map(|runtime_id| Some(runtime_id.to_string()))
+            .ok_or_else(|| format!("fleet node {node_id} has invalid runtime_id"));
+    }
+
+    let runtime_id = fetch_remote_runtime_id(&snapshot.base_url).await?;
+    let canonical_id = canonical_runtime_id(Some(&runtime_id))
+        .ok_or_else(|| "remote health returned invalid runtime_id".to_string())?;
+    let transition_lock = fleet_transition_lock(state);
+    let _transition = preconditions::mutex_lock(&transition_lock);
+
+    let (current_snapshot, live_identity_keys) = {
+        let runtime_state = preconditions::mutex_lock(state);
+        let current = runtime_state
+            .fleet_nodes
+            .values()
+            .find(|runtime| normalized_node_id(&runtime.entry.node_id) == requested_alias)
+            .map(|runtime| runtime.entry.clone());
+        let current = current.filter(|entry| {
+            normalized_base_url(&entry.base_url) == normalized_base_url(&snapshot.base_url)
+                && canonical_runtime_id(entry.runtime_id.as_deref())
+                    .is_none_or(|existing| existing == canonical_id)
+        });
+        let live_identity_keys = runtime_state
+            .fleet_nodes
+            .values()
+            .map(|runtime| LegacyIdentityNode {
+                alias: normalized_node_id(&runtime.entry.node_id),
+                base_url: normalized_base_url(&runtime.entry.base_url),
+            })
+            .collect::<Vec<_>>();
+        (current, live_identity_keys)
+    };
+    let Some(current_snapshot) = current_snapshot else {
+        return Ok(None);
+    };
+
+    let decision = crate::user_config::mutate(|config| {
+        let target_index = config.fleet_nodes.iter().position(|entry| {
+            normalized_node_id(&entry.node_id) == requested_alias
+                && normalized_base_url(&entry.base_url)
+                    == normalized_base_url(&current_snapshot.base_url)
+        })?;
+        if canonical_runtime_id(config.fleet_nodes[target_index].runtime_id.as_deref())
+            .is_some_and(|existing| existing != canonical_id)
+        {
+            return None;
+        }
+        config.fleet_nodes[target_index].runtime_id = Some(runtime_id.clone());
+
+        let matching_indices: Vec<_> = config
+            .fleet_nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let normalized = normalize_node(entry.clone());
+                let identity_key = LegacyIdentityNode {
+                    alias: normalized.node_id.clone(),
+                    base_url: normalized.base_url.clone(),
+                };
+                (canonical_runtime_id(normalized.runtime_id.as_deref()) == Some(canonical_id)
+                    && validate_node(&normalized).is_ok()
+                    && live_identity_keys.contains(&identity_key))
+                .then_some(index)
+            })
+            .collect();
+        let winner_index = *matching_indices.first()?;
+        for index in &matching_indices {
+            config.fleet_nodes[*index].runtime_id = Some(runtime_id.clone());
+        }
+        let winner = LegacyIdentityNode {
+            alias: normalized_node_id(&config.fleet_nodes[winner_index].node_id),
+            base_url: normalized_base_url(&config.fleet_nodes[winner_index].base_url),
+        };
+        let mut losers = Vec::new();
+        for index in matching_indices
+            .into_iter()
+            .filter(|index| *index != winner_index)
+        {
+            let loser = LegacyIdentityNode {
+                alias: normalized_node_id(&config.fleet_nodes[index].node_id),
+                base_url: normalized_base_url(&config.fleet_nodes[index].base_url),
+            };
+            if loser.alias != winner.alias && !losers.contains(&loser) {
+                losers.push(loser);
+            }
+        }
+        Some(LegacyBackfillDecision { winner, losers })
+    })
+    .map_err(|error| format!("failed to persist legacy fleet runtime_id: {error}"))?;
+    let Some(decision) = decision else {
+        return Ok(None);
+    };
+
+    let mut runtime_state = preconditions::mutex_lock(state);
+    let winner_key = runtime_state.fleet_nodes.iter().find_map(|(key, runtime)| {
+        (normalized_node_id(&runtime.entry.node_id) == decision.winner.alias
+            && normalized_base_url(&runtime.entry.base_url) == decision.winner.base_url
+            && canonical_runtime_id(runtime.entry.runtime_id.as_deref())
+                .is_none_or(|existing| existing == canonical_id))
+        .then(|| key.clone())
+    });
+    let Some(winner_key) = winner_key else {
+        return Ok(Some(runtime_id));
+    };
+    let Some(winner) = runtime_state.fleet_nodes.get_mut(&winner_key) else {
+        return Ok(Some(runtime_id));
+    };
+    winner.entry.runtime_id = Some(runtime_id.clone());
+
+    let loser_keys: Vec<_> = runtime_state
+        .fleet_nodes
+        .iter()
+        .filter(|(_, runtime)| {
+            decision.losers.iter().any(|loser| {
+                normalized_node_id(&runtime.entry.node_id) == loser.alias
+                    && normalized_base_url(&runtime.entry.base_url) == loser.base_url
+            })
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    let removed_aliases: std::collections::HashSet<_> = loser_keys
+        .iter()
+        .filter_map(|key| runtime_state.fleet_nodes.get(key))
+        .map(|runtime| normalized_node_id(&runtime.entry.node_id))
+        .collect();
+    for key in loser_keys {
+        runtime_state.fleet_nodes.remove(&key);
+    }
+    runtime_state
+        .fleet_status
+        .retain(|_, status| !removed_aliases.contains(&normalized_node_id(&status.node_id)));
+    Ok(Some(runtime_id))
+}
+
+pub async fn resolve_active_legacy_identities(
+    state: &SharedRuntimeState,
+    updating_node_id: &str,
+) -> Result<(), Vec<String>> {
+    let updating_node_id = normalized_node_id(updating_node_id);
+    let mut unresolved: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .filter(|runtime| {
+                runtime.entry.runtime_id.is_none()
+                    && normalized_node_id(&runtime.entry.node_id) != updating_node_id
+            })
+            .map(|runtime| normalized_node_id(&runtime.entry.node_id))
+            .collect()
+    };
+    unresolved.sort();
+    unresolved.dedup();
+
+    let results: Vec<_> = futures::stream::iter(unresolved.iter().cloned())
+        .map(|node_id| {
+            let state = state.clone();
+            async move {
+                let result = discover_legacy_runtime_id_once(&state, &node_id).await;
+                (node_id, result)
+            }
+        })
+        .buffer_unordered(LEGACY_IDENTITY_DISCOVERY_CONCURRENCY)
+        .collect()
+        .await;
+    for (node_id, result) in results {
+        if let Err(error) = result {
+            tracing::warn!(
+                node_id = %node_id,
+                error = %error,
+                "fleet identity gate could not resolve legacy node"
+            );
+        }
+    }
+
+    let mut remaining: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .filter(|runtime| {
+                runtime.entry.runtime_id.is_none()
+                    && normalized_node_id(&runtime.entry.node_id) != updating_node_id
+            })
+            .map(|runtime| normalized_node_id(&runtime.entry.node_id))
+            .collect()
+    };
+    remaining.sort();
+    remaining.dedup();
+    if remaining.is_empty() {
+        Ok(())
+    } else {
+        Err(remaining)
+    }
+}
+
+pub fn snapshot_workspace_peers(
+    state: &SharedRuntimeState,
+    local_workspace_id: &str,
+) -> Vec<FleetPeerSnapshot> {
+    let mut peers: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .flat_map(|runtime| {
+                workspace_subscriptions(&runtime.entry)
+                    .into_iter()
+                    .filter(|subscription| subscription.local_workspace_id == local_workspace_id)
+                    .map(|subscription| FleetPeerSnapshot {
+                        node_id: runtime.entry.node_id.clone(),
+                        runtime_id: runtime.entry.runtime_id.clone(),
+                        base_url: runtime.entry.base_url.clone(),
+                        remote_workspace_id: subscription.remote_workspace_id,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    peers.sort_by(|a, b| {
+        a.node_id
+            .cmp(&b.node_id)
+            .then_with(|| a.remote_workspace_id.cmp(&b.remote_workspace_id))
+            .then_with(|| a.base_url.cmp(&b.base_url))
+            .then_with(|| a.runtime_id.cmp(&b.runtime_id))
+    });
+    peers.dedup();
+    peers
+}
+
+/// Snapshot Fleet candidates eligible for an asset request in one local
+/// workspace. Asset routing requires the normalized repository identity in
+/// addition to the local slug so a stale or manually edited slug mapping
+/// cannot cross repository boundaries.
+pub fn snapshot_asset_peers(
+    state: &SharedRuntimeState,
+    local_workspace_id: &str,
+    workspace_identity: &str,
+) -> Vec<FleetPeerSnapshot> {
+    let mut peers: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .flat_map(|runtime| {
+                runtime
+                    .entry
+                    .workspace_mappings
+                    .iter()
+                    .filter(|mapping| {
+                        mapping.local_workspace_id == local_workspace_id
+                            && mapping.workspace_identity == workspace_identity
+                    })
+                    .map(|mapping| FleetPeerSnapshot {
+                        node_id: runtime.entry.node_id.clone(),
+                        runtime_id: canonical_runtime_id(runtime.entry.runtime_id.as_deref())
+                            .map(|runtime_id| runtime_id.to_string()),
+                        base_url: normalized_base_url(&runtime.entry.base_url),
+                        remote_workspace_id: mapping.remote_workspace_id.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    };
+    peers.sort_by(|a, b| {
+        a.node_id
+            .cmp(&b.node_id)
+            .then_with(|| a.remote_workspace_id.cmp(&b.remote_workspace_id))
+            .then_with(|| a.base_url.cmp(&b.base_url))
+            .then_with(|| a.runtime_id.cmp(&b.runtime_id))
+    });
+
+    peers
+}
+
+/// Best-effort identity discovery for legacy asset candidates. The candidate
+/// aliases are copied while the Runtime state lock is held, then every network
+/// and config operation runs after the guard has been released.
+pub async fn discover_asset_legacy_identities(
+    state: &SharedRuntimeState,
+    local_workspace_id: &str,
+    workspace_identity: &str,
+) {
+    let mut aliases: Vec<_> = {
+        let runtime_state = preconditions::mutex_lock(state);
+        runtime_state
+            .fleet_nodes
+            .values()
+            .filter(|runtime| {
+                runtime.entry.runtime_id.is_none()
+                    && runtime.entry.workspace_mappings.iter().any(|mapping| {
+                        mapping.local_workspace_id == local_workspace_id
+                            && mapping.workspace_identity == workspace_identity
+                    })
+            })
+            .map(|runtime| normalized_node_id(&runtime.entry.node_id))
+            .collect()
+    };
+    aliases.sort();
+    aliases.dedup();
+    let results: Vec<_> = futures::stream::iter(aliases)
+        .map(|node_id| {
+            let state = state.clone();
+            async move {
+                let result = discover_legacy_runtime_id_once(&state, &node_id).await;
+                (node_id, result)
+            }
+        })
+        .buffer_unordered(LEGACY_IDENTITY_DISCOVERY_CONCURRENCY)
+        .collect()
+        .await;
+    for (node_id, result) in results {
+        if let Err(error) = result {
+            tracing::warn!(
+                event = "asset_fleet_identity_probe_failed",
+                fleet_alias = %node_id,
+                error = %error,
+                "asset Fleet identity probe failed"
+            );
+        }
+    }
 }
 
 pub async fn resolve_workspace_mappings(
@@ -816,6 +1389,7 @@ mod tests {
     fn validate_node_rejects_incomplete_ssh_tunnel() {
         let entry = FleetNodeEntry {
             node_id: "node-a".to_string(),
+            runtime_id: None,
             base_url: "http://127.0.0.1:18068".to_string(),
             node_ip: None,
             node_name: None,
@@ -867,6 +1441,7 @@ mod tests {
     fn entry_with_tunnel(local_port: Option<u16>) -> FleetNodeEntry {
         FleetNodeEntry {
             node_id: "mac-mini".to_string(),
+            runtime_id: None,
             base_url: "http://127.0.0.1:18068".to_string(),
             node_ip: None,
             node_name: None,
@@ -908,5 +1483,10 @@ mod tests {
 
         // ssh_tunnel present but no fixed local_port → not watchable
         assert!(tunnel_launch_config(&entry_with_tunnel(None)).is_none());
+    }
+
+    #[test]
+    fn legacy_identity_discovery_concurrency_is_bounded() {
+        assert_eq!(LEGACY_IDENTITY_DISCOVERY_CONCURRENCY, 8);
     }
 }

@@ -325,3 +325,25 @@ pub fn resolve_content_pure(additions_json: &str, remote_json: &str) -> Result<J
     let result = ResolveResult { files, mappings };
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
 }
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod wasm_tests {
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    const ASSET_REF: &str = "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=asset.txt&type=text%2Fplain&size=42>";
+
+    #[wasm_bindgen_test]
+    fn extract_links_preserves_nested_asset_wire_shape() -> Result<(), String> {
+        let js_value = super::extract_links(ASSET_REF).map_err(|error| format!("{error:?}"))?;
+        let value: serde_json::Value =
+            serde_wasm_bindgen::from_value(js_value).map_err(|error| error.to_string())?;
+
+        assert_eq!(value[0]["kind"]["kind"], "asset");
+        assert_eq!(
+            value[0]["kind"]["asset"]["sha256"],
+            "8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88"
+        );
+        assert_eq!(value[0]["raw"], ASSET_REF);
+        Ok(())
+    }
+}

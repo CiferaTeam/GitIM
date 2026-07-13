@@ -101,7 +101,8 @@ enum Command {
         /// semantics; passed through verbatim.
         #[arg(long)]
         model: Option<String>,
-        /// Optional effort level (Claude only): low / medium / high / xhigh / max.
+        /// Optional reasoning effort for Claude or Codex (for example low,
+        /// medium, high, xhigh, max, or ultra). Must be supported by the model.
         #[arg(long)]
         effort: Option<String>,
         /// Inline system prompt. Mutually exclusive with --system-prompt-file.
@@ -181,8 +182,8 @@ enum Command {
         /// — the runtime rejects model changes on running agents.
         #[arg(long)]
         model: Option<String>,
-        /// Replacement effort level (Claude only): low / medium / high / xhigh /
-        /// max. Pass an empty string to clear. Stop the agent first.
+        /// Replacement reasoning effort for Claude or Codex. Pass an empty
+        /// string to use the model default. Stop the agent first.
         #[arg(long)]
         effort: Option<String>,
         /// Replacement introduction blurb.
@@ -232,6 +233,39 @@ enum Command {
     Fleet {
         #[command(subcommand)]
         command: FleetCommand,
+    },
+    /// Publish and fetch workspace attachment assets.
+    Asset {
+        #[command(subcommand)]
+        command: AssetCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AssetCommand {
+    /// Publish local files and print their canonical asset references.
+    Put {
+        /// Workspace slug. Optional when exactly one workspace is configured.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Local file to publish. Repeatable, in message order.
+        #[arg(long = "file", required = true)]
+        files: Vec<PathBuf>,
+    },
+    /// Fetch and verify an asset reference into a local file.
+    Get {
+        /// Workspace slug. Optional when exactly one workspace is configured.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Canonical `<^v1/...>` asset reference.
+        #[arg(long = "ref")]
+        asset_ref: String,
+        /// Destination path. Defaults to the reference filename in the current directory.
+        #[arg(long)]
+        output: Option<PathBuf>,
+        /// Atomically replace an existing destination.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -395,9 +429,9 @@ fn validate_args(args: &Args) -> Result<(), String> {
 /// `gitim_runtime::cli::Client` (reqwest non-blocking).
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
-        cmd_add_agent, cmd_burn_agent, cmd_fleet, cmd_list_agents, cmd_preflight, cmd_runtime_id,
-        cmd_status, cmd_update_agent, cmd_workspaces, from_cli_error, resolve_base_url,
-        tunnel as cli_tunnel, CliError, Client, ErrorResponse,
+        cmd_add_agent, cmd_asset, cmd_burn_agent, cmd_fleet, cmd_list_agents, cmd_preflight,
+        cmd_runtime_id, cmd_status, cmd_update_agent, cmd_workspaces, from_cli_error,
+        resolve_base_url, tunnel as cli_tunnel, CliError, Client, ErrorResponse,
     };
 
     tracing_subscriber::fmt()
@@ -545,6 +579,28 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 FleetTunnelCommand::Status { node_id } => cmd_fleet::tunnel_status(node_id).await,
                 FleetTunnelCommand::Down { node_id } => cmd_fleet::tunnel_down(node_id).await,
             },
+        },
+        Command::Asset { command } => match command {
+            AssetCommand::Put { workspace, files } => {
+                cmd_asset::put(&client, cmd_asset::PutArgs { workspace, files }).await
+            }
+            AssetCommand::Get {
+                workspace,
+                asset_ref,
+                output,
+                force,
+            } => {
+                cmd_asset::get(
+                    &client,
+                    cmd_asset::GetArgs {
+                        workspace,
+                        asset_ref,
+                        output,
+                        force,
+                    },
+                )
+                .await
+            }
         },
     };
 
@@ -1148,6 +1204,59 @@ mod argv_subcommand_tests {
     use clap::Parser;
     use std::path::PathBuf;
 
+    #[test]
+    fn asset_put_and_get_parse() {
+        let put = Args::try_parse_from([
+            "gitim-runtime",
+            "asset",
+            "put",
+            "--workspace",
+            "room",
+            "--file",
+            "a.png",
+            "--file",
+            "b.pdf",
+        ])
+        .expect("asset put argv");
+        match put.command {
+            Some(Command::Asset {
+                command: AssetCommand::Put { workspace, files },
+            }) => {
+                assert_eq!(workspace.as_deref(), Some("room"));
+                assert_eq!(files, vec![PathBuf::from("a.png"), PathBuf::from("b.pdf")]);
+            }
+            other => panic!("expected asset put, got {other:?}"),
+        }
+
+        let get = Args::try_parse_from([
+            "gitim-runtime",
+            "asset",
+            "get",
+            "--ref",
+            "<^v1/24a6489c-762e-4461-9247-a824807a6080/sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855?name=empty&type=application%2Foctet-stream&size=0>",
+            "--output",
+            "download.bin",
+            "--force",
+        ])
+        .expect("asset get argv");
+        match get.command {
+            Some(Command::Asset {
+                command:
+                    AssetCommand::Get {
+                        workspace,
+                        asset_ref: _,
+                        output,
+                        force,
+                    },
+            }) => {
+                assert!(workspace.is_none());
+                assert_eq!(output, Some(PathBuf::from("download.bin")));
+                assert!(force);
+            }
+            other => panic!("expected asset get, got {other:?}"),
+        }
+    }
+
     // ------------------------------------------------------------------
     // status
     // ------------------------------------------------------------------
@@ -1379,6 +1488,39 @@ mod argv_subcommand_tests {
             }) => {
                 assert!(system_prompt.is_none());
                 assert_eq!(system_prompt_file, Some(PathBuf::from("/tmp/prompt.md")));
+            }
+            other => panic!("expected AddAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn add_agent_codex_effort_parses() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "add-agent",
+            "--handler",
+            "codex-bot",
+            "--display-name",
+            "Codex Bot",
+            "--provider",
+            "codex",
+            "--model",
+            "gpt-5.6-sol",
+            "--effort",
+            "ultra",
+        ])
+        .expect("parse must succeed");
+
+        match args.command {
+            Some(Command::AddAgent {
+                provider,
+                model,
+                effort,
+                ..
+            }) => {
+                assert_eq!(provider, "codex");
+                assert_eq!(model.as_deref(), Some("gpt-5.6-sol"));
+                assert_eq!(effort.as_deref(), Some("ultra"));
             }
             other => panic!("expected AddAgent, got {other:?}"),
         }
@@ -1656,6 +1798,27 @@ mod argv_subcommand_tests {
                 assert_eq!(env, vec!["FOO=bar".to_string(), "BAZ=qux".to_string()]);
                 assert_eq!(introduction.as_deref(), Some("new blurb"));
                 assert!(!clear_session);
+            }
+            other => panic!("expected UpdateAgent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn update_agent_codex_effort_parses() {
+        let args = Args::try_parse_from([
+            "gitim-runtime",
+            "update-agent",
+            "--id",
+            "codex-bot",
+            "--effort",
+            "ultra",
+        ])
+        .expect("parse must succeed");
+
+        match args.command {
+            Some(Command::UpdateAgent { id, effort, .. }) => {
+                assert_eq!(id, "codex-bot");
+                assert_eq!(effort.as_deref(), Some("ultra"));
             }
             other => panic!("expected UpdateAgent, got {other:?}"),
         }

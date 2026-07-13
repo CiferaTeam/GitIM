@@ -15,6 +15,7 @@ croner = { workspace = true }
 getrandom = { version = "0.2", features = ["std"] }
 hex.workspace = true
 humantime = "2"
+percent-encoding = "2"
 tempfile = "3"
 tracing.workspace = true
 

@@ -72,9 +72,9 @@ export interface Agent {
   systemPrompt: string;
   model?: string;
   /**
-   * Claude-only effort level ("low" | "medium" | "high" | "xhigh" | "max").
-   * Sent to `claude --effort`. Undefined = provider default. Round-tripped
-   * from the runtime so the edit form can show the current value.
+   * Claude/Codex reasoning effort. Sent to Claude as `--effort` and to Codex
+   * as `model_reasoning_effort`. Undefined = selected model default.
+   * Round-tripped from the runtime so the edit form can show the current value.
    */
   effort?: string;
   /**

@@ -27,8 +27,8 @@
 //! semantics are preserved without starting a daemon.
 //!
 //! Tests 7 and 8 exercise genuine POST-side early-fail branches (missing
-//! field → 4xx from serde; path that can't host `repo.git` → 400 with
-//! `clone_failed`).
+//! field → 4xx from serde; unresolvable workspace path → 400 with
+//! `invalid_workspace_path`).
 //!
 //! ## HOME isolation
 //!
@@ -49,13 +49,19 @@ use serial_test::serial;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
+#[cfg(feature = "test-support")]
+use gitim_runtime::assets::AssetSource;
 use gitim_runtime::git_config::{GitConfig, GitProvider, WorkspaceConfig};
 use gitim_runtime::http::{create_router, SharedRuntimeState};
 use gitim_runtime::slug;
 use gitim_runtime::workspace::WorkspaceContext;
+#[cfg(feature = "test-support")]
+use gitim_runtime::workspace::WorkspaceInitialization;
 
 mod common;
 use common::HomeGuard;
+#[cfg(feature = "test-support")]
+use common::{ensure_daemon_in_path, short_tempdir};
 
 // -- Request helpers --------------------------------------------------------
 
@@ -98,10 +104,11 @@ fn inject_workspace(
     path: &std::path::Path,
     provider: GitProvider,
 ) {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut ctx = WorkspaceContext::new(
         slug_str.to_string(),
         workspace_name.to_string(),
-        path.to_path_buf(),
+        path.clone(),
     );
     ctx.git_config = Some(WorkspaceConfig {
         workspace: path.to_string_lossy().into_owned(),
@@ -129,10 +136,11 @@ fn inject_github_workspace_with_remote(
     path: &std::path::Path,
     remote_url: &str,
 ) {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let mut ctx = WorkspaceContext::new(
         slug_str.to_string(),
         workspace_name.to_string(),
-        path.to_path_buf(),
+        path.clone(),
     );
     ctx.git_config = Some(WorkspaceConfig {
         workspace: path.to_string_lossy().into_owned(),
@@ -381,7 +389,7 @@ async fn create_workspace_rejects_missing_path() {
     );
 }
 
-// -- 8. nonexistent/unwritable path → 400 ----------------------------------
+// -- 8. unresolvable workspace path → 400 ---------------------------------
 
 #[tokio::test]
 #[serial(http_workspaces_home)]
@@ -389,10 +397,9 @@ async fn create_workspace_rejects_nonexistent_path() {
     let _home = HomeGuard::install();
     let (router, _state) = create_router();
 
-    // `/dev/null/foo` can't host `repo.git` — `create_dir_all` in
-    // `provision_local_workspace` fails with ENOTDIR, surfacing as 400 with
-    // error_code=clone_failed. This exercises the real POST path without
-    // getting as far as the daemon spawn.
+    // Workspace identity is canonicalized before state reservation or
+    // provisioning. A path below a regular file therefore fails without
+    // creating any workspace-owned artifacts.
     let (status, body) = send(
         router,
         "POST",
@@ -459,7 +466,10 @@ async fn get_workspace_happy_path() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["slug"], "backend");
     assert_eq!(body["workspace_name"], "backend");
-    assert_eq!(body["path"], ws_path.to_string_lossy().as_ref());
+    assert_eq!(
+        body["path"],
+        ws_path.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
     assert_eq!(body["provider"], "local");
     assert_eq!(body["agents_count"], 0);
     // `initialized` is false because we injected without `human_repo`.
@@ -856,19 +866,489 @@ async fn create_workspace_rejects_duplicate_path() {
     assert!(s.workspaces.contains_key("first-workspace"));
 }
 
-// -- 17. POST failure does not leak placeholder state ----------------------
+#[cfg(unix)]
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn create_workspace_rejects_a_leaf_symlink_alias_before_provider_side_effects() {
+    use std::os::unix::fs::symlink;
+
+    let _home = HomeGuard::install();
+    let (router, state) = create_router();
+    let parent = TempDir::new().unwrap();
+    let workspace = parent.path().join("canonical-room");
+    let alias = parent.path().join("room-alias");
+    std::fs::create_dir(&workspace).unwrap();
+    symlink(&workspace, &alias).unwrap();
+    let sentinel = workspace.join(".gitim-runtime/sentinel");
+    std::fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
+    std::fs::write(&sentinel, b"active-workspace").unwrap();
+    inject_workspace(
+        &state,
+        "canonical-room",
+        "Canonical Room",
+        &workspace,
+        GitProvider::Local,
+    );
+    let token = state.lock().unwrap().workspaces["canonical-room"]
+        .asset_token
+        .clone();
+
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": alias,
+            "slug": "alias-room",
+            "git": { "provider": "github" },
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error_code"], "workspace_path_exists");
+    assert_eq!(body["existing_slug"], "canonical-room");
+    let runtime = state.lock().unwrap();
+    assert_eq!(runtime.workspaces.len(), 1);
+    assert_eq!(runtime.workspaces["canonical-room"].asset_token, token);
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"active-workspace");
+}
+
+#[cfg(all(unix, feature = "test-support"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn all_workspace_alias_forms_leave_an_active_workspace_byte_for_byte_unchanged() {
+    use std::os::unix::fs::symlink;
+
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let root = short_tempdir();
+    let real_parent = root.path().join("real-parent");
+    let workspace = real_parent.join("room");
+    let nested = real_parent.join("nested");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir(&nested).unwrap();
+    let leaf_alias = root.path().join("room-link");
+    let parent_alias = root.path().join("parent-link");
+    symlink(&workspace, &leaf_alias).unwrap();
+    symlink(&real_parent, &parent_alias).unwrap();
+    let lexical_alias = nested.join("..").join("room");
+    let canonical_workspace = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+
+    let (status, _) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical_workspace,
+            "slug": "room",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (assets, token, binding) = {
+        let runtime = state.lock().unwrap();
+        let context = &runtime.workspaces["room"];
+        let config = context.git_config.as_ref().unwrap();
+        (
+            std::sync::Arc::clone(&runtime.assets),
+            context.asset_token.clone(),
+            format!("local:{}", config.created_at),
+        )
+    };
+    let store = assets
+        .open_registered_store(&canonical_workspace, &binding, &token)
+        .unwrap();
+    let stored = store
+        .put_bytes(b"alias-safety-object", AssetSource::LocalUpload)
+        .unwrap();
+    let object_path = canonical_workspace
+        .join(".gitim-runtime/assets/v1/objects/sha256")
+        .join(&stored.sha256[..2])
+        .join(&stored.sha256);
+    let runtime_json =
+        std::path::PathBuf::from(std::env::var("HOME").unwrap()).join(".gitim/runtime.json");
+    let workspace_config = canonical_workspace.join(".gitim-runtime/config.json");
+    let manifest = canonical_workspace.join(".gitim-runtime/assets/v1/store.json");
+    let pid_file = canonical_workspace.join(".gitim-runtime/human/.gitim/run/gitim.pid");
+    let pid = std::fs::read_to_string(&pid_file)
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+    let baseline_runtime_json = std::fs::read(&runtime_json).unwrap();
+    let baseline_workspace_config = std::fs::read(&workspace_config).unwrap();
+    let baseline_manifest = std::fs::read(&manifest).unwrap();
+    let baseline_object = std::fs::read(&object_path).unwrap();
+    let baseline_usage = store.usage().unwrap();
+    let baseline_health = assets.health_snapshot(&canonical_workspace).unwrap();
+    let orphaned = canonical_workspace.join(".gitim-runtime/orphaned-assets");
+    let baseline_quarantine = std::fs::read_dir(&orphaned)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+
+    let aliases = [
+        (leaf_alias, "leaf-alias", json!({ "provider": "local" })),
+        (
+            parent_alias.join("room"),
+            "parent-alias",
+            json!({
+                "provider": "github",
+                "remote_url": "https://github.com/example/never-contact",
+                "token": "must-not-be-used"
+            }),
+        ),
+        (
+            lexical_alias,
+            "lexical-alias",
+            json!({ "provider": "local" }),
+        ),
+    ];
+    for (alias, slug, git) in aliases {
+        let (status, body) = send(
+            router.clone(),
+            "POST",
+            "/workspaces",
+            Some(json!({ "path": alias, "slug": slug, "git": git })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{slug}");
+        assert_eq!(body["error_code"], "workspace_path_exists", "{slug}");
+        assert_eq!(body["existing_slug"], "room", "{slug}");
+        assert!(std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(std::fs::read(&runtime_json).unwrap(), baseline_runtime_json);
+        assert_eq!(
+            std::fs::read(&workspace_config).unwrap(),
+            baseline_workspace_config
+        );
+        assert_eq!(std::fs::read(&manifest).unwrap(), baseline_manifest);
+        assert_eq!(std::fs::read(&object_path).unwrap(), baseline_object);
+        assert_eq!(store.usage().unwrap(), baseline_usage);
+        assert_eq!(
+            assets.health_snapshot(&canonical_workspace).unwrap(),
+            baseline_health
+        );
+        assert_eq!(
+            std::fs::read_dir(&orphaned)
+                .map(|entries| entries.count())
+                .unwrap_or(0),
+            baseline_quarantine
+        );
+        let runtime = state.lock().unwrap();
+        assert_eq!(runtime.workspaces.len(), 1);
+        assert_eq!(runtime.workspaces["room"].asset_token, token);
+        assert_eq!(assets.lifecycle_registry_entries(), (1, 1));
+    }
+
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/room", None).await.0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn deleted_local_workspace_assets_survive_failed_and_successful_reregistration() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("asset-reregister");
+    std::fs::create_dir(&workspace).unwrap();
+    let canonical = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+
+    let (status, body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "asset-reregister",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (assets, token, original_created_at) = {
+        let runtime = state.lock().unwrap();
+        let context = &runtime.workspaces["asset-reregister"];
+        (
+            std::sync::Arc::clone(&runtime.assets),
+            context.asset_token.clone(),
+            context.git_config.as_ref().unwrap().created_at.clone(),
+        )
+    };
+    let store = assets
+        .open_registered_store(&canonical, &format!("local:{original_created_at}"), &token)
+        .unwrap();
+    let stored = store
+        .put_bytes(b"preserved-attachment", AssetSource::LocalUpload)
+        .unwrap();
+    let object_path = store.object_path(&stored.sha256).unwrap();
+    let metadata_path = store.metadata_path(&stored.sha256).unwrap();
+
+    assert_eq!(
+        send(
+            router.clone(),
+            "DELETE",
+            "/workspaces/asset-reregister",
+            None,
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (failed_status, failed_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "asset-reregister",
+            "git": {
+                "provider": "github",
+                "remote_url": "https://github.com/acme/room"
+            },
+        })),
+    )
+    .await;
+    assert_eq!(failed_status, StatusCode::BAD_REQUEST);
+    assert_eq!(failed_body["error_code"], "missing_token");
+    assert!(object_path.exists());
+    assert!(metadata_path.exists());
+    assert_eq!(
+        WorkspaceConfig::read(&canonical).unwrap().created_at,
+        original_created_at
+    );
+
+    let (recreated_status, recreated_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "asset-reregister",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(recreated_status, StatusCode::CREATED, "{recreated_body}");
+    let (new_token, new_created_at) = {
+        let runtime = state.lock().unwrap();
+        let context = &runtime.workspaces["asset-reregister"];
+        (
+            context.asset_token.clone(),
+            context.git_config.as_ref().unwrap().created_at.clone(),
+        )
+    };
+    assert_eq!(new_created_at, original_created_at);
+    let reopened = assets
+        .open_registered_store(&canonical, &format!("local:{new_created_at}"), &new_token)
+        .unwrap();
+    assert_eq!(
+        reopened.read(&stored.sha256).unwrap(),
+        b"preserved-attachment"
+    );
+    assert!(!canonical.join(".gitim-runtime/orphaned-assets").exists());
+
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/asset-reregister", None,)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn failed_reregistration_restores_valid_config_without_existing_assets() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("config-reregister");
+    std::fs::create_dir(&workspace).unwrap();
+    let canonical = workspace.canonicalize().unwrap();
+    let (router, _state) = create_router();
+
+    let (status, body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "config-reregister",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let original_created_at = WorkspaceConfig::read(&canonical).unwrap().created_at;
+    assert_eq!(
+        send(
+            router.clone(),
+            "DELETE",
+            "/workspaces/config-reregister",
+            None,
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    std::fs::remove_dir_all(canonical.join(".gitim-runtime/assets")).unwrap();
+    assert!(!canonical.join(".gitim-runtime/assets/v1").exists());
+
+    let (failed_status, failed_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "config-reregister",
+            "git": {
+                "provider": "github",
+                "remote_url": "https://github.com/acme/room"
+            },
+        })),
+    )
+    .await;
+    assert_eq!(failed_status, StatusCode::BAD_REQUEST);
+    assert_eq!(failed_body["error_code"], "missing_token");
+    assert_eq!(
+        WorkspaceConfig::read(&canonical).unwrap().created_at,
+        original_created_at
+    );
+    assert!(!canonical.join(".gitim-runtime/assets/v1").exists());
+
+    let (recreated_status, recreated_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "config-reregister",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(recreated_status, StatusCode::CREATED, "{recreated_body}");
+    assert_eq!(
+        WorkspaceConfig::read(&canonical).unwrap().created_at,
+        original_created_at
+    );
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/config-reregister", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(all(unix, feature = "test-support"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn concurrent_canonical_and_alias_creates_have_one_side_effecting_winner() {
+    use std::os::unix::fs::symlink;
+
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let root = short_tempdir();
+    let workspace = root.path().join("room");
+    let alias = root.path().join("room-link");
+    std::fs::create_dir(&workspace).unwrap();
+    symlink(&workspace, &alias).unwrap();
+    let canonical_workspace = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+    let reservation_barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
+    state.lock().unwrap().workspace_create_reservation_barrier =
+        Some(std::sync::Arc::clone(&reservation_barrier));
+
+    let canonical_create = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical_workspace,
+            "slug": "canonical-room",
+            "git": { "provider": "local" },
+        })),
+    ));
+    let alias_create = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": alias,
+            "slug": "alias-room",
+            "git": { "provider": "local" },
+        })),
+    ));
+    reservation_barrier.wait().await;
+    let first = canonical_create.await.unwrap();
+    let second = alias_create.await.unwrap();
+    let mut results = [first, second];
+    results.sort_by_key(|(status, _)| status.as_u16());
+    assert_eq!(results[0].0, StatusCode::CREATED);
+    assert_eq!(results[1].0, StatusCode::CONFLICT);
+    assert_eq!(results[1].1["error_code"], "workspace_path_exists");
+    let winner = results[0].1["slug"].as_str().unwrap().to_string();
+
+    let (assets, pid) = {
+        let runtime = state.lock().unwrap();
+        assert_eq!(runtime.workspaces.len(), 1);
+        let context = &runtime.workspaces[&winner];
+        assert_eq!(context.path, workspace.canonicalize().unwrap());
+        let pid = std::fs::read_to_string(
+            context
+                .path
+                .join(".gitim-runtime/human/.gitim/run/gitim.pid"),
+        )
+        .unwrap()
+        .trim()
+        .parse::<u32>()
+        .unwrap();
+        (std::sync::Arc::clone(&runtime.assets), pid)
+    };
+    assert!(std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(gitim_runtime::user_config::read().workspaces.len(), 1);
+    assert_eq!(assets.lifecycle_registry_entries(), (1, 1));
+    assert_eq!(
+        std::fs::read_dir(workspace.join(".gitim-runtime/orphaned-assets"))
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        send(router, "DELETE", &format!("/workspaces/{winner}"), None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+// -- 17. invalid POST path does not reserve placeholder state --------------
 
 #[tokio::test]
 #[serial(http_workspaces_home)]
-async fn create_workspace_failure_cleans_up_placeholder() {
+async fn invalid_workspace_path_never_reserves_placeholder() {
     let _home = HomeGuard::install();
     let (router, state) = create_router();
 
-    // `/dev/null/...` can't host `repo.git` — `create_dir_all` in
-    // `provision_local_workspace` fails with ENOTDIR, the handler takes the
-    // rollback path and removes the placeholder. Without rollback, this would
-    // leave a half-initialized `WorkspaceContext` in state visible to later
-    // requests.
+    // Canonical path validation precedes placeholder reservation, so this
+    // request cannot leave a half-initialized `WorkspaceContext` visible to
+    // later requests.
     let (status, _body) = send(
         router,
         "POST",
@@ -887,6 +1367,882 @@ async fn create_workspace_failure_cleans_up_placeholder() {
         "failed create left placeholder in state: {:?}",
         s.workspaces.keys().collect::<Vec<_>>()
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn recovery_canonicalizes_aliases_deduplicates_paths_and_preserves_other_workspaces() {
+    use std::os::unix::fs::symlink;
+
+    let _home = HomeGuard::install();
+    let root = TempDir::new().unwrap();
+    let room = root.path().join("room");
+    let room_alias = root.path().join("room-alias");
+    let other = root.path().join("other");
+    std::fs::create_dir(&room).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    symlink(&room, &room_alias).unwrap();
+    let room_canonical = room.canonicalize().unwrap();
+    let other_canonical = other.canonicalize().unwrap();
+    WorkspaceConfig {
+        workspace: room_alias.to_string_lossy().into_owned(),
+        created_at: "2026-07-12T00:00:00Z".to_string(),
+        git: GitConfig {
+            provider: GitProvider::Local,
+            remote_url: None,
+            token: None,
+            github_email: None,
+        },
+    }
+    .write(&room)
+    .unwrap();
+    WorkspaceConfig {
+        workspace: other.to_string_lossy().into_owned(),
+        created_at: "2026-07-12T00:00:01Z".to_string(),
+        git: GitConfig {
+            provider: GitProvider::Local,
+            remote_url: None,
+            token: None,
+            github_email: None,
+        },
+    }
+    .write(&other)
+    .unwrap();
+    gitim_runtime::user_config::write(&gitim_runtime::user_config::UserConfig {
+        runtime_id: "24a6489c-762e-4461-9247-a824807a6080".to_string(),
+        workspaces: vec![
+            gitim_runtime::user_config::WorkspaceEntry {
+                slug: "room".to_string(),
+                workspace_name: "Room".to_string(),
+                path: room_alias.to_string_lossy().into_owned(),
+            },
+            gitim_runtime::user_config::WorkspaceEntry {
+                slug: "room-duplicate".to_string(),
+                workspace_name: "Duplicate".to_string(),
+                path: room.to_string_lossy().into_owned(),
+            },
+            gitim_runtime::user_config::WorkspaceEntry {
+                slug: "other".to_string(),
+                workspace_name: "Other".to_string(),
+                path: other.to_string_lossy().into_owned(),
+            },
+        ],
+        listen_port: Some(17777),
+        fleet_nodes: Vec::new(),
+    })
+    .unwrap();
+    let (_router, state) = create_router();
+
+    gitim_runtime::http::recover_from_config(std::sync::Arc::clone(&state)).await;
+
+    let runtime = state.lock().unwrap();
+    assert_eq!(runtime.workspaces.len(), 2);
+    assert_eq!(runtime.workspaces["room"].path, room_canonical);
+    assert_eq!(runtime.workspaces["other"].path, other_canonical);
+    assert!(!runtime.workspaces.contains_key("room-duplicate"));
+    drop(runtime);
+    let persisted = gitim_runtime::user_config::read();
+    assert_eq!(persisted.runtime_id, "24a6489c-762e-4461-9247-a824807a6080");
+    assert_eq!(persisted.listen_port, Some(17777));
+    assert_eq!(persisted.workspaces.len(), 2);
+    assert_eq!(
+        persisted
+            .workspaces
+            .iter()
+            .find(|entry| entry.slug == "room")
+            .unwrap()
+            .path,
+        room_canonical.to_string_lossy()
+    );
+    assert_eq!(
+        WorkspaceConfig::read(&room).unwrap().workspace,
+        room_canonical.to_string_lossy()
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn cancelled_create_request_finishes_owned_asset_activation_and_durable_state() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("cancel-safe-create");
+    std::fs::create_dir(&workspace).unwrap();
+    let (router, state) = create_router();
+    let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    state.lock().unwrap().assets.inject_after_activation_pause(
+        std::sync::Arc::clone(&reached),
+        std::sync::Arc::clone(&resume),
+    );
+
+    let request = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": workspace,
+            "slug": "cancel-safe-create",
+            "git": { "provider": "local" },
+        })),
+    ));
+    reached.wait().await;
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    assert!(state.lock().unwrap().workspaces["cancel-safe-create"]
+        .initialization
+        .is_some());
+
+    resume.wait().await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let finished = state
+                .lock()
+                .unwrap()
+                .workspaces
+                .get("cancel-safe-create")
+                .is_some_and(|workspace| workspace.initialization.is_none());
+            if finished {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let (path, token, assets) = {
+        let runtime = state.lock().unwrap();
+        let context = &runtime.workspaces["cancel-safe-create"];
+        (
+            context.path.clone(),
+            context.asset_token.clone(),
+            std::sync::Arc::clone(&runtime.assets),
+        )
+    };
+    let config = WorkspaceConfig::read(&path).unwrap();
+    let binding = format!("local:{}", config.created_at);
+    assets
+        .open_registered_store(&path, &binding, &token)
+        .expect("cancelled request left active registered store");
+    assert!(gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .any(|entry| entry.slug == "cancel-safe-create"));
+
+    let (status, _) = send(router, "DELETE", "/workspaces/cancel-safe-create", None).await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn delete_waits_for_owned_workspace_finalization_before_deactivating_exact_token() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("delete-during-create");
+    std::fs::create_dir(&workspace).unwrap();
+    let (router, state) = create_router();
+    let reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    state.lock().unwrap().assets.inject_after_activation_pause(
+        std::sync::Arc::clone(&reached),
+        std::sync::Arc::clone(&resume),
+    );
+    let create = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": workspace,
+            "slug": "delete-during-create",
+            "git": { "provider": "local" },
+        })),
+    ));
+    reached.wait().await;
+
+    let mut delete = tokio::spawn(send(
+        router,
+        "DELETE",
+        "/workspaces/delete-during-create",
+        None,
+    ));
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut delete)
+            .await
+            .is_err(),
+        "delete returned while workspace finalization was paused"
+    );
+    resume.wait().await;
+
+    assert_eq!(create.await.unwrap().0, StatusCode::CREATED);
+    assert_eq!(delete.await.unwrap().0, StatusCode::OK);
+    assert!(state.lock().unwrap().workspaces.is_empty());
+    assert!(gitim_runtime::user_config::read().workspaces.is_empty());
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn cancelled_delete_keeps_the_workspace_registered_for_retry() {
+    let _home = HomeGuard::install();
+    let workspace = short_tempdir();
+    let canonical = workspace.path().canonicalize().unwrap();
+    let (router, state) = create_router();
+    inject_workspace(
+        &state,
+        "cancel-delete",
+        "Cancel Delete",
+        &canonical,
+        GitProvider::Local,
+    );
+    let (assets, token) = {
+        let runtime = state.lock().unwrap();
+        (
+            std::sync::Arc::clone(&runtime.assets),
+            runtime.workspaces["cancel-delete"].asset_token.clone(),
+        )
+    };
+    let store = assets
+        .activate_workspace(&canonical, "local:2026-04-18T00:00:00Z", &token)
+        .unwrap();
+    let staged = store
+        .stage_bytes("pending.bin", b"pending-delete")
+        .await
+        .unwrap();
+    let transition_reached = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let transition_resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+    store.inject_persistence_transition_pause(
+        std::sync::Arc::clone(&transition_reached),
+        std::sync::Arc::clone(&transition_resume),
+    );
+    let request = tokio::spawn(send(
+        router.clone(),
+        "DELETE",
+        "/workspaces/cancel-delete",
+        None,
+    ));
+    tokio::task::spawn_blocking(move || transition_reached.wait())
+        .await
+        .unwrap();
+    request.abort();
+    tokio::task::spawn_blocking(move || transition_resume.wait())
+        .await
+        .unwrap();
+    assert!(request.await.unwrap_err().is_cancelled());
+
+    assert_eq!(
+        state.lock().unwrap().workspaces["cancel-delete"].asset_token,
+        token
+    );
+    assets
+        .open_registered_store(&canonical, "local:2026-04-18T00:00:00Z", &token)
+        .unwrap();
+    drop(staged);
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/cancel-delete", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn delete_waiting_for_old_initialization_does_not_remove_recreated_workspace() {
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let old_path = parent.path().join("old-workspace");
+    let new_path = parent.path().join("new-workspace");
+    std::fs::create_dir(&old_path).unwrap();
+    std::fs::create_dir(&new_path).unwrap();
+    let (router, state) = create_router();
+
+    let initialization = std::sync::Arc::new(WorkspaceInitialization::new());
+    let wait_started = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    initialization.inject_wait_started(std::sync::Arc::clone(&wait_started));
+    let mut old = WorkspaceContext::new("replace-race".to_string(), "Old".to_string(), old_path);
+    old.initialization = Some(std::sync::Arc::clone(&initialization));
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .insert("replace-race".to_string(), old);
+
+    let delete = tokio::spawn(send(router, "DELETE", "/workspaces/replace-race", None));
+    wait_started.wait().await;
+
+    let new_token = {
+        let mut runtime = state.lock().unwrap();
+        runtime.workspaces.remove("replace-race").unwrap();
+        let recreated = WorkspaceContext::new(
+            "replace-race".to_string(),
+            "New".to_string(),
+            new_path.clone(),
+        );
+        let token = recreated.asset_token.clone();
+        runtime
+            .workspaces
+            .insert("replace-race".to_string(), recreated);
+        token
+    };
+    initialization.finish();
+
+    assert_eq!(delete.await.unwrap().0, StatusCode::OK);
+    let runtime = state.lock().unwrap();
+    let recreated = &runtime.workspaces["replace-race"];
+    assert_eq!(recreated.asset_token, new_token);
+    assert_eq!(recreated.path, new_path);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn cancelled_create_rolls_back_when_owned_finalizer_panics_after_config_write() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("panic-safe-create");
+    std::fs::create_dir(&workspace).unwrap();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+    let activation_reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let activation_resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    assets.inject_after_activation_pause(
+        std::sync::Arc::clone(&activation_reached),
+        std::sync::Arc::clone(&activation_resume),
+    );
+    assets.set_after_config_write_hook(std::sync::Arc::new(|| {
+        panic!("injected owned workspace finalizer panic");
+    }));
+
+    let request = tokio::spawn(send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": workspace,
+            "slug": "panic-safe-create",
+            "git": { "provider": "local" },
+        })),
+    ));
+    activation_reached.wait().await;
+    let initialization = state.lock().unwrap().workspaces["panic-safe-create"]
+        .initialization
+        .clone()
+        .unwrap();
+    request.abort();
+    assert!(request.await.unwrap_err().is_cancelled());
+    activation_resume.wait().await;
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), initialization.wait())
+        .await
+        .expect("owned workspace finalizer did not settle after panic");
+    assert!(!state
+        .lock()
+        .unwrap()
+        .workspaces
+        .contains_key("panic-safe-create"));
+    assert!(gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .all(|entry| entry.slug != "panic-safe-create"));
+    assert!(!workspace.join(".gitim-runtime").exists());
+    assert!(assets.health_snapshot(&workspace).is_none());
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn owned_workspace_finalizer_panic_returns_500_after_complete_rollback() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("panic-status-create");
+    std::fs::create_dir(&workspace).unwrap();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+    assets.set_after_config_write_hook(std::sync::Arc::new(|| {
+        panic!("injected owned workspace finalizer panic");
+    }));
+
+    let (status, body) = send(
+        router,
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": workspace,
+            "slug": "panic-status-create",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(body["error_code"], "asset_store_failed");
+    assert!(!state
+        .lock()
+        .unwrap()
+        .workspaces
+        .contains_key("panic-status-create"));
+    assert!(gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .all(|entry| entry.slug != "panic-status-create"));
+    assert!(!workspace.join(".gitim-runtime").exists());
+    assert!(assets.health_snapshot(&workspace).is_none());
+    assert_eq!(
+        assets
+            .store_failures
+            .load(std::sync::atomic::Ordering::Relaxed),
+        1
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn finalizer_rollback_waits_for_asset_leases_before_atomic_cleanup() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("lease-safe-rollback");
+    std::fs::create_dir(&workspace).unwrap();
+    let canonical = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+    let activation_reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let activation_resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    assets.inject_after_activation_pause(
+        std::sync::Arc::clone(&activation_reached),
+        std::sync::Arc::clone(&activation_resume),
+    );
+    let deactivation_attempted = std::sync::Arc::new(std::sync::Barrier::new(2));
+    assets.inject_deactivate_attempt(std::sync::Arc::clone(&deactivation_attempted));
+    assets.set_after_config_write_hook(std::sync::Arc::new(|| {
+        panic!("injected lease-safe finalizer panic");
+    }));
+
+    let mut request = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "lease-safe-rollback",
+            "git": { "provider": "local" },
+        })),
+    ));
+    activation_reached.wait().await;
+    let (token, binding) = {
+        let runtime = state.lock().unwrap();
+        let context = &runtime.workspaces["lease-safe-rollback"];
+        let config = context.git_config.as_ref().unwrap();
+        (
+            context.asset_token.clone(),
+            format!("local:{}", config.created_at),
+        )
+    };
+    let store = assets
+        .open_registered_store(&canonical, &binding, &token)
+        .unwrap();
+    let staged = store
+        .stage_bytes("rollback.bin", b"rollback-lease")
+        .await
+        .unwrap();
+    activation_resume.wait().await;
+    tokio::task::spawn_blocking(move || deactivation_attempted.wait())
+        .await
+        .unwrap();
+
+    let early = tokio::time::timeout(std::time::Duration::from_secs(1), &mut request).await;
+    let rollback_waited = early.is_err();
+    let context_remained = state
+        .lock()
+        .unwrap()
+        .workspaces
+        .get("lease-safe-rollback")
+        .is_some_and(|context| context.asset_token == token);
+    let config_remained = gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .any(|entry| entry.slug == "lease-safe-rollback");
+    drop(staged);
+    let (status, _body) = match early {
+        Ok(result) => result.unwrap(),
+        Err(_) => request.await.unwrap(),
+    };
+
+    assert!(
+        rollback_waited,
+        "rollback completed while an asset lease was live"
+    );
+    assert!(
+        context_remained,
+        "rollback removed its reachable context before teardown"
+    );
+    assert!(
+        config_remained,
+        "rollback removed durable config before teardown"
+    );
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    assert!(!state
+        .lock()
+        .unwrap()
+        .workspaces
+        .contains_key("lease-safe-rollback"));
+    assert!(gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .all(|entry| entry.slug != "lease-safe-rollback"));
+    assert!(!canonical.join(".gitim-runtime").exists());
+    assert!(assets.health_snapshot(&canonical).is_none());
+    assert_eq!(assets.lifecycle_registry_entries(), (0, 0));
+
+    let (recreate_status, recreate_body) = send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical,
+            "slug": "lease-safe-rollback",
+            "git": { "provider": "local" },
+        })),
+    )
+    .await;
+    assert_eq!(recreate_status, StatusCode::CREATED, "{recreate_body}");
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/lease-safe-rollback", None,)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn rollback_never_cleans_a_canonical_workspace_owned_by_a_different_token() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("replacement-owner");
+    std::fs::create_dir(&workspace).unwrap();
+    let canonical_workspace = workspace.canonicalize().unwrap();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+    let activation_reached = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let activation_resume = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    assets.inject_after_activation_pause(
+        std::sync::Arc::clone(&activation_reached),
+        std::sync::Arc::clone(&activation_resume),
+    );
+    assets.set_after_config_write_hook(std::sync::Arc::new(|| {
+        panic!("injected finalizer panic after owner replacement");
+    }));
+
+    let create = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": canonical_workspace,
+            "slug": "replacement-owner",
+            "git": { "provider": "local" },
+        })),
+    ));
+    activation_reached.wait().await;
+
+    let (human_repo, git_config, transition, pid) = {
+        let runtime = state.lock().unwrap();
+        let old = &runtime.workspaces["replacement-owner"];
+        let human_repo = old.human_repo.clone().unwrap();
+        let pid = std::fs::read_to_string(human_repo.join(".gitim/run/gitim.pid"))
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        (
+            human_repo,
+            old.git_config.clone(),
+            std::sync::Arc::clone(&old.transition),
+            pid,
+        )
+    };
+    let mut replacement = WorkspaceContext::new(
+        "replacement-owner".to_string(),
+        "Replacement Owner".to_string(),
+        canonical_workspace.clone(),
+    );
+    replacement.human_repo = Some(human_repo);
+    replacement.git_config = git_config;
+    replacement.transition = transition;
+    let replacement_token = replacement.asset_token.clone();
+    state
+        .lock()
+        .unwrap()
+        .workspaces
+        .insert("replacement-owner".to_string(), replacement);
+    let sentinel = canonical_workspace.join(".gitim-runtime/replacement-owner.sentinel");
+    std::fs::write(&sentinel, b"new-owner").unwrap();
+    activation_resume.wait().await;
+
+    assert_eq!(create.await.unwrap().0, StatusCode::INTERNAL_SERVER_ERROR);
+    {
+        let runtime = state.lock().unwrap();
+        assert_eq!(
+            runtime.workspaces["replacement-owner"].asset_token,
+            replacement_token
+        );
+    }
+    assert_eq!(std::fs::read(&sentinel).unwrap(), b"new-owner");
+    assert!(canonical_workspace.join(".gitim-runtime").is_dir());
+    assert!(std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success());
+    assert!(gitim_runtime::user_config::read()
+        .workspaces
+        .iter()
+        .any(|entry| entry.slug == "replacement-owner"));
+    assert_eq!(
+        send(router, "DELETE", "/workspaces/replacement-owner", None)
+            .await
+            .0,
+        StatusCode::OK
+    );
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn rollback_config_io_does_not_hold_runtime_state_or_leak_transition_slots() {
+    let _home = HomeGuard::install();
+    let parent = short_tempdir();
+    let workspace = parent.path().join("rollback-config-pause");
+    std::fs::create_dir(&workspace).unwrap();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+    let rollback_reached = std::sync::Arc::new(std::sync::Barrier::new(2));
+    let rollback_resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+    assets.inject_rollback_config_pause(
+        std::sync::Arc::clone(&rollback_reached),
+        std::sync::Arc::clone(&rollback_resume),
+    );
+
+    let create = tokio::spawn(send(
+        router.clone(),
+        "POST",
+        "/workspaces",
+        Some(json!({
+            "path": workspace,
+            "slug": "rollback-config-pause",
+            "git": { "provider": "unsupported" },
+        })),
+    ));
+    tokio::task::spawn_blocking(move || rollback_reached.wait())
+        .await
+        .unwrap();
+
+    let list = tokio::spawn(send(router, "GET", "/workspaces", None));
+    let (list_status, _) = tokio::time::timeout(std::time::Duration::from_secs(1), list)
+        .await
+        .expect("workspace list waited for rollback config I/O")
+        .unwrap();
+    assert_eq!(list_status, StatusCode::OK);
+
+    tokio::task::spawn_blocking(move || rollback_resume.wait())
+        .await
+        .unwrap();
+    assert_eq!(create.await.unwrap().0, StatusCode::BAD_REQUEST);
+    let runtime = state.lock().unwrap();
+    assert!(runtime.workspaces.is_empty());
+    assert_eq!(runtime.workspace_transitions.live_entries(), 0);
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test]
+#[serial(http_workspaces_home)]
+async fn repeated_registered_open_and_delete_cycles_leave_both_registries_empty() {
+    let _home = HomeGuard::install();
+    let root = short_tempdir();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+
+    for index in 0..32 {
+        let slug = format!("cycle-{index}");
+        let workspace = root.path().join(&slug);
+        std::fs::create_dir(&workspace).unwrap();
+        let canonical = workspace.canonicalize().unwrap();
+        let transition = state.lock().unwrap().workspace_transitions.slot(&canonical);
+        let mut context = WorkspaceContext::new(slug.clone(), slug.clone(), canonical.clone());
+        context.transition = transition;
+        assets
+            .activate_workspace(&canonical, format!("local:{index}"), &context.asset_token)
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .insert(slug.clone(), context);
+
+        assert_eq!(
+            send(
+                router.clone(),
+                "DELETE",
+                &format!("/workspaces/{slug}"),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let runtime = state.lock().unwrap();
+        assert!(runtime.workspaces.is_empty());
+        assert_eq!(runtime.workspace_transitions.live_entries(), 0);
+        drop(runtime);
+        assert_eq!(assets.lifecycle_registry_entries(), (0, 0));
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn registered_open_waiters_do_not_retain_dead_path_indexes_after_delete() {
+    let _home = HomeGuard::install();
+    let root = short_tempdir();
+    let (router, state) = create_router();
+    let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+
+    for index in 0..16 {
+        let slug = format!("waiter-cycle-{index}");
+        let workspace = root.path().join(&slug);
+        std::fs::create_dir(&workspace).unwrap();
+        let canonical = workspace.canonicalize().unwrap();
+        let binding = format!("local:{index}");
+        let transition = state.lock().unwrap().workspace_transitions.slot(&canonical);
+        let mut context = WorkspaceContext::new(slug.clone(), slug.clone(), canonical.clone());
+        context.transition = transition;
+        let token = context.asset_token.clone();
+        let store = assets
+            .activate_workspace(&canonical, binding.clone(), &token)
+            .unwrap();
+        state
+            .lock()
+            .unwrap()
+            .workspaces
+            .insert(slug.clone(), context);
+
+        let transition_reached = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let transition_resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+        store.inject_persistence_transition_pause(
+            std::sync::Arc::clone(&transition_reached),
+            std::sync::Arc::clone(&transition_resume),
+        );
+        let delete_router = router.clone();
+        let delete_uri = format!("/workspaces/{slug}");
+        let delete =
+            tokio::spawn(async move { send(delete_router, "DELETE", &delete_uri, None).await });
+        tokio::task::spawn_blocking(move || transition_reached.wait())
+            .await
+            .unwrap();
+
+        let waiter_attempted = std::sync::Arc::new(std::sync::Barrier::new(2));
+        assets.inject_registered_open_wait_attempt(std::sync::Arc::clone(&waiter_attempted));
+        let waiter_assets = std::sync::Arc::clone(&assets);
+        let waiter_path = canonical.clone();
+        let waiter_binding = binding.clone();
+        let waiter_token = token.clone();
+        let waiter = tokio::task::spawn_blocking(move || {
+            waiter_assets.open_registered_store(&waiter_path, &waiter_binding, &waiter_token)
+        });
+        tokio::task::spawn_blocking(move || waiter_attempted.wait())
+            .await
+            .unwrap();
+
+        tokio::task::spawn_blocking(move || transition_resume.wait())
+            .await
+            .unwrap();
+        assert_eq!(delete.await.unwrap().0, StatusCode::OK);
+        assert!(matches!(
+            waiter.await.unwrap(),
+            Err(gitim_runtime::assets::AssetError::StaleBinding)
+        ));
+        assert_eq!(assets.lifecycle_registry_entries(), (0, 0));
+    }
+}
+
+#[cfg(feature = "test-support")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[serial(http_workspaces_home)]
+async fn asset_activation_store_and_invariant_failures_preserve_status_and_fully_rollback() {
+    ensure_daemon_in_path();
+    let _home = HomeGuard::install();
+
+    for (slug, expected_status, inject) in [
+        (
+            "activation-store-failure",
+            StatusCode::INSUFFICIENT_STORAGE,
+            0_u8,
+        ),
+        (
+            "activation-invariant-failure",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            1_u8,
+        ),
+    ] {
+        let parent = short_tempdir();
+        let workspace = parent.path().join(slug);
+        std::fs::create_dir(&workspace).unwrap();
+        let (router, state) = create_router();
+        let assets = std::sync::Arc::clone(&state.lock().unwrap().assets);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        assets.set_event_observer({
+            let events = std::sync::Arc::clone(&events);
+            std::sync::Arc::new(move |event| events.lock().unwrap().push(event))
+        });
+        if inject == 0 {
+            assets.inject_activation_store_failure_once();
+        } else {
+            assets.inject_activation_invariant_failure_once();
+        }
+
+        let (status, body) = send(
+            router,
+            "POST",
+            "/workspaces",
+            Some(json!({
+                "path": workspace,
+                "slug": slug,
+                "git": { "provider": "local" },
+            })),
+        )
+        .await;
+        assert_eq!(status, expected_status, "{slug}");
+        assert_eq!(body["error_code"], "asset_store_failed", "{slug}");
+        assert!(state.lock().unwrap().workspaces.is_empty(), "{slug}");
+        assert!(!workspace.join(".gitim-runtime").exists(), "{slug}");
+        assert!(assets.health_snapshot(&workspace).is_none(), "{slug}");
+        assert!(gitim_runtime::user_config::read().workspaces.is_empty());
+        assert_eq!(
+            assets
+                .store_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "{slug}"
+        );
+        let events = events.lock().unwrap();
+        assert_eq!(events.len(), 1, "{slug}");
+        assert_eq!(events[0].event, "asset_store_failure", "{slug}");
+        assert_eq!(events[0].workspace_slug, slug, "{slug}");
+        assert_eq!(events[0].error_code, Some("asset_store_failed"), "{slug}");
+        assert!(!format!("{:?}", events[0]).contains(workspace.to_string_lossy().as_ref()));
+    }
 }
 
 // -- 18. DELETE aborts in-process agent loop handles -----------------------

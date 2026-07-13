@@ -69,8 +69,10 @@ import {
 import * as mockClient from "./mock/client";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useConnectionDiagnosticsStore } from "@/hooks/use-connection-diagnostics-store";
+import { useAttachmentDraftStore } from "@/hooks/use-attachment-draft-store";
 import { DEFAULT_GIT_CORS_PROXY } from "./git-cors-proxy";
 import { localNetworkFetch } from "./local-network-fetch";
+import { parseAssetRef, type AssetRef } from "./asset-ref";
 
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
 let activeLocalBackend: LocalBackend | null = null;
@@ -257,6 +259,187 @@ function localBoardBackend(): BoardBackend {
 
 function wsBase(slug: string): string {
   return `${baseUrl()}/workspaces/${encodeURIComponent(slug)}`;
+}
+
+// --- Assets ---
+
+const MAX_ASSET_FILE_BYTES = 50 * 1024 * 1024;
+const MAX_ASSET_REQUEST_BYTES = 200 * 1024 * 1024;
+const MAX_ASSET_FILES = 10;
+const MAX_ASSET_FILENAME_BYTES = 255;
+const ASSET_UTF8 = new TextEncoder();
+
+const ASSET_LOCAL_UNAVAILABLE: ApiResponse<never> = {
+  ok: false,
+  error: "Asset uploads require the gitim runtime (not available in browser mode).",
+  error_code: "runtime_required",
+};
+
+export interface UploadedAsset extends AssetRef {
+  ref: string;
+}
+
+interface UploadedAssetWire {
+  ref: string;
+  sha256: string;
+  name: string;
+  media_type: string;
+  size: number;
+  width?: number;
+  height?: number;
+}
+
+function invalidUpload(error: string): ApiResponse<never> {
+  return { ok: false, error, error_code: "invalid_upload" };
+}
+
+function validateUploadFiles(files: File[]): ApiResponse<never> | null {
+  if (files.length < 1 || files.length > MAX_ASSET_FILES) {
+    return invalidUpload("Asset uploads require between 1 and 10 files.");
+  }
+  let total = 0;
+  for (const file of files) {
+    if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_ASSET_FILE_BYTES) {
+      return invalidUpload("Each asset must be no larger than 50 MiB.");
+    }
+    const filenameBytes = ASSET_UTF8.encode(sanitizedAssetName(file.name)).length;
+    if (filenameBytes > MAX_ASSET_FILENAME_BYTES) {
+      return invalidUpload("Asset filenames must be no longer than 255 UTF-8 bytes.");
+    }
+    total += file.size;
+    if (!Number.isSafeInteger(total) || total > MAX_ASSET_REQUEST_BYTES) {
+      return invalidUpload("An asset upload must be no larger than 200 MiB in total.");
+    }
+  }
+  return null;
+}
+
+function isUploadedAssetWire(value: unknown): value is UploadedAssetWire {
+  if (typeof value !== "object" || value === null) return false;
+  const wire = value as Record<string, unknown>;
+  return (
+    typeof wire.ref === "string" &&
+    typeof wire.sha256 === "string" &&
+    typeof wire.name === "string" &&
+    typeof wire.media_type === "string" &&
+    typeof wire.size === "number" &&
+    (wire.width === undefined || typeof wire.width === "number") &&
+    (wire.height === undefined || typeof wire.height === "number")
+  );
+}
+
+function normalizeUploadedAsset(value: unknown): UploadedAsset | null {
+  if (!isUploadedAssetWire(value)) return null;
+  const parsed = parseAssetRef(value.ref);
+  if (
+    !parsed ||
+    value.sha256 !== parsed.sha256 ||
+    value.name !== parsed.name ||
+    value.media_type !== parsed.mediaType ||
+    value.size !== parsed.size ||
+    value.width !== parsed.width ||
+    value.height !== parsed.height
+  ) {
+    return null;
+  }
+  return { ...parsed, ref: value.ref };
+}
+
+function invalidAssetResponse(): ApiResponse<never> {
+  return {
+    ok: false,
+    error: "Runtime returned an invalid asset upload response.",
+    error_code: "invalid_response",
+  };
+}
+
+function isAbortError(error: unknown): error is Error | DOMException {
+  return (
+    (error instanceof DOMException && error.name === "AbortError") ||
+    (error instanceof Error && error.name === "AbortError")
+  );
+}
+
+export async function uploadAssets(
+  slug: string,
+  files: File[],
+  signal?: AbortSignal,
+): Promise<ApiResponse<{ assets: UploadedAsset[] }>> {
+  if (isLocalMode()) return ASSET_LOCAL_UNAVAILABLE;
+  const validationError = validateUploadFiles(files);
+  if (validationError) return validationError;
+
+  const form = new FormData();
+  for (const file of files) form.append("file", file);
+
+  let response: Response;
+  try {
+    response = await localNetworkFetch(`${wsBase(slug)}/assets`, {
+      method: "POST",
+      body: form,
+      ...(signal && { signal }),
+    });
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return response.ok
+      ? invalidAssetResponse()
+      : { ok: false, error: `HTTP ${response.status}` };
+  }
+  if (!response.ok) {
+    const error = typeof body === "object" && body !== null
+      ? body as Record<string, unknown>
+      : {};
+    return {
+      ok: false,
+      error: typeof error.error === "string" ? error.error : `HTTP ${response.status}`,
+      error_code: typeof error.error_code === "string" ? error.error_code : undefined,
+    };
+  }
+
+  if (typeof body !== "object" || body === null) return invalidAssetResponse();
+  const envelope = body as Record<string, unknown>;
+  if (envelope.ok !== true || !Array.isArray(envelope.assets) || envelope.assets.length !== files.length) {
+    return invalidAssetResponse();
+  }
+  const assets: UploadedAsset[] = [];
+  for (const value of envelope.assets) {
+    const asset = normalizeUploadedAsset(value);
+    if (!asset) return invalidAssetResponse();
+    assets.push(asset);
+  }
+  return { ok: true, data: { assets } };
+}
+
+function sanitizedAssetName(name: string): string {
+  const basename = name.split(/[\\/]/).at(-1) ?? "";
+  const cleaned = Array.from(basename)
+    .filter((character) => !/\p{Cc}/u.test(character))
+    .join("");
+  return cleaned || "attachment";
+}
+
+function encodeAssetUrlComponent(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
+  );
+}
+
+export function assetResolveUrl(
+  slug: string,
+  asset: AssetRef,
+  options: { download?: boolean } = {},
+): string {
+  const name = encodeAssetUrlComponent(sanitizedAssetName(asset.name));
+  const path = `${wsBase(slug)}/assets/resolve/${encodeURIComponent(asset.originRuntimeId)}/${encodeURIComponent(asset.sha256)}`;
+  return `${path}?name=${name}${options.download ? "&download=1" : ""}`;
 }
 
 // --- Health ---
@@ -488,6 +671,7 @@ export async function forgetBrowserWorkspaceAndCache(
     shutdownBrowserWorkspace();
   }
   await forgetBrowserWorkspaceAndWipeCache(record.id);
+  useAttachmentDraftStore.getState().disposeWorkspace(`browser:${record.id}`);
   return { ok: true, data: { activeAffected } };
 }
 
@@ -496,6 +680,7 @@ export async function startOverBrowserWorkspaces(): Promise<ApiResponse<BrowserC
   shutdownBrowserWorkspace();
   await wipeAllBrowserWorkspaceCaches();
   clearAllBrowserWorkspaces();
+  useAttachmentDraftStore.getState().disposeAll();
   return { ok: true, data: { activeAffected } };
 }
 

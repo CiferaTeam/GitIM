@@ -1,0 +1,28 @@
+{
+  "valid": [
+    {
+      "raw": "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=fleet-assets.png&type=image%2Fpng&size=184203&width=1600&height=900>",
+      "name": "fleet-assets.png",
+      "media_type": "image/png",
+      "size": 184203,
+      "width": 1600,
+      "height": 900
+    },
+    {
+      "raw": "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855?name=%E6%8A%A5%E5%91%8A.txt&type=application%2Foctet-stream&size=0>",
+      "name": "报告.txt",
+      "media_type": "application/octet-stream",
+      "size": 0,
+      "width": null,
+      "height": null
+    }
+  ],
+  "invalid": [
+    "<^v2/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=a&type=image%2Fpng&size=1>",
+    "<^v1/3C6A295E-744A-41DC-BA60-5C21BB94E5A2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=a&type=image%2Fpng&size=1>",
+    "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8F2C4D7D7E931A62C18F6F24C8E388D72524D4C4CD6F88E9538F7D4A66C72A88?name=a&type=image%2Fpng&size=1>",
+    "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?type=image%2Fpng&name=a&size=1>",
+    "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=..%2Fsecret&type=image%2Fpng&size=1>",
+    "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=a&type=image%2Fpng&size=1&width=1>"
+  ]
+}

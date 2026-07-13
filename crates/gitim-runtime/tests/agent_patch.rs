@@ -668,8 +668,8 @@ async fn patch_model_rejects_running_agent() {
 
 // -- 14. PATCH effort writes me.json but PRESERVES session ---------------------
 // Unlike model, an effort change must not wipe the conversation: it only
-// changes how hard the model thinks. The Claude provider's SpawnSig picks up
-// the new --effort on the next (resumed) turn.
+// changes how hard the model thinks. The provider picks up the persisted value
+// on the next resumed turn.
 
 #[tokio::test]
 async fn patch_effort_writes_me_json_without_clearing_session() {
@@ -679,7 +679,7 @@ async fn patch_effort_writes_me_json_without_clearing_session() {
         &state,
         "ws14",
         "alice",
-        json!({ "provider": "claude", "model": "claude-opus-4-8" }),
+        json!({ "provider": "codex", "model": "gpt-5.6-sol" }),
     );
 
     let state_path = dir.path().join(".gitim/agent-state.json");
@@ -693,14 +693,14 @@ async fn patch_effort_writes_me_json_without_clearing_session() {
     )
     .unwrap();
 
-    let (status, body) = send_patch(&router, "ws14", "alice", json!({ "effort": "xhigh" })).await;
+    let (status, body) = send_patch(&router, "ws14", "alice", json!({ "effort": "ultra" })).await;
 
     assert_eq!(status, StatusCode::OK, "body: {body}");
-    assert_eq!(body["agent"]["effort"], json!("xhigh"));
+    assert_eq!(body["agent"]["effort"], json!("ultra"));
 
     let me_path = dir.path().join(".gitim/me.json");
     let me: Value = serde_json::from_str(&std::fs::read_to_string(&me_path).unwrap()).unwrap();
-    assert_eq!(me["effort"], json!("xhigh"));
+    assert_eq!(me["effort"], json!("ultra"));
 
     // Session state is untouched — effort does not cold-start the agent.
     let agent_state: Value =

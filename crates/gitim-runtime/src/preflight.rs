@@ -12,7 +12,7 @@ const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Per-call overrides for agent-aware preflight invocations.
 ///
 /// Used by `preflight_for_add_request` (and direct callers from `agents_add`)
-/// to inject the agent's actual env vars and model into the provider CLI
+/// to inject the agent's actual env vars, model, and Codex reasoning effort into the provider CLI
 /// subprocess, so the preflight verifies the same configuration the agent
 /// will eventually run under — not the runtime's default profile.
 ///
@@ -24,6 +24,8 @@ pub struct PreflightOverrides {
     pub env_override: Option<HashMap<String, String>>,
     /// Model name to pass on the CLI (replaces the per-provider preflight constant).
     pub model_override: Option<String>,
+    /// Codex reasoning effort. `None` uses the selected model's default.
+    pub effort_override: Option<String>,
 }
 
 /// Why a preflight attempt failed. Serialized as snake_case so the
@@ -343,8 +345,9 @@ pub async fn preflight_claude_with_config(
         .args(["--output-format", "json"])
         .args(["--setting-sources", ""])
         .args(["--tools", ""])
-        .args(["--system-prompt", "Reply with exactly what the user asks."])
-        .arg("Reply with exactly: GITIM_OK")
+        .args(["--system-prompt", "Reply with exactly what the user asks."]);
+
+    cmd.arg("Reply with exactly: GITIM_OK")
         // Pipe stdin so we can close the write end immediately — some
         // Claude CLI versions block on stdin readiness when it's `null`.
         .stdin(Stdio::piped())
@@ -520,8 +523,19 @@ pub async fn preflight_codex_with_config(
         // `--skip-git-repo-check`, codex refuses to run with "Not inside a
         // trusted directory".
         .arg("--skip-git-repo-check")
-        .args(["--model", model])
-        .arg("Reply with exactly: GITIM_OK")
+        .args(["--model", model]);
+
+    if let Some(effort) = overrides
+        .effort_override
+        .as_ref()
+        .filter(|value| !value.is_empty())
+    {
+        let quoted_effort = serde_json::Value::String(effort.clone()).to_string();
+        cmd.arg("-c")
+            .arg(format!("model_reasoning_effort={quoted_effort}"));
+    }
+
+    cmd.arg("Reply with exactly: GITIM_OK")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2004,6 +2018,7 @@ pub async fn preflight_for_add_request(
     provider: &str,
     env: Option<&HashMap<String, String>>,
     model: Option<&str>,
+    effort: Option<&str>,
     llm_provider: Option<&str>,
     llm_model: Option<&str>,
 ) -> PreflightResult {
@@ -2011,6 +2026,7 @@ pub async fn preflight_for_add_request(
         provider,
         env,
         model,
+        effort,
         llm_provider,
         llm_model,
         PreflightDispatchOverrides::default(),
@@ -2024,6 +2040,7 @@ pub async fn preflight_for_add_request_with_overrides(
     provider: &str,
     env: Option<&HashMap<String, String>>,
     model: Option<&str>,
+    effort: Option<&str>,
     llm_provider: Option<&str>,
     llm_model: Option<&str>,
     overrides: PreflightDispatchOverrides,
@@ -2037,7 +2054,15 @@ pub async fn preflight_for_add_request_with_overrides(
     // request never hangs past PROVIDER_PREFLIGHT_TIMEOUT regardless of inner
     // behavior.
     let started_outer = Instant::now();
-    let inner = dispatch_preflight(provider, env, model, llm_provider, llm_model, &overrides);
+    let inner = dispatch_preflight(
+        provider,
+        env,
+        model,
+        effort,
+        llm_provider,
+        llm_model,
+        &overrides,
+    );
 
     match tokio::time::timeout(outer_timeout, inner).await {
         Ok(result) => result,
@@ -2060,6 +2085,7 @@ async fn dispatch_preflight(
     provider: &str,
     env: Option<&HashMap<String, String>>,
     model: Option<&str>,
+    effort: Option<&str>,
     llm_provider: Option<&str>,
     llm_model: Option<&str>,
     overrides: &PreflightDispatchOverrides,
@@ -2068,6 +2094,7 @@ async fn dispatch_preflight(
     let prov_overrides = PreflightOverrides {
         env_override: env.cloned(),
         model_override: model.map(String::from),
+        effort_override: effort.map(String::from),
     };
 
     // Add-agent preflight is model-specific and can hit slow upstream retry

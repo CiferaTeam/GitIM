@@ -295,6 +295,9 @@ const generalThread =
 const dmThread =
   "[L000001][P000000][@alice][20260317T120000Z] private\n";
 
+const ASSET_REF =
+  "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=portrait.png&type=image%2Fpng&size=68&width=1000&height=10000>";
+
 function seedState() {
   files.clear();
   dirs.clear();
@@ -655,6 +658,29 @@ describe("daemon-web handlers", () => {
       }),
     ]);
     expect(res.data).not.toHaveProperty("messages");
+  });
+
+  it("preserves canonical asset metadata in browser thread entries", async () => {
+    const body = `portrait\n${ASSET_REF}`;
+    files.set(
+      "/repo/channels/general.thread",
+      `[L000001][P000000][@alice][20260317T120000Z] ${body}\n`,
+    );
+
+    const res = await read("general");
+
+    expect(res.ok).toBe(true);
+    expect(res.data?.entries).toEqual([
+      expect.objectContaining({
+        body,
+        links: [
+          expect.objectContaining({
+            raw: ASSET_REF,
+            kind: expect.objectContaining({ kind: "asset" }),
+          }),
+        ],
+      }),
+    ]);
   });
 
   it("adds channel recipients from creator, parent chain, and mentions", async () => {

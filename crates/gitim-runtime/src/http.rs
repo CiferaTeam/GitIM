@@ -19,6 +19,7 @@ use crate::agent::{
     provision_human, AgentConfig,
 };
 use crate::agent_loop::{is_daemon_not_running_poll_error, AgentLoop};
+use crate::assets::AssetError;
 use crate::git_config::{
     mark_excluded_from_backups, validate_workspace_path_from_env, GitConfig, GitProvider,
     WorkspaceConfig,
@@ -101,6 +102,9 @@ struct HealthResponse {
     /// `AgentSaturationLog::save` returns an error from the sampler tick.
     /// Surfaced on `/runtime/health`. Best-effort observability.
     saturation_save_failures: u64,
+    asset_store_failures: u64,
+    asset_hash_mismatches: u64,
+    asset_fleet_fetch_failures: u64,
     /// Per-workspace epoch number read from the human clone's
     /// `gitim.epoch.yaml` (1 = never rotated / pre-rotation repo). Commit
     /// counts are deliberately NOT here: health is polled hot and
@@ -113,6 +117,15 @@ struct HealthResponse {
 struct WorkspaceEpochInfo {
     slug: String,
     epoch: u32,
+    asset_bytes: u64,
+    asset_objects: u64,
+    asset_quota: u64,
+}
+
+struct WorkspaceHealthInput {
+    slug: String,
+    path: PathBuf,
+    human_repo: Option<PathBuf>,
 }
 
 // -----------------------------------------------------------------------------
@@ -313,8 +326,8 @@ pub struct AgentInfo {
     pub provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
-    /// Claude-only effort level (`low`..`max`). Round-trips to the WebUI so the
-    /// edit form can show the current value. None for other providers / unset.
+    /// Claude/Codex reasoning effort. Round-trips to the WebUI so the edit
+    /// form can show the current value. None means use the model default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -374,9 +387,15 @@ pub struct RuntimeState {
     /// so we don't accidentally create a "demo mode" path.
     pub clone_url_override: Option<String>,
     pub workspaces: HashMap<String, crate::workspace::WorkspaceContext>,
+    pub workspace_transitions: Arc<crate::workspace::WorkspaceTransitionRegistry>,
+    #[cfg(feature = "test-support")]
+    pub workspace_create_reservation_barrier: Option<Arc<tokio::sync::Barrier>>,
     pub fleet_tx: tokio::sync::broadcast::Sender<crate::fleet::FleetEventEnvelope>,
     pub fleet_nodes: HashMap<String, crate::fleet::FleetNodeRuntime>,
     pub fleet_status: HashMap<String, crate::fleet::FleetNodeStatus>,
+    /// Serializes Fleet config persistence with the corresponding short live
+    /// state transition so concurrent aliases cannot reorder disk and memory.
+    pub fleet_transition_lock: Arc<Mutex<()>>,
     /// Canonicalized path to the runtime binary captured at startup. The
     /// update endpoint (self-replace) uses this to (a) validate the install
     /// dir in strict mode, and (b) fork-exec a new runtime after the binary
@@ -417,6 +436,7 @@ pub struct RuntimeState {
     /// `AgentSaturationLog::save` returns an error from the sampler tick.
     /// Surfaced on `/runtime/health`. Best-effort observability.
     pub saturation_save_failures: std::sync::atomic::AtomicU64,
+    pub assets: Arc<crate::assets::AssetService>,
 }
 
 impl RuntimeState {
@@ -454,9 +474,15 @@ impl Default for RuntimeState {
             github_api: Arc::new(DefaultGithubApi { base_url }),
             clone_url_override,
             workspaces: HashMap::new(),
+            workspace_transitions: Arc::new(
+                crate::workspace::WorkspaceTransitionRegistry::default(),
+            ),
+            #[cfg(feature = "test-support")]
+            workspace_create_reservation_barrier: None,
             fleet_tx,
             fleet_nodes: HashMap::new(),
             fleet_status: HashMap::new(),
+            fleet_transition_lock: Arc::new(Mutex::new(())),
             canonical_exe_path,
             update_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             update_last_error: None,
@@ -464,6 +490,7 @@ impl Default for RuntimeState {
             runtime_id: String::new(),
             usage_save_failures: std::sync::atomic::AtomicU64::new(0),
             saturation_save_failures: std::sync::atomic::AtomicU64::new(0),
+            assets: Arc::new(crate::assets::AssetService::default()),
         }
     }
 }
@@ -489,12 +516,33 @@ pub fn has_active_agents(state: &SharedRuntimeState) -> bool {
 }
 
 async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse> {
-    let s = crate::preconditions::arc_mutex_lock(&state);
-    let workspace_epochs = s
-        .workspaces
+    let (runtime_id, usage_save_failures, saturation_save_failures, assets, workspaces) = {
+        let runtime = crate::preconditions::arc_mutex_lock(&state);
+        let workspaces = runtime
+            .workspaces
+            .iter()
+            .map(|(slug, workspace)| WorkspaceHealthInput {
+                slug: slug.clone(),
+                path: workspace.path.clone(),
+                human_repo: workspace.human_repo.clone(),
+            })
+            .collect::<Vec<_>>();
+        (
+            runtime.runtime_id.clone(),
+            runtime
+                .usage_save_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            runtime
+                .saturation_save_failures
+                .load(std::sync::atomic::Ordering::Relaxed),
+            Arc::clone(&runtime.assets),
+            workspaces,
+        )
+    };
+    let workspace_epochs = workspaces
         .iter()
-        .map(|(slug, w)| {
-            let epoch = w
+        .map(|workspace| {
+            let epoch = workspace
                 .human_repo
                 .as_ref()
                 .and_then(|root| {
@@ -502,24 +550,39 @@ async fn health(State(state): State<SharedRuntimeState>) -> Json<HealthResponse>
                         .ok()
                         .flatten()
                 })
-                .map(|f| f.epoch)
+                .map(|file| file.epoch)
                 .unwrap_or(1);
+            let asset_health = assets.health_snapshot(&workspace.path).unwrap_or(
+                crate::assets::AssetHealthSnapshot {
+                    bytes: 0,
+                    objects: 0,
+                    quota_bytes: assets.limits.workspace_quota_bytes,
+                },
+            );
             WorkspaceEpochInfo {
-                slug: slug.clone(),
+                slug: workspace.slug.clone(),
                 epoch,
+                asset_bytes: asset_health.bytes,
+                asset_objects: asset_health.objects,
+                asset_quota: asset_health.quota_bytes,
             }
         })
         .collect();
     Json(HealthResponse {
         service: "gitim-runtime",
         version: env!("CARGO_PKG_VERSION"),
-        workspaces_count: s.workspaces.len(),
-        runtime_id: s.runtime_id.clone(),
-        usage_save_failures: s
-            .usage_save_failures
+        workspaces_count: workspaces.len(),
+        runtime_id,
+        usage_save_failures,
+        saturation_save_failures,
+        asset_store_failures: assets
+            .store_failures
             .load(std::sync::atomic::Ordering::Relaxed),
-        saturation_save_failures: s
-            .saturation_save_failures
+        asset_hash_mismatches: assets
+            .hash_mismatches
+            .load(std::sync::atomic::Ordering::Relaxed),
+        asset_fleet_fetch_failures: assets
+            .fleet_fetch_failures
             .load(std::sync::atomic::Ordering::Relaxed),
         workspace_epochs,
     })
@@ -2745,8 +2808,8 @@ struct AgentAddRequest {
     provider: String,
     #[serde(default)]
     model: Option<String>,
-    /// Claude-only effort level (`low` / `medium` / `high` / `xhigh` / `max`).
-    /// Omitted / empty leaves the CLI default. Ignored for other providers.
+    /// Claude/Codex effort level. Omitted / empty uses the selected model's
+    /// CLI default. Other providers do not consume this field.
     #[serde(default)]
     effort: Option<String>,
     #[serde(default)]
@@ -2990,6 +3053,7 @@ async fn agents_add(
         &req.provider,
         Some(&req.env),
         req.model.as_deref(),
+        req.effort.as_deref(),
         req.llm_provider.as_deref(),
         req.llm_model.as_deref(),
     )
@@ -3888,7 +3952,7 @@ struct AgentUpdateRequest {
     system_prompt: Option<Option<String>>,
     #[serde(default, deserialize_with = "deser_triple_option")]
     model: Option<Option<String>>,
-    /// Claude-only effort. Three-state like `model`: absent → no-op,
+    /// Claude/Codex effort. Three-state like `model`: absent → no-op,
     /// null / "" → clear (CLI default), "level" → set.
     #[serde(default, deserialize_with = "deser_triple_option")]
     effort: Option<Option<String>>,
@@ -4042,8 +4106,8 @@ async fn agents_patch(
     // while the agent is offline (frontend gate), so it takes effect on the
     // next Start. Unlike model it does NOT clear the session — effort changes
     // how hard the model thinks, not the conversation, so resuming with a new
-    // --effort is correct. The Claude provider's SpawnSig also carries effort,
-    // so any in-process change forces a respawn that picks up the new flag.
+    // configured effort is correct. Claude's SpawnSig also carries effort, so
+    // any in-process change forces a respawn that picks up the new flag.
     if let Some(effort_opt) = &req.effort {
         me.effort = match effort_opt {
             Some(s) if !s.is_empty() => Some(s.clone()),
@@ -4966,6 +5030,17 @@ async fn fleet_nodes_upsert(
         )
             .into_response();
     }
+    let mut entry = entry;
+    entry.runtime_id = match crate::fleet::fetch_remote_runtime_id(&entry.base_url).await {
+        Ok(runtime_id) => Some(runtime_id),
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(err, "invalid_fleet_node")),
+            )
+                .into_response()
+        }
+    };
     let entry = match crate::fleet::resolve_workspace_mappings(&state, entry).await {
         Ok(entry) => entry,
         Err(err) => {
@@ -4976,21 +5051,46 @@ async fn fleet_nodes_upsert(
                 .into_response()
         }
     };
-
-    let mut cfg = crate::user_config::read();
-    cfg.upsert_fleet_node(entry.clone());
-    if let Err(err) = crate::user_config::write(&cfg) {
+    if let Err(unresolved) =
+        crate::fleet::resolve_active_legacy_identities(&state, &entry.node_id).await
+    {
         return (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            StatusCode::CONFLICT,
             Json(ErrorBody::with_code(
-                format!("failed to persist fleet node: {err}"),
-                "fleet_config_write_failed",
+                format!(
+                    "fleet node identity is unresolved for: {}. Ensure those runtimes are reachable or remove them before adding a new alias",
+                    unresolved.join(", ")
+                ),
+                "fleet_identity_unresolved",
             )),
         )
             .into_response();
     }
 
-    crate::fleet::activate_node(state, entry.clone());
+    match crate::fleet::persist_node_transition(&state, entry.clone()) {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(
+                    "runtime_id is already registered under another fleet node alias",
+                    "duplicate_runtime_id",
+                )),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    format!("failed to persist fleet node: {err}"),
+                    "fleet_config_write_failed",
+                )),
+            )
+                .into_response()
+        }
+    }
+
     Json(FleetNodeUpsertResponse {
         ok: true,
         node: entry,
@@ -5005,13 +5105,20 @@ async fn fleet_nodes_delete(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let mut cfg = crate::user_config::read();
-    let config_existed = cfg.remove_fleet_node(&node_id);
-    let runtime_existed = {
-        let s = crate::preconditions::arc_mutex_lock(&state);
-        s.fleet_nodes.contains_key(&node_id)
+    let existed = match crate::fleet::remove_node_transition(&state, &node_id) {
+        Ok(existed) => existed,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    format!("failed to persist fleet node removal: {err}"),
+                    "fleet_config_write_failed",
+                )),
+            )
+                .into_response()
+        }
     };
-    if !config_existed && !runtime_existed {
+    if !existed {
         return (
             StatusCode::NOT_FOUND,
             Json(ErrorBody::with_code("fleet node not found", "not_found")),
@@ -5019,18 +5126,6 @@ async fn fleet_nodes_delete(
             .into_response();
     }
 
-    if let Err(err) = crate::user_config::write(&cfg) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody::with_code(
-                format!("failed to persist fleet node removal: {err}"),
-                "fleet_config_write_failed",
-            )),
-        )
-            .into_response();
-    }
-
-    crate::fleet::remove_node(&state, &node_id);
     Json(OkAckResponse { ok: true }).into_response()
 }
 
@@ -5038,6 +5133,21 @@ async fn fleet_nodes_delete(
 /// workspace is recovered in its own task so one slow daemon doesn't stall
 /// the rest.
 pub async fn recover_from_config(state: SharedRuntimeState) {
+    if let Err(error) = crate::user_config::mutate(|config| {
+        let mut seen_paths = HashSet::new();
+        config.workspaces.retain_mut(|entry| {
+            let Ok(canonical) = PathBuf::from(&entry.path).canonicalize() else {
+                return true;
+            };
+            if !seen_paths.insert(canonical.clone()) {
+                return false;
+            }
+            entry.path = canonical.to_string_lossy().into_owned();
+            true
+        });
+    }) {
+        tracing::warn!(error = %error, "failed to normalize persisted workspace paths");
+    }
     let cfg = crate::user_config::read();
     if cfg.workspaces.is_empty() {
         return;
@@ -5055,17 +5165,17 @@ pub async fn recover_from_config(state: SharedRuntimeState) {
         let recovered_path = match workspace.canonicalize() {
             Ok(path) => path,
             Err(e) => {
-                tracing::warn!(slug=%entry.slug, path=%entry.path, error=%e, "workspace path canonicalization failed; using configured path");
-                workspace.clone()
+                tracing::warn!(slug=%entry.slug, path=%entry.path, error=%e, "workspace path canonicalization failed; skipping workspace");
+                continue;
             }
         };
-        if !seen_paths.insert(recovered_path) {
+        if !seen_paths.insert(recovered_path.clone()) {
             tracing::warn!(slug=%entry.slug, path=%entry.path, "workspace path already recovered; skipping duplicate entry");
             continue;
         }
         let state = state.clone();
         tasks.push(tokio::spawn(async move {
-            recover_single_workspace(state, entry.slug, entry.workspace_name, workspace).await;
+            recover_single_workspace(state, entry.slug, entry.workspace_name, recovered_path).await;
         }));
     }
     for t in tasks {
@@ -5079,6 +5189,16 @@ async fn recover_single_workspace(
     workspace_name: String,
     workspace: PathBuf,
 ) {
+    let mut recovered_config = WorkspaceConfig::read(&workspace).ok();
+    if let Some(config) = recovered_config.as_mut() {
+        let canonical = workspace.to_string_lossy().into_owned();
+        if config.workspace != canonical {
+            config.workspace.clone_from(&canonical);
+            if let Err(error) = config.write(&workspace) {
+                tracing::warn!(slug, error = %error, "failed to normalize workspace config path");
+            }
+        }
+    }
     {
         let mut s = crate::preconditions::arc_mutex_lock(&state);
         if s.workspaces.contains_key(&slug) {
@@ -5090,8 +5210,29 @@ async fn recover_single_workspace(
             workspace_name,
             workspace.clone(),
         );
-        ctx.git_config = WorkspaceConfig::read(&workspace).ok();
+        ctx.transition = s.workspace_transitions.slot(&workspace);
+        ctx.git_config = recovered_config.clone();
         s.workspaces.insert(slug.clone(), ctx);
+    }
+
+    if let Some(config) = recovered_config.as_ref() {
+        let (assets, token) = {
+            let s = crate::preconditions::arc_mutex_lock(&state);
+            let Some(workspace) = s.workspaces.get(&slug) else {
+                return;
+            };
+            (Arc::clone(&s.assets), workspace.asset_token.clone())
+        };
+        if let Err(error) = crate::assets::http::open_workspace_store(
+            Arc::clone(&assets),
+            workspace.clone(),
+            config,
+            &token,
+        )
+        .await
+        {
+            assets.record_store_failure(&slug, &error);
+        }
     }
 
     let human_dir = workspace.join(".gitim-runtime/human");
@@ -5565,10 +5706,11 @@ async fn workspaces_get(
 }
 
 /// Remove the workspace entry from memory and the user config file.
-/// On-disk user files at `workspace` root are preserved — only `.gitim-runtime/`
-/// artifacts are cleaned by the daemon-kill path. If the config file write
-/// fails the caller is told (500), because the API would otherwise lie about
-/// durable state (workspace gone from memory, resurrects on restart).
+/// On-disk workspace files and the attachment namespace are preserved. Owned
+/// daemon processes are stopped and the durable Runtime registry entry is
+/// removed. If the config file write fails the caller is told (500), because
+/// the API would otherwise lie about durable state (workspace gone from
+/// memory, resurrects on restart).
 async fn workspaces_delete(
     State(state): State<SharedRuntimeState>,
     WorkspaceSlug(slug): WorkspaceSlug,
@@ -5576,17 +5718,49 @@ async fn workspaces_delete(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
+    let (expected_token, initialization, transition) = {
+        let s = crate::preconditions::arc_mutex_lock(&state);
+        let Some(workspace) = s.workspaces.get(&slug) else {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorBody::new("unknown workspace")),
+            )
+                .into_response();
+        };
+        (
+            workspace.asset_token.clone(),
+            workspace.initialization.clone(),
+            Arc::clone(&workspace.transition),
+        )
+    };
+    if let Some(initialization) = initialization {
+        initialization.wait().await;
+    }
+    let _workspace_transition_guard = transition.lock_owned().await;
+    let assets = {
+        let s = crate::preconditions::arc_mutex_lock(&state);
+        match s.workspaces.get(&slug) {
+            Some(workspace) if workspace.asset_token == expected_token => Arc::clone(&s.assets),
+            None | Some(_) => {
+                // The workspace targeted by this DELETE no longer exists.
+                // A replacement using the same slug is a separate lifecycle.
+                return Json(OkAckResponse { ok: true }).into_response();
+            }
+        }
+    };
+    if let Err(error) = assets.deactivate_workspace(&expected_token).await {
+        tracing::warn!(slug = %slug, error = %error, "failed to deactivate asset store");
+    }
     let mut removed = {
         let mut s = crate::preconditions::arc_mutex_lock(&state);
-        match s.workspaces.remove(&slug) {
-            Some(ctx) => ctx,
-            None => {
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(ErrorBody::new("unknown workspace")),
-                )
-                    .into_response();
+        match s.workspaces.get(&slug) {
+            Some(workspace) if workspace.asset_token == expected_token => {
+                let Some(removed) = s.workspaces.remove(&slug) else {
+                    return Json(OkAckResponse { ok: true }).into_response();
+                };
+                removed
             }
+            None | Some(_) => return Json(OkAckResponse { ok: true }).into_response(),
         }
     };
 
@@ -5602,36 +5776,166 @@ async fn workspaces_delete(
 
     crate::workspace::kill_daemons(&removed).await;
 
-    let mut cfg = crate::user_config::read();
-    if cfg.remove(&slug) {
-        if let Err(e) = crate::user_config::write(&cfg) {
-            tracing::error!(slug = %slug, error = %e, "failed to persist workspace removal");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorBody::with_code(
-                    format!(
-                        "workspace removed from memory and daemons stopped, but ~/.gitim/runtime.json write failed: {e}. Next runtime start will try to recover this workspace.",
-                    ),
-                    "config_write_failed",
-                )),
-            )
-                .into_response();
-        }
+    if let Err(e) = crate::user_config::mutate(|config| {
+        remove_workspace_config_entry(config, &slug, &removed.path)
+    }) {
+        tracing::error!(slug = %slug, error = %e, "failed to persist workspace removal");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorBody::with_code(
+                format!(
+                    "workspace removed from memory and daemons stopped, but ~/.gitim/runtime.json write failed: {e}. Next runtime start will try to recover this workspace.",
+                ),
+                "config_write_failed",
+            )),
+        )
+            .into_response();
     }
 
     Json(OkAckResponse { ok: true }).into_response()
 }
 
-/// Best-effort rollback for a failed `POST /workspaces`. Kills any daemon the
-/// partial provisioning started, then removes `.gitim-runtime/` (which holds
-/// `human/` + any token-carrying config). We do NOT delete user-owned files
-/// at `workspace` root (e.g. the local bare `repo.git`) — those existed before
-/// we touched the directory or were created by us but are safe to leave; the
-/// plan's "file hygiene" rule is to preserve local files.
-fn cleanup_partial_workspace(workspace: &Path) {
+/// Best-effort rollback for a failed `POST /workspaces`. Partial human runtime
+/// state is removed. A pre-existing attachment namespace and workspace config
+/// are restored so deletion followed by re-registration keeps durable assets.
+#[derive(Clone)]
+struct WorkspaceRollbackBaseline {
+    preserve_asset_namespace: bool,
+    config: Option<WorkspaceConfig>,
+}
+
+impl WorkspaceRollbackBaseline {
+    fn capture(workspace: &Path) -> Self {
+        Self {
+            preserve_asset_namespace: std::fs::symlink_metadata(
+                workspace.join(".gitim-runtime/assets/v1"),
+            )
+            .is_ok(),
+            config: WorkspaceConfig::read(workspace).ok(),
+        }
+    }
+
+    fn local_created_at(&self, workspace: &Path) -> Option<String> {
+        let config = self.config.as_ref()?;
+        if config.git.provider != GitProvider::Local
+            || chrono::DateTime::parse_from_rfc3339(&config.created_at).is_err()
+        {
+            return None;
+        }
+        let configured = PathBuf::from(&config.workspace);
+        let configured = configured.canonicalize().ok()?;
+        (configured == workspace).then(|| config.created_at.clone())
+    }
+}
+
+fn cleanup_partial_workspace(workspace: &Path, baseline: &WorkspaceRollbackBaseline) {
     cleanup_human_dir(workspace);
     let runtime_dir = workspace.join(".gitim-runtime");
-    let _ = std::fs::remove_dir_all(&runtime_dir);
+    if baseline.preserve_asset_namespace {
+        let config_path = runtime_dir.join("config.json");
+        if let Some(config) = &baseline.config {
+            if let Err(error) = config.write(workspace) {
+                tracing::error!(error = %error, "failed to restore workspace config during rollback");
+            }
+        } else {
+            let _ = std::fs::remove_file(config_path);
+        }
+    } else {
+        let _ = std::fs::remove_dir_all(&runtime_dir);
+        if let Some(config) = &baseline.config {
+            if let Err(error) = config.write(workspace) {
+                tracing::error!(error = %error, "failed to restore workspace config during rollback");
+            }
+        }
+    }
+}
+
+fn remove_workspace_config_entry(
+    config: &mut crate::user_config::UserConfig,
+    slug: &str,
+    canonical_workspace: &Path,
+) -> bool {
+    let before = config.workspaces.len();
+    config.workspaces.retain(|entry| {
+        if entry.slug != slug {
+            return true;
+        }
+        let configured = PathBuf::from(&entry.path);
+        let identity = configured.canonicalize().unwrap_or(configured);
+        identity != canonical_workspace
+    });
+    config.workspaces.len() != before
+}
+
+struct WorkspaceInitializationGuard(Arc<crate::workspace::WorkspaceInitialization>);
+
+impl Drop for WorkspaceInitializationGuard {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
+}
+
+async fn rollback_workspace_creation(
+    state: &SharedRuntimeState,
+    slug: &str,
+    workspace: &Path,
+    expected_token: &crate::assets::AssetWorkspaceToken,
+    baseline: &WorkspaceRollbackBaseline,
+) {
+    let (assets, owns_context) = {
+        let runtime = crate::preconditions::arc_mutex_lock(state);
+        (
+            Arc::clone(&runtime.assets),
+            runtime
+                .workspaces
+                .get(slug)
+                .is_some_and(|context| context.asset_token == *expected_token),
+        )
+    };
+
+    if let Err(error) = assets.deactivate_workspace(expected_token).await {
+        assets.record_store_failure(slug, &error);
+        tracing::error!(slug, error = %error, "failed to deactivate rolled-back asset store");
+        return;
+    }
+
+    let still_owns_context = owns_context
+        && crate::preconditions::arc_mutex_lock(state)
+            .workspaces
+            .get(slug)
+            .is_some_and(|context| context.asset_token == *expected_token);
+    if still_owns_context {
+        #[cfg(feature = "test-support")]
+        assets.wait_before_rollback_config();
+        if let Err(error) = crate::user_config::mutate(|config| {
+            remove_workspace_config_entry(config, slug, workspace)
+        }) {
+            tracing::error!(slug, error = %error, "failed to remove rolled-back workspace config");
+            return;
+        }
+    }
+
+    let (removed_exact_token, owned_by_another_token) = {
+        let mut runtime = crate::preconditions::arc_mutex_lock(state);
+        let removed_exact_token = runtime
+            .workspaces
+            .get(slug)
+            .is_some_and(|context| context.asset_token == *expected_token)
+            && runtime.workspaces.remove(slug).is_some();
+        let owned_by_another_token = runtime
+            .workspaces
+            .values()
+            .any(|context| context.path == workspace && context.asset_token != *expected_token);
+        (removed_exact_token, owned_by_another_token)
+    };
+    if removed_exact_token && !owned_by_another_token {
+        cleanup_partial_workspace(workspace, baseline);
+    } else if removed_exact_token {
+        tracing::warn!(
+            slug,
+            "skipped workspace rollback cleanup because the canonical path has a new owner"
+        );
+    }
 }
 
 /// Provision a local-mode workspace: init bare at `{path}/repo.git` and run
@@ -5642,6 +5946,7 @@ fn cleanup_partial_workspace(workspace: &Path) {
 /// into the standard `{ ok: false, error_code, error }` body.
 async fn provision_local_workspace(
     workspace: &Path,
+    created_at: Option<String>,
 ) -> Result<(PathBuf, WorkspaceConfig), (&'static str, String)> {
     let repo_path = workspace.join("repo.git");
     std::fs::create_dir_all(&repo_path).map_err(|e| {
@@ -5686,6 +5991,10 @@ async fn provision_local_workspace(
         github_email: None,
     };
 
+    if workspace.join(".gitim-runtime/human").exists() {
+        cleanup_human_dir(workspace);
+    }
+
     let human_dir = provision_human(workspace, &remote_url, "git", auth)
         .await
         .map_err(|e| {
@@ -5699,7 +6008,7 @@ async fn provision_local_workspace(
 
     let config = WorkspaceConfig {
         workspace: workspace.to_string_lossy().into_owned(),
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: created_at.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
         git: GitConfig {
             provider: GitProvider::Local,
             remote_url: None,
@@ -5865,11 +6174,45 @@ async fn workspaces_create(
     use axum::http::StatusCode;
     use axum::response::IntoResponse;
 
-    let workspace = PathBuf::from(&req.path);
+    let requested_workspace = PathBuf::from(&req.path);
 
-    // Path validation: only cloud-sync rejection today. Do this before
-    // touching `state` so concurrent callers with bad paths fail fast and
-    // don't race for a slug.
+    // Validate both the requested spelling and its canonical identity before
+    // touching state or performing any workspace-owned side effect.
+    if let Err(crate::git_config::WorkspacePathError::CloudSyncDetected(service)) =
+        validate_workspace_path_from_env(&requested_workspace)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody::with_code(
+                format!("workspace is inside {service} — refusing to store a token there"),
+                "cloud_sync_path_rejected",
+            )),
+        )
+            .into_response();
+    }
+    let workspace = match requested_workspace.canonicalize() {
+        Ok(path) if path.is_dir() => path,
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(
+                    "workspace path must be an existing directory",
+                    "invalid_workspace_path",
+                )),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(
+                    format!("workspace path cannot be resolved: {error}"),
+                    "invalid_workspace_path",
+                )),
+            )
+                .into_response()
+        }
+    };
     if let Err(crate::git_config::WorkspacePathError::CloudSyncDetected(service)) =
         validate_workspace_path_from_env(&workspace)
     {
@@ -5882,6 +6225,22 @@ async fn workspaces_create(
         )
             .into_response();
     }
+    #[cfg(feature = "test-support")]
+    let reservation_barrier = {
+        crate::preconditions::arc_mutex_lock(&state)
+            .workspace_create_reservation_barrier
+            .clone()
+    };
+    #[cfg(feature = "test-support")]
+    if let Some(reservation_barrier) = reservation_barrier {
+        reservation_barrier.wait().await;
+    }
+    let workspace_transition = {
+        let runtime = crate::preconditions::arc_mutex_lock(&state);
+        runtime.workspace_transitions.slot(&workspace)
+    };
+    let workspace_transition_guard = Arc::clone(&workspace_transition).lock_owned().await;
+    let rollback_baseline = WorkspaceRollbackBaseline::capture(&workspace);
 
     // `workspace_name` defaults to the basename *as-is* (case/spaces/unicode
     // preserved) so the UI can show a human-friendly label even when the slug
@@ -5925,7 +6284,7 @@ async fn workspaces_create(
     // and a provisioning failure would run `cleanup_partial_workspace` against
     // the shared directory — killing the live workspace's daemon and deleting
     // its `.gitim-runtime/` tree.
-    let slug = {
+    let (slug, initialization, asset_token) = {
         let mut s = crate::preconditions::arc_mutex_lock(&state);
 
         if let Some(existing) = s.workspaces.values().find(|w| w.path == workspace) {
@@ -5980,104 +6339,154 @@ async fn workspaces_create(
             )
                 .into_response();
         }
-        let placeholder = crate::workspace::WorkspaceContext::new(
+        let initialization = Arc::new(crate::workspace::WorkspaceInitialization::new());
+        let mut placeholder = crate::workspace::WorkspaceContext::new(
             slug.clone(),
             workspace_name.clone(),
             workspace.clone(),
         );
+        placeholder.transition = Arc::clone(&workspace_transition);
+        placeholder.initialization = Some(Arc::clone(&initialization));
+        let asset_token = placeholder.asset_token.clone();
         s.workspaces.insert(slug.clone(), placeholder);
-        slug
+        (slug, initialization, asset_token)
     };
 
-    // Async provisioning runs without the state lock held. On any failure
-    // below we must re-lock and drop the placeholder so a retry can succeed.
-    let provider_str = req.git.provider.as_str();
-    let provisioned = match provider_str {
-        "local" => provision_local_workspace(&workspace).await,
-        "github" => {
-            let token = match req.git.token.as_ref() {
-                Some(t) if !t.is_empty() => t.clone(),
-                _ => {
-                    crate::preconditions::arc_mutex_lock(&state)
-                        .workspaces
-                        .remove(&slug);
-                    cleanup_partial_workspace(&workspace);
+    let join_state = Arc::clone(&state);
+    let join_slug = slug.clone();
+    let join_workspace = workspace.clone();
+    let join_initialization = Arc::clone(&initialization);
+    let join_asset_token = asset_token.clone();
+    let join_rollback_baseline = rollback_baseline.clone();
+    let finalization = tokio::spawn(async move {
+        let _initialization_guard = WorkspaceInitializationGuard(initialization);
+        let _workspace_transition_guard = workspace_transition_guard;
+        let supervisor_state = Arc::clone(&state);
+        let supervisor_slug = slug.clone();
+        let supervisor_workspace = workspace.clone();
+        let supervisor_asset_token = asset_token;
+        let supervisor_rollback_baseline = rollback_baseline;
+        let inner_asset_token = supervisor_asset_token.clone();
+        let inner_rollback_baseline = supervisor_rollback_baseline.clone();
+        let inner = tokio::spawn(async move {
+            // Async provisioning runs without the state lock held. On any failure
+            // below we must re-lock and drop the placeholder so a retry can succeed.
+            let provider_str = req.git.provider.as_str();
+            let provisioned = match provider_str {
+                "local" => {
+                    let created_at = inner_rollback_baseline.local_created_at(&workspace);
+                    provision_local_workspace(&workspace, created_at).await
+                }
+                "github" => {
+                    let token = match req.git.token.as_ref() {
+                        Some(t) if !t.is_empty() => t.clone(),
+                        _ => {
+                            rollback_workspace_creation(
+                                &state,
+                                &slug,
+                                &workspace,
+                                &inner_asset_token,
+                                &inner_rollback_baseline,
+                            )
+                            .await;
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(ErrorBody::with_code(
+                                    "github mode requires a personal access token",
+                                    "missing_token",
+                                )),
+                            )
+                                .into_response();
+                        }
+                    };
+                    let remote_url = match req.git.remote_url.as_ref() {
+                        Some(u) if !u.is_empty() => u.clone(),
+                        _ => {
+                            rollback_workspace_creation(
+                                &state,
+                                &slug,
+                                &workspace,
+                                &inner_asset_token,
+                                &inner_rollback_baseline,
+                            )
+                            .await;
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(ErrorBody::with_code(
+                                    "github mode requires remote_url",
+                                    "missing_remote_url",
+                                )),
+                            )
+                                .into_response();
+                        }
+                    };
+                    provision_github_workspace(&state, &workspace, remote_url, token).await
+                }
+                other => {
+                    rollback_workspace_creation(
+                        &state,
+                        &slug,
+                        &workspace,
+                        &inner_asset_token,
+                        &inner_rollback_baseline,
+                    )
+                    .await;
                     return (
                         StatusCode::BAD_REQUEST,
                         Json(ErrorBody::with_code(
-                            "github mode requires a personal access token",
-                            "missing_token",
+                            format!("provider not supported: {other}"),
+                            "provider_not_supported",
                         )),
                     )
                         .into_response();
                 }
             };
-            let remote_url = match req.git.remote_url.as_ref() {
-                Some(u) if !u.is_empty() => u.clone(),
-                _ => {
-                    crate::preconditions::arc_mutex_lock(&state)
-                        .workspaces
-                        .remove(&slug);
-                    cleanup_partial_workspace(&workspace);
+
+            let (human_dir, config) = match provisioned {
+                Ok(x) => x,
+                Err((error_code, message)) => {
+                    rollback_workspace_creation(
+                        &state,
+                        &slug,
+                        &workspace,
+                        &inner_asset_token,
+                        &inner_rollback_baseline,
+                    )
+                    .await;
+                    // All provisioning failures surface as 400: they're all "your input
+                    // or environment caused this" (bad token, bad URL, clone failed).
+                    // None are 500-class — the runtime itself is still fine.
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(ErrorBody::with_code(
-                            "github mode requires remote_url",
-                            "missing_remote_url",
-                        )),
+                        Json(ErrorBody::with_code(message, error_code)),
                     )
                         .into_response();
                 }
             };
-            provision_github_workspace(&state, &workspace, remote_url, token).await
-        }
-        other => {
-            crate::preconditions::arc_mutex_lock(&state)
-                .workspaces
-                .remove(&slug);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody::with_code(
-                    format!("provider not supported: {other}"),
-                    "provider_not_supported",
-                )),
-            )
-                .into_response();
-        }
-    };
 
-    let (human_dir, config) = match provisioned {
-        Ok(x) => x,
-        Err((error_code, message)) => {
-            crate::preconditions::arc_mutex_lock(&state)
-                .workspaces
-                .remove(&slug);
-            cleanup_partial_workspace(&workspace);
-            // All provisioning failures surface as 400: they're all "your input
-            // or environment caused this" (bad token, bad URL, clone failed).
-            // None are 500-class — the runtime itself is still fine.
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorBody::with_code(message, error_code)),
-            )
-                .into_response();
-        }
-    };
-
-    // Success: fill the placeholder with real provisioning results, then
-    // persist to ~/.gitim/runtime.json so the workspace survives a restart.
-    let provider_for_response;
-    {
-        let mut s = crate::preconditions::arc_mutex_lock(&state);
-        match s.workspaces.get_mut(&slug) {
-            Some(ctx) => {
-                ctx.human_repo = Some(human_dir);
-                ctx.git_config = Some(config.clone());
-            }
-            None => {
-                // Extremely unlikely — would mean a DELETE raced in during
-                // provisioning. Roll back the filesystem side and fail.
-                cleanup_partial_workspace(&workspace);
+            // Success: fill the placeholder with real provisioning results, then
+            // persist to ~/.gitim/runtime.json so the workspace survives a restart.
+            let provider_for_response = config.git.provider;
+            let placeholder_updated = {
+                let mut s = crate::preconditions::arc_mutex_lock(&state);
+                match s.workspaces.get_mut(&slug) {
+                    Some(ctx) if ctx.asset_token == inner_asset_token => {
+                        ctx.human_repo = Some(human_dir);
+                        ctx.git_config = Some(config.clone());
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if !placeholder_updated {
+                rollback_workspace_creation(
+                    &state,
+                    &slug,
+                    &workspace,
+                    &inner_asset_token,
+                    &inner_rollback_baseline,
+                )
+                .await;
                 return (
                     StatusCode::CONFLICT,
                     Json(ErrorBody::with_code(
@@ -6087,43 +6496,154 @@ async fn workspaces_create(
                 )
                     .into_response();
             }
+
+            let assets = {
+                let s = crate::preconditions::arc_mutex_lock(&state);
+                Arc::clone(&s.assets)
+            };
+            if let Err(error) = crate::assets::http::open_workspace_store(
+                Arc::clone(&assets),
+                workspace.clone(),
+                &config,
+                &inner_asset_token,
+            )
+            .await
+            {
+                assets.record_store_failure(&slug, &error);
+                rollback_workspace_creation(
+                    &state,
+                    &slug,
+                    &workspace,
+                    &inner_asset_token,
+                    &inner_rollback_baseline,
+                )
+                .await;
+                return (
+                    error.status_code(),
+                    Json(ErrorBody::with_code(
+                        "workspace asset store initialization failed",
+                        error.error_code(),
+                    )),
+                )
+                    .into_response();
+            }
+
+            #[cfg(feature = "test-support")]
+            assets.wait_after_activation().await;
+
+            let workspace_entry = crate::user_config::WorkspaceEntry {
+                slug: slug.clone(),
+                workspace_name: workspace_name.clone(),
+                path: workspace.to_string_lossy().into_owned(),
+            };
+            if let Err(e) = crate::user_config::mutate(|config| config.upsert(workspace_entry)) {
+                tracing::error!(slug = %slug, error = %e, "failed to persist workspace entry");
+                rollback_workspace_creation(
+                    &state,
+                    &slug,
+                    &workspace,
+                    &inner_asset_token,
+                    &inner_rollback_baseline,
+                )
+                .await;
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorBody::with_code(
+                        format!(
+                            "workspace provisioned but ~/.gitim/runtime.json write failed: {e}"
+                        ),
+                        "config_write_failed",
+                    )),
+                )
+                    .into_response();
+            }
+
+            #[cfg(feature = "test-support")]
+            assets.run_after_config_write_hook();
+
+            let response = (
+                StatusCode::CREATED,
+                Json(WorkspaceCreateResponse {
+                    ok: true,
+                    slug: slug.clone(),
+                    workspace_name,
+                    path: workspace.to_string_lossy().into_owned(),
+                    provider: provider_for_response,
+                }),
+            )
+                .into_response();
+            if let Some(workspace) = crate::preconditions::arc_mutex_lock(&state)
+                .workspaces
+                .get_mut(&slug)
+            {
+                if workspace.asset_token == inner_asset_token {
+                    workspace.initialization = None;
+                }
+            }
+            response
+        });
+
+        match inner.await {
+            Ok(response) => response,
+            Err(error) => {
+                rollback_workspace_creation(
+                    &supervisor_state,
+                    &supervisor_slug,
+                    &supervisor_workspace,
+                    &supervisor_asset_token,
+                    &supervisor_rollback_baseline,
+                )
+                .await;
+                tracing::error!(slug = %supervisor_slug, error = %error, "workspace finalization task failed");
+                let asset_error =
+                    AssetError::Invariant("workspace finalization task failed unexpectedly");
+                let assets =
+                    Arc::clone(&crate::preconditions::arc_mutex_lock(&supervisor_state).assets);
+                assets.record_store_failure(&supervisor_slug, &asset_error);
+                (
+                    asset_error.status_code(),
+                    Json(ErrorBody::with_code(
+                        "workspace finalization failed",
+                        asset_error.error_code(),
+                    )),
+                )
+                    .into_response()
+            }
         }
-        provider_for_response = config.git.provider;
-    }
-
-    let mut user_cfg = crate::user_config::read();
-    user_cfg.upsert(crate::user_config::WorkspaceEntry {
-        slug: slug.clone(),
-        workspace_name: workspace_name.clone(),
-        path: workspace.to_string_lossy().into_owned(),
     });
-    if let Err(e) = crate::user_config::write(&user_cfg) {
-        tracing::error!(slug = %slug, error = %e, "failed to persist workspace entry");
-        crate::preconditions::arc_mutex_lock(&state)
-            .workspaces
-            .remove(&slug);
-        cleanup_partial_workspace(&workspace);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorBody::with_code(
-                format!("workspace provisioned but ~/.gitim/runtime.json write failed: {e}"),
-                "config_write_failed",
-            )),
-        )
-            .into_response();
-    }
 
-    (
-        StatusCode::CREATED,
-        Json(WorkspaceCreateResponse {
-            ok: true,
-            slug,
-            workspace_name,
-            path: workspace.to_string_lossy().into_owned(),
-            provider: provider_for_response,
-        }),
-    )
-        .into_response()
+    match finalization.await {
+        Ok(response) => response,
+        Err(error) => {
+            let transition = {
+                let runtime = crate::preconditions::arc_mutex_lock(&join_state);
+                runtime.workspace_transitions.slot(&join_workspace)
+            };
+            let _workspace_transition_guard = transition.lock_owned().await;
+            rollback_workspace_creation(
+                &join_state,
+                &join_slug,
+                &join_workspace,
+                &join_asset_token,
+                &join_rollback_baseline,
+            )
+            .await;
+            join_initialization.finish();
+            tracing::error!(slug = %join_slug, error = %error, "workspace finalization supervisor failed");
+            let asset_error =
+                AssetError::Invariant("workspace finalization supervisor failed unexpectedly");
+            let assets = Arc::clone(&crate::preconditions::arc_mutex_lock(&join_state).assets);
+            assets.record_store_failure(&join_slug, &asset_error);
+            (
+                asset_error.status_code(),
+                Json(ErrorBody::with_code(
+                    "workspace finalization failed",
+                    asset_error.error_code(),
+                )),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// HTTP handler for `GET /hermes/llm/providers`.
@@ -6240,7 +6760,36 @@ pub fn create_router_with_exe(canonical_exe_path: PathBuf) -> (Router, SharedRun
 }
 
 fn build_router(state: SharedRuntimeState) -> (Router, SharedRuntimeState) {
+    build_router_with_asset_router(state, crate::assets::http::router())
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn create_router_with_asset_upload_limit(
+    max_upload_bytes: usize,
+) -> (Router, SharedRuntimeState) {
+    create_router_with_asset_http_config(max_upload_bytes, Vec::new())
+}
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn create_router_with_asset_http_config(
+    max_upload_bytes: usize,
+    configured_origins: Vec<String>,
+) -> (Router, SharedRuntimeState) {
+    let state = Arc::new(Mutex::new(RuntimeState::default()));
+    build_router_with_asset_router(
+        state,
+        crate::assets::http::router_with_configured_origins(max_upload_bytes, configured_origins),
+    )
+}
+
+fn build_router_with_asset_router(
+    state: SharedRuntimeState,
+    asset_router: Router<SharedRuntimeState>,
+) -> (Router, SharedRuntimeState) {
     let ws_router = Router::new()
+        .merge(asset_router)
         .route("/im/me", get(im_me))
         .route("/im/channels", get(im_channels))
         .route("/im/create-channel", post(im_create))

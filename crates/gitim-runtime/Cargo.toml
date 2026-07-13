@@ -20,13 +20,19 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 regex = { workspace = true }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "multipart"] }
 dirs = "6"
-axum = "0.8"
+axum = { version = "0.8", features = ["multipart"] }
 async-trait = "0.1"
 futures = "0.3"
+fs2 = "0.4"
+infer = "0.19"
+imagesize = { version = "0.15", default-features = false, features = ["png", "jpeg", "gif", "webp", "heif"] }
+mime = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tokio-util = { workspace = true, features = ["io"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tower = { version = "0.5", features = ["util"] }
 tempfile = "3"
 tiktoken-rs = "0.11.0"
 libc = "0.2"
@@ -38,11 +44,7 @@ percent-encoding = "2"
 xattr = "1"
 
 [features]
-# Gates the `fake-gitim-runtime` test-support binary and the `update_e2e`
-# integration test. Without this feature, plain `cargo build --release` (or
-# `cargo install --path`) does NOT produce the fake binary — keeps test
-# helpers out of production artifacts. Enable via
-# `cargo test -p gitim-runtime --features test-support --test update_e2e`.
+# Gates test-only binaries, integration targets, and diagnostic APIs.
 test-support = []
 
 [[bin]]
@@ -70,11 +72,20 @@ name = "update_e2e"
 path = "tests/update_e2e.rs"
 required-features = ["test-support"]
 
+[[test]]
+name = "assets_store"
+path = "tests/assets_store.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "assets_http"
+path = "tests/assets_http.rs"
+
 [dev-dependencies]
 serial_test = "3"
 mockito = "1"
-tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 xattr = "1"

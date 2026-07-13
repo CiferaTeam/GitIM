@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { parseAssetRef } from "./asset-ref";
 import { parseMessageBody, type Fragment } from "./message-parser";
+
+const ASSET_REF =
+  "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=fleet-assets.png&type=image%2Fpng&size=184203&width=1600&height=900>";
 
 function collectTypes(fragments: Fragment[]): string[] {
   return fragments.map((f) => f.type);
@@ -81,6 +85,85 @@ describe("parseMessageBody", () => {
   it("parses multiple links in one message", () => {
     const frags = parseMessageBody("<@alice> <#general> and <!https://x.com>");
     expect(collectTypes(frags)).toEqual(["mention", "text", "channel-link", "text", "external-link"]);
+  });
+
+  describe("asset references", () => {
+    it("parses a canonical asset as a single asset fragment", () => {
+      expect(parseMessageBody(ASSET_REF)).toEqual([
+        { type: "asset", asset: parseAssetRef(ASSET_REF) },
+      ]);
+    });
+
+    it("preserves assets inside inline code", () => {
+      expect(parseMessageBody(`\`${ASSET_REF}\``)).toEqual([
+        { type: "inline-code", code: ASSET_REF },
+      ]);
+    });
+
+    it("preserves assets inside fenced code blocks", () => {
+      expect(parseMessageBody(`\`\`\`text\n${ASSET_REF}\n\`\`\``)).toEqual([
+        { type: "code-block", language: "text", code: `${ASSET_REF}\n` },
+      ]);
+    });
+
+    it("parses assets among text and existing inline links", () => {
+      expect(collectTypes(parseMessageBody(`See <@alice> ${ASSET_REF} <#general/abc123> <!https://gitim.io>.`))).toEqual([
+        "text",
+        "mention",
+        "text",
+        "asset",
+        "text",
+        "card-link",
+        "text",
+        "external-link",
+        "text",
+      ]);
+    });
+
+    it("emits invalid asset references as exact selectable plain text", () => {
+      const invalid = ASSET_REF.replace("size=184203", "size=0184203");
+      expect(parseMessageBody(invalid)).toEqual([{ type: "text", content: invalid }]);
+    });
+
+    it("parses multiple canonical assets", () => {
+      expect(collectTypes(parseMessageBody(`${ASSET_REF} and ${ASSET_REF}`))).toEqual([
+        "asset",
+        "text",
+        "asset",
+      ]);
+    });
+
+    it.each([
+      ["channel", "<#general>", "channel-link"],
+      ["user", "<~bob>", "user-profile"],
+      ["mention", "<@alice>", "mention"],
+      ["soft link", "<!https://gitim.io>", "external-link"],
+    ])("does not swallow a nested %s link in a malformed asset opener", (_label, link, type) => {
+      const fragments = parseMessageBody(`<^not-an-asset ${link}>`);
+      expect(collectTypes(fragments)).toContain(type);
+      expect(
+        fragments
+          .filter((fragment): fragment is Extract<Fragment, { type: "text" }> => fragment.type === "text")
+          .map((fragment) => fragment.content)
+          .join(""),
+      ).toBe("<^not-an-asset >");
+    });
+
+    it("recovers valid links after a long malformed asset opener", () => {
+      const fragments = parseMessageBody(
+        `<^${"x".repeat(2_000)} <#general>> tail <@alice>`,
+      );
+      expect(collectTypes(fragments)).toEqual([
+        "text",
+        "channel-link",
+        "text",
+        "mention",
+      ]);
+      expect(findFirst(fragments, "channel-link")).toEqual({
+        type: "channel-link",
+        channel: "general",
+      });
+    });
   });
 
   describe("card-link", () => {

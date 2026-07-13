@@ -9,11 +9,13 @@ use std::time::Duration;
 use gitim_runtime::preflight::{
     preflight_pi, preflight_pi_with, preflight_pi_with_config, ErrorKind, PreflightOverrides,
 };
+use serial_test::serial;
 
 mod common;
 use common::{fixture, resolve_stdbin};
 
 #[tokio::test]
+#[serial(pi_preflight)]
 async fn test_preflight_pi_not_installed() {
     let result = preflight_pi_with("/usr/bin/definitely-not-pi-xyz", Duration::from_secs(5)).await;
 
@@ -24,6 +26,7 @@ async fn test_preflight_pi_not_installed() {
 }
 
 #[tokio::test]
+#[serial(pi_preflight)]
 async fn test_preflight_pi_exit_nonzero() {
     let result = preflight_pi_with(&resolve_stdbin("false"), Duration::from_secs(5)).await;
 
@@ -33,6 +36,7 @@ async fn test_preflight_pi_exit_nonzero() {
 }
 
 #[tokio::test]
+#[serial(pi_preflight)]
 async fn test_preflight_pi_empty_output() {
     let result = preflight_pi_with(&resolve_stdbin("true"), Duration::from_secs(5)).await;
 
@@ -42,6 +46,7 @@ async fn test_preflight_pi_empty_output() {
 }
 
 #[tokio::test]
+#[serial(pi_preflight)]
 async fn test_preflight_pi_timeout() {
     let script = fixture("sleep-pi.sh");
     assert!(
@@ -57,6 +62,7 @@ async fn test_preflight_pi_timeout() {
 }
 
 #[tokio::test]
+#[serial(pi_preflight)]
 async fn test_preflight_pi_uses_message_rpc_field() {
     let script = fixture("pi-rpc-echo.sh");
     assert!(script.is_file(), "fixture missing: {script:?}");
@@ -70,6 +76,7 @@ async fn test_preflight_pi_uses_message_rpc_field() {
 }
 
 #[tokio::test]
+#[serial(pi_preflight)]
 #[ignore = "flaky under parallel cargo test load: timing race between script stdout surfacing and the test's own timeout firing. Run with --ignored to verify."]
 async fn test_preflight_pi_surfaces_rpc_error_response() {
     let script = fixture("pi-rpc-error.sh");
@@ -85,6 +92,7 @@ async fn test_preflight_pi_surfaces_rpc_error_response() {
 }
 
 #[tokio::test]
+#[serial(pi_preflight)]
 #[ignore = "requires real pi CLI; run manually with --ignored"]
 async fn test_preflight_pi_real_hello() {
     let result = preflight_pi().await;
@@ -115,6 +123,7 @@ async fn test_preflight_pi_real_hello() {
 // `preflight_pi_with_config`.
 
 #[tokio::test]
+#[serial(pi_preflight)]
 async fn pi_with_config_env_override_reaches_subprocess() {
     let script = fixture("pi-rpc-echo-env.sh");
     assert!(script.is_file(), "fixture missing: {script:?}");
@@ -132,6 +141,7 @@ async fn pi_with_config_env_override_reaches_subprocess() {
     let overrides = PreflightOverrides {
         env_override: Some(env),
         model_override: None,
+        effort_override: None,
     };
     let result =
         preflight_pi_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides).await;
@@ -145,6 +155,7 @@ async fn pi_with_config_env_override_reaches_subprocess() {
 }
 
 #[tokio::test]
+#[serial(pi_preflight)]
 async fn pi_with_config_model_override_reaches_subprocess() {
     let script = fixture("pi-rpc-echo-argv.sh");
     assert!(script.is_file(), "fixture missing: {script:?}");
@@ -152,6 +163,7 @@ async fn pi_with_config_model_override_reaches_subprocess() {
     let overrides = PreflightOverrides {
         env_override: None,
         model_override: Some("openai/gpt-test".to_string()),
+        effort_override: None,
     };
     let result =
         preflight_pi_with_config(script.to_str().unwrap(), Duration::from_secs(5), overrides).await;

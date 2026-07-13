@@ -196,6 +196,9 @@ mod tests {
             activity_tx: tx,
             auth_failed: Arc::new(AtomicBool::new(false)),
             git_config: None,
+            asset_token: crate::assets::AssetWorkspaceToken::new(),
+            initialization: None,
+            transition: Arc::default(),
         };
         let mut rs = RuntimeState::default();
         rs.workspaces.insert("test".into(), ctx);
