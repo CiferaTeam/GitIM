@@ -1,10 +1,18 @@
 import { useMemo, useState, type MouseEvent } from "react";
-import { Download, FileText, RefreshCw } from "lucide-react";
+import { Download, FileText, RefreshCw, X } from "lucide-react";
 
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import type { AssetRef } from "../../lib/asset-ref";
 import { assetResolveUrl } from "../../lib/client";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+  DialogTrigger,
+} from "../ui/dialog";
 
 const INLINE_IMAGE_TYPES = new Set([
   "image/png",
@@ -226,52 +234,87 @@ function ImageCard({
   }
 
   return (
-    <a
-      href={url}
-      target="_blank"
-      rel="noopener noreferrer"
-      aria-label={`Open ${asset.name}`}
-      onClick={stopAssetEvent}
-      onDoubleClick={stopAssetEvent}
-      className="block overflow-hidden rounded-lg border border-border-strong bg-surface text-inherit no-underline"
-    >
-      <span
-        data-asset-frame
-        className={`relative flex max-w-[440px] max-h-[440px] min-h-20 items-center justify-center overflow-hidden bg-background ${geometry ? "mx-auto" : "w-full"}`}
-        style={geometry ? {
-          aspectRatio: geometry.aspectRatio,
-          width: "100%",
-          maxWidth: `${geometry.frameWidth}px`,
-        } : undefined}
-      >
-        <img
-          key={attempt}
-          data-asset-image
-          src={url}
-          crossOrigin="anonymous"
-          loading="lazy"
-          alt={asset.name}
-          {...(geometry && { width: geometry.width, height: geometry.height })}
-          onLoad={() => setState("loaded")}
-          onError={() => setState("unavailable")}
-          className="block h-full max-h-[440px] w-full max-w-full object-contain"
-        />
-        {state === "loading" && (
+    <Dialog>
+      <DialogTrigger asChild>
+        <button
+          type="button"
+          aria-label={`Open image preview for ${asset.name}`}
+          onClick={stopAssetEvent}
+          onDoubleClick={stopAssetEvent}
+          className="block w-full overflow-hidden rounded-lg border border-border-strong bg-surface text-left text-inherit"
+        >
           <span
-            role="status"
-            className="absolute inset-0 flex items-center justify-center bg-background/70 text-xs text-text-muted"
+            data-asset-frame
+            className={`relative flex max-h-[440px] max-w-[440px] min-h-20 items-center justify-center overflow-hidden bg-background ${geometry ? "mx-auto" : "w-full"}`}
+            style={geometry ? {
+              aspectRatio: geometry.aspectRatio,
+              width: "100%",
+              maxWidth: `${geometry.frameWidth}px`,
+            } : undefined}
           >
-            Loading {asset.name}…
+            <img
+              key={attempt}
+              data-asset-image
+              src={url}
+              crossOrigin="anonymous"
+              loading="lazy"
+              alt={asset.name}
+              {...(geometry && { width: geometry.width, height: geometry.height })}
+              onLoad={() => setState("loaded")}
+              onError={() => setState("unavailable")}
+              className="block h-full max-h-[440px] w-full max-w-full object-contain"
+            />
+            {state === "loading" && (
+              <span
+                role="status"
+                className="absolute inset-0 flex items-center justify-center bg-background/70 text-xs text-text-muted"
+              >
+                Loading {asset.name}…
+              </span>
+            )}
           </span>
-        )}
-      </span>
-      <span className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-xs text-text-muted">
-        <span className="min-w-0 truncate font-medium text-foreground" title={asset.name}>
-          {asset.name}
-        </span>
-        <span className="shrink-0">{formatBinarySize(asset.size)}</span>
-      </span>
-    </a>
+          <span className="flex items-center justify-between gap-3 border-t border-border px-3 py-2 text-xs text-text-muted">
+            <span className="min-w-0 truncate font-medium text-foreground" title={asset.name}>
+              {asset.name}
+            </span>
+            <span className="shrink-0">{formatBinarySize(asset.size)}</span>
+          </span>
+        </button>
+      </DialogTrigger>
+      <DialogContent
+        showCloseButton={false}
+        className="flex h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-0 overflow-hidden border-border-strong bg-background/95 p-0 sm:max-w-none"
+      >
+        <div className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-3">
+          <DialogTitle className="min-w-0 flex-1 truncate text-sm" title={asset.name}>
+            {asset.name}
+          </DialogTitle>
+          <DialogDescription className="sr-only">
+            Full-size image preview
+          </DialogDescription>
+          <DownloadLink asset={asset} url={downloadUrl} />
+          <DialogClose asChild>
+            <button
+              type="button"
+              aria-label="Close image preview"
+              className="rounded-md p-2 text-text-secondary transition-colors duration-75 hover:bg-surface-hover hover:text-foreground"
+            >
+              <X aria-hidden="true" className="size-4" />
+            </button>
+          </DialogClose>
+        </div>
+        <div className="flex min-h-0 flex-1 items-center justify-center p-3 sm:p-6">
+          <img
+            data-asset-lightbox-image
+            src={url}
+            crossOrigin="anonymous"
+            alt={asset.name}
+            onError={() => setState("unavailable")}
+            className="max-h-full max-w-full object-contain"
+          />
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

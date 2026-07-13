@@ -136,7 +136,7 @@ describe("MessageBody", () => {
     });
   }
 
-  it("renders a canonical PNG as a lazy anonymous image linked to the local resolver", async () => {
+  it("renders a canonical PNG as a lazy anonymous image with a lightbox trigger", async () => {
     await renderBody(assetRef({ width: 1600, height: 900 }));
 
     const image = container.querySelector("img[data-asset-image]");
@@ -146,13 +146,64 @@ describe("MessageBody", () => {
     expect(image?.getAttribute("crossorigin")).toBe("anonymous");
     expect(image?.getAttribute("src")).toContain("/assets/resolve/");
 
-    const link = image?.closest("a");
-    expect(link?.getAttribute("target")).toBe("_blank");
-    expect(link?.getAttribute("rel")).toBe("noopener noreferrer");
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open image preview for fleet-assets.png"]',
+    );
+    expect(trigger).not.toBeNull();
+    expect(image?.closest("a")).toBeNull();
     expect(assetResolveUrlMock).toHaveBeenCalledWith(
       "workspace",
       expect.objectContaining({ name: "fleet-assets.png", mediaType: "image/png" }),
     );
+  });
+
+  it("opens an in-app lightbox with image metadata and download", async () => {
+    await renderBody(assetRef({ width: 1600, height: 900 }));
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open image preview for fleet-assets.png"]',
+    )!;
+
+    await act(async () => {
+      trigger.click();
+      await Promise.resolve();
+    });
+
+    const dialog = document.body.querySelector<HTMLElement>('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    expect(dialog?.querySelector('[data-slot="dialog-title"]')?.textContent).toBe(
+      "fleet-assets.png",
+    );
+    expect(
+      dialog?.querySelector<HTMLImageElement>("img[data-asset-lightbox-image]")?.src,
+    ).toContain("/assets/resolve/");
+    expect(
+      dialog?.querySelector<HTMLAnchorElement>(
+        'a[aria-label="Download fleet-assets.png"]',
+      )?.href,
+    ).toContain("download=1");
+    expect(dialog?.querySelector('button[aria-label="Close image preview"]')).not.toBeNull();
+  });
+
+  it("closes the image lightbox with Escape and restores trigger focus", async () => {
+    await renderBody(assetRef({ width: 1600, height: 900 }));
+    const trigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Open image preview for fleet-assets.png"]',
+    )!;
+    trigger.focus();
+
+    await act(async () => {
+      trigger.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("reserves exact normal image geometry and bounds extreme dimension hints", async () => {
@@ -374,7 +425,9 @@ describe("MessageBody", () => {
     const image = container.querySelector("img[data-asset-image]");
     expect(image?.getAttribute("alt")).toBe(name);
     expect(container.querySelector(`[title="${name}"]`)?.textContent).toBe(name);
-    expect(container.querySelector(`a[aria-label="Open ${name}"]`)).not.toBeNull();
+    expect(
+      container.querySelector(`button[aria-label="Open image preview for ${name}"]`),
+    ).not.toBeNull();
     expect(container.querySelector("b")).toBeNull();
   });
 
@@ -427,11 +480,13 @@ describe("MessageBody", () => {
       await Promise.resolve();
     });
 
-    const imageLink = container.querySelector<HTMLAnchorElement>('a[aria-label^="Open "]')!;
+    const imageTrigger = container.querySelector<HTMLButtonElement>(
+      'button[aria-label^="Open image preview for "]',
+    )!;
     const download = container.querySelector<HTMLAnchorElement>('a[aria-label^="Download "]')!;
     for (const target of [
       container.querySelector<HTMLElement>("[data-asset-root]")!,
-      imageLink,
+      imageTrigger,
       download,
     ]) {
       const click = new MouseEvent("click", { bubbles: true, cancelable: true });
