@@ -292,6 +292,9 @@ function ImageCard({
           <DialogDescription className="sr-only">
             Full-size image preview
           </DialogDescription>
+          <span className="shrink-0 text-xs text-text-muted">
+            {formatBinarySize(asset.size)}
+          </span>
           <DownloadLink asset={asset} url={downloadUrl} />
           <DialogClose asChild>
             <button

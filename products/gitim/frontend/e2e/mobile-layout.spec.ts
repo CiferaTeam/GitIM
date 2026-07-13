@@ -722,8 +722,12 @@ test("mobile chat Enter inserts newline and send button sends", async ({ page })
   await expect(input).toHaveValue("");
 });
 
-test("mobile attachment stays within the composer and message column", async ({ page }) => {
+test("mobile attachment and lightbox stay within the viewport", async ({ page }) => {
   const sentBodies: Array<Record<string, unknown>> = [];
+  let popupOpened = false;
+  page.on("popup", () => {
+    popupOpened = true;
+  });
   await page.setViewportSize({ width: 390, height: 844 });
   await stubRuntime(page, sentBodies);
   await page.goto("/chat");
@@ -795,6 +799,64 @@ test("mobile attachment stays within the composer and message column", async ({ 
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
     await page.evaluate(() => document.documentElement.clientWidth),
   );
+
+  const trigger = page.getByRole("button", {
+    name: "Open image preview for portrait.png",
+  });
+  const pageCount = page.context().pages().length;
+  await trigger.click();
+
+  const dialog = page.getByRole("dialog", { name: "portrait.png" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText(`${portraitPng.length} B`, { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("link", { name: "Download portrait.png" })).toHaveAttribute(
+    "href",
+    /[?&]download=1(?:&|$)/,
+  );
+  expect(popupOpened).toBe(false);
+  expect(page.context().pages()).toHaveLength(pageCount);
+
+  const viewport = page.viewportSize();
+  const lightboxImage = dialog.locator("[data-asset-lightbox-image]");
+  const [dialogBox, lightboxImageBox] = await Promise.all([
+    dialog.boundingBox(),
+    lightboxImage.boundingBox(),
+  ]);
+  expect(viewport).not.toBeNull();
+  expect(dialogBox).not.toBeNull();
+  expect(lightboxImageBox).not.toBeNull();
+  for (const box of [dialogBox!, lightboxImageBox!]) {
+    expect(box.x).toBeGreaterThanOrEqual(0);
+    expect(box.y).toBeGreaterThanOrEqual(0);
+    expect(box.x + box.width).toBeLessThanOrEqual(viewport!.width);
+    expect(box.y + box.height).toBeLessThanOrEqual(viewport!.height);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(
+    await page.evaluate(() => document.documentElement.clientWidth),
+  );
+
+  await page.keyboard.press("Tab");
+  expect(
+    await dialog.evaluate((element) => element.contains(document.activeElement)),
+  ).toBe(true);
+
+  await dialog.getByRole("button", { name: "Close image preview" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  await expect(dialog).toBeVisible();
+  await page.mouse.click(4, Math.floor(viewport!.height / 2));
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+
+  await trigger.click();
+  await expect(dialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  expect(popupOpened).toBe(false);
+  expect(page.context().pages()).toHaveLength(pageCount);
 });
 
 test("mobile card detail uses the shared bottom tabs once", async ({ page }) => {

@@ -173,6 +173,7 @@ describe("MessageBody", () => {
     expect(dialog?.querySelector('[data-slot="dialog-title"]')?.textContent).toBe(
       "fleet-assets.png",
     );
+    expect(dialog?.textContent).toContain("180 KiB");
     expect(
       dialog?.querySelector<HTMLImageElement>("img[data-asset-lightbox-image]")?.src,
     ).toContain("/assets/resolve/");

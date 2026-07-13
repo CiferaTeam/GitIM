@@ -45,6 +45,7 @@ it("opens an in-app lightbox with image metadata and download", async () => {
   expect(dialog).not.toBeNull();
   expect(dialog?.querySelector('[data-slot="dialog-title"]')?.textContent)
     .toBe("fleet-assets.png");
+  expect(dialog?.textContent).toContain("180 KiB");
   expect(dialog?.querySelector<HTMLImageElement>("img[data-asset-lightbox-image]")?.src)
     .toContain("/assets/resolve/");
   expect(dialog?.querySelector<HTMLAnchorElement>('a[aria-label="Download fleet-assets.png"]')?.href)
@@ -188,6 +189,9 @@ Replace the successful image anchor with:
       <DialogDescription className="sr-only">
         Full-size image preview
       </DialogDescription>
+      <span className="shrink-0 text-xs text-text-muted">
+        {formatBinarySize(asset.size)}
+      </span>
       <DownloadLink asset={asset} url={downloadUrl} />
       <DialogClose asChild>
         <button type="button" aria-label="Close image preview" className="rounded-md p-2 text-text-secondary hover:bg-surface-hover hover:text-foreground">
@@ -231,6 +235,7 @@ Expected: 23 tests pass with no warnings.
 **Files:**
 - Modify: `docs/plans/file-attachments/00-requirements.md`
 - Modify: `docs/plans/image-lightbox/01-implementation-plan.md`
+- Modify: `products/gitim/frontend/e2e/mobile-layout.spec.ts`
 
 - [x] **Step 1: Update the attachment rendering requirement**
 
@@ -253,16 +258,20 @@ npm run build
 
 Expected: all commands exit 0.
 
-- [x] **Step 3: Run browser E2E**
+- [x] **Step 3: Add and run browser E2E**
 
-Open a real Runtime-backed conversation, click a rendered attachment, verify no
-new browser tab appears, close once with Escape and once with the close action,
-and verify Download still resolves through the Runtime.
+Extend the mobile attachment Playwright flow to open the rendered image and
+assert the dialog/image stay within the 390 × 844 viewport, no popup opens,
+Download contains `download=1`, focus remains trapped, close/backdrop/Escape all
+dismiss, and focus returns to the thumbnail. Repeat the same interaction against
+a real local Runtime with Kimi WebBridge.
 
 ## Verification
 
 - `message-body.test.tsx`: 23 tests passed.
 - Frontend suite: 74 files and 716 tests passed.
+- Mobile Playwright suite: 19 tests passed, including the lightbox interaction
+  and viewport regression.
 - ESLint and the production TypeScript/Vite build passed.
 - Kimi WebBridge exercised the worktree Vite build against the local Runtime on
   desktop and a 390 × 844 mobile viewport. The dialog stayed within the viewport,
