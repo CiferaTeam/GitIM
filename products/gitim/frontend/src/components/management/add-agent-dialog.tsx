@@ -80,9 +80,10 @@ export function AddAgentDialog() {
   const [providerModelsLoading, setProviderModelsLoading] = useState(false);
   const [providerCustomModelInput, setProviderCustomModelInput] = useState("");
 
-  const derivedHandler = handlerManuallyEdited
-    ? toHandler(handler.trim())
-    : toHandler(displayName.trim());
+  // Handle input is the source of truth. Auto-sync from display name keeps the
+  // IME pinyin intermediate in `handler`; re-deriving from a CJK display name
+  // would wipe it (toHandler strips non-ASCII).
+  const derivedHandler = toHandler(handler.trim());
   const handlerError = handler.trim() ? validateHandler(handler.trim()) : null;
   const displayNameError = !displayName.trim() ? "Display name is required" : null;
   const providerInfo = provider ? PROVIDERS[provider as ProviderId] : null;
@@ -400,9 +401,16 @@ export function AddAgentDialog() {
                   id="agent-display-name"
                   value={displayName}
                   onChange={(e) => {
-                    setDisplayName(e.target.value);
+                    const nextDisplay = e.target.value;
+                    setDisplayName(nextDisplay);
                     if (!handlerManuallyEdited) {
-                      setHandler(toHandler(e.target.value));
+                      const nextHandler = toHandler(nextDisplay);
+                      // Keep prior auto-derived handle when display name commits
+                      // to CJK (IME Enter): toHandler("火花") === "" but the
+                      // pinyin intermediate (e.g. "huohua") is still valid.
+                      if (nextHandler || !nextDisplay.trim()) {
+                        setHandler(nextHandler);
+                      }
                     }
                   }}
                   placeholder="e.g. Code Reviewer"
