@@ -56,6 +56,10 @@ history snapshots.
 - Inline SVG, PDF, audio, or video players.
 - Malware scanning and content moderation.
 
+The future mobile-shell path through an automatically selected Tailscale
+Gateway Runtime is captured in
+[04-mobile-gateway-discovery.md](04-mobile-gateway-discovery.md).
+
 ## Architectural Invariants
 
 1. Binary bytes are never written below the human or Agent Git clone.
