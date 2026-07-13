@@ -722,9 +722,9 @@ describe("daemon-web Quick Session parity", () => {
       setState({ epochRedirected: true, syncStatus: "epoch_redirected" });
       return {
         beforeHead: "base",
-        afterHead: "local-rebased-head",
+        afterHead: "local-unpublished-head",
         changed: true,
-        status: "rebased" as const,
+        status: "idle" as const,
       };
     });
 
