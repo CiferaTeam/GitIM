@@ -835,12 +835,15 @@ test("mobile attachment and lightbox stay within the viewport", async ({ page })
     await page.evaluate(() => document.documentElement.clientWidth),
   );
 
+  const download = dialog.getByRole("link", { name: "Download portrait.png" });
+  const close = dialog.getByRole("button", { name: "Close image preview" });
+  await close.focus();
   await page.keyboard.press("Tab");
-  expect(
-    await dialog.evaluate((element) => element.contains(document.activeElement)),
-  ).toBe(true);
+  await expect(download).toBeFocused();
+  await page.keyboard.press("Shift+Tab");
+  await expect(close).toBeFocused();
 
-  await dialog.getByRole("button", { name: "Close image preview" }).click();
+  await close.click();
   await expect(dialog).toHaveCount(0);
   await expect(trigger).toBeFocused();
 
