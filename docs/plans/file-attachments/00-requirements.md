@@ -56,9 +56,9 @@ history snapshots.
 - Inline SVG, PDF, audio, or video players.
 - Malware scanning and content moderation.
 
-The future mobile-shell path through an automatically selected Tailscale
-Gateway Runtime is captured in
-[04-mobile-gateway-discovery.md](04-mobile-gateway-discovery.md).
+The future mobile-shell path through an automatically selected Tailscale Gateway
+Runtime is captured in
+[Mobile Gateway Discovery](../mobile-gateway-discovery/00-design.md).
 
 ## Architectural Invariants
 
