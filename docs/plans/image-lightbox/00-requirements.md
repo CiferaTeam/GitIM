@@ -28,4 +28,5 @@ URL.
 - The dialog has an accessible name and description.
 - Desktop and mobile previews remain inside the visible viewport without page
   overflow.
-- Existing message click and double-click boundaries remain isolated.
+- Portaled preview clicks, double-clicks, touch gestures, and context menus do
+  not trigger the underlying message actions.

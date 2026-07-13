@@ -110,6 +110,7 @@ rendered.
 
 **Files:**
 - Modify: `products/gitim/frontend/src/components/chat/asset-fragment.tsx`
+- Modify: `products/gitim/frontend/src/components/ui/dialog.tsx`
 - Test: `products/gitim/frontend/src/components/chat/message-body.test.tsx`
 
 - [x] **Step 1: Build the trigger and dialog**
@@ -180,6 +181,8 @@ Replace the successful image anchor with:
   </DialogTrigger>
   <DialogContent
     showCloseButton={false}
+    overlayProps={assetPortalEventBoundary}
+    {...assetPortalEventBoundary}
     className="flex h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-0 overflow-hidden border-border-strong bg-background/95 p-0 sm:max-w-none"
   >
     <div className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-3">
@@ -218,7 +221,11 @@ Replace the successful image anchor with:
 Keep `state`, `attempt`, `imageGeometry`, the loading overlay, and the
 `UnavailableCard` branch unchanged. The trigger calls `stopAssetEvent`, while
 the outer `data-asset-root` boundary continues to stop propagation without
-calling `preventDefault`.
+calling `preventDefault`. Extend the shared `DialogContent` with typed
+`overlayProps`, then apply the same click, double-click, touch, and context-menu
+propagation boundary to both the portaled content and overlay. This prevents
+React portal events from reaching the owning mobile `MessageItem` and opening
+its reply, thread, or long-press action sheet interactions.
 
 - [x] **Step 3: Verify GREEN**
 
@@ -263,8 +270,9 @@ Expected: all commands exit 0.
 Extend the mobile attachment Playwright flow to open the rendered image and
 assert the dialog/image stay within the 390 × 844 viewport, no popup opens,
 Download contains `download=1`, focus remains trapped, close/backdrop/Escape all
-dismiss, and focus returns to the thumbnail. Repeat the same interaction against
-a real local Runtime with Kimi WebBridge.
+dismiss, focus returns to the thumbnail, and long presses on both the portaled
+image and overlay do not open the underlying message action sheet. Repeat the
+same interaction against a real local Runtime with Kimi WebBridge.
 
 ## Verification
 

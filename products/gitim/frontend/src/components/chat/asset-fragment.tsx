@@ -1,4 +1,4 @@
-import { useMemo, useState, type MouseEvent } from "react";
+import { useMemo, useState, type SyntheticEvent } from "react";
 import { Download, FileText, RefreshCw, X } from "lucide-react";
 
 import { useConnectionStore } from "../../hooks/use-connection-store";
@@ -78,9 +78,19 @@ function shortOrigin(originRuntimeId: string): string {
   return `${originRuntimeId.slice(0, 8)}…`;
 }
 
-function stopAssetEvent(event: MouseEvent<HTMLElement>) {
+function stopAssetEvent(event: SyntheticEvent<HTMLElement>) {
   event.stopPropagation();
 }
+
+const assetPortalEventBoundary = {
+  onClick: stopAssetEvent,
+  onDoubleClick: stopAssetEvent,
+  onTouchStart: stopAssetEvent,
+  onTouchEnd: stopAssetEvent,
+  onTouchCancel: stopAssetEvent,
+  onTouchMove: stopAssetEvent,
+  onContextMenu: stopAssetEvent,
+};
 
 function isInlineSafeImage(asset: AssetRef): boolean {
   const { width, height } = asset;
@@ -283,6 +293,8 @@ function ImageCard({
       </DialogTrigger>
       <DialogContent
         showCloseButton={false}
+        overlayProps={assetPortalEventBoundary}
+        {...assetPortalEventBoundary}
         className="flex h-[calc(100dvh-2rem)] w-[calc(100vw-2rem)] max-w-none flex-col gap-0 overflow-hidden border-border-strong bg-background/95 p-0 sm:max-w-none"
       >
         <div className="flex h-12 shrink-0 items-center gap-3 border-b border-border px-3">

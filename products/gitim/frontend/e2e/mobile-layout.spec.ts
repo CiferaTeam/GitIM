@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { deflateSync } from "node:zlib";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const runtimePort = 49322;
 const slug = "mobile";
@@ -837,6 +837,39 @@ test("mobile attachment and lightbox stay within the viewport", async ({ page })
 
   const download = dialog.getByRole("link", { name: "Download portrait.png" });
   const close = dialog.getByRole("button", { name: "Close image preview" });
+  const longPress = async (target: Locator) => {
+    await target.evaluate(async (element) => {
+      const rect = element.getBoundingClientRect();
+      const touch = new Touch({
+        identifier: 1,
+        target: element,
+        clientX: rect.left + 1,
+        clientY: rect.top + 1,
+      });
+      element.dispatchEvent(new TouchEvent("touchstart", {
+        bubbles: true,
+        cancelable: true,
+        touches: [touch],
+        targetTouches: [touch],
+        changedTouches: [touch],
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 550));
+      element.dispatchEvent(new TouchEvent("touchend", {
+        bubbles: true,
+        cancelable: true,
+        changedTouches: [touch],
+      }));
+    });
+  };
+  const actionSheetCopy = page.locator("button").filter({ hasText: "Copy Text" });
+
+  await longPress(lightboxImage);
+  await page.waitForTimeout(100);
+  expect(await actionSheetCopy.count()).toBe(0);
+  await longPress(page.locator('[data-slot="dialog-overlay"]'));
+  await page.waitForTimeout(100);
+  expect(await actionSheetCopy.count()).toBe(0);
+
   await close.focus();
   await page.keyboard.press("Tab");
   await expect(download).toBeFocused();
