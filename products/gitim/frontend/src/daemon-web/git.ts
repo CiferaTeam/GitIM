@@ -151,6 +151,18 @@ export async function addRemoveAndCommit(
   });
 }
 
+/** Restore selected index entries to HEAD without changing working files. */
+export async function restoreIndexPaths(
+  dir: string,
+  filepaths: string[],
+): Promise<void> {
+  const fs = getFs();
+  for (const filepath of new Set(filepaths)) {
+    // resetIndex removes entries that are absent from HEAD, covering failed creates.
+    await git.resetIndex({ fs, dir, filepath, ref: "HEAD" });
+  }
+}
+
 /** Push local commits to origin. */
 export async function push(
   dir: string,

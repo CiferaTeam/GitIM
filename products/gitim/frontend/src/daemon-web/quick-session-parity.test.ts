@@ -8,6 +8,12 @@ const commits = vi.hoisted(() => [] as Array<{
   message: string;
   author: string;
 }>);
+const stagedPaths = vi.hoisted(() => new Set<string>());
+const committedIndexes = vi.hoisted(() => [] as string[][]);
+const failures = vi.hoisted(() => ({
+  commit: false,
+  removePath: null as string | null,
+}));
 const runSyncMock = vi.hoisted(() => vi.fn(async () => undefined));
 
 function parent(path: string): string | null {
@@ -53,9 +59,15 @@ vi.mock("./storage", () => ({
   exists: vi.fn(async (path: string) => files.has(path) || directories.has(path)),
   mkdir: vi.fn(async (path: string) => ensureDirectory(path)),
   removeFile: vi.fn(async (path: string) => {
+    if (failures.removePath === path) {
+      failures.removePath = null;
+      throw new Error(`injected unlink failure: ${path}`);
+    }
+    if (!files.has(path)) throw new Error(`missing file: ${path}`);
     files.delete(path);
   }),
   removeDir: vi.fn(async (path: string) => {
+    if (children(path).length > 0) throw new Error(`directory not empty: ${path}`);
     directories.delete(path);
   }),
   configureFs: vi.fn(),
@@ -69,7 +81,14 @@ vi.mock("./git", () => ({
     message: string,
     author: string,
   ) => {
+    paths.forEach((path) => stagedPaths.add(path));
+    if (failures.commit) {
+      failures.commit = false;
+      throw new Error("injected commit failure");
+    }
     commits.push({ adds: paths, removes: [], message, author });
+    committedIndexes.push([...stagedPaths].sort());
+    stagedPaths.clear();
     return `commit-${commits.length}`;
   }),
   addAndCommitOnly: vi.fn(),
@@ -80,8 +99,18 @@ vi.mock("./git", () => ({
     message: string,
     author: string,
   ) => {
+    [...adds, ...removes].forEach((path) => stagedPaths.add(path));
+    if (failures.commit) {
+      failures.commit = false;
+      throw new Error("injected commit failure");
+    }
     commits.push({ adds, removes, message, author });
+    committedIndexes.push([...stagedPaths].sort());
+    stagedPaths.clear();
     return `commit-${commits.length}`;
+  }),
+  restoreIndexPaths: vi.fn(async (_repo: string, paths: string[]) => {
+    paths.forEach((path) => stagedPaths.delete(path));
   }),
   checkout: vi.fn(),
   cloneRepo: vi.fn(),
@@ -101,7 +130,10 @@ vi.mock("./sync", () => ({ runSync: runSyncMock }));
 import * as handlers from "./handlers";
 import { classifyQuickSessionPollChange } from "./quick-session-handlers";
 import { initState, setState } from "./state";
-import { parseQuickSessionMeta } from "gitim-wasm";
+import {
+  parseQuickSessionMeta,
+  serializeQuickSessionMeta,
+} from "gitim-wasm";
 
 const SESSION_ID = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
 const OTHER_SESSION_ID = "qs-01JYYYYYYYYYYYYYYYYYYYYYYY";
@@ -135,6 +167,10 @@ function seed(): void {
   files.clear();
   directories.clear();
   commits.length = 0;
+  stagedPaths.clear();
+  committedIndexes.length = 0;
+  failures.commit = false;
+  failures.removePath = null;
   runSyncMock.mockReset();
   runSyncMock.mockResolvedValue(undefined);
   ensureDirectory("/repo/users");
@@ -164,6 +200,18 @@ function responseData(response: Record<string, unknown>): Record<string, unknown
   return response.data as Record<string, unknown>;
 }
 
+function rustSerializedMeta(meta: unknown): string {
+  return serializeQuickSessionMeta(meta);
+}
+
+function expectIndexClean(): void {
+  expect([...stagedPaths]).toEqual([]);
+}
+
+function sessionFile(id: string, archived: boolean, name: string): string {
+  return `/repo/${archived ? "archive/quick-sessions" : "quick-sessions"}/${id}/${name}`;
+}
+
 describe("daemon-web Quick Session parity", () => {
   beforeEach(seed);
 
@@ -171,7 +219,7 @@ describe("daemon-web Quick Session parity", () => {
     const input = {
       session_id: SESSION_ID,
       agent_id: "alice",
-      first_message: "hello from browser",
+      first_message: "hello: browser\n  # preserved literally",
     };
 
     const created = responseData(await quick.createQuickSession(input));
@@ -191,26 +239,16 @@ describe("daemon-web Quick Session parity", () => {
       },
     });
     expect(files.get(`/repo/quick-sessions/${SESSION_ID}/discussion.thread`)).toBe(
-      "[L000001][P000000][@lewis][20260711T010203Z] hello from browser\n",
+      [
+        "[L000001][P000000][@lewis][20260711T010203Z] hello: browser",
+        "  # preserved literally",
+        "",
+      ].join("\n"),
     );
-    const expectedRustSerdeYaml = [
-      `id: ${SESSION_ID}`,
-      "title_source: none",
-      "agent_id: alice",
-      "created_by: lewis",
-      "status: needs_title",
-      "created_at: 20260711T010203Z",
-      "updated_at: 20260711T010203Z",
-      "last_message_preview: hello from browser",
-      "last_human_line: 1",
-      "revision: 2",
-      "",
-    ].join("\n");
     const yaml = files.get(`/repo/quick-sessions/${SESSION_ID}/session.meta.yaml`);
-    expect(yaml).toBe(expectedRustSerdeYaml);
-    expect(parseQuickSessionMeta(yaml as string)).toEqual(
-      (created.session as { meta: unknown }).meta,
-    );
+    const createdMeta = (created.session as { meta: unknown }).meta;
+    expect(yaml).toBe(rustSerializedMeta(createdMeta));
+    expect(parseQuickSessionMeta(yaml as string)).toEqual(createdMeta);
     expect(commits).toEqual([
       {
         adds: [
@@ -243,6 +281,46 @@ describe("daemon-web Quick Session parity", () => {
       error_code: "quick_session_id_collision",
     });
     expect(commits).toHaveLength(1);
+  });
+
+  it("uses Rust serde bytes for multiline and special metadata scalars", () => {
+    const fixtures = [
+      {
+        id: SESSION_ID,
+        title_source: "none",
+        agent_id: "alice",
+        created_by: "lewis",
+        status: "needs_title",
+        created_at: "20260711T010203Z",
+        updated_at: "20260711T010203Z",
+        last_message_preview: "line one\nline: two # literal",
+        last_human_line: 1,
+        revision: 2,
+      },
+      {
+        id: OTHER_SESSION_ID,
+        title: "Investigate: \"quoted\" value\nnext line",
+        title_source: "api_set",
+        agent_id: "alice",
+        created_by: "lewis",
+        status: "active",
+        created_at: "20260711T010203Z",
+        updated_at: "20260711T020304Z",
+        summary: "First paragraph\n\n- key: value\n- # literal marker",
+        summary_updated_at: "20260711T020304Z",
+        last_message_preview: " leading and trailing ",
+        last_human_request_id: "request:with:specials",
+        last_human_line: 7,
+        revision: 9,
+      },
+    ];
+
+    const yamlDocuments = fixtures.map((fixture) => rustSerializedMeta(fixture));
+
+    expect(yamlDocuments).toHaveLength(2);
+    expect(yamlDocuments[0]).not.toBe(yamlDocuments[1]);
+    expect(yamlDocuments.map((yaml) => parseQuickSessionMeta(yaml)))
+      .toEqual(fixtures);
   });
 
   it("validates ids and requires active creator and agent handlers", async () => {
@@ -366,6 +444,158 @@ describe("daemon-web Quick Session parity", () => {
       ok: false,
       error_code: "quick_session_forbidden",
     });
+  });
+
+  it("restores worktree and index after every Quick Session commit failure", async () => {
+    failures.commit = true;
+    expect(await quick.createQuickSession({
+      session_id: SESSION_ID,
+      agent_id: "alice",
+      first_message: "create fails",
+    })).toMatchObject({ ok: false, error: "injected commit failure" });
+    expect(files.has(sessionFile(SESSION_ID, false, "session.meta.yaml"))).toBe(false);
+    expect(files.has(sessionFile(SESSION_ID, false, "discussion.thread"))).toBe(false);
+    expectIndexClean();
+
+    await quick.createQuickSession({
+      session_id: OTHER_SESSION_ID,
+      agent_id: "alice",
+      first_message: "unrelated succeeds",
+    });
+    expect(committedIndexes.at(-1)).toEqual([
+      `quick-sessions/${OTHER_SESSION_ID}/discussion.thread`,
+      `quick-sessions/${OTHER_SESSION_ID}/session.meta.yaml`,
+    ]);
+
+    await quick.createQuickSession({
+      session_id: SESSION_ID,
+      agent_id: "alice",
+      first_message: "original",
+    });
+    const activeMetaPath = sessionFile(SESSION_ID, false, "session.meta.yaml");
+    const activeThreadPath = sessionFile(SESSION_ID, false, "discussion.thread");
+    const originalActiveMeta = files.get(activeMetaPath);
+    const originalActiveThread = files.get(activeThreadPath);
+
+    failures.commit = true;
+    expect(await quick.sendQuickSessionMessage(SESSION_ID, {
+      body: "must roll back",
+      request_id: "request-failed",
+    })).toMatchObject({ ok: false, error: "injected commit failure" });
+    expect(files.get(activeMetaPath)).toBe(originalActiveMeta);
+    expect(files.get(activeThreadPath)).toBe(originalActiveThread);
+    expectIndexClean();
+
+    failures.commit = true;
+    expect(await quick.archiveQuickSession(SESSION_ID)).toMatchObject({
+      ok: false,
+      error: "injected commit failure",
+    });
+    expect(files.get(activeMetaPath)).toBe(originalActiveMeta);
+    expect(files.get(activeThreadPath)).toBe(originalActiveThread);
+    expect(files.has(sessionFile(SESSION_ID, true, "session.meta.yaml"))).toBe(false);
+    expect(files.has(sessionFile(SESSION_ID, true, "discussion.thread"))).toBe(false);
+    expectIndexClean();
+
+    await quick.archiveQuickSession(SESSION_ID);
+    const archivedMetaPath = sessionFile(SESSION_ID, true, "session.meta.yaml");
+    const archivedThreadPath = sessionFile(SESSION_ID, true, "discussion.thread");
+    const originalArchivedMeta = files.get(archivedMetaPath);
+    const originalArchivedThread = files.get(archivedThreadPath);
+
+    failures.commit = true;
+    expect(await quick.unarchiveQuickSession(SESSION_ID)).toMatchObject({
+      ok: false,
+      error: "injected commit failure",
+    });
+    expect(files.get(archivedMetaPath)).toBe(originalArchivedMeta);
+    expect(files.get(archivedThreadPath)).toBe(originalArchivedThread);
+    expect(files.has(activeMetaPath)).toBe(false);
+    expect(files.has(activeThreadPath)).toBe(false);
+    expectIndexClean();
+
+    await quick.unarchiveQuickSession(SESSION_ID);
+    expect(committedIndexes.at(-1)).toEqual([
+      `archive/quick-sessions/${SESSION_ID}/discussion.thread`,
+      `archive/quick-sessions/${SESSION_ID}/session.meta.yaml`,
+      `quick-sessions/${SESSION_ID}/discussion.thread`,
+      `quick-sessions/${SESSION_ID}/session.meta.yaml`,
+    ]);
+  });
+
+  it("rolls archive and unarchive back when source cleanup fails", async () => {
+    await quick.createQuickSession({
+      session_id: SESSION_ID,
+      agent_id: "alice",
+      first_message: "original",
+    });
+    const activeMetaPath = sessionFile(SESSION_ID, false, "session.meta.yaml");
+    const activeThreadPath = sessionFile(SESSION_ID, false, "discussion.thread");
+    const originalActiveMeta = files.get(activeMetaPath);
+    const originalActiveThread = files.get(activeThreadPath);
+
+    failures.removePath = activeThreadPath;
+    expect(await quick.archiveQuickSession(SESSION_ID)).toMatchObject({
+      ok: false,
+      error: `injected unlink failure: ${activeThreadPath}`,
+    });
+    expect(files.get(activeMetaPath)).toBe(originalActiveMeta);
+    expect(files.get(activeThreadPath)).toBe(originalActiveThread);
+    expect(files.has(sessionFile(SESSION_ID, true, "session.meta.yaml"))).toBe(false);
+    expect(files.has(sessionFile(SESSION_ID, true, "discussion.thread"))).toBe(false);
+    expect(commits).toHaveLength(1);
+    expectIndexClean();
+
+    await quick.archiveQuickSession(SESSION_ID);
+    const archivedMetaPath = sessionFile(SESSION_ID, true, "session.meta.yaml");
+    const archivedThreadPath = sessionFile(SESSION_ID, true, "discussion.thread");
+    const originalArchivedMeta = files.get(archivedMetaPath);
+    const originalArchivedThread = files.get(archivedThreadPath);
+
+    failures.removePath = archivedThreadPath;
+    expect(await quick.unarchiveQuickSession(SESSION_ID)).toMatchObject({
+      ok: false,
+      error: `injected unlink failure: ${archivedThreadPath}`,
+    });
+    expect(files.get(archivedMetaPath)).toBe(originalArchivedMeta);
+    expect(files.get(archivedThreadPath)).toBe(originalArchivedThread);
+    expect(files.has(activeMetaPath)).toBe(false);
+    expect(files.has(activeThreadPath)).toBe(false);
+    expect(commits).toHaveLength(2);
+    expectIndexClean();
+  });
+
+  it("preserves Rust-serialized title and summary bytes across archive", async () => {
+    const created = responseData(await quick.createQuickSession({
+      session_id: SESSION_ID,
+      agent_id: "alice",
+      first_message: "first",
+    }));
+    const activeMetaPath = sessionFile(SESSION_ID, false, "session.meta.yaml");
+    const activeMeta = {
+      ...(created.session as { meta: Record<string, unknown> }).meta,
+      title: "Title: \"quoted\"\ncontinued",
+      title_source: "api_set",
+      status: "active",
+      summary: "Summary line\n\n- key: value\n- # literal",
+      summary_updated_at: "20260711T010203Z",
+      last_message_preview: "preview: value\n# literal",
+      revision: 7,
+    };
+    files.set(activeMetaPath, rustSerializedMeta(activeMeta));
+
+    await quick.archiveQuickSession(SESSION_ID);
+
+    const archivedMetaPath = sessionFile(SESSION_ID, true, "session.meta.yaml");
+    const archivedYaml = files.get(archivedMetaPath) as string;
+    const archivedMeta = parseQuickSessionMeta(archivedYaml);
+    expect(archivedMeta).toMatchObject({
+      title: activeMeta.title,
+      summary: activeMeta.summary,
+      last_message_preview: activeMeta.last_message_preview,
+      status: "archived",
+    });
+    expect(archivedYaml).toBe(rustSerializedMeta(archivedMeta));
   });
 
   it("honors the epoch fence and reports a committed reconnect result", async () => {

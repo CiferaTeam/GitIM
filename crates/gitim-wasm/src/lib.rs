@@ -146,6 +146,15 @@ pub fn parse_quick_session_meta_wasm(yaml: &str) -> Result<JsValue, JsError> {
     serde_wasm_bindgen::to_value(&meta).map_err(|error| JsError::new(&error.to_string()))
 }
 
+#[wasm_bindgen(js_name = "serializeQuickSessionMeta")]
+pub fn serialize_quick_session_meta_wasm(meta: JsValue) -> Result<String, JsError> {
+    let meta: gitim_core::types::QuickSessionMeta =
+        serde_wasm_bindgen::from_value(meta).map_err(|error| JsError::new(&error.to_string()))?;
+    gitim_core::types::validate_quick_session_meta(&meta)
+        .map_err(|error| JsError::new(&error.to_string()))?;
+    serde_yaml::to_string(&meta).map_err(|error| JsError::new(&error.to_string()))
+}
+
 #[derive(serde::Serialize)]
 struct QuickSessionTransitionResult {
     meta: gitim_core::types::QuickSessionMeta,

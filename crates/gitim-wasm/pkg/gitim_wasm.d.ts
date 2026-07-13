@@ -39,6 +39,8 @@ export function renumberBatch(batch: string, max_existing: bigint): string;
 
 export function resolveContentPure(additions_json: string, remote_json: string): any;
 
+export function serializeQuickSessionMeta(meta: any): string;
+
 export function setBoardField(board: any, field: string, value: string): any;
 
 export function setBoardSection(board: any, section: string, value: string): any;
@@ -81,6 +83,7 @@ export interface InitOutput {
     readonly validateHandler: (a: number, b: number) => [number, number, number, number];
     readonly validateQuickSessionId: (a: number, b: number) => [number, number];
     readonly parseQuickSessionMeta: (a: number, b: number) => [number, number, number];
+    readonly serializeQuickSessionMeta: (a: any) => [number, number, number, number];
     readonly applyQuickSessionTransition: (a: any, b: any) => [number, number, number];
     readonly parseChannelMeta: (a: number, b: number) => [number, number, number];
     readonly parseUserMeta: (a: number, b: number) => [number, number, number];

@@ -16,6 +16,7 @@ import { isAuthFailure } from "./auth-errors";
 import {
   applyQuickSessionTransition,
   parseQuickSessionMeta,
+  serializeQuickSessionMeta,
   validateAppend,
   validateQuickSessionId,
 } from "gitim-wasm";
@@ -239,19 +240,27 @@ export async function createQuickSession(
       const absDir = `${s.repoDir}/${relDir}`;
       const metaRel = `${relDir}/session.meta.yaml`;
       const threadRel = `${relDir}/discussion.thread`;
+      const transactionPaths = [metaRel, threadRel];
       await mkdirp(absDir);
       try {
-        await writeFile(`${absDir}/session.meta.yaml`, stringifyQuickSessionMeta(transitioned.meta));
+        await writeFile(
+          `${absDir}/session.meta.yaml`,
+          serializeQuickSessionMeta(transitioned.meta),
+        );
         await writeFile(`${absDir}/discussion.thread`, thread);
         await gitOps.addAndCommit(
           s.repoDir,
-          [metaRel, threadRel],
+          transactionPaths,
           `session: create ${input.session_id} for @${input.agent_id} by @${creator}`,
           creator,
         );
       } catch (error) {
-        await removeQuickSessionDirectory(absDir);
-        throw error;
+        await rollbackQuickSessionMutation(
+          s.repoDir,
+          transactionPaths,
+          async () => removeQuickSessionDirectoryIfExists(absDir),
+          error,
+        );
       }
 
       return {
@@ -420,20 +429,30 @@ export async function sendQuickSessionMessage(
       const newThread = `${oldThread}${line}`;
       const metaPath = `${located.absDir}/session.meta.yaml`;
       const threadPath = `${located.absDir}/discussion.thread`;
+      const transactionPaths = [
+        `${located.relDir}/session.meta.yaml`,
+        `${located.relDir}/discussion.thread`,
+      ];
       const oldMeta = await readFile(metaPath);
       try {
-        await writeFile(metaPath, stringifyQuickSessionMeta(transitioned.meta));
+        await writeFile(metaPath, serializeQuickSessionMeta(transitioned.meta));
         await writeFile(threadPath, newThread);
         await gitOps.addAndCommit(
           s.repoDir,
-          [`${located.relDir}/session.meta.yaml`, `${located.relDir}/discussion.thread`],
+          transactionPaths,
           `session-msg: @${s.me.handler} -> ${sessionId} L${String(nextLine).padStart(6, "0")}`,
           s.me.handler,
         );
       } catch (error) {
-        await writeFile(metaPath, oldMeta);
-        await writeFile(threadPath, oldThread);
-        throw error;
+        await rollbackQuickSessionMutation(
+          s.repoDir,
+          transactionPaths,
+          async () => {
+            await writeFile(metaPath, oldMeta);
+            await writeFile(threadPath, oldThread);
+          },
+          error,
+        );
       }
       return {
         committed: true,
@@ -492,29 +511,47 @@ async function moveQuickSession(sessionId: string, archive: boolean): Promise<Ap
       if (await exists(`${targetAbs}/session.meta.yaml`)) {
         return err("quick session target already exists");
       }
-      const thread = await readFile(`${located.absDir}/discussion.thread`);
+      const sourceMetaPath = `${located.absDir}/session.meta.yaml`;
+      const sourceThreadPath = `${located.absDir}/discussion.thread`;
+      const oldMeta = await readFile(sourceMetaPath);
+      const thread = await readFile(sourceThreadPath);
+      const addPaths = [
+        `${targetRel}/session.meta.yaml`,
+        `${targetRel}/discussion.thread`,
+      ];
+      const removePaths = [
+        `${located.relDir}/session.meta.yaml`,
+        `${located.relDir}/discussion.thread`,
+      ];
+      const transactionPaths = [...addPaths, ...removePaths];
       await mkdirp(targetAbs);
       try {
         await writeFile(
           `${targetAbs}/session.meta.yaml`,
-          stringifyQuickSessionMeta(transitioned.meta),
+          serializeQuickSessionMeta(transitioned.meta),
         );
         await writeFile(`${targetAbs}/discussion.thread`, thread);
+        await removeQuickSessionDirectoryRequired(located.absDir);
         await gitOps.addRemoveAndCommit(
           s.repoDir,
-          [`${targetRel}/session.meta.yaml`, `${targetRel}/discussion.thread`],
-          [
-            `${located.relDir}/session.meta.yaml`,
-            `${located.relDir}/discussion.thread`,
-          ],
+          addPaths,
+          removePaths,
           `session: ${archive ? "archive" : "unarchive"} ${sessionId} by @${s.me.handler}`,
           s.me.handler,
         );
       } catch (error) {
-        await removeQuickSessionDirectory(targetAbs);
-        throw error;
+        await rollbackQuickSessionMutation(
+          s.repoDir,
+          transactionPaths,
+          async () => {
+            await mkdirp(located.absDir);
+            await writeFile(sourceMetaPath, oldMeta);
+            await writeFile(sourceThreadPath, thread);
+            await removeQuickSessionDirectoryIfExists(targetAbs);
+          },
+          error,
+        );
       }
-      await removeQuickSessionDirectory(located.absDir);
       return {
         committed: true,
         data: archive
@@ -716,67 +753,44 @@ function quickSessionSyncFields(
   };
 }
 
-const QUICK_SESSION_META_FIELDS: Array<keyof QuickSessionMeta> = [
-  "id",
-  "title",
-  "title_source",
-  "agent_id",
-  "created_by",
-  "status",
-  "created_at",
-  "updated_at",
-  "archived_at",
-  "archived_from",
-  "summary",
-  "summary_updated_at",
-  "last_message_preview",
-  "error",
-  "processing_input_line",
-  "processing_started_at",
-  "attempt_id",
-  "last_completed_attempt_id",
-  "last_completed_input_line",
-  "last_completed_line",
-  "last_failed_attempt_id",
-  "last_human_request_id",
-  "last_human_line",
-  "revision",
-];
-
-function stringifyQuickSessionMeta(meta: QuickSessionMeta): string {
-  return `${QUICK_SESSION_META_FIELDS.flatMap((field) => {
-    const value = meta[field];
-    return value === undefined ? [] : [`${field}: ${quickSessionYamlScalar(value)}`];
-  }).join("\n")}\n`;
-}
-
-function quickSessionYamlScalar(value: string | number): string {
-  if (typeof value === "number") return String(value);
-  const yamlKeyword = /^(?:null|true|false|yes|no|on|off|~)$/i;
-  if (
-    value.length > 0 &&
-    value.trim() === value &&
-    !yamlKeyword.test(value) &&
-    /^[A-Za-z0-9_@./+-]+(?: [A-Za-z0-9_@./+-]+)*$/.test(value)
-  ) {
-    return value;
-  }
-  return JSON.stringify(value);
-}
-
-async function removeQuickSessionDirectory(absDir: string): Promise<void> {
+async function removeQuickSessionDirectoryRequired(absDir: string): Promise<void> {
   for (const name of ["session.meta.yaml", "discussion.thread"]) {
-    try {
-      await removeFile(`${absDir}/${name}`);
-    } catch {
-      // The tracked file may not have been created before rollback began.
-    }
+    await removeFile(`${absDir}/${name}`);
+  }
+  await removeDir(absDir);
+}
+
+async function removeQuickSessionDirectoryIfExists(absDir: string): Promise<void> {
+  for (const name of ["session.meta.yaml", "discussion.thread"]) {
+    const path = `${absDir}/${name}`;
+    if (await exists(path)) await removeFile(path);
+  }
+  if (await exists(absDir)) await removeDir(absDir);
+}
+
+async function rollbackQuickSessionMutation(
+  repoDir: string,
+  paths: string[],
+  restoreWorktree: () => Promise<void>,
+  cause: unknown,
+): Promise<never> {
+  const rollbackErrors: string[] = [];
+  try {
+    await restoreWorktree();
+  } catch (error) {
+    rollbackErrors.push(`worktree: ${errorMessage(error)}`);
   }
   try {
-    await removeDir(absDir);
-  } catch {
-    // Git tracks the files; empty parent cleanup is best-effort.
+    await gitOps.restoreIndexPaths(repoDir, paths);
+  } catch (error) {
+    rollbackErrors.push(`index: ${errorMessage(error)}`);
   }
+  if (rollbackErrors.length > 0) {
+    throw new Error(
+      `${errorMessage(cause)}; quick session rollback failed (${rollbackErrors.join("; ")})`,
+    );
+  }
+  throw cause;
 }
 
 async function mkdirp(path: string): Promise<void> {
