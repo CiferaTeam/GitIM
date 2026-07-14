@@ -144,6 +144,11 @@ export interface QuickSessionListQuery {
   limit?: number;
 }
 
+export interface ReadQuickSessionQuery {
+  limit?: number;
+  since?: number;
+}
+
 export interface SendQuickSessionInput {
   body: string;
   request_id: string;
@@ -158,6 +163,7 @@ export interface QuickSessionBackend {
   ): Promise<ApiResponse<{ sessions: QuickSessionListItem[] }>>;
   readQuickSession(
     id: string,
+    query?: ReadQuickSessionQuery,
   ): Promise<ApiResponse<{ session: QuickSessionDetail }>>;
   sendQuickSessionMessage(
     id: string,
@@ -569,8 +575,13 @@ export class LocalBackend implements Backend {
   }
   readQuickSession(
     id: string,
+    query: ReadQuickSessionQuery = {},
   ): Promise<ApiResponse<{ session: QuickSessionDetail }>> {
-    return this.call<{ session: QuickSessionDetail }>("readQuickSession", id);
+    return this.call<{ session: QuickSessionDetail }>(
+      "readQuickSession",
+      id,
+      query,
+    );
   }
   sendQuickSessionMessage(
     id: string,

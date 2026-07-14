@@ -11,6 +11,7 @@ import { emitWorkspaceSwitch } from "../lib/workspace-lifecycle";
 import { useQuickSessionStore } from "./use-quick-session-store";
 
 const SESSION_ID = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+const OTHER_SESSION_ID = "qs-01JYYYYYYYYYYYYYYYYYYYYYYY";
 const ATTEMPT_ID = "qa-01JYYYYYYYYYYYYYYYYYYYYYYY";
 
 const api = vi.hoisted(() => ({
@@ -415,6 +416,136 @@ describe("useQuickSessionStore", () => {
         .runtimeById[SESSION_ID]?.latestEvent?.detail,
     ).toBe("running tests");
     expect(useQuickSessionStore.getState().items[0]?.revision).toBe(5);
+  });
+
+  it("accepts completion events when poll clears the active claim first", () => {
+    useQuickSessionStore.getState().applyDetail(detail({ revision: 3 }));
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(
+        quickEvent({ context_generation: 4 }),
+      ),
+    ).toBe(true);
+
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "active",
+        attempt_id: undefined,
+        processing_input_line: undefined,
+        processing_started_at: undefined,
+        last_completed_attempt_id: ATTEMPT_ID,
+        last_completed_input_line: 1,
+        last_completed_line: 2,
+        last_failed_attempt_id: "qa-01JXXXXXXXXXXXXXXXXXXXXXXX",
+        revision: 6,
+      }),
+    );
+
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(
+        quickEvent({
+          event_type: "usage",
+          detail: JSON.stringify({
+            session_id: "provider-quick",
+            used_percent: 42,
+            source: "provider_reported",
+            updated_at: "2026-07-11T00:00:05Z",
+          }),
+          session_revision: 3,
+          context_generation: 4,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(
+        quickEvent({
+          event_type: "done",
+          detail: "done",
+          session_revision: 3,
+          context_generation: 4,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      useQuickSessionStore.getState().runtimeById[SESSION_ID]?.usage?.usedPercent,
+    ).toBe(42);
+
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(
+        quickEvent({
+          event_type: "done",
+          attempt_id: "qa-01JXXXXXXXXXXXXXXXXXXXXXXX",
+          context_generation: 4,
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(
+        quickEvent({ event_type: "done", context_generation: 3 }),
+      ),
+    ).toBe(false);
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(
+        quickEvent({
+          event_type: "error",
+          attempt_id: "qa-01JXXXXXXXXXXXXXXXXXXXXXXX",
+          context_generation: 4,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("accepts a terminal error when poll records the failed attempt first", () => {
+    useQuickSessionStore.getState().applyDetail(detail({ revision: 3 }));
+    useQuickSessionStore.getState().applyActivityEvent(
+      quickEvent({ context_generation: 7 }),
+    );
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "error",
+        attempt_id: undefined,
+        processing_input_line: undefined,
+        processing_started_at: undefined,
+        last_failed_attempt_id: ATTEMPT_ID,
+        error: "provider failed",
+        revision: 4,
+      }),
+    );
+
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(
+        quickEvent({
+          event_type: "error",
+          detail: "provider failed",
+          context_generation: 7,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(
+        quickEvent({ event_type: "done", context_generation: 7 }),
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps list items ordered by newest update and then id", () => {
+    useQuickSessionStore.getState().applyDetail(
+      detail({ id: SESSION_ID, updated_at: "2026-07-11T00:00:03Z" }),
+    );
+    useQuickSessionStore.getState().applyDetail(
+      detail({ id: OTHER_SESSION_ID, updated_at: "2026-07-11T00:00:04Z" }),
+    );
+    expect(useQuickSessionStore.getState().items.map((item) => item.id)).toEqual([
+      OTHER_SESSION_ID,
+      SESSION_ID,
+    ]);
+
+    useQuickSessionStore.getState().applyDetail(
+      detail({ id: SESSION_ID, updated_at: "2026-07-11T00:00:04Z", revision: 4 }),
+    );
+    expect(useQuickSessionStore.getState().items.map((item) => item.id)).toEqual([
+      OTHER_SESSION_ID,
+      SESSION_ID,
+    ]);
   });
 
   it("refreshes only Quick Session changes and targets the selected detail", async () => {

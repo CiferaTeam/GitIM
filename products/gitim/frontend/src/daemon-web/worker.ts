@@ -122,8 +122,11 @@ const handler: Record<
     handlers.createQuickSession(input as handlers.CreateQuickSessionInput),
   listQuickSessions: (query?: unknown) =>
     handlers.listQuickSessions((query ?? {}) as handlers.QuickSessionListQuery),
-  readQuickSession: (sessionId: unknown) =>
-    handlers.readQuickSession(sessionId as string),
+  readQuickSession: (sessionId: unknown, query?: unknown) =>
+    handlers.readQuickSession(
+      sessionId as string,
+      (query ?? {}) as handlers.ReadQuickSessionQuery,
+    ),
   sendQuickSessionMessage: (sessionId: unknown, input: unknown) =>
     handlers.sendQuickSessionMessage(
       sessionId as string,

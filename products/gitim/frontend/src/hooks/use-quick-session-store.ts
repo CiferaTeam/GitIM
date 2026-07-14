@@ -145,6 +145,15 @@ function itemFromDetail(detail: QuickSessionDetail): QuickSessionListItem {
   };
 }
 
+function sortQuickSessionItems(
+  items: QuickSessionListItem[],
+): QuickSessionListItem[] {
+  return [...items].sort((left, right) => {
+    const updated = right.updated_at.localeCompare(left.updated_at);
+    return updated || left.id.localeCompare(right.id);
+  });
+}
+
 function mapQuickSessionUsage(detail: string): SessionUsageSnapshot | undefined {
   if (detail.trim() === "") return undefined;
   try {
@@ -247,10 +256,10 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
       }
       set((state) => {
         const existing = new Map(state.items.map((item) => [item.id, item]));
-        const items = response.data!.sessions.map((item) => {
+        const items = sortQuickSessionItems(response.data!.sessions.map((item) => {
           const current = existing.get(item.id);
           return current && current.revision > item.revision ? current : item;
-        });
+        }));
         return {
           items,
           loading: { ...state.loading, list: false },
@@ -512,16 +521,20 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
     set((state) => {
       const incoming = itemFromDetail(detail);
       const without = state.items.filter((item) => item.id !== id);
-      const items =
-        detail.archived === state.showArchived ? [...without, incoming] : without;
+      const items = sortQuickSessionItems(
+        detail.archived === state.showArchived ? [...without, incoming] : without,
+      );
       const previousRuntime = state.runtimeById[id];
-      const sameAttempt =
-        detail.meta.attempt_id !== undefined &&
-        detail.meta.attempt_id === previousRuntime?.attemptId;
-      const runtime: QuickSessionRuntimeOverlay = sameAttempt
+      const preservesPreviousAttempt =
+        previousRuntime?.attemptId !== undefined &&
+        (detail.meta.attempt_id !== undefined
+          ? detail.meta.attempt_id === previousRuntime.attemptId
+          : detail.meta.last_completed_attempt_id === previousRuntime.attemptId ||
+            detail.meta.last_failed_attempt_id === previousRuntime.attemptId);
+      const runtime: QuickSessionRuntimeOverlay = preservesPreviousAttempt
         ? {
             ...previousRuntime,
-            status: previousRuntime.status,
+            status: detail.meta.status,
             revision: detail.meta.revision,
           }
         : {
@@ -552,14 +565,33 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
       return false;
     }
     const detail = get().detailById[event.session_id];
-    if (
-      !detail ||
-      detail.meta.status !== "running" ||
-      detail.meta.attempt_id !== event.attempt_id
-    ) {
+    if (!detail) {
+      return false;
+    }
+    const ownsActiveAttempt =
+      detail.meta.status === "running" &&
+      detail.meta.attempt_id === event.attempt_id;
+    const ownsCompletedAttempt =
+      detail.meta.status !== "running" &&
+      detail.meta.status !== "archived" &&
+      (event.event_type === "usage" || event.event_type === "done") &&
+      detail.meta.last_completed_attempt_id === event.attempt_id;
+    const ownsFailedAttempt =
+      detail.meta.status !== "running" &&
+      detail.meta.status !== "archived" &&
+      event.event_type === "error" &&
+      detail.meta.last_failed_attempt_id === event.attempt_id;
+    if (!ownsActiveAttempt && !ownsCompletedAttempt && !ownsFailedAttempt) {
       return false;
     }
     const previous = get().runtimeById[event.session_id];
+    if (
+      !ownsActiveAttempt &&
+      previous?.attemptId !== undefined &&
+      previous.attemptId !== event.attempt_id
+    ) {
+      return false;
+    }
     if (
       previous?.attemptId === event.attempt_id &&
       previous.contextGeneration !== undefined &&

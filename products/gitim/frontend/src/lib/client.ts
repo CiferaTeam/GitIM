@@ -56,6 +56,7 @@ import type {
   ChannelArchiveBackend,
   DmArchiveBackend,
   QuickSessionBackend,
+  ReadQuickSessionQuery,
 } from "./backend";
 import { HttpBackend, LocalBackend } from "./backend";
 import {
@@ -84,6 +85,8 @@ import {
   generateQuickSessionId,
   generateQuickSessionRequestId,
 } from "./quick-session-ref";
+
+export type { ReadQuickSessionQuery } from "./backend";
 
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
 let activeLocalBackend: LocalBackend | null = null;
@@ -1134,11 +1137,6 @@ export interface QuickSessionListQuery {
   limit?: number;
 }
 
-export interface ReadQuickSessionQuery {
-  limit?: number;
-  since?: number;
-}
-
 export async function createQuickSession(
   slug: string,
   agentId: string,
@@ -1197,7 +1195,7 @@ export async function readQuickSession(
 ): Promise<ApiResponse<{ session: QuickSessionDetail }>> {
   if (isLocalMode()) {
     void slug;
-    return localQuickSessionBackend().readQuickSession(sessionId);
+    return localQuickSessionBackend().readQuickSession(sessionId, query);
   }
   const params = new URLSearchParams();
   if (query.limit !== undefined) params.set("limit", String(query.limit));

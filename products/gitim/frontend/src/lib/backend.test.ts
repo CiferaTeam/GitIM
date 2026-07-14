@@ -374,7 +374,11 @@ describe("LocalBackend", () => {
         "listQuickSessions",
         [{ archived: true, agent_id: "alice" }],
       ],
-      [backend.readQuickSession(sessionId), "readQuickSession", [sessionId]],
+      [
+        backend.readQuickSession(sessionId, { limit: 20, since: 4 }),
+        "readQuickSession",
+        [sessionId, { limit: 20, since: 4 }],
+      ],
       [
         backend.sendQuickSessionMessage(sessionId, {
           body: "follow-up",

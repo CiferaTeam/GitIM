@@ -166,7 +166,10 @@ type QuickSessionHandlers = typeof handlers & {
     actionable?: boolean;
     limit?: number;
   }): Promise<Record<string, unknown>>;
-  readQuickSession(id: string): Promise<Record<string, unknown>>;
+  readQuickSession(
+    id: string,
+    query?: { limit?: number; since?: number },
+  ): Promise<Record<string, unknown>>;
   sendQuickSessionMessage(
     id: string,
     input: { body: string; request_id: string },
@@ -467,6 +470,34 @@ describe("daemon-web Quick Session parity", () => {
       ok: false,
       error_code: "quick_session_forbidden",
     });
+  });
+
+  it("bounds transcript reads with the native limit and since semantics", async () => {
+    await quick.createQuickSession({
+      session_id: SESSION_ID,
+      agent_id: "alice",
+      first_message: "first",
+    });
+    await quick.sendQuickSessionMessage(SESSION_ID, {
+      body: "second",
+      request_id: "request-2",
+    });
+    await quick.sendQuickSessionMessage(SESSION_ID, {
+      body: "third",
+      request_id: "request-3",
+    });
+
+    const lines = async (query?: { limit?: number; since?: number }) => {
+      const data = responseData(await quick.readQuickSession(SESSION_ID, query));
+      const session = data.session as {
+        entries: Array<{ line_number: number }>;
+      };
+      return session.entries.map((entry) => entry.line_number);
+    };
+
+    await expect(lines({ limit: 2 })).resolves.toEqual([2, 3]);
+    await expect(lines({ since: 1, limit: 1 })).resolves.toEqual([2]);
+    await expect(lines({ since: 2 })).resolves.toEqual([3]);
   });
 
   it("restores worktree and index after every Quick Session commit failure", async () => {

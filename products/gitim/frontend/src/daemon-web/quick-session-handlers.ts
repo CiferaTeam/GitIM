@@ -44,6 +44,11 @@ export interface QuickSessionListQuery {
   limit?: number;
 }
 
+export interface ReadQuickSessionQuery {
+  limit?: number;
+  since?: number;
+}
+
 export interface SendQuickSessionInput {
   body: string;
   request_id: string;
@@ -372,7 +377,10 @@ async function listQuickSessionsSnapshot(
   return ok({ sessions: sessions.slice(0, limit) });
 }
 
-export async function readQuickSession(sessionId: string): Promise<ApiResponse> {
+export async function readQuickSession(
+  sessionId: string,
+  query: ReadQuickSessionQuery = {},
+): Promise<ApiResponse> {
   try {
     await ensureWasmReady();
     const idError = quickSessionIdError(sessionId);
@@ -380,7 +388,7 @@ export async function readQuickSession(sessionId: string): Promise<ApiResponse> 
     return await withRepoLock(async () => {
       const located = await locateQuickSession(sessionId);
       if (!located) return err("quick session not found");
-      return ok({ session: await quickSessionDetail(located) });
+      return ok({ session: await quickSessionDetail(located, query) });
     });
   } catch (error) {
     return quickSessionErrorResponse(error);
@@ -730,14 +738,35 @@ async function loadQuickSessionMeta(
   ) as QuickSessionMeta;
 }
 
-async function quickSessionDetail(located: LocatedQuickSession): Promise<{
+async function quickSessionDetail(
+  located: LocatedQuickSession,
+  query: ReadQuickSessionQuery = {},
+): Promise<{
   meta: QuickSessionMeta;
   entries: ThreadEntry[];
   archived: boolean;
 }> {
   const meta = await loadQuickSessionMeta(located);
   const thread = await readFile(`${located.absDir}/discussion.thread`);
-  return { meta, entries: parseThread(thread).entries, archived: located.archived };
+  const entries = boundedQuickSessionEntries(parseThread(thread).entries, query);
+  return { meta, entries, archived: located.archived };
+}
+
+function boundedQuickSessionEntries(
+  entries: ThreadEntry[],
+  query: ReadQuickSessionQuery,
+): ThreadEntry[] {
+  const since = query.since;
+  const filtered =
+    since === undefined
+      ? entries
+      : entries.filter((entry) => entry.line_number > since);
+  if (query.limit === undefined) return filtered;
+  const limit = Math.max(0, Math.trunc(query.limit));
+  if (limit === 0) return [];
+  return query.since === undefined
+    ? filtered.slice(-limit)
+    : filtered.slice(0, limit);
 }
 
 function quickSessionListItem(

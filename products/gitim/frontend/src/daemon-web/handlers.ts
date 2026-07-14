@@ -59,6 +59,7 @@ export {
 export type {
   CreateQuickSessionInput,
   QuickSessionListQuery,
+  ReadQuickSessionQuery,
   SendQuickSessionInput,
 } from "./quick-session-handlers";
 

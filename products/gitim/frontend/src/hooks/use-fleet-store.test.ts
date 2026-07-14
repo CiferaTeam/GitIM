@@ -116,6 +116,78 @@ describe("useFleetStore", () => {
     expect(agents[0].agent.id).toBe("cfo");
   });
 
+  it("ignores fleet-forwarded Quick Session events before main-agent routing", () => {
+    useFleetStore.getState().updateAgent("node-a", "room", "cfo", {
+      status: "idle",
+      sessionUsage: {
+        sessionId: "main-session",
+        usedPercent: 8,
+        source: "runtime_estimated",
+        updatedAt: "2026-05-15T00:00:00Z",
+      },
+    });
+    const key = fleetActivityKey("node-a", "room", "cfo");
+
+    for (const event_type of ["usage", "error", "burned"] as const) {
+      applyFleetAgentActivityEvent({
+        kind: "agent_activity",
+        node_id: "node-a",
+        workspace_id: "room",
+        agent_id: "cfo",
+        received_at: "2026-05-15T00:10:00Z",
+        event: {
+          agent_id: "cfo",
+          workspace_id: "room",
+          event_type,
+          detail:
+            event_type === "usage"
+              ? JSON.stringify({
+                  session_id: "quick-session-provider",
+                  used_percent: 91,
+                  source: "provider_reported",
+                  updated_at: "2026-05-15T00:10:00Z",
+                })
+              : "quick session event",
+          timestamp: "2026-05-15T00:10:00Z",
+          scope: "quick_session",
+          session_id: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+          attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY",
+          session_revision: 3,
+          context_generation: 1,
+        },
+      });
+    }
+
+    const nodeA = useFleetStore
+      .getState()
+      .agents.find((entry) => entry.nodeId === "node-a");
+    expect(nodeA?.agent.status).toBe("idle");
+    expect(nodeA?.agent.sessionUsage?.sessionId).toBe("main-session");
+    expect(useAgentActivityStore.getState().activities[key]).toBeUndefined();
+    expect(useFleetStore.getState().agents).toHaveLength(2);
+
+    applyFleetAgentActivityEvent({
+      kind: "agent_activity",
+      node_id: "node-c",
+      workspace_id: "room",
+      agent_id: "new-agent",
+      received_at: "2026-05-15T00:10:00Z",
+      event: {
+        agent_id: "new-agent",
+        workspace_id: "room",
+        event_type: "thinking",
+        detail: "quick only",
+        timestamp: "2026-05-15T00:10:00Z",
+        scope: "quick_session",
+        session_id: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+        attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY",
+        session_revision: 3,
+        context_generation: 1,
+      },
+    });
+    expect(useFleetStore.getState().agents).toHaveLength(2);
+  });
+
   it("infers a remote agent from fleet activity and stores its event by node key", () => {
     applyFleetAgentActivityEvent({
       kind: "agent_activity",

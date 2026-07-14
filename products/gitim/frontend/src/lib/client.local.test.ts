@@ -50,6 +50,12 @@ class MockLocalBackend {
   thread = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   users = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   joinChannel = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
+  readQuickSession = vi.fn<
+    (
+      id: string,
+      query?: { limit?: number; since?: number },
+    ) => Promise<ApiResponse>
+  >(() => Promise.resolve({ ok: true }));
   createCard = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   listCards = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
   readCard = vi.fn<() => Promise<ApiResponse>>(() => Promise.resolve({ ok: true }));
@@ -303,6 +309,27 @@ describe("client local browser workspaces", () => {
     expect(localBackends[0].setBoard).toHaveBeenCalledWith("summary", "Updated");
     expect(localBackends[0].setBoardSection).toHaveBeenCalledWith("当前状态", "Busy");
     expect(localBackends[0].appendBoardSection).toHaveBeenCalledWith("待确认", "- one");
+  });
+
+  it("routes bounded Quick Session reads through the active browser backend", async () => {
+    const { createBrowserWorkspace } = await import("./browser-workspaces");
+    const client = await import("./client");
+    const record = createBrowserWorkspace({
+      remoteUrl: "https://github.com/acme/phone",
+      workspaceName: "Phone",
+    });
+    await client.activateBrowserWorkspace(record.slug);
+
+    await client.readQuickSession(
+      record.slug,
+      "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+      { limit: 20, since: 4 },
+    );
+
+    expect(localBackends[0].readQuickSession).toHaveBeenCalledWith(
+      "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+      { limit: 20, since: 4 },
+    );
   });
 
   it("surfaces cached browser activation when the workspace needs a token", async () => {
