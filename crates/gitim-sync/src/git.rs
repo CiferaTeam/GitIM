@@ -987,6 +987,20 @@ pub(crate) fn classify_remote_error(raw_stderr: &str) -> GitError {
 mod tests {
     use super::*;
 
+    fn configure_test_identity(root: &Path, name: &str, email: &str) {
+        for args in [
+            ["config", "user.email", email],
+            ["config", "user.name", name],
+            ["config", "commit.gpgsign", "false"],
+        ] {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+        }
+    }
+
     #[test]
     fn rate_limit_detection_matches_known_patterns() {
         assert!(is_rate_limited(
@@ -1174,16 +1188,7 @@ mod tests {
             ])
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "a@test.com"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "A"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
+        configure_test_identity(clone_dir.path(), "A", "a@test.com");
         std::fs::write(clone_dir.path().join("seed.txt"), "seed").unwrap();
         std::process::Command::new("git")
             .args(["add", "."])
@@ -1242,16 +1247,7 @@ mod tests {
 
         // Seed a commit so HEAD resolves to something — otherwise
         // symbolic-ref on a freshly-init repo is its own edge case.
-        std::process::Command::new("git")
-            .args(["config", "user.email", "t@test.com"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "T"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
+        configure_test_identity(dir.path(), "T", "t@test.com");
         std::fs::write(dir.path().join("seed"), "seed").unwrap();
         std::process::Command::new("git")
             .args(["add", "."])
@@ -1297,16 +1293,7 @@ mod tests {
             ])
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "t@test.com"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "T"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
+        configure_test_identity(clone_dir.path(), "T", "t@test.com");
         std::fs::write(clone_dir.path().join("seed"), "seed").unwrap();
         std::process::Command::new("git")
             .args(["add", "."])
@@ -1430,16 +1417,7 @@ mod tests {
             .current_dir(bare_dir.path().parent().unwrap())
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "a@test.com"])
-            .current_dir(clone_a.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "A"])
-            .current_dir(clone_a.path())
-            .output()
-            .unwrap();
+        configure_test_identity(clone_a.path(), "A", "a@test.com");
 
         std::fs::write(clone_a.path().join("init.txt"), "init").unwrap();
         std::process::Command::new("git")
@@ -1467,16 +1445,7 @@ mod tests {
             .current_dir(bare_dir.path().parent().unwrap())
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "b@test.com"])
-            .current_dir(clone_b.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "B"])
-            .current_dir(clone_b.path())
-            .output()
-            .unwrap();
+        configure_test_identity(clone_b.path(), "B", "b@test.com");
 
         std::fs::write(clone_a.path().join("init.txt"), "A's version").unwrap();
         std::process::Command::new("git")

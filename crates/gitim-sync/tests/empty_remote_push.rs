@@ -36,6 +36,7 @@ fn run_git(dir: &Path, args: &[&str]) {
 fn setup_git_config(dir: &Path, name: &str, email: &str) {
     run_git(dir, &["config", "user.email", email]);
     run_git(dir, &["config", "user.name", name]);
+    run_git(dir, &["config", "commit.gpgsign", "false"]);
     // Neutralize dev-box git config that could mask the bug: recent git
     // versions / local overrides may auto-wire upstream on plain `git push`,
     // which hides the empty-remote regression. Force the strict path.

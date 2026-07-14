@@ -26,6 +26,7 @@ fn run_git(dir: &Path, args: &[&str]) {
 fn setup_git_config(dir: &Path, name: &str, email: &str) {
     run_git(dir, &["config", "user.email", email]);
     run_git(dir, &["config", "user.name", name]);
+    run_git(dir, &["config", "commit.gpgsign", "false"]);
 }
 
 /// Create a bare repo + two clones (a and b), with an initial commit on main.

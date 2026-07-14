@@ -469,6 +469,48 @@ struct QuickSessionResolutions {
     mappings: Vec<conflict::RenumberMapping>,
 }
 
+struct ConflictReplayRollback<'a> {
+    repo: &'a GitStorage,
+    saved_head: String,
+    armed: bool,
+}
+
+impl<'a> ConflictReplayRollback<'a> {
+    fn new(repo: &'a GitStorage, saved_head: String) -> Self {
+        Self {
+            repo,
+            saved_head,
+            armed: false,
+        }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ConflictReplayRollback<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match self.repo.reset_hard_to(&self.saved_head) {
+            Ok(()) => warn!(
+                "sync: conflict replay failed; restored pre-rebase HEAD {}",
+                self.saved_head
+            ),
+            Err(error) => error!(
+                "sync: conflict replay rollback failed: {}. Local commit remains recoverable via reflog at {}",
+                error, self.saved_head
+            ),
+        }
+    }
+}
+
 fn is_quick_session_path(path: &Path) -> bool {
     let path = path.to_string_lossy();
     path.starts_with("quick-sessions/") || path.starts_with("archive/quick-sessions/")
@@ -1238,11 +1280,15 @@ fn sync_with_push(
                     return SyncOutcome::Normal;
                 }
 
+                let mut replay_rollback =
+                    ConflictReplayRollback::new(repo, local_head_before_rebase.clone());
+
                 // SyncLoop manages git state; resolve_content does pure content transform
                 if let Err(e) = repo.discard_unpushed() {
                     warn!("sync: discard_unpushed failed: {}", e);
                     return SyncOutcome::Normal;
                 }
+                replay_rollback.arm();
 
                 let mut modified_paths: Vec<String> = Vec::new();
 
@@ -1279,12 +1325,12 @@ fn sync_with_push(
                                 parent.display(),
                                 e
                             );
-                            continue;
+                            return SyncOutcome::Normal;
                         }
                     }
                     if let Err(e) = std::fs::write(&abs_path, local_content) {
                         warn!("sync: failed to write back local board: {}", e);
-                        continue;
+                        return SyncOutcome::Normal;
                     }
                     modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
                 }
@@ -1302,7 +1348,7 @@ fn sync_with_push(
                                     rel_path.display(),
                                     e
                                 );
-                                continue;
+                                return SyncOutcome::Normal;
                             }
                         };
                         let local_meta: gitim_core::types::ChannelMeta =
@@ -1314,7 +1360,7 @@ fn sync_with_push(
                                         rel_path.display(),
                                         e
                                     );
-                                    continue;
+                                    return SyncOutcome::Normal;
                                 }
                             };
                         let remote_meta: gitim_core::types::ChannelMeta =
@@ -1326,7 +1372,7 @@ fn sync_with_push(
                                         rel_path.display(),
                                         e
                                     );
-                                    continue;
+                                    return SyncOutcome::Normal;
                                 }
                             };
                         let merged = conflict::merge_channel_meta(&local_meta, &remote_meta);
@@ -1334,19 +1380,19 @@ fn sync_with_push(
                             Ok(yaml) => {
                                 if let Err(e) = std::fs::write(&abs_path, &yaml) {
                                     warn!("sync: failed to write merged meta: {}", e);
-                                    continue;
+                                    return SyncOutcome::Normal;
                                 }
                             }
                             Err(e) => {
                                 warn!("sync: failed to serialize merged meta: {}", e);
-                                continue;
+                                return SyncOutcome::Normal;
                             }
                         }
                     } else {
                         // User meta or other: write local content back as-is
                         if let Err(e) = std::fs::write(&abs_path, local_content) {
                             warn!("sync: failed to write back local meta: {}", e);
-                            continue;
+                            return SyncOutcome::Normal;
                         }
                     }
                     modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
@@ -1396,37 +1442,41 @@ fn sync_with_push(
                     modified_paths.push(rel_path.to_string_lossy().to_string());
                 }
 
-                // Commit resolved content
-                if !modified_paths.is_empty() {
-                    let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
-                    let commit_msg = if !quick_session_resolutions.writes.is_empty() {
-                        "session: sync after rebase".to_string()
-                    } else if !thread_mappings.is_empty() {
-                        build_rebase_commit_msg(&thread_mappings, &local_additions)
-                    } else if !local_boards.is_empty() && local_metas.is_empty() {
-                        "board: sync after rebase".to_string()
-                    } else if !local_boards.is_empty() {
-                        "sync: board/meta after rebase".to_string()
-                    } else {
-                        "meta: sync after rebase".to_string()
-                    };
-                    // Under normal operation every local commit on this clone
-                    // belongs to one handler (the daemon owner), so stamping
-                    // the rebase-resolution commit with that handler matches
-                    // reality. Committer still comes from git config — only
-                    // author is rewritten. `None` preserves the legacy
-                    // behaviour (git config picks author too).
-                    let commit_result = match rebase_author {
-                        Some((name, email)) => {
-                            repo.add_and_commit_as(&path_refs, &commit_msg, Some((name, email)))
-                        }
-                        None => repo.add_and_commit(&path_refs, &commit_msg),
-                    };
-                    if let Err(e) = commit_result {
-                        warn!("sync: commit after conflict resolution failed: {}", e);
-                        return SyncOutcome::Normal;
-                    }
+                if modified_paths.is_empty() {
+                    warn!("sync: conflict replay produced no modified paths");
+                    return SyncOutcome::Normal;
                 }
+
+                // Commit resolved content
+                let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
+                let commit_msg = if !quick_session_resolutions.writes.is_empty() {
+                    "session: sync after rebase".to_string()
+                } else if !thread_mappings.is_empty() {
+                    build_rebase_commit_msg(&thread_mappings, &local_additions)
+                } else if !local_boards.is_empty() && local_metas.is_empty() {
+                    "board: sync after rebase".to_string()
+                } else if !local_boards.is_empty() {
+                    "sync: board/meta after rebase".to_string()
+                } else {
+                    "meta: sync after rebase".to_string()
+                };
+                // Under normal operation every local commit on this clone
+                // belongs to one handler (the daemon owner), so stamping
+                // the rebase-resolution commit with that handler matches
+                // reality. Committer still comes from git config — only
+                // author is rewritten. `None` preserves the legacy
+                // behaviour (git config picks author too).
+                let commit_result = match rebase_author {
+                    Some((name, email)) => {
+                        repo.add_and_commit_as(&path_refs, &commit_msg, Some((name, email)))
+                    }
+                    None => repo.add_and_commit(&path_refs, &commit_msg),
+                };
+                if let Err(e) = commit_result {
+                    warn!("sync: commit after conflict resolution failed: {}", e);
+                    return SyncOutcome::Normal;
+                }
+                replay_rollback.disarm();
 
                 for m in thread_mappings
                     .iter()

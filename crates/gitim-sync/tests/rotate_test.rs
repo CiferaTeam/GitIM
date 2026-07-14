@@ -25,6 +25,7 @@ fn setup_bare_and_clone(n_commits: usize) -> (tempfile::TempDir, tempfile::TempD
     git(&clone, &["clone", bare.path().to_str().unwrap(), "."]);
     git(&clone, &["config", "user.email", "t@t"]);
     git(&clone, &["config", "user.name", "t"]);
+    git(&clone, &["config", "commit.gpgsign", "false"]);
     for i in 0..n_commits {
         commit_file(&clone, &format!("f{i}.txt"), &format!("c{i}"));
     }
@@ -36,6 +37,7 @@ fn clone_from(bare: &tempfile::TempDir) -> tempfile::TempDir {
     git(&c, &["clone", bare.path().to_str().unwrap(), "."]);
     git(&c, &["config", "user.email", "t@t"]);
     git(&c, &["config", "user.name", "t"]);
+    git(&c, &["config", "commit.gpgsign", "false"]);
     c
 }
 fn head_branch(dir: &tempfile::TempDir) -> String {

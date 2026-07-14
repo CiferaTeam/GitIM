@@ -28,6 +28,7 @@ fn setup_repo_pair() -> (TempDir, TempDir, GitStorage) {
     // Configure user in clone (needed for commits)
     run_git(clone_dir.path(), &["config", "user.email", "test@test.com"]);
     run_git(clone_dir.path(), &["config", "user.name", "Test"]);
+    run_git(clone_dir.path(), &["config", "commit.gpgsign", "false"]);
 
     // Create initial commit so main branch exists
     let init_file = clone_dir.path().join("init.txt");
@@ -199,6 +200,7 @@ fn test_poll_no_remote_uses_head() {
     run_git(local_dir.path(), &["init"]);
     run_git(local_dir.path(), &["config", "user.email", "test@test.com"]);
     run_git(local_dir.path(), &["config", "user.name", "Test"]);
+    run_git(local_dir.path(), &["config", "commit.gpgsign", "false"]);
 
     // Create initial commit
     std::fs::write(local_dir.path().join("init.txt"), "init").unwrap();

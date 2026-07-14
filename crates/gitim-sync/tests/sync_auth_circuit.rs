@@ -240,6 +240,7 @@ fn setup_clone_with_dead_remote() -> (TempDir, TempDir, GitStorage) {
     );
     run_git(clone_dir.path(), &["config", "user.email", "t@t.com"]);
     run_git(clone_dir.path(), &["config", "user.name", "T"]);
+    run_git(clone_dir.path(), &["config", "commit.gpgsign", "false"]);
     std::fs::write(clone_dir.path().join("init.txt"), "init").unwrap();
     run_git(clone_dir.path(), &["add", "."]);
     run_git(clone_dir.path(), &["commit", "-m", "initial"]);

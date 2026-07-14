@@ -36,6 +36,12 @@ fn run_git(root: &Path, args: &[&str]) {
     );
 }
 
+fn configure_identity(root: &Path, name: &str, email: &str) {
+    run_git(root, &["config", "user.email", email]);
+    run_git(root, &["config", "user.name", name]);
+    run_git(root, &["config", "commit.gpgsign", "false"]);
+}
+
 fn write_session(root: &Path, meta: &QuickSessionMeta, thread: &str) {
     let directory = root.join(format!("quick-sessions/{SESSION_ID}"));
     std::fs::create_dir_all(&directory).unwrap();
@@ -167,8 +173,7 @@ fn setup() -> (TempDir, TempDir, TempDir, QuickSessionMeta, String) {
             clone_a.path().to_str().unwrap(),
         ],
     );
-    run_git(clone_a.path(), &["config", "user.email", "alice@test.com"]);
-    run_git(clone_a.path(), &["config", "user.name", "Alice"]);
+    configure_identity(clone_a.path(), "Alice", "alice@test.com");
 
     let alice = Handler::new("alice").unwrap();
     let mut meta = QuickSessionMeta::new(
@@ -221,8 +226,7 @@ fn setup() -> (TempDir, TempDir, TempDir, QuickSessionMeta, String) {
             clone_b.path().to_str().unwrap(),
         ],
     );
-    run_git(clone_b.path(), &["config", "user.email", "bob@test.com"]);
-    run_git(clone_b.path(), &["config", "user.name", "Bob"]);
+    configure_identity(clone_b.path(), "Bob", "bob@test.com");
     (bare, clone_a, clone_b, meta, thread)
 }
 
@@ -334,6 +338,122 @@ fn concurrent_creator_input_and_agent_completion_reconcile_session_markers() {
 }
 
 #[test]
+fn conflict_replay_write_failure_restores_local_quick_session_commit() {
+    let (_bare, remote, local, base_meta, base_thread) = setup();
+    let alice = Handler::new("alice").unwrap();
+    let bob = Handler::new("bob").unwrap();
+
+    std::fs::create_dir_all(remote.path().join("archive")).unwrap();
+    std::fs::write(
+        remote.path().join("archive/quick-sessions"),
+        "tracked path that blocks the archive directory\n",
+    )
+    .unwrap();
+    run_git(remote.path(), &["add", "."]);
+    run_git(
+        remote.path(),
+        &["commit", "-m", "block session archive directory"],
+    );
+    run_git(remote.path(), &["push"]);
+
+    let mut local_meta = base_meta;
+    apply_quick_session_transition(
+        &mut local_meta,
+        QuickSessionTransition::AgentReply {
+            actor: "bob".to_string(),
+            input_line: 1,
+            attempt_id: ATTEMPT_A.to_string(),
+            output_line: 2,
+            preview: "local agent reply".to_string(),
+            now: "2026-07-11T00:00:04Z".to_string(),
+        },
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut local_meta,
+        QuickSessionTransition::HumanMessage {
+            actor: "alice".to_string(),
+            line_number: 3,
+            request_id: Some("request-2".to_string()),
+            preview: "local follow-up".to_string(),
+            now: "2026-07-11T00:00:05Z".to_string(),
+        },
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut local_meta,
+        QuickSessionTransition::Archive {
+            actor: "alice".to_string(),
+            now: "2026-07-11T00:00:06Z".to_string(),
+        },
+    )
+    .unwrap();
+    let local_thread = format!(
+        "{base_thread}{}{}",
+        format_message(2, 1, &bob, "20260711T000004Z", "local agent reply"),
+        format_message(3, 0, &alice, "20260711T000005Z", "local follow-up")
+    );
+    archive_session(local.path(), &local_meta, &local_thread);
+    run_git(local.path(), &["add", "-A"]);
+    run_git(local.path(), &["commit", "-m", "archive local session"]);
+
+    let repo = GitStorage::new(local.path());
+    let local_head_before_rebase = repo.rev_parse("HEAD").unwrap();
+    let local_branch_before_rebase = repo.current_branch().unwrap();
+    let pushed = Arc::new(AtomicBool::new(false));
+    let pushed_callback = pushed.clone();
+    let mut circuit = AuthCircuit::new(Arc::new(AtomicBool::new(false)));
+    run_sync_cycle(
+        &repo,
+        &mut circuit,
+        &Mutex::new(()),
+        &move |_, _| pushed_callback.store(true, Ordering::SeqCst),
+        &|_, _, _| {},
+        &|_| {},
+        &|| {},
+        Some(&("Bob".to_string(), "bob@test.com".to_string())),
+    );
+
+    assert!(!pushed.load(Ordering::SeqCst));
+    assert_eq!(
+        repo.rev_parse("HEAD").unwrap(),
+        local_head_before_rebase,
+        "a failed replay must leave the branch at the pre-rebase local commit"
+    );
+    assert_eq!(
+        repo.current_branch().unwrap(),
+        local_branch_before_rebase,
+        "rollback must keep the local commit attached to its branch"
+    );
+    let status = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(local.path())
+        .output()
+        .unwrap();
+    assert!(status.status.success());
+    assert!(
+        String::from_utf8_lossy(&status.stdout).trim().is_empty(),
+        "rollback must restore a clean working tree: {}",
+        String::from_utf8_lossy(&status.stdout)
+    );
+    assert!(!repo.has_stale_rebase_state());
+
+    let archive = local
+        .path()
+        .join(format!("archive/quick-sessions/{SESSION_ID}"));
+    let restored_meta: QuickSessionMeta =
+        serde_yaml::from_str(&std::fs::read_to_string(archive.join("session.meta.yaml")).unwrap())
+            .unwrap();
+    assert_eq!(restored_meta.status, QuickSessionStatus::Archived);
+    let restored_thread =
+        parse_thread(&std::fs::read_to_string(archive.join("discussion.thread")).unwrap()).unwrap();
+    assert_eq!(restored_thread.messages().len(), 3);
+    assert_eq!(restored_thread.messages()[0].body, "first");
+    assert_eq!(restored_thread.messages()[1].body, "local agent reply");
+    assert_eq!(restored_thread.messages()[2].body, "local follow-up");
+}
+
+#[test]
 fn metadata_only_claim_and_title_merge_with_remote_creator_append() {
     let bare = TempDir::new().unwrap();
     let clone_a = TempDir::new().unwrap();
@@ -347,8 +467,7 @@ fn metadata_only_claim_and_title_merge_with_remote_creator_append() {
             clone_a.path().to_str().unwrap(),
         ],
     );
-    run_git(clone_a.path(), &["config", "user.email", "alice@test.com"]);
-    run_git(clone_a.path(), &["config", "user.name", "Alice"]);
+    configure_identity(clone_a.path(), "Alice", "alice@test.com");
 
     let alice = Handler::new("alice").unwrap();
     let mut base_meta = QuickSessionMeta::new(
@@ -381,8 +500,7 @@ fn metadata_only_claim_and_title_merge_with_remote_creator_append() {
             clone_b.path().to_str().unwrap(),
         ],
     );
-    run_git(clone_b.path(), &["config", "user.email", "bob@test.com"]);
-    run_git(clone_b.path(), &["config", "user.name", "Bob"]);
+    configure_identity(clone_b.path(), "Bob", "bob@test.com");
 
     let mut remote_meta = base_meta.clone();
     apply_quick_session_transition(
