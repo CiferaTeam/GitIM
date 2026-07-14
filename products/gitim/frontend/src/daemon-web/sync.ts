@@ -241,9 +241,14 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     //    Collect append-only thread additions, reset to remote, then re-apply
     //    with renumbering. Non-thread conflicts fail safe: keep local commits
     //    in place and surface sync error instead of silently dropping changes.
+    const replayBase = await gitOps.findMergeBase(
+      s.repoDir,
+      localHead,
+      remoteHead,
+    );
     const changedFiles = await gitOps.diffTrees(
       s.repoDir,
-      s.headCommit,
+      replayBase,
       localHead,
     );
 
@@ -312,10 +317,10 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
         remoteArchivedMeta,
         remoteArchivedThread,
       ] = await Promise.all([
-        gitOps.readFileAtCommit(s.repoDir, s.headCommit, activeMetaPath),
-        gitOps.readFileAtCommit(s.repoDir, s.headCommit, activeThreadPath),
-        gitOps.readFileAtCommit(s.repoDir, s.headCommit, archivedMetaPath),
-        gitOps.readFileAtCommit(s.repoDir, s.headCommit, archivedThreadPath),
+        gitOps.readFileAtCommit(s.repoDir, replayBase, activeMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, replayBase, activeThreadPath),
+        gitOps.readFileAtCommit(s.repoDir, replayBase, archivedMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, replayBase, archivedThreadPath),
         gitOps.readFileAtCommit(s.repoDir, remoteHead, activeMetaPath),
         gitOps.readFileAtCommit(s.repoDir, remoteHead, activeThreadPath),
         gitOps.readFileAtCommit(s.repoDir, remoteHead, archivedMetaPath),
@@ -511,7 +516,7 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       try {
         const [localContent, baseContent, remoteContent] = await Promise.all([
           readFile(`${s.repoDir}/${fp}`),
-          gitOps.readFileAtCommit(s.repoDir, s.headCommit, fp),
+          gitOps.readFileAtCommit(s.repoDir, replayBase, fp),
           gitOps.readFileAtCommit(s.repoDir, remoteHead, fp),
         ]);
         if (baseContent !== null && remoteContent === null) {

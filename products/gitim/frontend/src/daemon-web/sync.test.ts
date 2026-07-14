@@ -7,6 +7,7 @@ const gitMocks = vi.hoisted(() => ({
   addRemoveAndCommit: vi.fn(async () => "committed-head"),
   diffTrees: vi.fn(async () => [] as string[]),
   fetchOrigin: vi.fn(async () => undefined),
+  findMergeBase: vi.fn(async () => "base"),
   push: vi.fn(async () => undefined),
   readFileAtCommit: vi.fn(async (...args: [string, string, string]) => {
     if (args.length !== 3) throw new Error("invalid readFileAtCommit call");
@@ -196,6 +197,8 @@ describe("daemon-web sync", () => {
     gitMocks.diffTrees.mockReset();
     gitMocks.diffTrees.mockResolvedValue([]);
     gitMocks.fetchOrigin.mockClear();
+    gitMocks.findMergeBase.mockReset();
+    gitMocks.findMergeBase.mockResolvedValue("base");
     gitMocks.push.mockReset();
     gitMocks.push.mockResolvedValue(undefined);
     gitMocks.readFileAtCommit.mockReset();
@@ -391,6 +394,21 @@ describe("daemon-web sync", () => {
     expect(gitMocks.addAndCommit).not.toHaveBeenCalled();
     expect(files.get("/repo/channels/general.thread")).toBe(localThread);
     expect(getState().syncStatus).toBe("error");
+  });
+
+  it("fails safe before reset when shallow history has no merge base", async () => {
+    files.set("/repo/channels/general.thread", localThread);
+    gitMocks.resolveHead.mockResolvedValueOnce("local-head");
+    gitMocks.push.mockRejectedValueOnce(new Error("non-fast-forward"));
+    gitMocks.findMergeBase.mockRejectedValueOnce(
+      new Error("browser sync history has no unique merge base"),
+    );
+
+    await expect(runSync({ forceNewCycle: true }))
+      .rejects.toThrow("no unique merge base");
+
+    expect(gitMocks.resetToRemote).not.toHaveBeenCalled();
+    expect(files.get("/repo/channels/general.thread")).toBe(localThread);
   });
 
   it("rebases local board commits after remote changes", async () => {
@@ -598,6 +616,84 @@ describe("daemon-web sync", () => {
     expect(gitMocks.resetToCommit).not.toHaveBeenCalled();
     expect(files.get(`${sessionDir}/discussion.thread`)).toBe(localSessionThread);
     expect(getState().syncStatus).toBe("error");
+  });
+
+  it("recovers the replay base after worker reinitialization and a newer remote commit", async () => {
+    const remoteFirst =
+      baseThread +
+      "[L000002][P000001][@alice][20260317T120050Z] remote first\n";
+    const replayedFirst =
+      remoteFirst +
+      "[L000003][P000001][@lewis][20260317T120100Z] local\n";
+    const remoteSecond =
+      remoteFirst +
+      "[L000003][P000001][@alice][20260317T120200Z] remote second\n";
+    files.set("/repo/channels/general.thread", localThread);
+    gitMocks.resolveHead
+      .mockResolvedValueOnce("local-head")
+      .mockResolvedValueOnce("replay-head")
+      .mockResolvedValueOnce("merged-head");
+    gitMocks.resolveRemoteHead
+      .mockResolvedValueOnce("remote-first-head")
+      .mockResolvedValueOnce("remote-second-head");
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockRejectedValueOnce(new Error("push offline"))
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockResolvedValueOnce(undefined);
+    gitMocks.findMergeBase
+      .mockResolvedValueOnce("base")
+      .mockResolvedValueOnce("remote-first-head");
+    gitMocks.diffTrees.mockResolvedValue(["channels/general.thread"]);
+    gitMocks.readFileAtCommit.mockImplementation(
+      async (_repo: string, ref: string, path: string) => {
+        if (path !== "channels/general.thread") return null;
+        if (ref === "base") return baseThread;
+        if (ref === "remote-first-head") return remoteFirst;
+        if (ref === "remote-second-head") return remoteSecond;
+        return null;
+      },
+    );
+    gitMocks.resetToRemote
+      .mockImplementationOnce(async () => {
+        files.set("/repo/channels/general.thread", remoteFirst);
+      })
+      .mockImplementationOnce(async () => {
+        files.set("/repo/channels/general.thread", remoteSecond);
+      });
+
+    await expect(runSync({ forceNewCycle: true }))
+      .rejects.toThrow("push offline");
+    expect(files.get("/repo/channels/general.thread")).toBe(replayedFirst);
+    expect(gitMocks.fetchOrigin).toHaveBeenCalledTimes(2);
+
+    // A restarted Worker reconstructs this from the fetched remote ref,
+    // which advanced while the replay push was being retried.
+    initSyncState();
+    setState({ headCommit: "remote-second-head" });
+
+    await expect(runSync({ forceNewCycle: true })).resolves.toMatchObject({
+      afterHead: "merged-head",
+      status: "rebased",
+    });
+
+    expect(gitMocks.diffTrees).toHaveBeenNthCalledWith(
+      2,
+      "/repo",
+      "remote-first-head",
+      "replay-head",
+    );
+    expect(files.get("/repo/channels/general.thread")).toBe(
+      remoteSecond +
+      "[L000004][P000001][@lewis][20260317T120100Z] local\n",
+    );
+    expect(gitMocks.findMergeBase).toHaveBeenNthCalledWith(
+      2,
+      "/repo",
+      "replay-head",
+      "remote-second-head",
+    );
   });
 
   it("merges concurrent quick session sends and regenerates line metadata", async () => {

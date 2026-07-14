@@ -168,23 +168,44 @@ async function syncAfterCommit(options?: { trackCommitId?: boolean }): Promise<{
   error_code?: string;
   needs_token?: boolean;
 }> {
-  const beforeHead = options?.trackCommitId ? getState().headCommit : undefined;
   try {
-    await runSync({ forceNewCycle: true });
-    const syncedHead = getState().headCommit;
-    return {
-      status: "pushed",
-      commit_id:
-        beforeHead !== undefined && syncedHead !== beforeHead
-          ? syncedHead
-          : undefined,
-    };
+    const result = await runSync({ forceNewCycle: true });
+    const state = getState();
+    if (state.epochRedirected) {
+      return {
+        status: "commit_only",
+        commit_id: options?.trackCommitId ? result.afterHead : undefined,
+        error: "Workspace epoch is redirected; the local commit was not published.",
+        error_code: "epoch_redirected",
+      };
+    }
+    if (result.status === "reconnect_required") {
+      return {
+        status: "commit_only",
+        error: "Reconnect token to publish the local commit.",
+        error_code: "reconnect_required",
+        needs_token: true,
+      };
+    }
+    const published =
+      result.status === "pushed" ||
+      result.status === "rebased" ||
+      (result.status === "idle" && result.changed);
+    return published
+      ? {
+          status: "pushed",
+          commit_id: options?.trackCommitId ? result.afterHead : undefined,
+        }
+      : { status: "commit_only" };
   } catch (e) {
-    const syncedHead = getState().headCommit;
-    const commitId =
-      beforeHead !== undefined && syncedHead !== beforeHead
-        ? syncedHead
-        : undefined;
+    let commitId: string | undefined;
+    if (options?.trackCommitId) {
+      try {
+        commitId = await gitOps.resolveHead(getState().repoDir);
+      } catch {
+        // The caller retains its original local commit id as a fallback.
+      }
+    }
     if (isAuthFailure(e)) {
       setState({ token: null, syncStatus: "reconnect_required" });
       return {
@@ -199,11 +220,18 @@ async function syncAfterCommit(options?: { trackCommitId?: boolean }): Promise<{
   }
 }
 
-async function resolveSyncBaseline(repoDir: string, localHead: string): Promise<string> {
+async function resolveSyncBaseline(
+  repoDir: string,
+  localHead: string,
+  token: string | null,
+  corsProxy: string,
+): Promise<string> {
   try {
     return await gitOps.resolveRemoteHead(repoDir);
   } catch {
-    return localHead;
+    if (!token) return localHead;
+    await gitOps.fetchOrigin(repoDir, corsProxy, tokenAuth(token));
+    return await gitOps.resolveRemoteHead(repoDir);
   }
 }
 
@@ -281,7 +309,12 @@ export async function init(config: {
     }
 
     const head = await gitOps.resolveHead(dir);
-    const syncBaseline = await resolveSyncBaseline(dir, head);
+    const syncBaseline = await resolveSyncBaseline(
+      dir,
+      head,
+      config.token,
+      config.corsProxy,
+    );
     const s = initState({
       workspaceId,
       repoDir: dir,

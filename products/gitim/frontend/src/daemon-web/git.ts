@@ -80,6 +80,23 @@ export async function resolveRemoteHead(dir: string): Promise<string> {
   });
 }
 
+/** Resolve the single ancestry base shared by local and remote replay heads. */
+export async function findMergeBase(
+  dir: string,
+  localHead: string,
+  remoteHead: string,
+): Promise<string> {
+  const bases = await git.findMergeBase({
+    fs: getFs(),
+    dir,
+    oids: [localHead, remoteHead],
+  });
+  if (bases.length !== 1 || typeof bases[0] !== "string") {
+    throw new Error("browser sync history has no unique merge base");
+  }
+  return bases[0];
+}
+
 /** Stage files and create a commit. Returns the new commit SHA. */
 export async function addAndCommit(
   dir: string,

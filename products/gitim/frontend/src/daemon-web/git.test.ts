@@ -9,6 +9,7 @@ const resolveRefMock = vi.hoisted(() => vi.fn(async () => "local-head"));
 const writeRefMock = vi.hoisted(() => vi.fn(async () => undefined));
 const readBlobMock = vi.hoisted(() => vi.fn());
 const walkMock = vi.hoisted(() => vi.fn());
+const findMergeBaseMock = vi.hoisted(() => vi.fn(async () => ["base"]));
 const statusMatrixMock = vi.hoisted(() =>
   vi.fn<() => Promise<StatusMatrixRow[]>>(async () => []),
 );
@@ -30,6 +31,7 @@ vi.mock("isomorphic-git", () => ({
     resetIndex: resetIndexMock,
     statusMatrix: statusMatrixMock,
     TREE: treeMock,
+    findMergeBase: findMergeBaseMock,
     walk: walkMock,
     writeRef: writeRefMock,
   },
@@ -46,6 +48,7 @@ vi.mock("./storage", () => ({
 import {
   addAndCommitOnly,
   diffTrees,
+  findMergeBase,
   push,
   readFileAtCommit,
   resetToCommit,
@@ -66,6 +69,8 @@ describe("daemon-web git operations", () => {
     writeRefMock.mockClear();
     readBlobMock.mockReset();
     walkMock.mockReset();
+    findMergeBaseMock.mockReset();
+    findMergeBaseMock.mockResolvedValue(["base"]);
     statusMatrixMock.mockReset();
     statusMatrixMock.mockResolvedValue([]);
     addMock.mockClear();
@@ -133,6 +138,23 @@ describe("daemon-web git operations", () => {
     await expect(diffTrees("/repo", "old", "new")).resolves.toEqual([
       "channels/general.thread",
     ]);
+  });
+
+  it("returns the unique merge base for two browser heads", async () => {
+    await expect(findMergeBase("/repo", "local", "remote"))
+      .resolves.toBe("base");
+    expect(findMergeBaseMock).toHaveBeenCalledWith({
+      fs: fsMock,
+      dir: "/repo",
+      oids: ["local", "remote"],
+    });
+  });
+
+  it("rejects browser histories without exactly one merge base", async () => {
+    findMergeBaseMock.mockResolvedValueOnce([]);
+
+    await expect(findMergeBase("/repo", "local", "remote"))
+      .rejects.toThrow("unique merge base");
   });
 
   it("reads text content from a commit", async () => {
