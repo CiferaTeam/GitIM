@@ -761,6 +761,14 @@ impl GitStorage {
         }
     }
 
+    /// Read a path from the current branch/upstream merge base without
+    /// checking out either side. Conflict resolvers use this to recover the
+    /// common append-only prefix even when one side moved an object.
+    pub fn show_file_at_merge_base(&self, path: &str) -> Result<Option<String>, GitError> {
+        let merge_base = self.merge_base_with_upstream()?;
+        self.show_file_at_ref(&merge_base, path)
+    }
+
     /// `git push --atomic origin <new>:refs/heads/<new> <old>:refs/heads/<old>`.
     /// Both refs update or neither does — this is the rotation arbiter.
     /// A reject classifies through `classify_remote_error` like every other

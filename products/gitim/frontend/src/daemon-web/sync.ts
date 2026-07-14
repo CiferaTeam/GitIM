@@ -68,6 +68,13 @@ interface QuickSessionMove {
   commitMessage: string;
 }
 
+interface QuickSessionRelocation {
+  targetMetaPath: string;
+  targetThreadPath: string;
+  sourceMetaPath: string;
+  sourceThreadPath: string;
+}
+
 function quickSessionFileFromPath(path: string): {
   archived: boolean;
   id: string;
@@ -285,209 +292,208 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     }> = [];
     const quickSessionCreates: Record<string, string> = {};
     const quickSessionMoves: QuickSessionMove[] = [];
+    const quickSessionRelocations: QuickSessionRelocation[] = [];
 
     for (const changed of quickSessionChanges.values()) {
-      const hasArchivedPath =
-        changed.archivedMetaPath !== undefined ||
-        changed.archivedThreadPath !== undefined;
-      if (hasArchivedPath) {
-        if (
-          !changed.activeMetaPath ||
-          !changed.activeThreadPath ||
-          !changed.archivedMetaPath ||
-          !changed.archivedThreadPath
-        ) {
-          throw new Error(
-            `Quick session ${changed.id} move transaction is incomplete`,
-          );
-        }
+      const activeMetaPath = `quick-sessions/${changed.id}/session.meta.yaml`;
+      const activeThreadPath = `quick-sessions/${changed.id}/discussion.thread`;
+      const archivedMetaPath =
+        `archive/quick-sessions/${changed.id}/session.meta.yaml`;
+      const archivedThreadPath =
+        `archive/quick-sessions/${changed.id}/discussion.thread`;
+      const [
+        baseActiveMeta,
+        baseActiveThread,
+        baseArchivedMeta,
+        baseArchivedThread,
+        remoteActiveMeta,
+        remoteActiveThread,
+        remoteArchivedMeta,
+        remoteArchivedThread,
+      ] = await Promise.all([
+        gitOps.readFileAtCommit(s.repoDir, s.headCommit, activeMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, s.headCommit, activeThreadPath),
+        gitOps.readFileAtCommit(s.repoDir, s.headCommit, archivedMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, s.headCommit, archivedThreadPath),
+        gitOps.readFileAtCommit(s.repoDir, remoteHead, activeMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, remoteHead, activeThreadPath),
+        gitOps.readFileAtCommit(s.repoDir, remoteHead, archivedMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, remoteHead, archivedThreadPath),
+      ]);
+      const localActiveState = quickSessionPairState(
+        (await exists(`${s.repoDir}/${activeMetaPath}`))
+          ? await readFile(`${s.repoDir}/${activeMetaPath}`)
+          : null,
+        (await exists(`${s.repoDir}/${activeThreadPath}`))
+          ? await readFile(`${s.repoDir}/${activeThreadPath}`)
+          : null,
+        `Quick session ${changed.id} local active`,
+      );
+      const localArchivedState = quickSessionPairState(
+        (await exists(`${s.repoDir}/${archivedMetaPath}`))
+          ? await readFile(`${s.repoDir}/${archivedMetaPath}`)
+          : null,
+        (await exists(`${s.repoDir}/${archivedThreadPath}`))
+          ? await readFile(`${s.repoDir}/${archivedThreadPath}`)
+          : null,
+        `Quick session ${changed.id} local archive`,
+      );
+      if (localActiveState === localArchivedState) {
+        throw new Error(
+          `Quick session ${changed.id} local canonical location is ambiguous`,
+        );
+      }
+      const localArchived = localArchivedState === "present";
+      const localMetaPath = localArchived ? archivedMetaPath : activeMetaPath;
+      const localThreadPath = localArchived ? archivedThreadPath : activeThreadPath;
+      const [localMeta, localThread] = await Promise.all([
+        readFile(`${s.repoDir}/${localMetaPath}`),
+        readFile(`${s.repoDir}/${localThreadPath}`),
+      ]);
 
-        const activeMetaPath = changed.activeMetaPath;
-        const activeThreadPath = changed.activeThreadPath;
-        const archivedMetaPath = changed.archivedMetaPath;
-        const archivedThreadPath = changed.archivedThreadPath;
-        const [
-          baseActiveMeta,
-          baseActiveThread,
-          baseArchivedMeta,
-          baseArchivedThread,
+      const baseActiveState = quickSessionPairState(
+        baseActiveMeta,
+        baseActiveThread,
+        `Quick session ${changed.id} baseline active`,
+      );
+      const baseArchivedState = quickSessionPairState(
+        baseArchivedMeta,
+        baseArchivedThread,
+        `Quick session ${changed.id} baseline archive`,
+      );
+      if (baseActiveState === "absent" && baseArchivedState === "absent") {
+        const remoteActiveState = quickSessionPairState(
           remoteActiveMeta,
           remoteActiveThread,
+          `Quick session ${changed.id} remote active`,
+        );
+        const remoteArchivedState = quickSessionPairState(
           remoteArchivedMeta,
           remoteArchivedThread,
-        ] = await Promise.all([
-          gitOps.readFileAtCommit(s.repoDir, s.headCommit, activeMetaPath),
-          gitOps.readFileAtCommit(s.repoDir, s.headCommit, activeThreadPath),
-          gitOps.readFileAtCommit(s.repoDir, s.headCommit, archivedMetaPath),
-          gitOps.readFileAtCommit(s.repoDir, s.headCommit, archivedThreadPath),
-          gitOps.readFileAtCommit(s.repoDir, remoteHead, activeMetaPath),
-          gitOps.readFileAtCommit(s.repoDir, remoteHead, activeThreadPath),
-          gitOps.readFileAtCommit(s.repoDir, remoteHead, archivedMetaPath),
-          gitOps.readFileAtCommit(s.repoDir, remoteHead, archivedThreadPath),
-        ]);
-
-        const baseActiveState = quickSessionPairState(
-          baseActiveMeta,
-          baseActiveThread,
-          `Quick session ${changed.id} baseline active source`,
+          `Quick session ${changed.id} remote archive`,
         );
-        const baseArchivedState = quickSessionPairState(
-          baseArchivedMeta,
-          baseArchivedThread,
-          `Quick session ${changed.id} baseline archived source`,
-        );
-        const archive =
-          baseActiveState === "present" && baseArchivedState === "absent";
-        const unarchive =
-          baseActiveState === "absent" && baseArchivedState === "present";
-        if (!archive && !unarchive) {
-          throw new Error(
-            `Quick session ${changed.id} move baseline is ambiguous`,
-          );
-        }
-
-        const sourceMetaPath = archive ? activeMetaPath : archivedMetaPath;
-        const sourceThreadPath = archive ? activeThreadPath : archivedThreadPath;
-        const targetMetaPath = archive ? archivedMetaPath : activeMetaPath;
-        const targetThreadPath = archive ? archivedThreadPath : activeThreadPath;
-        const baseSourceMeta = archive ? baseActiveMeta : baseArchivedMeta;
-        const baseSourceThread = archive ? baseActiveThread : baseArchivedThread;
-        const remoteSourceMeta = archive ? remoteActiveMeta : remoteArchivedMeta;
-        const remoteSourceThread = archive
-          ? remoteActiveThread
-          : remoteArchivedThread;
-        const remoteTargetMeta = archive ? remoteArchivedMeta : remoteActiveMeta;
-        const remoteTargetThread = archive
-          ? remoteArchivedThread
-          : remoteActiveThread;
-
         if (
-          remoteSourceMeta !== baseSourceMeta ||
-          remoteSourceThread !== baseSourceThread
+          localArchived ||
+          remoteActiveState === "present" ||
+          remoteArchivedState === "present"
         ) {
-          throw new Error(
-            `Quick session ${changed.id} remote source changed or was deleted`,
-          );
-        }
-        if (remoteTargetMeta !== null || remoteTargetThread !== null) {
-          throw new Error(
-            `Quick session ${changed.id} remote target already exists`,
-          );
-        }
-
-        const sourceMetaAbs = `${s.repoDir}/${sourceMetaPath}`;
-        const sourceThreadAbs = `${s.repoDir}/${sourceThreadPath}`;
-        const targetMetaAbs = `${s.repoDir}/${targetMetaPath}`;
-        const targetThreadAbs = `${s.repoDir}/${targetThreadPath}`;
-        if (
-          (await exists(sourceMetaAbs)) ||
-          (await exists(sourceThreadAbs)) ||
-          !(await exists(targetMetaAbs)) ||
-          !(await exists(targetThreadAbs))
-        ) {
-          throw new Error(
-            `Quick session ${changed.id} local move transaction is incomplete`,
-          );
-        }
-        const [targetMeta, targetThread] = await Promise.all([
-          readFile(targetMetaAbs),
-          readFile(targetThreadAbs),
-        ]);
-        const parsedTargetMeta = parseQuickSessionMeta(targetMeta) as {
-          status: string;
-        };
-        if (
-          (archive && parsedTargetMeta.status !== "archived") ||
-          (unarchive && parsedTargetMeta.status === "archived")
-        ) {
-          throw new Error(
-            `Quick session ${changed.id} local move metadata is invalid`,
-          );
-        }
-        quickSessionMoves.push({
-          targetMetaPath,
-          targetThreadPath,
-          sourceMetaPath,
-          sourceThreadPath,
-          targetMeta,
-          targetThread,
-          commitMessage:
-            `session: ${archive ? "archive" : "unarchive"} ${changed.id} by @${s.me.handler}`,
-        });
-        continue;
-      }
-
-      if (!changed.activeMetaPath) {
-        throw new Error(
-          `Quick session ${changed.id} changed without session.meta.yaml`,
-        );
-      }
-      const threadPath =
-        changed.activeThreadPath ??
-        `quick-sessions/${changed.id}/discussion.thread`;
-      const [localMeta, baseMeta, remoteMeta, baseThread, remoteThread] =
-        await Promise.all([
-          readFile(`${s.repoDir}/${changed.activeMetaPath}`),
-          gitOps.readFileAtCommit(
-            s.repoDir,
-            s.headCommit,
-            changed.activeMetaPath,
-          ),
-          gitOps.readFileAtCommit(
-            s.repoDir,
-            remoteHead,
-            changed.activeMetaPath,
-          ),
-          gitOps.readFileAtCommit(s.repoDir, s.headCommit, threadPath),
-          gitOps.readFileAtCommit(s.repoDir, remoteHead, threadPath),
-        ]);
-
-      if (baseMeta === null) {
-        if (!changed.activeThreadPath) {
-          throw new Error(
-            `Quick session ${changed.id} create is missing discussion.thread`,
-          );
-        }
-        if (remoteMeta !== null || remoteThread !== null || baseThread !== null) {
           throw new Error(
             `Quick session ${changed.id} create conflict requires manual resolution`,
           );
         }
-        quickSessionCreates[changed.activeMetaPath] = localMeta;
-        quickSessionCreates[threadPath] = await readFile(
-          `${s.repoDir}/${threadPath}`,
-        );
+        quickSessionCreates[activeMetaPath] = localMeta;
+        quickSessionCreates[activeThreadPath] = localThread;
         continue;
       }
+      if (baseActiveState === baseArchivedState) {
+        throw new Error(
+          `Quick session ${changed.id} move baseline is ambiguous`,
+        );
+      }
+      const baseArchived = baseArchivedState === "present";
+      const baseMeta = baseArchived ? baseArchivedMeta : baseActiveMeta;
+      const baseThread = baseArchived ? baseArchivedThread : baseActiveThread;
+      if (baseMeta === null || baseThread === null) {
+        throw new Error(
+          `Quick session ${changed.id} baseline transaction is incomplete`,
+        );
+      }
 
-      if (remoteMeta === null || remoteThread === null || baseThread === null) {
+      const remoteActiveState = quickSessionPairState(
+        remoteActiveMeta,
+        remoteActiveThread,
+        `Quick session ${changed.id} remote active`,
+      );
+      const remoteArchivedState = quickSessionPairState(
+        remoteArchivedMeta,
+        remoteArchivedThread,
+        `Quick session ${changed.id} remote archive`,
+      );
+      if (remoteActiveState === remoteArchivedState) {
+        throw new Error(
+          `Quick session ${changed.id} remote canonical location is ambiguous`,
+        );
+      }
+      const remoteArchived = remoteArchivedState === "present";
+      const remoteMeta = remoteArchived ? remoteArchivedMeta : remoteActiveMeta;
+      const remoteThread = remoteArchived
+        ? remoteArchivedThread
+        : remoteActiveThread;
+      if (remoteMeta === null || remoteThread === null) {
         throw new Error(
           `Quick session ${changed.id} remote transaction is incomplete`,
         );
       }
+      const parsedLocalMeta = parseQuickSessionMeta(localMeta) as {
+        status: string;
+      };
+      if ((parsedLocalMeta.status === "archived") !== localArchived) {
+        throw new Error(
+          `Quick session ${changed.id} local metadata does not match its canonical location`,
+        );
+      }
+
+      // Preserve the exact local move when the remote source is untouched.
+      // This keeps ordinary archive/unarchive retries byte-stable. Any
+      // cross-node mutation falls through to the shared WASM merge below.
+      if (
+        localArchived !== baseArchived &&
+        remoteArchived === baseArchived &&
+        remoteMeta === baseMeta &&
+        remoteThread === baseThread
+      ) {
+        const sourceMetaPath = baseArchived ? archivedMetaPath : activeMetaPath;
+        const sourceThreadPath = baseArchived
+          ? archivedThreadPath
+          : activeThreadPath;
+        quickSessionMoves.push({
+          targetMetaPath: localMetaPath,
+          targetThreadPath: localThreadPath,
+          sourceMetaPath,
+          sourceThreadPath,
+          targetMeta: localMeta,
+          targetThread: localThread,
+          commitMessage:
+            `session: ${localArchived ? "archive" : "unarchive"} ${changed.id} by @${s.me.handler}`,
+        });
+        continue;
+      }
+
       if (!remoteThread.startsWith(baseThread)) {
         throw new Error(
           `Quick session ${changed.id} remote thread changed outside append-only shape`,
         );
       }
-      if (changed.activeThreadPath) {
-        const localThread = await readFile(`${s.repoDir}/${threadPath}`);
-        const additions = extractThreadAdditions(
-          threadPath,
-          localThread,
-          baseThread,
-        );
-        if (additions.trim()) localAdditions[threadPath] = additions;
-      }
-      remoteContents[threadPath] = remoteThread;
+      const archiveWins = localArchived || remoteArchived;
+      const targetMetaPath = archiveWins ? archivedMetaPath : activeMetaPath;
+      const targetThreadPath = archiveWins
+        ? archivedThreadPath
+        : activeThreadPath;
+      const additions = extractThreadAdditions(
+        targetThreadPath,
+        localThread,
+        baseThread,
+      );
+      if (additions.trim()) localAdditions[targetThreadPath] = additions;
+      remoteContents[targetThreadPath] = remoteThread;
       quickSessionMerges.push({
-        metaPath: changed.activeMetaPath,
-        threadPath,
+        metaPath: targetMetaPath,
+        threadPath: targetThreadPath,
         localMeta,
         baseMeta,
         remoteMeta,
         remoteThread,
       });
+      if (archiveWins !== remoteArchived) {
+        quickSessionRelocations.push({
+          targetMetaPath,
+          targetThreadPath,
+          sourceMetaPath: remoteArchived ? archivedMetaPath : activeMetaPath,
+          sourceThreadPath: remoteArchived
+            ? archivedThreadPath
+            : activeThreadPath,
+        });
+      }
     }
 
     for (const fp of changedFiles) {
@@ -531,8 +537,12 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     // line-number translation.
     const resolved = resolveConflicts(localAdditions, remoteContents);
     const quickSessionMetas: Record<string, string> = {};
+    const quickSessionThreads: Record<string, string> = {};
     for (const quick of quickSessionMerges) {
       const mergedThread = resolved.files[quick.threadPath] ?? quick.remoteThread;
+      if (resolved.files[quick.threadPath] === undefined) {
+        quickSessionThreads[quick.threadPath] = mergedThread;
+      }
       const mappings = resolved.mappings.filter(
         (mapping) => mapping.file === quick.threadPath,
       );
@@ -563,11 +573,21 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     const { writeFile, mkdir, removeDir, removeFile } = await import("./storage");
     const filePaths: string[] = [];
     for (const [fp, content] of Object.entries(resolved.files)) {
-      await writeFile(`${s.repoDir}/${fp}`, content);
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
+      filePaths.push(fp);
+    }
+    for (const [fp, content] of Object.entries(quickSessionThreads)) {
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
       filePaths.push(fp);
     }
     for (const [fp, content] of Object.entries(quickSessionMetas)) {
-      await writeFile(`${s.repoDir}/${fp}`, content);
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
       filePaths.push(fp);
     }
     for (const [fp, content] of Object.entries(quickSessionCreates)) {
@@ -589,6 +609,11 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       await removeFile(`${s.repoDir}/${move.sourceThreadPath}`);
       await removeDir(parentPath(`${s.repoDir}/${move.sourceMetaPath}`));
     }
+    for (const relocation of quickSessionRelocations) {
+      await removeFile(`${s.repoDir}/${relocation.sourceMetaPath}`);
+      await removeFile(`${s.repoDir}/${relocation.sourceThreadPath}`);
+      await removeDir(parentPath(`${s.repoDir}/${relocation.sourceMetaPath}`));
+    }
     for (const [fp, content] of Object.entries(localBoards)) {
       const absPath = `${s.repoDir}/${fp}`;
       await mkdirp(parentPath(absPath), exists, mkdir);
@@ -608,20 +633,34 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
         : hasQuickSessionFiles && !hasThreadFiles
           ? "session: sync after rebase"
           : resolved.commitMessage;
-    if (quickSessionMoves.length > 0) {
-      const moveAddPaths = quickSessionMoves.flatMap((move) => [
-        move.targetMetaPath,
-        move.targetThreadPath,
-      ]);
-      const moveRemovePaths = quickSessionMoves.flatMap((move) => [
-        move.sourceMetaPath,
-        move.sourceThreadPath,
-      ]);
+    if (quickSessionMoves.length > 0 || quickSessionRelocations.length > 0) {
+      const moveAddPaths = [
+        ...quickSessionMoves.flatMap((move) => [
+          move.targetMetaPath,
+          move.targetThreadPath,
+        ]),
+        ...quickSessionRelocations.flatMap((move) => [
+          move.targetMetaPath,
+          move.targetThreadPath,
+        ]),
+      ];
+      const moveRemovePaths = [
+        ...quickSessionMoves.flatMap((move) => [
+          move.sourceMetaPath,
+          move.sourceThreadPath,
+        ]),
+        ...quickSessionRelocations.flatMap((move) => [
+          move.sourceMetaPath,
+          move.sourceThreadPath,
+        ]),
+      ];
       await gitOps.addRemoveAndCommit(
         s.repoDir,
         [...filePaths, ...moveAddPaths],
         moveRemovePaths,
-        quickSessionMoves.map((move) => move.commitMessage).join("\n"),
+        quickSessionMoves.length > 0 && quickSessionRelocations.length === 0
+          ? quickSessionMoves.map((move) => move.commitMessage).join("\n")
+          : "session: sync after rebase",
         s.me.handler,
       );
     } else {

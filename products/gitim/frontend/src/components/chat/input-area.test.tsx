@@ -223,6 +223,7 @@ describe("InputArea card recipient preview", () => {
       root = createRoot(container);
       root.render(
         <InputArea
+          workspaceSlug={null}
           workspaceKey="runtime:room"
           scopeKey="general"
           replyTo={null}
@@ -271,6 +272,7 @@ describe("InputArea card recipient preview", () => {
       root = createRoot(container);
       root.render(
         <InputArea
+          workspaceSlug={null}
           workspaceKey="runtime:room"
           scopeKey="card:strategy/card-1"
           replyTo={null}
@@ -313,6 +315,7 @@ describe("InputArea card recipient preview", () => {
       root = createRoot(container);
       root.render(
         <InputArea
+          workspaceSlug={null}
           workspaceKey="runtime:room"
           scopeKey="general"
           replyTo={null}

@@ -226,12 +226,13 @@ pub fn merge_quick_session_meta(
             "immutable metadata differs".to_string(),
         ));
     }
-    if local.status == QuickSessionStatus::Archived || remote.status == QuickSessionStatus::Archived
-    {
-        return Err(ConflictError::QuickSession(
-            "archive transitions require manual resolution".to_string(),
-        ));
-    }
+    // Archive is the cross-node convergence fence. A writer that moved the
+    // object to archive races only with state derived from the same immutable
+    // session, so we can still merge its append-only transcript and durable
+    // completion markers. The archived result clears any concurrent running
+    // claim, preventing a stale provider turn from becoming live again.
+    let archive_wins = local.status == QuickSessionStatus::Archived
+        || remote.status == QuickSessionStatus::Archived;
 
     let (title, title_source) = match (&local.title, &remote.title) {
         (Some(local), Some(remote)) if local != remote => {
@@ -364,7 +365,7 @@ pub fn merge_quick_session_meta(
         ));
     }
 
-    let local_claim = if local.status == QuickSessionStatus::Running {
+    let local_claim = if !archive_wins && local.status == QuickSessionStatus::Running {
         Some((
             local.attempt_id.clone().ok_or_else(|| {
                 ConflictError::QuickSession("local running claim is incomplete".to_string())
@@ -379,7 +380,7 @@ pub fn merge_quick_session_meta(
     } else {
         None
     };
-    let remote_claim = if remote.status == QuickSessionStatus::Running {
+    let remote_claim = if !archive_wins && remote.status == QuickSessionStatus::Running {
         Some((
             remote.attempt_id.clone().ok_or_else(|| {
                 ConflictError::QuickSession("remote running claim is incomplete".to_string())
@@ -431,7 +432,7 @@ pub fn merge_quick_session_meta(
             "a running claim conflicts with a failed attempt".to_string(),
         ));
     }
-    let status = if claim.is_some() {
+    let stable_status = if claim.is_some() {
         QuickSessionStatus::Running
     } else if failure.as_ref().is_some_and(|failed| {
         newest_human_line.is_none_or(|newest| failed.3.is_none_or(|seen| newest <= seen))
@@ -441,6 +442,11 @@ pub fn merge_quick_session_meta(
         QuickSessionStatus::Active
     } else {
         QuickSessionStatus::NeedsTitle
+    };
+    let status = if archive_wins {
+        QuickSessionStatus::Archived
+    } else {
+        stable_status
     };
     let (attempt_id, processing_input_line, processing_started_at) = match claim {
         Some((attempt, input, started)) => (Some(attempt), Some(input), Some(started)),
@@ -455,6 +461,12 @@ pub fn merge_quick_session_meta(
         Some((attempt, error, _, _)) => (Some(error), Some(attempt)),
         None => (None, None),
     };
+    let archived_at = if archive_wins {
+        local.archived_at.clone().max(remote.archived_at.clone())
+    } else {
+        None
+    };
+    let archived_from = archive_wins.then_some(stable_status);
     let merged = QuickSessionMeta {
         id: local.id.clone(),
         title,
@@ -464,8 +476,8 @@ pub fn merge_quick_session_meta(
         status,
         created_at: local.created_at.clone(),
         updated_at: local.updated_at.clone().max(remote.updated_at.clone()),
-        archived_at: None,
-        archived_from: None,
+        archived_at,
+        archived_from,
         summary,
         summary_updated_at,
         last_message_preview: final_preview,

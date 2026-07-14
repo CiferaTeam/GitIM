@@ -455,3 +455,76 @@ fn quick_session_merge_preserves_newer_error_and_clears_failed_claim() {
     assert!(merged.processing_input_line.is_none());
     assert_eq!(merged.last_human_line, Some(2));
 }
+
+#[test]
+fn quick_session_archive_wins_and_clears_concurrent_running_claim() {
+    let session_id = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    let attempt_id = "qa-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    let mut running = QuickSessionMeta::new(
+        session_id.to_string(),
+        "bob".to_string(),
+        "alice".to_string(),
+        "2026-07-11T00:00:00Z".to_string(),
+    );
+    apply_quick_session_transition(
+        &mut running,
+        QuickSessionTransition::HumanMessage {
+            actor: "alice".to_string(),
+            line_number: 1,
+            request_id: None,
+            preview: "first".to_string(),
+            now: "2026-07-11T00:00:01Z".to_string(),
+        },
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut running,
+        QuickSessionTransition::Claim {
+            actor: "bob".to_string(),
+            input_line: 1,
+            attempt_id: attempt_id.to_string(),
+            now: "2026-07-11T00:00:02Z".to_string(),
+        },
+    )
+    .unwrap();
+    apply_quick_session_transition(
+        &mut running,
+        QuickSessionTransition::SetTitle {
+            actor: "bob".to_string(),
+            attempt_id: attempt_id.to_string(),
+            title: "Concurrent title".to_string(),
+            now: "2026-07-11T00:00:03Z".to_string(),
+        },
+    )
+    .unwrap();
+    let mut archived = running.clone();
+    apply_quick_session_transition(
+        &mut archived,
+        QuickSessionTransition::Archive {
+            actor: "alice".to_string(),
+            now: "2026-07-11T00:00:04Z".to_string(),
+        },
+    )
+    .unwrap();
+    let alice = Handler::new("alice").unwrap();
+    let thread = format_message(1, 0, &alice, "20260711T000001Z", "first");
+
+    let merged = merge_quick_session_meta(
+        &running,
+        &archived,
+        &thread,
+        &[],
+        Path::new(&format!(
+            "archive/quick-sessions/{session_id}/discussion.thread"
+        )),
+    )
+    .unwrap();
+
+    assert_eq!(merged.status, QuickSessionStatus::Archived);
+    assert_eq!(merged.archived_from, Some(QuickSessionStatus::Active));
+    assert_eq!(merged.archived_at, archived.archived_at);
+    assert!(merged.attempt_id.is_none());
+    assert!(merged.processing_input_line.is_none());
+    assert!(merged.processing_started_at.is_none());
+    assert!(merged.revision > archived.revision.max(running.revision));
+}

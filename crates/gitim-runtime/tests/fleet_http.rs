@@ -884,6 +884,12 @@ async fn legacy_fleet_node_activates_sse_when_health_is_unavailable() {
                 event_type: "tool_use".to_string(),
                 detail: "legacy node stayed live".to_string(),
                 timestamp: "2026-05-15T00:00:00Z".to_string(),
+                scope: ActivityScope::default(),
+                session_id: None,
+                r#ref: None,
+                session_revision: None,
+                attempt_id: None,
+                context_generation: None,
             });
             tokio::time::sleep(Duration::from_millis(50)).await;
         }

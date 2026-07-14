@@ -462,31 +462,48 @@ pub fn run_sync_cycle(
 /// Retries up to 3 times if push fails after conflict resolution.
 const MAX_SYNC_RETRIES: usize = 3;
 
-fn prepare_quick_session_meta_resolutions(
+#[derive(Default)]
+struct QuickSessionResolutions {
+    writes: HashMap<PathBuf, String>,
+    removals: Vec<PathBuf>,
+    mappings: Vec<conflict::RenumberMapping>,
+}
+
+fn is_quick_session_path(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    path.starts_with("quick-sessions/") || path.starts_with("archive/quick-sessions/")
+}
+
+fn complete_quick_session_pair(
+    meta: Option<String>,
+    thread: Option<String>,
+    description: &str,
+) -> Result<Option<(String, String)>, String> {
+    match (meta, thread) {
+        (Some(meta), Some(thread)) => Ok(Some((meta, thread))),
+        (None, None) => Ok(None),
+        _ => Err(format!("{description} transaction is incomplete")),
+    }
+}
+
+fn prepare_quick_session_resolutions(
     repo: &GitStorage,
     all_unpushed: &[PathBuf],
-    local_additions: &HashMap<PathBuf, String>,
-    local_metas: &HashMap<PathBuf, String>,
-) -> Result<HashMap<PathBuf, String>, String> {
+) -> Result<QuickSessionResolutions, String> {
     let quick_paths: Vec<&PathBuf> = all_unpushed
         .iter()
-        .filter(|path| {
-            let path = path.to_string_lossy();
-            path.starts_with("quick-sessions/") || path.starts_with("archive/quick-sessions/")
-        })
+        .filter(|path| is_quick_session_path(path))
         .collect();
     if quick_paths.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(QuickSessionResolutions::default());
     }
 
-    let mut sessions: HashMap<String, (Option<PathBuf>, Option<PathBuf>)> = HashMap::new();
+    let mut sessions: HashMap<String, ()> = HashMap::new();
     for path in quick_paths {
         let path_str = path.to_string_lossy();
-        if path_str.starts_with("archive/quick-sessions/") {
-            return Err("archive transitions require manual resolution".to_string());
-        }
         let rest = path_str
             .strip_prefix("quick-sessions/")
+            .or_else(|| path_str.strip_prefix("archive/quick-sessions/"))
             .ok_or_else(|| "invalid quick session path".to_string())?;
         let (session_id, file) = rest
             .split_once('/')
@@ -494,59 +511,164 @@ fn prepare_quick_session_meta_resolutions(
         if file.contains('/') {
             return Err("invalid quick session path".to_string());
         }
-        let entry = sessions.entry(session_id.to_string()).or_default();
         match file {
-            "session.meta.yaml" => entry.0 = Some(path.clone()),
-            "discussion.thread" => entry.1 = Some(path.clone()),
+            "session.meta.yaml" | "discussion.thread" => {}
             _ => return Err("unknown quick session file".to_string()),
         }
+        sessions.insert(session_id.to_string(), ());
     }
 
-    let mut merged_metas = HashMap::new();
-    for (session_id, (meta_path, thread_path)) in sessions {
-        let meta_path = meta_path.ok_or_else(|| {
-            format!("quick session {session_id} changed without session.meta.yaml")
-        })?;
-        let canonical_thread_path =
-            PathBuf::from(format!("quick-sessions/{session_id}/discussion.thread"));
-        let thread_path = thread_path.unwrap_or(canonical_thread_path);
-        let local_thread = local_additions.get(&thread_path);
-        if let Some(local_thread) = local_thread {
-            let parsed_local = gitim_core::parser::parse_thread(local_thread)
-                .map_err(|error| format!("quick session {session_id} local thread: {error}"))?;
-            if parsed_local
-                .entries
-                .first()
-                .is_none_or(|entry| entry.line_number() <= 1)
-            {
-                return Err(format!(
-                    "quick session {session_id} create conflict requires manual resolution"
-                ));
-            }
+    let read_working = |path: &Path| -> Result<Option<String>, String> {
+        let absolute = repo.root().join(path);
+        if !absolute.exists() {
+            return Ok(None);
         }
-        let local_meta: gitim_core::types::QuickSessionMeta =
-            serde_yaml::from_str(local_metas.get(&meta_path).ok_or_else(|| {
-                format!("quick session {session_id} local metadata is unavailable")
-            })?)
-            .map_err(|error| format!("quick session {session_id} local metadata: {error}"))?;
-        let thread_key = thread_path.to_string_lossy();
-        let meta_key = meta_path.to_string_lossy();
-        let remote_thread = repo
-            .show_file_at_ref("@{upstream}", &thread_key)
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| format!("quick session {session_id} remote thread is unavailable"))?;
-        let remote_meta: gitim_core::types::QuickSessionMeta = serde_yaml::from_str(
-            &repo
-                .show_file_at_ref("@{upstream}", &meta_key)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| {
-                    format!("quick session {session_id} remote metadata is unavailable")
-                })?,
-        )
-        .map_err(|error| format!("quick session {session_id} remote metadata: {error}"))?;
-        let (merged_thread, mappings) = if let Some(local_thread) = local_thread {
-            let additions = HashMap::from([(thread_path.clone(), local_thread.clone())]);
-            let remote_contents = HashMap::from([(thread_path.clone(), remote_thread)]);
+        std::fs::read_to_string(&absolute)
+            .map(Some)
+            .map_err(|error| format!("read {}: {error}", path.display()))
+    };
+    let read_remote = |path: &Path| -> Result<Option<String>, String> {
+        repo.show_file_at_ref("@{upstream}", &path.to_string_lossy())
+            .map_err(|error| error.to_string())
+    };
+    let read_base = |path: &Path| -> Result<Option<String>, String> {
+        repo.show_file_at_merge_base(&path.to_string_lossy())
+            .map_err(|error| error.to_string())
+    };
+
+    let mut resolutions = QuickSessionResolutions::default();
+    for session_id in sessions.into_keys() {
+        let active_meta = PathBuf::from(format!("quick-sessions/{session_id}/session.meta.yaml"));
+        let active_thread = PathBuf::from(format!("quick-sessions/{session_id}/discussion.thread"));
+        let archived_meta = PathBuf::from(format!(
+            "archive/quick-sessions/{session_id}/session.meta.yaml"
+        ));
+        let archived_thread = PathBuf::from(format!(
+            "archive/quick-sessions/{session_id}/discussion.thread"
+        ));
+
+        let local_active = complete_quick_session_pair(
+            read_working(&active_meta)?,
+            read_working(&active_thread)?,
+            &format!("quick session {session_id} local active"),
+        )?;
+        let local_archived = complete_quick_session_pair(
+            read_working(&archived_meta)?,
+            read_working(&archived_thread)?,
+            &format!("quick session {session_id} local archive"),
+        )?;
+        let remote_active = complete_quick_session_pair(
+            read_remote(&active_meta)?,
+            read_remote(&active_thread)?,
+            &format!("quick session {session_id} remote active"),
+        )?;
+        let remote_archived = complete_quick_session_pair(
+            read_remote(&archived_meta)?,
+            read_remote(&archived_thread)?,
+            &format!("quick session {session_id} remote archive"),
+        )?;
+        let base_active = complete_quick_session_pair(
+            read_base(&active_meta)?,
+            read_base(&active_thread)?,
+            &format!("quick session {session_id} base active"),
+        )?;
+        let base_archived = complete_quick_session_pair(
+            read_base(&archived_meta)?,
+            read_base(&archived_thread)?,
+            &format!("quick session {session_id} base archive"),
+        )?;
+
+        let (local_meta_yaml, local_thread_content, local_is_archived) =
+            match (local_active, local_archived) {
+                (Some((meta, thread)), None) => (meta, thread, false),
+                (None, Some((meta, thread))) => (meta, thread, true),
+                _ => {
+                    return Err(format!(
+                        "quick session {session_id} local canonical location is ambiguous"
+                    ))
+                }
+            };
+        let (remote_meta_yaml, remote_thread_content, remote_is_archived) =
+            match (remote_active, remote_archived) {
+                (Some((meta, thread)), None) => (meta, thread, false),
+                (None, Some((meta, thread))) => (meta, thread, true),
+                _ => {
+                    return Err(format!(
+                        "quick session {session_id} remote canonical location is ambiguous"
+                    ))
+                }
+            };
+        let (base_meta_yaml, base_thread_content, base_is_archived) =
+            match (base_active, base_archived) {
+                (Some((meta, thread)), None) => (meta, thread, false),
+                (None, Some((meta, thread))) => (meta, thread, true),
+                _ => {
+                    return Err(format!(
+                        "quick session {session_id} create conflict requires manual resolution"
+                    ))
+                }
+            };
+
+        // An ordinary archive/unarchive move can share a commit with another
+        // file that caused the rebase conflict. When upstream still has the
+        // exact baseline session, replay that move byte-for-byte; archive-wins
+        // applies only when both nodes actually mutated the session.
+        if local_is_archived != base_is_archived
+            && remote_is_archived == base_is_archived
+            && remote_meta_yaml == base_meta_yaml
+            && remote_thread_content == base_thread_content
+        {
+            let target_meta = if local_is_archived {
+                archived_meta.clone()
+            } else {
+                active_meta.clone()
+            };
+            let target_thread = if local_is_archived {
+                archived_thread.clone()
+            } else {
+                active_thread.clone()
+            };
+            resolutions.writes.insert(target_meta, local_meta_yaml);
+            resolutions
+                .writes
+                .insert(target_thread, local_thread_content);
+            if local_is_archived {
+                resolutions.removals.push(active_meta);
+                resolutions.removals.push(active_thread);
+            } else {
+                resolutions.removals.push(archived_meta);
+                resolutions.removals.push(archived_thread);
+            }
+            continue;
+        }
+
+        let local_addition = local_thread_content
+            .strip_prefix(&base_thread_content)
+            .ok_or_else(|| {
+                format!("quick session {session_id} local thread changed outside append-only shape")
+            })?;
+        if !remote_thread_content.starts_with(&base_thread_content) {
+            return Err(format!(
+                "quick session {session_id} remote thread changed outside append-only shape"
+            ));
+        }
+
+        let archive_wins = local_is_archived || remote_is_archived;
+        let target_meta = if archive_wins {
+            archived_meta.clone()
+        } else {
+            active_meta.clone()
+        };
+        let target_thread = if archive_wins {
+            archived_thread.clone()
+        } else {
+            active_thread.clone()
+        };
+        let (merged_thread, mappings) = if local_addition.is_empty() {
+            (remote_thread_content, Vec::new())
+        } else {
+            let additions = HashMap::from([(target_thread.clone(), local_addition.to_string())]);
+            let remote_contents = HashMap::from([(target_thread.clone(), remote_thread_content)]);
             let (resolved_files, mappings) =
                 conflict::resolve_content_pure(&additions, &remote_contents)
                     .map_err(|error| error.to_string())?;
@@ -556,21 +678,34 @@ fn prepare_quick_session_meta_resolutions(
                 .content
                 .clone();
             (merged_thread, mappings)
-        } else {
-            (remote_thread, Vec::new())
         };
+        let local_meta: gitim_core::types::QuickSessionMeta =
+            serde_yaml::from_str(&local_meta_yaml)
+                .map_err(|error| format!("quick session {session_id} local metadata: {error}"))?;
+        let remote_meta: gitim_core::types::QuickSessionMeta =
+            serde_yaml::from_str(&remote_meta_yaml)
+                .map_err(|error| format!("quick session {session_id} remote metadata: {error}"))?;
         let merged_meta = conflict::merge_quick_session_meta(
             &local_meta,
             &remote_meta,
             &merged_thread,
             &mappings,
-            &thread_path,
+            &target_thread,
         )
         .map_err(|error| error.to_string())?;
         let yaml = serde_yaml::to_string(&merged_meta).map_err(|error| error.to_string())?;
-        merged_metas.insert(meta_path, yaml);
+        resolutions.writes.insert(target_meta, yaml);
+        resolutions.writes.insert(target_thread, merged_thread);
+        resolutions.mappings.extend(mappings);
+        if archive_wins {
+            resolutions.removals.push(active_meta);
+            resolutions.removals.push(active_thread);
+        } else {
+            resolutions.removals.push(archived_meta);
+            resolutions.removals.push(archived_thread);
+        }
     }
-    Ok(merged_metas)
+    Ok(resolutions)
 }
 
 /// Hard safety net: if HEAD falls this far behind `@{upstream}`, sync is
@@ -944,7 +1079,7 @@ fn sync_with_push(
         };
 
         // Capture local additions BEFORE attempting rebase
-        let local_additions = match repo.diff_since_merge_base("*.thread") {
+        let mut local_additions = match repo.diff_since_merge_base("*.thread") {
             Ok(v) => v,
             Err(e) => {
                 warn!("sync: failed to diff unpushed additions: {}", e);
@@ -1046,21 +1181,19 @@ fn sync_with_push(
                     warn!("sync: failed to abort conflicted rebase: {}", error);
                     return SyncOutcome::Normal;
                 }
-                let quick_session_metas = match prepare_quick_session_meta_resolutions(
-                    repo,
-                    &all_unpushed_before_rebase,
-                    &local_additions,
-                    &local_metas,
-                ) {
-                    Ok(resolutions) => resolutions,
-                    Err(error) => {
-                        warn!(
-                            "sync: quick session conflict preserved for manual resolution: {}",
-                            error
-                        );
-                        return SyncOutcome::Normal;
-                    }
-                };
+                let quick_session_resolutions =
+                    match prepare_quick_session_resolutions(repo, &all_unpushed_before_rebase) {
+                        Ok(resolutions) => resolutions,
+                        Err(error) => {
+                            warn!(
+                                "sync: quick session conflict preserved for manual resolution: {}",
+                                error
+                            );
+                            return SyncOutcome::Normal;
+                        }
+                    };
+                local_additions.retain(|path, _| !is_quick_session_path(path));
+                local_metas.retain(|path, _| !is_quick_session_path(path));
                 // Rebase failed. Two paths:
                 //
                 //   1. All unpushed files are in the resolvable set
@@ -1095,7 +1228,11 @@ fn sync_with_push(
                 }
 
                 // Rebase failed — use thread-aware + meta + board conflict resolution
-                if local_additions.is_empty() && local_metas.is_empty() && local_boards.is_empty() {
+                if local_additions.is_empty()
+                    && local_metas.is_empty()
+                    && local_boards.is_empty()
+                    && quick_session_resolutions.writes.is_empty()
+                {
                     let _ = repo.abort_rebase();
                     warn!("sync: rebase conflict with no resolvable changes, aborted");
                     return SyncOutcome::Normal;
@@ -1155,12 +1292,7 @@ fn sync_with_push(
                 // Meta resolution
                 for (rel_path, local_content) in &local_metas {
                     let abs_path = repo.root().join(rel_path);
-                    if let Some(merged_quick_session) = quick_session_metas.get(rel_path) {
-                        if let Err(e) = std::fs::write(&abs_path, merged_quick_session) {
-                            warn!("sync: failed to write merged quick session meta: {}", e);
-                            continue;
-                        }
-                    } else if rel_path.starts_with("channels/") {
+                    if rel_path.starts_with("channels/") {
                         // Channel meta: merge members as union, scalars take remote
                         let remote_content = match std::fs::read_to_string(&abs_path) {
                             Ok(c) => c,
@@ -1220,10 +1352,56 @@ fn sync_with_push(
                     modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
                 }
 
+                // Quick Sessions resolve as a two-file transaction. Archive
+                // wins any active/archive race, while the core merge keeps
+                // append-only messages and completion markers and clears a
+                // stale running claim.
+                for rel_path in &quick_session_resolutions.removals {
+                    let abs_path = repo.root().join(rel_path);
+                    if abs_path.exists() {
+                        if let Err(e) = std::fs::remove_file(&abs_path) {
+                            warn!(
+                                "sync: failed to remove superseded quick session file {}: {}",
+                                rel_path.display(),
+                                e
+                            );
+                            return SyncOutcome::Normal;
+                        }
+                        modified_paths.push(rel_path.to_string_lossy().to_string());
+                        if let Some(parent) = abs_path.parent() {
+                            let _ = std::fs::remove_dir(parent);
+                        }
+                    }
+                }
+                for (rel_path, content) in &quick_session_resolutions.writes {
+                    let abs_path = repo.root().join(rel_path);
+                    if let Some(parent) = abs_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            warn!(
+                                "sync: failed to create quick session dir {}: {}",
+                                parent.display(),
+                                e
+                            );
+                            return SyncOutcome::Normal;
+                        }
+                    }
+                    if let Err(e) = std::fs::write(&abs_path, content) {
+                        warn!(
+                            "sync: failed to write resolved quick session file {}: {}",
+                            rel_path.display(),
+                            e
+                        );
+                        return SyncOutcome::Normal;
+                    }
+                    modified_paths.push(rel_path.to_string_lossy().to_string());
+                }
+
                 // Commit resolved content
                 if !modified_paths.is_empty() {
                     let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
-                    let commit_msg = if !thread_mappings.is_empty() {
+                    let commit_msg = if !quick_session_resolutions.writes.is_empty() {
+                        "session: sync after rebase".to_string()
+                    } else if !thread_mappings.is_empty() {
                         build_rebase_commit_msg(&thread_mappings, &local_additions)
                     } else if !local_boards.is_empty() && local_metas.is_empty() {
                         "board: sync after rebase".to_string()
@@ -1250,7 +1428,10 @@ fn sync_with_push(
                     }
                 }
 
-                for m in &thread_mappings {
+                for m in thread_mappings
+                    .iter()
+                    .chain(quick_session_resolutions.mappings.iter())
+                {
                     on_renumbered(m.file.clone(), m.old_line, m.new_line);
                 }
 

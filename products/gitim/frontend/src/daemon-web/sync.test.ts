@@ -756,21 +756,18 @@ describe("daemon-web sync", () => {
     expect(result.status).toBe("rebased");
   });
 
-  it.each([
-    { conflict: "source changed", expected: "remote source changed" },
-    { conflict: "source deleted", expected: "remote source changed" },
-    { conflict: "target exists", expected: "remote target already exists" },
-  ])("keeps a local quick session move intact when the remote $conflict", async ({
-    conflict,
-    expected,
-  }) => {
+  it("converges a local archive with a remote agent reply", async () => {
     const activeMeta = quickSessionMeta();
-    const remoteActiveMeta = quickSessionMeta({
+    const completedMeta = quickSessionMeta({
       title: "Remote title",
       title_source: "api_set",
       status: "active",
-      updated_at: "20260711T010253Z",
-      revision: 3,
+      updated_at: "20260711T010403Z",
+      last_message_preview: "agent completion",
+      last_completed_attempt_id: "qa-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+      last_completed_input_line: 1,
+      last_completed_line: 2,
+      revision: 4,
     });
     const archivedMeta = quickSessionMeta({
       status: "archived",
@@ -781,13 +778,20 @@ describe("daemon-web sync", () => {
     });
     const thread =
       "[L000001][P000000][@lewis][20260711T010203Z] base\n";
+    const completedThread =
+      thread +
+      "[L000002][P000001][@alice][20260711T010403Z] agent completion\n";
     dirs.add("/repo/archive");
     dirs.add("/repo/archive/quick-sessions");
     dirs.add(archivedSessionDir);
     files.set(`${archivedSessionDir}/session.meta.yaml`, archivedMeta);
     files.set(`${archivedSessionDir}/discussion.thread`, thread);
-    gitMocks.resolveHead.mockResolvedValueOnce("local-archive-head");
-    gitMocks.push.mockRejectedValueOnce(new Error("non-fast-forward"));
+    gitMocks.resolveHead
+      .mockResolvedValueOnce("local-archive-head")
+      .mockResolvedValueOnce("merged-head");
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockResolvedValueOnce(undefined);
     gitMocks.diffTrees.mockResolvedValueOnce([
       archivedSessionMetaPath,
       archivedSessionThreadPath,
@@ -800,27 +804,134 @@ describe("daemon-web sync", () => {
         const path = args[2];
         if (path === sessionMetaPath) {
           if (ref === "base") return activeMeta;
-          if (conflict === "source deleted") return null;
-          return conflict === "source changed" ? remoteActiveMeta : activeMeta;
+          return completedMeta;
         }
         if (path === sessionThreadPath) {
-          return conflict === "source deleted" && ref !== "base" ? null : thread;
-        }
-        if (conflict === "target exists" && ref !== "base") {
-          if (path === archivedSessionMetaPath) return archivedMeta;
-          if (path === archivedSessionThreadPath) return thread;
+          return ref === "base" ? thread : completedThread;
         }
         return null;
       },
     );
+    gitMocks.resetToRemote.mockImplementationOnce(async () => {
+      dirs.add("/repo/quick-sessions");
+      dirs.add(sessionDir);
+      files.set(`${sessionDir}/session.meta.yaml`, completedMeta);
+      files.set(`${sessionDir}/discussion.thread`, completedThread);
+      files.delete(`${archivedSessionDir}/session.meta.yaml`);
+      files.delete(`${archivedSessionDir}/discussion.thread`);
+      dirs.delete(archivedSessionDir);
+    });
 
-    await expect(runSync({ forceNewCycle: true }))
-      .rejects.toThrow(expected);
+    const result = await runSync({ forceNewCycle: true });
 
-    expect(gitMocks.resetToRemote).not.toHaveBeenCalled();
-    expect(files.get(`${archivedSessionDir}/session.meta.yaml`)).toBe(archivedMeta);
-    expect(files.get(`${archivedSessionDir}/discussion.thread`)).toBe(thread);
-    expect(gitMocks.addRemoveAndCommit).not.toHaveBeenCalled();
+    expect(files.has(`${sessionDir}/session.meta.yaml`)).toBe(false);
+    expect(files.has(`${sessionDir}/discussion.thread`)).toBe(false);
+    expect(files.get(`${archivedSessionDir}/discussion.thread`)).toBe(
+      completedThread,
+    );
+    const merged = parseQuickSessionMeta(
+      files.get(`${archivedSessionDir}/session.meta.yaml`)!,
+    ) as Record<string, unknown>;
+    expect(merged).toMatchObject({
+      status: "archived",
+      archived_at: "20260711T010303Z",
+      archived_from: "active",
+      last_completed_attempt_id: "qa-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+      last_completed_input_line: 1,
+      last_completed_line: 2,
+    });
+    expect(merged.attempt_id).toBeUndefined();
+    expect(merged.processing_input_line).toBeUndefined();
+    expect(merged.revision).toBeGreaterThan(4);
+    expect(gitMocks.addRemoveAndCommit).toHaveBeenCalled();
+    expect(result.status).toBe("rebased");
+  });
+
+  it("converges a local agent reply with a remote archive", async () => {
+    const activeMeta = quickSessionMeta();
+    const archivedMeta = quickSessionMeta({
+      status: "archived",
+      archived_at: "20260711T010303Z",
+      archived_from: "needs_title",
+      updated_at: "20260711T010303Z",
+      revision: 3,
+    });
+    const completedMeta = quickSessionMeta({
+      title: "Local title",
+      title_source: "api_set",
+      status: "active",
+      updated_at: "20260711T010403Z",
+      last_message_preview: "agent completion",
+      last_completed_attempt_id: "qa-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+      last_completed_input_line: 1,
+      last_completed_line: 2,
+      revision: 4,
+    });
+    const thread =
+      "[L000001][P000000][@lewis][20260711T010203Z] base\n";
+    const completedThread =
+      thread +
+      "[L000002][P000001][@alice][20260711T010403Z] agent completion\n";
+    seedQuickSession(completedMeta, completedThread);
+    gitMocks.resolveHead
+      .mockResolvedValueOnce("local-reply-head")
+      .mockResolvedValueOnce("merged-head");
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockResolvedValueOnce(undefined);
+    gitMocks.diffTrees.mockResolvedValueOnce([
+      sessionMetaPath,
+      sessionThreadPath,
+    ]);
+    gitMocks.readFileAtCommit.mockImplementation(
+      async (...args: [string, string, string]) => {
+        const ref = args[1];
+        const path = args[2];
+        if (path === sessionMetaPath) return ref === "base" ? activeMeta : null;
+        if (path === sessionThreadPath) return ref === "base" ? thread : null;
+        if (path === archivedSessionMetaPath) {
+          return ref === "base" ? null : archivedMeta;
+        }
+        if (path === archivedSessionThreadPath) {
+          return ref === "base" ? null : thread;
+        }
+        return null;
+      },
+    );
+    gitMocks.resetToRemote.mockImplementationOnce(async () => {
+      dirs.add("/repo/archive");
+      dirs.add("/repo/archive/quick-sessions");
+      dirs.add(archivedSessionDir);
+      files.set(`${archivedSessionDir}/session.meta.yaml`, archivedMeta);
+      files.set(`${archivedSessionDir}/discussion.thread`, thread);
+      files.delete(`${sessionDir}/session.meta.yaml`);
+      files.delete(`${sessionDir}/discussion.thread`);
+      dirs.delete(sessionDir);
+    });
+
+    const result = await runSync({ forceNewCycle: true });
+
+    expect(files.has(`${sessionDir}/session.meta.yaml`)).toBe(false);
+    expect(files.has(`${sessionDir}/discussion.thread`)).toBe(false);
+    expect(files.get(`${archivedSessionDir}/discussion.thread`)).toBe(
+      completedThread,
+    );
+    const merged = parseQuickSessionMeta(
+      files.get(`${archivedSessionDir}/session.meta.yaml`)!,
+    ) as Record<string, unknown>;
+    expect(merged).toMatchObject({
+      status: "archived",
+      archived_at: "20260711T010303Z",
+      archived_from: "active",
+      last_completed_attempt_id: "qa-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+      last_completed_input_line: 1,
+      last_completed_line: 2,
+    });
+    expect(merged.attempt_id).toBeUndefined();
+    expect(merged.processing_input_line).toBeUndefined();
+    expect(merged.revision).toBeGreaterThan(4);
+    expect(gitMocks.addAndCommit).toHaveBeenCalled();
+    expect(result.status).toBe("rebased");
   });
 
   it("latches a working-tree epoch redirect before attempting any push", async () => {
