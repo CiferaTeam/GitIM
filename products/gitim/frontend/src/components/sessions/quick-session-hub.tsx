@@ -63,6 +63,8 @@ function QuickSessionHubWorkspace({
   const [copied, setCopied] = useState(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const openSource = useRef<"hover" | "focus" | "click" | null>(null);
+  const closeSource = useRef<"hover" | "dismiss" | "trigger" | null>(null);
+  const ignoreRestoredTriggerFocus = useRef(false);
 
   const agents = useAgentStore((state) => state.agents);
   const fleetAgents = useFleetStore((state) => state.agents);
@@ -118,12 +120,18 @@ function QuickSessionHubWorkspace({
 
   const openFromHover = useCallback(() => {
     clearCloseTimer();
+    closeSource.current = null;
     openSource.current = "hover";
     setOpen(true);
   }, [clearCloseTimer]);
 
   const openFromFocus = useCallback(() => {
     clearCloseTimer();
+    if (ignoreRestoredTriggerFocus.current) {
+      ignoreRestoredTriggerFocus.current = false;
+      return;
+    }
+    closeSource.current = null;
     if (!open) openSource.current = "focus";
     setOpen(true);
   }, [clearCloseTimer, open]);
@@ -132,6 +140,7 @@ function QuickSessionHubWorkspace({
     clearCloseTimer();
     if (pinned) return;
     closeTimer.current = setTimeout(() => {
+      closeSource.current = "hover";
       openSource.current = null;
       setOpen(false);
     }, HOVER_CLOSE_DELAY_MS);
@@ -160,6 +169,10 @@ function QuickSessionHubWorkspace({
     <Popover
       open={open}
       onOpenChange={(next) => {
+        clearCloseTimer();
+        if (!next && closeSource.current === null) {
+          closeSource.current = "dismiss";
+        }
         setOpen(next);
         if (!next) {
           openSource.current = null;
@@ -183,10 +196,12 @@ function QuickSessionHubWorkspace({
               event.preventDefault();
               clearCloseTimer();
               if (pinned) {
+                closeSource.current = "trigger";
                 openSource.current = null;
                 setPinned(false);
                 setOpen(false);
               } else {
+                closeSource.current = null;
                 openSource.current = "click";
                 setPinned(true);
                 setOpen(true);
@@ -208,9 +223,21 @@ function QuickSessionHubWorkspace({
         onOpenAutoFocus={(event) => {
           if (openSource.current === "hover") event.preventDefault();
         }}
+        onCloseAutoFocus={(event) => {
+          if (closeSource.current === "hover") {
+            event.preventDefault();
+          } else {
+            ignoreRestoredTriggerFocus.current = true;
+            queueMicrotask(() => {
+              ignoreRestoredTriggerFocus.current = false;
+            });
+          }
+          closeSource.current = null;
+        }}
         onPointerEnter={clearCloseTimer}
         onPointerLeave={leave}
         onEscapeKeyDown={() => {
+          closeSource.current = "dismiss";
           openSource.current = null;
           setPinned(false);
           setOpen(false);

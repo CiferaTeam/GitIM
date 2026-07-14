@@ -262,6 +262,10 @@ test("creates, references, and archives a Quick Session", async ({ page }) => {
   await quickSessions.hover();
   await expect(page.getByRole("heading", { name: "Quick Sessions" })).toBeVisible();
   await expect(composer).toBeFocused();
+  await composer.hover();
+  await page.waitForTimeout(300);
+  await expect(page.getByRole("heading", { name: "Quick Sessions" })).toBeHidden();
+  await expect(composer).toBeFocused();
   await quickSessions.click();
   await page.getByRole("button", { name: "New Quick Session" }).click();
   await page.getByPlaceholder("What should this session focus on?").fill("Investigate flakes");
@@ -284,11 +288,21 @@ test("creates, references, and archives a Quick Session", async ({ page }) => {
   await expect(page.getByText("Ready to investigate", { exact: true }).last()).toBeVisible();
 
   const row = page.getByRole("listitem").filter({ hasText: "Investigate flakes" });
+  await row.getByRole("button", { name: /Investigate flakes/ }).first().focus();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "Quick Sessions" })).toBeHidden();
+  await expect(quickSessions).toBeFocused();
+  await page.waitForTimeout(100);
+  await expect(page.getByRole("heading", { name: "Quick Sessions" })).toBeHidden();
+  await quickSessions.click();
+  await expect(page.getByRole("heading", { name: "Investigate flakes" })).toBeVisible();
+
   await row.dragTo(composer);
   await expect(composer).toHaveValue(/^session:qs-/);
   expect(runtime.channelSendCount()).toBe(0);
 
   await page.keyboard.press("Escape");
+  await expect(page.getByRole("heading", { name: "Quick Sessions" })).toBeHidden();
   await page.getByRole("button", { name: "Quick Sessions" }).click();
   await row.getByRole("button", { name: /Investigate flakes/ }).first().click();
   await page.getByRole("button", { name: "Archive session" }).click();
