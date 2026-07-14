@@ -62,6 +62,7 @@ function QuickSessionHubWorkspace({
   const [firstMessage, setFirstMessage] = useState("");
   const [copied, setCopied] = useState(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const openSource = useRef<"hover" | "focus" | "click" | null>(null);
 
   const agents = useAgentStore((state) => state.agents);
   const fleetAgents = useFleetStore((state) => state.agents);
@@ -115,15 +116,25 @@ function QuickSessionHubWorkspace({
     closeTimer.current = null;
   }, []);
 
-  const enter = useCallback(() => {
+  const openFromHover = useCallback(() => {
     clearCloseTimer();
+    openSource.current = "hover";
     setOpen(true);
   }, [clearCloseTimer]);
+
+  const openFromFocus = useCallback(() => {
+    clearCloseTimer();
+    if (!open) openSource.current = "focus";
+    setOpen(true);
+  }, [clearCloseTimer, open]);
 
   const leave = useCallback(() => {
     clearCloseTimer();
     if (pinned) return;
-    closeTimer.current = setTimeout(() => setOpen(false), HOVER_CLOSE_DELAY_MS);
+    closeTimer.current = setTimeout(() => {
+      openSource.current = null;
+      setOpen(false);
+    }, HOVER_CLOSE_DELAY_MS);
   }, [clearCloseTimer, pinned]);
 
   useEffect(() => () => clearCloseTimer(), [clearCloseTimer]);
@@ -150,10 +161,13 @@ function QuickSessionHubWorkspace({
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        if (!next) setPinned(false);
+        if (!next) {
+          openSource.current = null;
+          setPinned(false);
+        }
       }}
     >
-      <div onPointerEnter={enter} onPointerLeave={leave} className="hidden md:block">
+      <div onPointerEnter={openFromHover} onPointerLeave={leave} className="hidden md:block">
         <PopoverTrigger asChild>
           <button
             type="button"
@@ -164,14 +178,16 @@ function QuickSessionHubWorkspace({
               "flex h-7 items-center gap-1.5 rounded-md px-2 text-xs text-text-muted transition-colors hover:bg-surface/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50",
               open && "bg-primary/10 text-primary",
             )}
-            onFocus={enter}
+            onFocus={openFromFocus}
             onClick={(event) => {
               event.preventDefault();
               clearCloseTimer();
               if (pinned) {
+                openSource.current = null;
                 setPinned(false);
                 setOpen(false);
               } else {
+                openSource.current = "click";
                 setPinned(true);
                 setOpen(true);
               }
@@ -189,9 +205,13 @@ function QuickSessionHubWorkspace({
         align="center"
         sideOffset={8}
         className="hidden h-[520px] w-[760px] max-w-[calc(100vw-24px)] overflow-hidden p-0 md:flex"
-        onPointerEnter={enter}
+        onOpenAutoFocus={(event) => {
+          if (openSource.current === "hover") event.preventDefault();
+        }}
+        onPointerEnter={clearCloseTimer}
         onPointerLeave={leave}
         onEscapeKeyDown={() => {
+          openSource.current = null;
           setPinned(false);
           setOpen(false);
         }}
@@ -293,18 +313,22 @@ function QuickSessionHubWorkspace({
           }
           onArchive={async () => {
             if (!selectedId) return false;
+            const sessionId = selectedId;
             const ok = await useQuickSessionStore
               .getState()
-              .archive(activeSlug, selectedId);
-            if (ok) useQuickSessionStore.getState().select(null);
+              .archive(activeSlug, sessionId);
+            const store = useQuickSessionStore.getState();
+            if (ok && store.selectedId === sessionId) store.select(null);
             return ok;
           }}
           onUnarchive={async () => {
             if (!selectedId) return false;
+            const sessionId = selectedId;
             const ok = await useQuickSessionStore
               .getState()
-              .unarchive(activeSlug, selectedId);
-            if (ok) useQuickSessionStore.getState().select(null);
+              .unarchive(activeSlug, sessionId);
+            const store = useQuickSessionStore.getState();
+            if (ok && store.selectedId === sessionId) store.select(null);
             return ok;
           }}
           onCopy={(ref) => void copyRef(ref)}

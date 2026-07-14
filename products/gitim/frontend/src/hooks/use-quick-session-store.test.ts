@@ -140,6 +140,11 @@ describe("useQuickSessionStore", () => {
     expect(useQuickSessionStore.getState().items).toEqual([listItem(initial)]);
 
     await useQuickSessionStore.getState().open("alpha", SESSION_ID);
+    expect(api.readQuickSession).toHaveBeenLastCalledWith(
+      "alpha",
+      SESSION_ID,
+      { limit: 50 },
+    );
     expect(useQuickSessionStore.getState().selectedId).toBe(SESSION_ID);
     expect(useQuickSessionStore.getState().detailById[SESSION_ID]).toEqual(initial);
 
@@ -284,6 +289,99 @@ describe("useQuickSessionStore", () => {
     emitWorkspaceSwitch();
     expect(useQuickSessionStore.getState().pendingCreate).toBeNull();
     expect(useQuickSessionStore.getState().pendingSend).toBeNull();
+  });
+
+  it("refreshes a late send without restoring its previous selection", async () => {
+    const pending = deferred<ApiResponse>();
+    const sentDetail = detail({
+      id: SESSION_ID,
+      status: "active",
+      attempt_id: undefined,
+      revision: 4,
+    });
+    const otherDetail = detail({
+      id: OTHER_SESSION_ID,
+      status: "active",
+      attempt_id: undefined,
+      revision: 2,
+    });
+    api.sendQuickSessionMessage.mockReturnValue(pending.promise);
+    api.readQuickSession.mockImplementation(
+      async (_slug: string, id: string) =>
+        ok({ session: id === SESSION_ID ? sentDetail : otherDetail }),
+    );
+    useQuickSessionStore.getState().applyDetail(detail({ status: "active" }));
+    useQuickSessionStore.getState().select(SESSION_ID);
+
+    const sending = useQuickSessionStore
+      .getState()
+      .send("alpha", SESSION_ID, "continue");
+    await useQuickSessionStore.getState().open("alpha", OTHER_SESSION_ID);
+    expect(useQuickSessionStore.getState().selectedId).toBe(OTHER_SESSION_ID);
+
+    pending.resolve(
+      ok({
+        session_id: SESSION_ID,
+        line_number: 2,
+        status: "active",
+        revision: 4,
+        ref: `session:${SESSION_ID}:L000002`,
+      }),
+    );
+    await expect(sending).resolves.toBe(true);
+
+    expect(useQuickSessionStore.getState().selectedId).toBe(OTHER_SESSION_ID);
+    expect(
+      useQuickSessionStore.getState().detailById[SESSION_ID]?.meta.revision,
+    ).toBe(4);
+    expect(api.readQuickSession).toHaveBeenLastCalledWith(
+      "alpha",
+      SESSION_ID,
+      { limit: 50 },
+    );
+  });
+
+  it("discards a send follow-up read after the workspace changes", async () => {
+    const pendingRead = deferred<
+      ApiResponse<{ session: QuickSessionDetail }>
+    >();
+    api.sendQuickSessionMessage.mockResolvedValue(
+      ok({
+        session_id: SESSION_ID,
+        line_number: 2,
+        status: "active",
+        revision: 4,
+        ref: `session:${SESSION_ID}:L000002`,
+      }),
+    );
+    api.readQuickSession.mockReturnValue(pendingRead.promise);
+    useQuickSessionStore.getState().applyDetail(detail({ status: "active" }));
+    useQuickSessionStore.getState().select(SESSION_ID);
+
+    const sending = useQuickSessionStore
+      .getState()
+      .send("alpha", SESSION_ID, "continue");
+    await vi.waitFor(() => {
+      expect(api.readQuickSession).toHaveBeenCalledWith(
+        "alpha",
+        SESSION_ID,
+        { limit: 50 },
+      );
+    });
+    emitWorkspaceSwitch();
+    pendingRead.resolve(
+      ok({
+        session: detail({
+          status: "active",
+          attempt_id: undefined,
+          revision: 4,
+        }),
+      }),
+    );
+
+    await expect(sending).resolves.toBe(false);
+    expect(useQuickSessionStore.getState().activeSlug).toBeNull();
+    expect(useQuickSessionStore.getState().detailById).toEqual({});
   });
 
   it("turns transport rejections into per-operation errors", async () => {
@@ -567,6 +665,8 @@ describe("useQuickSessionStore", () => {
     ]);
     expect(api.listQuickSessions).toHaveBeenCalledTimes(1);
     expect(api.readQuickSession).toHaveBeenCalledTimes(1);
-    expect(api.readQuickSession).toHaveBeenCalledWith("alpha", SESSION_ID);
+    expect(api.readQuickSession).toHaveBeenCalledWith("alpha", SESSION_ID, {
+      limit: 50,
+    });
   });
 });

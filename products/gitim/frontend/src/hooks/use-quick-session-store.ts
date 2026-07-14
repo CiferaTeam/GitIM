@@ -91,6 +91,8 @@ const EMPTY_ERRORS: OperationErrors = {
   archive: null,
 };
 
+const QUICK_SESSION_HUB_TRANSCRIPT_LIMIT = 50;
+
 let workspaceGeneration = 0;
 const operationSequence: Record<QuickSessionOperation, number> = {
   list: 0,
@@ -286,7 +288,9 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
       errors: { ...state.errors, detail: null },
     }));
     try {
-      const response = await client.readQuickSession(slug, id);
+      const response = await client.readQuickSession(slug, id, {
+        limit: QUICK_SESSION_HUB_TRANSCRIPT_LIMIT,
+      });
       if (!operationIsCurrent(slug, "detail", request)) return;
       if (!response.ok || !response.data) {
         setOperation(
@@ -410,8 +414,30 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
             ? null
             : state.pendingSend,
       }));
-      await get().open(slug, id);
-      if (!operationIsCurrent(slug, "send", request)) return false;
+      let detailError: string | null = null;
+      try {
+        const detailResponse = await client.readQuickSession(slug, id, {
+          limit: QUICK_SESSION_HUB_TRANSCRIPT_LIMIT,
+        });
+        if (!operationIsCurrent(slug, "send", request)) return false;
+        if (detailResponse.ok && detailResponse.data) {
+          get().applyDetail(detailResponse.data.session);
+        } else {
+          detailError =
+            detailResponse.error ?? "Failed to read Quick Session";
+        }
+      } catch (error) {
+        if (!operationIsCurrent(slug, "send", request)) return false;
+        detailError = rejectedOperationMessage(
+          error,
+          "Failed to read Quick Session",
+        );
+      }
+      if (get().selectedId === id) {
+        set((state) => ({
+          errors: { ...state.errors, detail: detailError },
+        }));
+      }
       setOperation(set, "send", false, null);
       return true;
     } catch (error) {

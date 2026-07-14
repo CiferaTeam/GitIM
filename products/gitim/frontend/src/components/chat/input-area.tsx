@@ -632,12 +632,20 @@ export function InputArea({
     if (!ta) return;
     const start = ta.selectionStart ?? text.length;
     const end = ta.selectionEnd ?? start;
-    const next = text.slice(0, start) + payload.ref + text.slice(end);
+    const before = text.slice(0, start);
+    const after = text.slice(end);
+    const needsBoundarySpace = (value: string | undefined) =>
+      value !== undefined && /[\p{L}\p{N}_/\\-]/u.test(value);
+    const prefix = needsBoundarySpace(before.at(-1)) ? " " : "";
+    const suffix =
+      needsBoundarySpace(after[0]) || after.startsWith(":L") ? " " : "";
+    const inserted = `${prefix}${payload.ref}${suffix}`;
+    const next = before + inserted + after;
     setText(next);
     clearSendError(activeAttachmentKey);
     localStorage.setItem(draftKey(activeWorkspaceKey, activeScopeKey), next);
     requestAnimationFrame(() => {
-      const cursor = start + payload.ref!.toString().length;
+      const cursor = start + inserted.length;
       ta.focus();
       ta.setSelectionRange(cursor, cursor);
     });

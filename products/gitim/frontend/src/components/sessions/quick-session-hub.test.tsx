@@ -499,6 +499,65 @@ describe("QuickSessionHub", () => {
     expect(composer.value).toBe("");
   });
 
+  it("keeps a newer selection and its draft when an older archive finishes", async () => {
+    const otherSession = {
+      ...session,
+      meta: {
+        ...session.meta,
+        id: "qs-01JYYYYYYYYYYYYYYYYYYYYYYY",
+        title: "Other session",
+      },
+    };
+    let resolveArchive!: (value: {
+      ok: boolean;
+      data: {
+        session_id: string;
+        status: string;
+        revision: number;
+        archived_at: string;
+      };
+    }) => void;
+    api.archiveQuickSession.mockReturnValue(
+      new Promise((resolve) => {
+        resolveArchive = resolve;
+      }),
+    );
+    useQuickSessionStore.setState({
+      selectedId: SESSION_ID,
+      detailById: {
+        [SESSION_ID]: session,
+        [otherSession.meta.id]: otherSession,
+      },
+    });
+    await act(async () => root.render(<QuickSessionHub />));
+    await act(async () => {
+      (container.querySelector(
+        "button[aria-label='Archive session']",
+      ) as HTMLButtonElement).click();
+    });
+
+    await act(async () => useQuickSessionStore.getState().select(otherSession.meta.id));
+    const composer = Array.from(container.querySelectorAll("textarea")).find(
+      (element) => element.placeholder.includes("Continue"),
+    )!;
+    await act(async () => setValue(composer, "keep this newer draft"));
+    await act(async () => {
+      resolveArchive({
+        ok: true,
+        data: {
+          session_id: SESSION_ID,
+          status: "archived",
+          revision: 5,
+          archived_at: "2026-07-11T00:03:00Z",
+        },
+      });
+      await vi.waitFor(() => expect(api.listQuickSessions).toHaveBeenCalled());
+    });
+
+    expect(useQuickSessionStore.getState().selectedId).toBe(otherSession.meta.id);
+    expect(composer.value).toBe("keep this newer draft");
+  });
+
   it("renders list loading, error, empty, and complete row metadata states", async () => {
     const props = {
       selectedId: null,

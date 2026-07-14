@@ -255,7 +255,14 @@ test("creates, references, and archives a Quick Session", async ({ page }) => {
   await page.goto("/chat");
   await page.getByRole("button", { name: "general", exact: true }).click();
 
-  await page.getByRole("button", { name: "Quick Sessions" }).click();
+  const composer = page.getByPlaceholder(/Type a message/);
+  const quickSessions = page.getByRole("button", { name: "Quick Sessions" });
+  await composer.focus();
+  await expect(composer).toBeFocused();
+  await quickSessions.hover();
+  await expect(page.getByRole("heading", { name: "Quick Sessions" })).toBeVisible();
+  await expect(composer).toBeFocused();
+  await quickSessions.click();
   await page.getByRole("button", { name: "New Quick Session" }).click();
   await page.getByPlaceholder("What should this session focus on?").fill("Investigate flakes");
   await page.getByRole("button", { name: "Start session" }).click();
@@ -277,7 +284,6 @@ test("creates, references, and archives a Quick Session", async ({ page }) => {
   await expect(page.getByText("Ready to investigate", { exact: true }).last()).toBeVisible();
 
   const row = page.getByRole("listitem").filter({ hasText: "Investigate flakes" });
-  const composer = page.getByPlaceholder(/Type a message/);
   await row.dragTo(composer);
   await expect(composer).toHaveValue(/^session:qs-/);
   expect(runtime.channelSendCount()).toBe(0);

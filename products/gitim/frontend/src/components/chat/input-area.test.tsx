@@ -11,6 +11,7 @@ import {
 } from "../../hooks/use-attachment-draft-store";
 import { InputArea } from "./input-area";
 import { QUICK_SESSION_DRAG_MIME } from "../../lib/quick-session-ref";
+import { parseMessageBody } from "../../lib/message-parser";
 
 const { uploadAssetsMock, mediaState, connectionState } = vi.hoisted(() => ({
   uploadAssetsMock: vi.fn(),
@@ -253,8 +254,12 @@ describe("InputArea card recipient preview", () => {
       await Promise.resolve();
     });
     expect(textarea.value).toBe(
-      "before session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZafter",
+      "before session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ after",
     );
+    expect(parseMessageBody(textarea.value)).toContainEqual({
+      type: "session-link",
+      sessionId: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+    });
     expect(noopSend).not.toHaveBeenCalled();
     expect(localStorage.getItem("gitim:draft:runtime:room:general")).toBe(
       textarea.value,
