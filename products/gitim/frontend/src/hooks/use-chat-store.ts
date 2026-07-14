@@ -8,8 +8,6 @@ import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 const CARD_CHANGE_EVENT_TTL_MS = 24 * 60 * 60 * 1000;
 /** Max reminders retained per channel to keep the merge cheap. */
 const CARD_CHANGE_EVENT_MAX_COUNT = 50;
-/** Merge successive updates to the same card at the same anchor within this window. */
-const CARD_CHANGE_EVENT_DEDUP_MS = 5 * 1000;
 const CARD_CHANGE_EVENTS_STORAGE_PREFIX = "gitim:card-change-events:v1:";
 
 export interface CardChangeEvent {
@@ -111,11 +109,10 @@ function mergeCardChangeEventMap(
   const list = (current[event.cardChannel] ?? []).filter(
     (e) => e.receivedAt >= ttlCutoff,
   );
+  // Same card + same anchor ⇒ no channel message landed between the two
+  // reminders (anchor is max channel line when viewing that channel, else 0).
   const existingIndex = list.findIndex(
-    (e) =>
-      e.cardId === event.cardId &&
-      e.anchorLine === event.anchorLine &&
-      now - e.receivedAt <= CARD_CHANGE_EVENT_DEDUP_MS,
+    (e) => e.cardId === event.cardId && e.anchorLine === event.anchorLine,
   );
 
   let next: CardChangeEvent[];

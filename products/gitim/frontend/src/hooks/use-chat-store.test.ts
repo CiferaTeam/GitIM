@@ -671,7 +671,7 @@ describe("useChatStore card change events", () => {
     expect(useChatStore.getState().cardChangeEvents.dev).toHaveLength(1);
   });
 
-  it("merges events for the same card at the same anchor within the dedup window", () => {
+  it("merges events for the same card at the same anchor regardless of time gap", () => {
     const now = Date.now();
     useChatStore
       .getState()
@@ -680,7 +680,7 @@ describe("useChatStore card change events", () => {
       .getState()
       .addCardChangeEvent(
         makeEvent("c1", "general", 10, {
-          receivedAt: now + 1000,
+          receivedAt: now + 60_000,
           authors: ["bob"],
           count: 2,
         }),
@@ -689,6 +689,25 @@ describe("useChatStore card change events", () => {
     expect(events).toHaveLength(1);
     expect(events[0].count).toBe(3);
     expect(events[0].authors).toEqual(["alice", "bob"]);
+  });
+
+  it("keeps separate events when the same card lands at different anchors", () => {
+    const now = Date.now();
+    useChatStore
+      .getState()
+      .addCardChangeEvent(makeEvent("c1", "general", 10, { receivedAt: now }));
+    useChatStore
+      .getState()
+      .addCardChangeEvent(
+        makeEvent("c1", "general", 20, {
+          receivedAt: now + 1000,
+          authors: ["bob"],
+          count: 1,
+        }),
+      );
+    const events = useChatStore.getState().cardChangeEvents.general;
+    expect(events).toHaveLength(2);
+    expect(events.map((e) => e.anchorLine)).toEqual([10, 20]);
   });
 
   it("drops events older than the TTL", () => {
