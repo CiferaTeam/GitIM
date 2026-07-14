@@ -1099,7 +1099,30 @@ async fn startup_scan_finds_pre_cursor_actionable_session() {
 }
 
 #[tokio::test]
-async fn stale_running_claim_becomes_error_without_execution() {
+async fn restart_without_local_state_recovers_stale_compact_claim_without_execution() {
+    let (temp, backend, factory, executor, _rx) = harness(ProviderAction::Complete, false);
+    backend.transition(QuickSessionTransition::Claim {
+        actor: "bob".to_string(),
+        input_line: 1,
+        attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY".to_string(),
+        now: "20260711T000002Z".to_string(),
+    });
+    assert!(
+        !QuickSessionRuntimeState::state_path(temp.path(), SESSION_ID)
+            .unwrap()
+            .exists()
+    );
+    let executor = executor.with_stale_claim_after(std::time::Duration::ZERO);
+    assert!(executor.recover_actionable().await.unwrap().is_empty());
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Error);
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 1);
+    assert!(executor.recover_actionable().await.unwrap().is_empty());
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 1);
+    assert!(factory.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn stale_rfc3339_claim_remains_recoverable() {
     let (_temp, backend, factory, executor, _rx) = harness(ProviderAction::Complete, false);
     backend.transition(QuickSessionTransition::Claim {
         actor: "bob".to_string(),
@@ -1107,12 +1130,28 @@ async fn stale_running_claim_becomes_error_without_execution() {
         attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY".to_string(),
         now: "2026-07-11T00:00:02Z".to_string(),
     });
+
     let executor = executor.with_stale_claim_after(std::time::Duration::ZERO);
     assert!(executor.recover_actionable().await.unwrap().is_empty());
     assert_eq!(backend.detail().meta.status, QuickSessionStatus::Error);
     assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 1);
+    assert!(factory.calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn malformed_compact_claim_timestamp_is_not_treated_as_stale() {
+    let (_temp, backend, factory, executor, _rx) = harness(ProviderAction::Complete, false);
+    backend.transition(QuickSessionTransition::Claim {
+        actor: "bob".to_string(),
+        input_line: 1,
+        attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY".to_string(),
+        now: "20260711 000002Z".to_string(),
+    });
+
+    let executor = executor.with_stale_claim_after(std::time::Duration::ZERO);
     assert!(executor.recover_actionable().await.unwrap().is_empty());
-    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 1);
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Running);
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 0);
     assert!(factory.calls.lock().unwrap().is_empty());
 }
 

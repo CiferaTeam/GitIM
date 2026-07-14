@@ -30,6 +30,8 @@ const PROMPT_CHAR_LIMIT: usize = 12_000;
 const CLAIMED_ENTRY_RESERVE: usize = 2_048;
 const QUICK_SESSION_SCAN_ERROR: &str = "interrupted quick session turn discovered during recovery";
 const DEFAULT_STALE_CLAIM_AFTER: Duration = Duration::from_secs(5 * 60);
+const QUICK_SESSION_COMPACT_TIMESTAMP_FORMAT: &str = "%Y%m%dT%H%M%SZ";
+const QUICK_SESSION_COMPACT_TIMESTAMP_LEN: usize = 16;
 
 type LiveAttempts = Arc<Mutex<HashSet<(String, String)>>>;
 
@@ -881,13 +883,34 @@ fn claim_is_stale(
     let Some(started_at) = detail.meta.processing_started_at.as_deref() else {
         return false;
     };
-    let Ok(started_at) = chrono::DateTime::parse_from_rfc3339(started_at) else {
+    let Some(started_at) = parse_quick_session_claim_timestamp(started_at) else {
         return false;
     };
     let Ok(stale_after) = chrono::Duration::from_std(stale_after) else {
         return false;
     };
-    now.signed_duration_since(started_at.with_timezone(&chrono::Utc)) >= stale_after
+    now.signed_duration_since(started_at) >= stale_after
+}
+
+fn parse_quick_session_claim_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let bytes = value.as_bytes();
+    let is_compact = bytes.len() == QUICK_SESSION_COMPACT_TIMESTAMP_LEN
+        && bytes[8] == b'T'
+        && bytes[15] == b'Z'
+        && bytes[..8].iter().all(u8::is_ascii_digit)
+        && bytes[9..15].iter().all(u8::is_ascii_digit);
+    if is_compact {
+        return chrono::NaiveDateTime::parse_from_str(
+            value,
+            QUICK_SESSION_COMPACT_TIMESTAMP_FORMAT,
+        )
+        .ok()
+        .map(|timestamp| timestamp.and_utc());
+    }
+
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
 }
 
 fn provider_error(error: String) -> RuntimeError {
