@@ -1,8 +1,10 @@
 import { Archive, Copy, GripVertical, Loader2 } from "lucide-react";
 
 import type { QuickSessionListItem } from "@/lib/types";
+import { formatTimestamp } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { QUICK_SESSION_DRAG_MIME } from "@/lib/quick-session-ref";
+import { useTimezoneStore } from "@/hooks/use-timezone";
 
 interface QuickSessionListProps {
   items: QuickSessionListItem[];
@@ -23,6 +25,7 @@ export function QuickSessionList({
   onSelect,
   onCopy,
 }: QuickSessionListProps) {
+  const timezone = useTimezoneStore((state) => state.timezone);
   if (loading && items.length === 0) {
     return (
       <div className="flex items-center gap-2 px-3 py-6 text-xs text-text-muted">
@@ -79,8 +82,18 @@ export function QuickSessionList({
                 <Archive className="size-3 shrink-0 text-text-muted" />
               ) : null}
             </span>
-            <span className="mt-0.5 block truncate text-[11px] text-text-muted">
-              @{item.agent_id} · {item.last_message_preview || item.status}
+            <span className="mt-0.5 flex items-center gap-1.5 text-[11px] text-text-muted">
+              <span>@{item.agent_id}</span>
+              <span>·</span>
+              <span>{item.status}</span>
+              <span>·</span>
+              <span>{formatTimestamp(item.updated_at, timezone)}</span>
+            </span>
+            <span className="mt-0.5 block truncate text-[11px] text-text-secondary">
+              {item.last_message_preview || "No preview yet"}
+            </span>
+            <span className="mt-0.5 block truncate font-mono text-[10px] text-text-faint" title={item.ref}>
+              {item.ref}
             </span>
           </button>
           <button
