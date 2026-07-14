@@ -835,12 +835,13 @@ Expected: named feature branch, clean worktree, and all implementation commits a
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
 | CEO Review | `/plan-ceo-review` | Scope and strategy | 0 | Not run | PR #47 product semantics were supplied by the user and independently specified |
-| Codex Review | `/codex review` | Independent second opinion | 3 | Pass | 3 P1 and 1 P2 findings fixed; final rerun approved |
+| Codex Review | `/codex review` | Independent second opinion | 5 | Pass | 4 P1 and 1 P2 findings fixed; final rerun approved |
 | Eng Review | `/plan-eng-review` | Architecture and tests | 1 | Clear | 8 findings resolved before implementation |
 | Design Review | Task 8 spec and quality reviews | UI and UX correctness | 2 | Approved | Radix focus, workspace scope, bounded reads, stale async state, and reference DnD verified |
+| Full Diff Review | Independent subagent review | Post-rebase merge readiness | 2 | Approved | 7 Important findings fixed across the pre-rebase and final review tracks; final rerun approved |
 | DX Review | `/plan-devex-review` | Developer experience gaps | 0 | Not required | Existing CLI, HTTP, Git, and browser conventions reused |
 
-**CROSS-MODEL:** Independent reviews converged on durable identity, crash-safe turn claims, archive-wins convergence, transactional conflict replay, provider cancellation, shared protocol rules, and stale-event fencing.
+**CROSS-MODEL:** Independent reviews converged on durable identity, crash-safe turn claims, archive-wins convergence, transactional conflict replay, durable browser merge bases, truthful publication status, provider cancellation, shared protocol rules, and stale-event fencing.
 
 **UNRESOLVED:** 0
 
