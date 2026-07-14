@@ -30,6 +30,7 @@ const PROMPT_CHAR_LIMIT: usize = 12_000;
 const CLAIMED_ENTRY_RESERVE: usize = 2_048;
 const QUICK_SESSION_SCAN_ERROR: &str = "interrupted quick session turn discovered during recovery";
 const DEFAULT_STALE_CLAIM_AFTER: Duration = Duration::from_secs(5 * 60);
+const DEFAULT_ATTEMPT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const QUICK_SESSION_COMPACT_TIMESTAMP_FORMAT: &str = "%Y%m%dT%H%M%SZ";
 const QUICK_SESSION_COMPACT_TIMESTAMP_LEN: usize = 16;
 
@@ -167,6 +168,7 @@ pub struct QuickSessionExecutor {
     provider_factory: Arc<dyn QuickSessionProviderFactory>,
     live_attempts: LiveAttempts,
     stale_claim_after: Duration,
+    attempt_poll_interval: Duration,
 }
 
 impl QuickSessionExecutor {
@@ -194,6 +196,7 @@ impl QuickSessionExecutor {
             provider_factory,
             live_attempts: Arc::new(Mutex::new(HashSet::new())),
             stale_claim_after: DEFAULT_STALE_CLAIM_AFTER,
+            attempt_poll_interval: DEFAULT_ATTEMPT_POLL_INTERVAL,
         }
     }
 
@@ -205,6 +208,12 @@ impl QuickSessionExecutor {
     #[doc(hidden)]
     pub fn with_stale_claim_after(mut self, stale_claim_after: Duration) -> Self {
         self.stale_claim_after = stale_claim_after;
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_attempt_poll_interval(mut self, attempt_poll_interval: Duration) -> Self {
+        self.attempt_poll_interval = attempt_poll_interval;
         self
     }
 
@@ -411,23 +420,47 @@ impl QuickSessionExecutor {
             claim.revision,
             captured_generation,
         );
-        let mut session = match provider.execute(&prompt, opts).await {
-            Ok(session) => session,
-            Err(error) => {
-                let marked = self
-                    .mark_claim_error(session_id, &attempt_id, &error.to_string())
-                    .await?;
+        let provider_execution = provider.execute(&prompt, opts);
+        tokio::pin!(provider_execution);
+        let ownership_monitor = self.wait_for_attempt_loss(session_id, &attempt_id);
+        tokio::pin!(ownership_monitor);
+        let mut session = match tokio::select! {
+            result = &mut provider_execution => Some(result),
+            () = &mut ownership_monitor => None,
+        } {
+            None => {
                 self.clear_active_attempt(session_id, &attempt_id)?;
-                if !marked {
-                    return Ok(QuickSessionRunOutcome::Discarded);
-                }
-                return self.failed_outcome(session_id).await;
+                return Ok(QuickSessionRunOutcome::Discarded);
             }
+            Some(result) => match result {
+                Ok(session) => session,
+                Err(error) => {
+                    let marked = self
+                        .mark_claim_error(session_id, &attempt_id, &error.to_string())
+                        .await?;
+                    self.clear_active_attempt(session_id, &attempt_id)?;
+                    if !marked {
+                        return Ok(QuickSessionRunOutcome::Discarded);
+                    }
+                    return self.failed_outcome(session_id).await;
+                }
+            },
         };
         let session_abort_guard = session.abort_on_drop();
         let mut reset_requested = false;
         let mut turn_text = String::new();
-        while let Some(event) = session.events.recv().await {
+        loop {
+            let event = tokio::select! {
+                event = session.events.recv() => event,
+                () = &mut ownership_monitor => {
+                    session.abort();
+                    self.clear_active_attempt(session_id, &attempt_id)?;
+                    return Ok(QuickSessionRunOutcome::Discarded);
+                }
+            };
+            let Some(event) = event else {
+                break;
+            };
             match event {
                 Event::Text { content } => {
                     turn_text.push_str(&content);
@@ -510,21 +543,31 @@ impl QuickSessionExecutor {
                 Event::Log { .. } => {}
             }
         }
-        let result = match session.result.await {
-            Ok(result) => {
-                session_abort_guard.disarm();
-                result
-            }
-            Err(_) => {
-                let marked = self
-                    .mark_claim_error(session_id, &attempt_id, "provider result channel closed")
-                    .await?;
+        let result = match tokio::select! {
+            result = &mut session.result => Some(result),
+            () = &mut ownership_monitor => None,
+        } {
+            None => {
+                session.abort();
                 self.clear_active_attempt(session_id, &attempt_id)?;
-                if !marked {
-                    return Ok(QuickSessionRunOutcome::Discarded);
-                }
-                return self.failed_outcome(session_id).await;
+                return Ok(QuickSessionRunOutcome::Discarded);
             }
+            Some(result) => match result {
+                Ok(result) => {
+                    session_abort_guard.disarm();
+                    result
+                }
+                Err(_) => {
+                    let marked = self
+                        .mark_claim_error(session_id, &attempt_id, "provider result channel closed")
+                        .await?;
+                    self.clear_active_attempt(session_id, &attempt_id)?;
+                    if !marked {
+                        return Ok(QuickSessionRunOutcome::Discarded);
+                    }
+                    return self.failed_outcome(session_id).await;
+                }
+            },
         };
 
         let current_local =
@@ -769,6 +812,27 @@ impl QuickSessionExecutor {
         })
     }
 
+    async fn wait_for_attempt_loss(&self, session_id: &str, attempt_id: &str) {
+        let mut ticker = tokio::time::interval(self.attempt_poll_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match self.backend.read(session_id).await {
+                Ok(response) if !attempt_accepts_result(&response.session, attempt_id) => return,
+                Ok(_) => {}
+                Err(error) => {
+                    tracing::debug!(
+                        session_id,
+                        attempt_id,
+                        error,
+                        "quick session ownership check failed"
+                    );
+                }
+            }
+        }
+    }
+
     fn clear_active_attempt(&self, session_id: &str, attempt_id: &str) -> Result<(), RuntimeError> {
         let mut state = QuickSessionRuntimeState::load(&self.config.workspace_root, session_id)?;
         if state.active_attempt_id.as_deref() == Some(attempt_id) {
@@ -823,6 +887,17 @@ impl QuickSessionExecutor {
             });
         }
     }
+}
+
+fn attempt_accepts_result(detail: &QuickSessionDetail, attempt_id: &str) -> bool {
+    if detail.archived || detail.meta.status == QuickSessionStatus::Archived {
+        return false;
+    }
+    let owns_active_attempt = detail.meta.status == QuickSessionStatus::Running
+        && detail.meta.attempt_id.as_deref() == Some(attempt_id);
+    let owns_completed_attempt =
+        detail.meta.last_completed_attempt_id.as_deref() == Some(attempt_id);
+    owns_active_attempt || owns_completed_attempt
 }
 
 struct ActiveAttemptGuard {

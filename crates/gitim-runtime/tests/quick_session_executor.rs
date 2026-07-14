@@ -1267,6 +1267,104 @@ async fn cancellation_after_session_return_aborts_provider_before_late_write() {
 }
 
 #[tokio::test]
+async fn archiving_a_running_session_aborts_provider_before_late_write() {
+    let release = Arc::new(Notify::new());
+    let exited = Arc::new(Notify::new());
+    let writes = Arc::new(AtomicUsize::new(0));
+    let (temp, backend, _factory, executor, mut rx) = harness(
+        ProviderAction::DetachedSession {
+            release: release.clone(),
+            exited: exited.clone(),
+            writes: writes.clone(),
+        },
+        false,
+    );
+    let executor = executor.with_attempt_poll_interval(std::time::Duration::from_millis(10));
+    let task = tokio::spawn(async move { executor.execute(SESSION_ID).await });
+    loop {
+        let event = rx.recv().await.unwrap();
+        if event.event_type == "status" && event.detail == "provider-session-ready" {
+            break;
+        }
+    }
+
+    backend.transition(QuickSessionTransition::Archive {
+        actor: "alice".to_string(),
+        now: "2026-07-11T00:00:11Z".to_string(),
+    });
+    let outcome = tokio::time::timeout(std::time::Duration::from_millis(250), task)
+        .await
+        .expect("archive cancellation should be bounded")
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome, QuickSessionRunOutcome::Discarded);
+
+    release.notify_waiters();
+    tokio::time::timeout(std::time::Duration::from_millis(250), exited.notified())
+        .await
+        .expect("provider task should be hard-aborted");
+    assert_eq!(writes.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Archived);
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 0);
+    let local = QuickSessionRuntimeState::load(temp.path(), SESSION_ID).unwrap();
+    assert_eq!(local.active_attempt_id, None);
+    assert_eq!(local.session_token, None);
+    assert_eq!(local.session_usage, None);
+}
+
+#[tokio::test]
+async fn archive_then_unarchive_cannot_revive_a_running_provider_attempt() {
+    let release = Arc::new(Notify::new());
+    let exited = Arc::new(Notify::new());
+    let writes = Arc::new(AtomicUsize::new(0));
+    let (temp, backend, _factory, executor, mut rx) = harness(
+        ProviderAction::DetachedSession {
+            release: release.clone(),
+            exited: exited.clone(),
+            writes: writes.clone(),
+        },
+        false,
+    );
+    let executor = executor.with_attempt_poll_interval(std::time::Duration::from_millis(10));
+    let task = tokio::spawn(async move { executor.execute(SESSION_ID).await });
+    loop {
+        let event = rx.recv().await.unwrap();
+        if event.event_type == "status" && event.detail == "provider-session-ready" {
+            break;
+        }
+    }
+
+    backend.transition(QuickSessionTransition::Archive {
+        actor: "alice".to_string(),
+        now: "2026-07-11T00:00:11Z".to_string(),
+    });
+    backend.transition(QuickSessionTransition::Unarchive {
+        actor: "alice".to_string(),
+        now: "2026-07-11T00:00:12Z".to_string(),
+    });
+    let outcome = tokio::time::timeout(std::time::Duration::from_millis(250), task)
+        .await
+        .expect("stale attempt cancellation should be bounded")
+        .unwrap()
+        .unwrap();
+    assert_eq!(outcome, QuickSessionRunOutcome::Discarded);
+
+    release.notify_waiters();
+    tokio::time::timeout(std::time::Duration::from_millis(250), exited.notified())
+        .await
+        .expect("provider task should be hard-aborted");
+    assert_eq!(writes.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::NeedsTitle);
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 0);
+    assert_eq!(
+        QuickSessionRuntimeState::load(temp.path(), SESSION_ID)
+            .unwrap()
+            .active_attempt_id,
+        None
+    );
+}
+
+#[tokio::test]
 async fn matching_crash_marker_recovers_immediately_and_clears_ownership() {
     let (temp, backend, _factory, executor, _rx) = harness(ProviderAction::Complete, false);
     let attempt_id = "qa-01JYYYYYYYYYYYYYYYYYYYYYYY";

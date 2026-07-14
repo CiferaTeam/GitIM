@@ -13,8 +13,21 @@ const gitMocks = vi.hoisted(() => ({
     return null as string | null;
   }),
   resetToRemote: vi.fn(async () => undefined),
+  resetToCommit: vi.fn(async () => undefined),
   resolveHead: vi.fn(async () => "local-head"),
   resolveRemoteHead: vi.fn(async () => "remote-head"),
+}));
+const storageMocks = vi.hoisted(() => ({
+  removeFile: vi.fn(async (path: string) => {
+    files.delete(path);
+  }),
+  writeFile: vi.fn(async (path: string, content: string) => {
+    const parent = path.slice(0, path.lastIndexOf("/")) || "/";
+    if (!dirs.has(parent)) {
+      throw new Error(`missing parent dir: ${parent}`);
+    }
+    files.set(path, content);
+  }),
 }));
 const postMessageMock = vi.hoisted(() => vi.fn());
 
@@ -28,21 +41,13 @@ vi.mock("./storage", () => ({
   removeDir: vi.fn(async (path: string) => {
     dirs.delete(path);
   }),
-  removeFile: vi.fn(async (path: string) => {
-    files.delete(path);
-  }),
+  removeFile: storageMocks.removeFile,
   readFile: vi.fn(async (path: string) => {
     const value = files.get(path);
     if (value === undefined) throw new Error(`missing file: ${path}`);
     return value;
   }),
-  writeFile: vi.fn(async (path: string, content: string) => {
-    const parent = path.slice(0, path.lastIndexOf("/")) || "/";
-    if (!dirs.has(parent)) {
-      throw new Error(`missing parent dir: ${parent}`);
-    }
-    files.set(path, content);
-  }),
+  writeFile: storageMocks.writeFile,
 }));
 
 vi.mock("./auth", () => ({
@@ -118,6 +123,48 @@ function seedQuickSession(meta: string, thread: string): void {
   files.set(`${sessionDir}/discussion.thread`, thread);
 }
 
+function configureQuickSessionSendReplay() {
+  const baseSessionThread =
+    "[L000001][P000000][@lewis][20260711T010203Z] base\n";
+  const localSessionThread =
+    baseSessionThread +
+    "[L000002][P000001][@lewis][20260711T010303Z] local follow-up\n";
+  const baseMeta = quickSessionMeta();
+  const localMeta = quickSessionMeta({
+    updated_at: "20260711T010303Z",
+    last_message_preview: "local follow-up",
+    last_human_line: 2,
+    last_human_request_id: "request-local",
+    revision: 3,
+  });
+  seedQuickSession(localMeta, localSessionThread);
+  gitMocks.resolveHead.mockResolvedValue("local-head");
+  gitMocks.push
+    .mockRejectedValueOnce(new Error("non-fast-forward"))
+    .mockResolvedValue(undefined);
+  gitMocks.diffTrees.mockResolvedValueOnce([
+    sessionMetaPath,
+    sessionThreadPath,
+  ]);
+  gitMocks.readFileAtCommit.mockImplementation(
+    async (...args: [string, string, string]) => {
+      const path = args[2];
+      if (path === sessionMetaPath) return baseMeta;
+      if (path === sessionThreadPath) return baseSessionThread;
+      return null;
+    },
+  );
+  gitMocks.resetToRemote.mockImplementationOnce(async () => {
+    files.set(`${sessionDir}/session.meta.yaml`, baseMeta);
+    files.set(`${sessionDir}/discussion.thread`, baseSessionThread);
+  });
+  gitMocks.resetToCommit.mockImplementation(async () => {
+    files.set(`${sessionDir}/session.meta.yaml`, localMeta);
+    files.set(`${sessionDir}/discussion.thread`, localSessionThread);
+  });
+  return { localMeta, localSessionThread };
+}
+
 function initSyncState() {
   initState({
     workspaceId: "ws_phone",
@@ -155,10 +202,22 @@ describe("daemon-web sync", () => {
     gitMocks.readFileAtCommit.mockResolvedValue(null);
     gitMocks.resetToRemote.mockReset();
     gitMocks.resetToRemote.mockResolvedValue(undefined);
+    gitMocks.resetToCommit.mockReset();
+    gitMocks.resetToCommit.mockResolvedValue(undefined);
     gitMocks.resolveHead.mockReset();
     gitMocks.resolveHead.mockResolvedValue("local-head");
     gitMocks.resolveRemoteHead.mockReset();
     gitMocks.resolveRemoteHead.mockResolvedValue("remote-head");
+    storageMocks.removeFile.mockClear();
+    storageMocks.removeFile.mockImplementation(async (path: string) => {
+      files.delete(path);
+    });
+    storageMocks.writeFile.mockClear();
+    storageMocks.writeFile.mockImplementation(async (path: string, content: string) => {
+      const parent = path.slice(0, path.lastIndexOf("/")) || "/";
+      if (!dirs.has(parent)) throw new Error(`missing parent dir: ${parent}`);
+      files.set(path, content);
+    });
     initSyncState();
   });
 
@@ -479,6 +538,68 @@ describe("daemon-web sync", () => {
     expect(result.status).toBe("rebased");
   });
 
+  it("restores the local quick session commit when replay storage fails", async () => {
+    const { localMeta, localSessionThread } = configureQuickSessionSendReplay();
+    storageMocks.writeFile.mockRejectedValueOnce(new Error("disk full"));
+
+    await expect(runSync({ forceNewCycle: true })).rejects.toThrow("disk full");
+
+    expect(gitMocks.resetToCommit).toHaveBeenCalledWith("/repo", "local-head");
+    expect(files.get(`${sessionDir}/session.meta.yaml`)).toBe(localMeta);
+    expect(files.get(`${sessionDir}/discussion.thread`)).toBe(localSessionThread);
+    expect(getState().syncStatus).toBe("error");
+
+    const retry = await runSync({ forceNewCycle: true });
+    expect(retry.status).toBe("pushed");
+    expect(files.get(`${sessionDir}/discussion.thread`)).toBe(localSessionThread);
+  });
+
+  it("restores the local quick session commit when replay commit creation fails", async () => {
+    const { localMeta, localSessionThread } = configureQuickSessionSendReplay();
+    gitMocks.addAndCommit.mockRejectedValueOnce(new Error("commit failed"));
+
+    await expect(runSync({ forceNewCycle: true }))
+      .rejects.toThrow("commit failed");
+
+    expect(gitMocks.resetToCommit).toHaveBeenCalledWith("/repo", "local-head");
+    expect(files.get(`${sessionDir}/session.meta.yaml`)).toBe(localMeta);
+    expect(files.get(`${sessionDir}/discussion.thread`)).toBe(localSessionThread);
+    expect(getState().syncStatus).toBe("error");
+  });
+
+  it("keeps the replay error and appends a transactional restore failure", async () => {
+    configureQuickSessionSendReplay();
+    const original = new Error("commit failed");
+    gitMocks.addAndCommit.mockRejectedValueOnce(original);
+    gitMocks.resetToCommit.mockRejectedValueOnce(new Error("checkout failed"));
+
+    const failure = await runSync({ forceNewCycle: true }).catch((error) => error);
+
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toContain("commit failed");
+    expect((failure as Error).message).toContain(
+      "failed to restore local sync state: checkout failed",
+    );
+    expect((failure as Error & { cause?: unknown }).cause).toBe(original);
+    expect(getState().syncStatus).toBe("error");
+  });
+
+  it("keeps the replay commit reachable when the following push fails", async () => {
+    const { localSessionThread } = configureQuickSessionSendReplay();
+    gitMocks.push.mockReset();
+    gitMocks.push
+      .mockRejectedValueOnce(new Error("non-fast-forward"))
+      .mockRejectedValueOnce(new Error("push offline"));
+
+    await expect(runSync({ forceNewCycle: true }))
+      .rejects.toThrow("push offline");
+
+    expect(gitMocks.addAndCommit).toHaveBeenCalled();
+    expect(gitMocks.resetToCommit).not.toHaveBeenCalled();
+    expect(files.get(`${sessionDir}/discussion.thread`)).toBe(localSessionThread);
+    expect(getState().syncStatus).toBe("error");
+  });
+
   it("merges concurrent quick session sends and regenerates line metadata", async () => {
     const baseSessionThread =
       "[L000001][P000000][@lewis][20260711T010203Z] base\n";
@@ -691,6 +812,70 @@ describe("daemon-web sync", () => {
     );
     expect(gitMocks.push).toHaveBeenCalledTimes(2);
     expect(result.status).toBe("rebased");
+  });
+
+  it("restores the local quick session archive when replay removal fails", async () => {
+    const activeMeta = quickSessionMeta();
+    const archivedMeta = quickSessionMeta({
+      status: "archived",
+      archived_at: "20260711T010303Z",
+      archived_from: "needs_title",
+      updated_at: "20260711T010303Z",
+      revision: 3,
+    });
+    const thread =
+      "[L000001][P000000][@lewis][20260711T010203Z] base\n";
+    dirs.add("/repo/archive");
+    dirs.add("/repo/archive/quick-sessions");
+    dirs.add(archivedSessionDir);
+    files.set(`${archivedSessionDir}/session.meta.yaml`, archivedMeta);
+    files.set(`${archivedSessionDir}/discussion.thread`, thread);
+    gitMocks.resolveHead.mockResolvedValue("local-archive-head");
+    gitMocks.push.mockRejectedValueOnce(new Error("non-fast-forward"));
+    gitMocks.diffTrees.mockResolvedValueOnce([
+      archivedSessionMetaPath,
+      archivedSessionThreadPath,
+      sessionMetaPath,
+      sessionThreadPath,
+    ]);
+    gitMocks.readFileAtCommit.mockImplementation(
+      async (...args: [string, string, string]) => {
+        const path = args[2];
+        if (path === sessionMetaPath) return activeMeta;
+        if (path === sessionThreadPath) return thread;
+        return null;
+      },
+    );
+    gitMocks.resetToRemote.mockImplementationOnce(async () => {
+      dirs.add("/repo/quick-sessions");
+      dirs.add(sessionDir);
+      files.set(`${sessionDir}/session.meta.yaml`, activeMeta);
+      files.set(`${sessionDir}/discussion.thread`, thread);
+      files.delete(`${archivedSessionDir}/session.meta.yaml`);
+      files.delete(`${archivedSessionDir}/discussion.thread`);
+      dirs.delete(archivedSessionDir);
+    });
+    gitMocks.resetToCommit.mockImplementationOnce(async () => {
+      dirs.add(archivedSessionDir);
+      files.set(`${archivedSessionDir}/session.meta.yaml`, archivedMeta);
+      files.set(`${archivedSessionDir}/discussion.thread`, thread);
+      files.delete(`${sessionDir}/session.meta.yaml`);
+      files.delete(`${sessionDir}/discussion.thread`);
+      dirs.delete(sessionDir);
+    });
+    storageMocks.removeFile.mockRejectedValueOnce(new Error("remove failed"));
+
+    await expect(runSync({ forceNewCycle: true }))
+      .rejects.toThrow("remove failed");
+
+    expect(gitMocks.resetToCommit).toHaveBeenCalledWith(
+      "/repo",
+      "local-archive-head",
+    );
+    expect(files.get(`${archivedSessionDir}/session.meta.yaml`)).toBe(archivedMeta);
+    expect(files.get(`${archivedSessionDir}/discussion.thread`)).toBe(thread);
+    expect(files.has(`${sessionDir}/session.meta.yaml`)).toBe(false);
+    expect(getState().syncStatus).toBe("error");
   });
 
   it("replays an exact quick session unarchive after an unrelated remote commit", async () => {

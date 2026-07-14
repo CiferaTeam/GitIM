@@ -14,6 +14,7 @@ const statusMatrixMock = vi.hoisted(() =>
 );
 const addMock = vi.hoisted(() => vi.fn(async () => undefined));
 const commitMock = vi.hoisted(() => vi.fn(async () => "new-head"));
+const checkoutMock = vi.hoisted(() => vi.fn(async () => undefined));
 const resetIndexMock = vi.hoisted(() => vi.fn(async () => undefined));
 const treeMock = vi.hoisted(() => vi.fn((input: unknown) => input));
 
@@ -21,6 +22,7 @@ vi.mock("isomorphic-git", () => ({
   default: {
     add: addMock,
     commit: commitMock,
+    checkout: checkoutMock,
     push: pushMock,
     currentBranch: currentBranchMock,
     readBlob: readBlobMock,
@@ -46,6 +48,7 @@ import {
   diffTrees,
   push,
   readFileAtCommit,
+  resetToCommit,
   restoreIndexPaths,
 } from "./git";
 
@@ -67,6 +70,7 @@ describe("daemon-web git operations", () => {
     statusMatrixMock.mockResolvedValue([]);
     addMock.mockClear();
     commitMock.mockClear();
+    checkoutMock.mockClear();
     resetIndexMock.mockClear();
     treeMock.mockClear();
     currentBranchMock.mockReset();
@@ -226,5 +230,23 @@ describe("daemon-web git operations", () => {
         ref: "HEAD",
       }],
     ]);
+  });
+
+  it("hard-resets the current branch and working tree to an exact commit", async () => {
+    await resetToCommit("/repo", "saved-local-head");
+
+    expect(writeRefMock).toHaveBeenCalledWith({
+      fs: fsMock,
+      dir: "/repo",
+      ref: "refs/heads/main",
+      value: "saved-local-head",
+      force: true,
+    });
+    expect(checkoutMock).toHaveBeenCalledWith({
+      fs: fsMock,
+      dir: "/repo",
+      ref: "main",
+      force: true,
+    });
   });
 });

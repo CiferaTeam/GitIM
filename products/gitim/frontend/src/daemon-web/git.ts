@@ -261,7 +261,17 @@ export async function resetToRemote(
   const fs = getFs();
   const commit = await git.resolveRef({ fs, dir, ref: remoteRef });
 
-  // Point the current branch at the remote commit
+  await resetToCommit(dir, commit);
+}
+
+/** Hard reset the current branch and working tree to an exact commit. */
+export async function resetToCommit(
+  dir: string,
+  commit: string,
+): Promise<void> {
+  const fs = getFs();
+
+  // Point the current branch at the target commit.
   const branch = await getCurrentBranch(dir);
   await git.writeRef({
     fs,

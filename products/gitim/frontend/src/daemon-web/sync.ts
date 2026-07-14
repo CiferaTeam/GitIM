@@ -186,6 +186,7 @@ async function detectEpochRedirect(repoDir: string): Promise<boolean> {
 async function runSyncOnceLocked(): Promise<SyncResult> {
   const s = getState();
   const beforeHead = s.headCommit;
+  let rollbackHead: string | null = null;
   if (!s.token) {
     setState({ syncStatus: "reconnect_required" });
     postReconnectRequired(beforeHead);
@@ -563,7 +564,9 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       quickSessionMetas[quick.metaPath] = serializeQuickSessionMeta(mergedMeta);
     }
 
-    // Reset working tree to remote HEAD
+    // From this point until the replay commit succeeds, every failure must
+    // restore the branch and working tree that still owns the local changes.
+    rollbackHead = localHead;
     await gitOps.resetToRemote(
       s.repoDir,
       `refs/remotes/origin/${s.defaultBranch}`,
@@ -671,6 +674,7 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
         s.me.handler,
       );
     }
+    rollbackHead = null;
 
     // Epoch fence (invariant 1): the reset just materialized remote state
     // in the working tree — if that includes a redirected gitim.epoch.yaml,
@@ -698,7 +702,18 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     postRepoChanged(newHead, "rebase");
     return syncResult(beforeHead, newHead, "rebased");
   } catch (e) {
-    const message = errorMessage(e);
+    let reportedError = e;
+    if (rollbackHead !== null) {
+      try {
+        await gitOps.resetToCommit(s.repoDir, rollbackHead);
+      } catch (restoreError) {
+        reportedError = new Error(
+          `${errorMessage(e)}; failed to restore local sync state: ${errorMessage(restoreError)}`,
+          { cause: e },
+        );
+      }
+    }
+    const message = errorMessage(reportedError);
     if (isAuthFailure(e)) {
       setState({ token: null, syncStatus: "reconnect_required" });
       postReconnectRequired(getState().headCommit, message);
@@ -706,8 +721,8 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       setState({ syncStatus: "error" });
       postMessage({ type: "sync_error", error: message });
     }
-    console.error("[daemon-web] sync error:", e);
-    throw e;
+    console.error("[daemon-web] sync error:", reportedError);
+    throw reportedError;
   }
 }
 
