@@ -118,6 +118,24 @@ const handler: Record<
   thread: (channel: unknown, line: unknown) =>
     handlers.thread(channel as string, line as number),
   users: () => handlers.users(),
+  createQuickSession: (input: unknown) =>
+    handlers.createQuickSession(input as handlers.CreateQuickSessionInput),
+  listQuickSessions: (query?: unknown) =>
+    handlers.listQuickSessions((query ?? {}) as handlers.QuickSessionListQuery),
+  readQuickSession: (sessionId: unknown, query?: unknown) =>
+    handlers.readQuickSession(
+      sessionId as string,
+      (query ?? {}) as handlers.ReadQuickSessionQuery,
+    ),
+  sendQuickSessionMessage: (sessionId: unknown, input: unknown) =>
+    handlers.sendQuickSessionMessage(
+      sessionId as string,
+      input as handlers.SendQuickSessionInput,
+    ),
+  archiveQuickSession: (sessionId: unknown) =>
+    handlers.archiveQuickSession(sessionId as string),
+  unarchiveQuickSession: (sessionId: unknown) =>
+    handlers.unarchiveQuickSession(sessionId as string),
   listBoards: () => handlers.listBoards(),
   showBoard: (handler: unknown) =>
     handlers.showBoard(handler as string),

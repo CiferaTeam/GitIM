@@ -143,7 +143,8 @@ const AUTH_CIRCUIT_HEARTBEAT_SECS: u64 = 300;
 ///   write+commit sequence — never around the network-only `fetch`/`push`. The
 ///   daemon's write handlers hold the same lock around their own commits, so
 ///   `rebase` is guaranteed never to run while a handler is mid-append.
-/// - `on_pushed`: called after a successful push (all pending messages are now remote)
+/// - `on_pushed`: called after a successful push with the pushed HEAD and the
+///   pre-rewrite local HEAD whose commits were included.
 /// - `on_renumbered`: called for each message that was renumbered during conflict resolution
 ///   (file, old_line, new_line)
 /// - `on_synced`: called after every sync cycle completes, with the current HEAD commit hash.
@@ -168,7 +169,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     on_cycle_done: F4,
     rebase_author: Option<(String, String)>,
 ) where
-    F1: Fn() + Send + Sync + 'static,
+    F1: Fn(String, String) + Send + Sync + 'static,
     F2: Fn(PathBuf, u64, u64) + Send + Sync + 'static,
     F3: Fn(String) + Send + Sync + 'static,
     F4: Fn() + Send + Sync + 'static,
@@ -195,7 +196,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
     // `&dyn Fn(..)` deref'd from the Arc. Sync bound on the F* params is
     // load-bearing here: `Arc<F>: Sync` requires `F: Sync`, which the daemon's
     // closures satisfy (they capture `Arc<AppState>`, itself Sync).
-    let on_pushed: Arc<dyn Fn() + Send + Sync + 'static> = Arc::new(on_pushed);
+    let on_pushed: Arc<dyn Fn(String, String) + Send + Sync + 'static> = Arc::new(on_pushed);
     let on_renumbered: Arc<dyn Fn(PathBuf, u64, u64) + Send + Sync + 'static> =
         Arc::new(on_renumbered);
     let on_synced: Arc<dyn Fn(String) + Send + Sync + 'static> = Arc::new(on_synced);
@@ -372,7 +373,7 @@ pub fn run_sync_cycle(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
     commit_lock: &Mutex<()>,
-    on_pushed: &dyn Fn(),
+    on_pushed: &dyn Fn(String, String),
     on_renumbered: &dyn Fn(PathBuf, u64, u64),
     on_synced: &dyn Fn(String),
     on_cycle_done: &dyn Fn(),
@@ -460,6 +461,294 @@ pub fn run_sync_cycle(
 /// Push-first strategy: try push, fallback to fetch+rebase, then conflict resolution.
 /// Retries up to 3 times if push fails after conflict resolution.
 const MAX_SYNC_RETRIES: usize = 3;
+
+#[derive(Default)]
+struct QuickSessionResolutions {
+    writes: HashMap<PathBuf, String>,
+    removals: Vec<PathBuf>,
+    mappings: Vec<conflict::RenumberMapping>,
+}
+
+struct ConflictReplayRollback<'a> {
+    repo: &'a GitStorage,
+    saved_head: String,
+    armed: bool,
+}
+
+impl<'a> ConflictReplayRollback<'a> {
+    fn new(repo: &'a GitStorage, saved_head: String) -> Self {
+        Self {
+            repo,
+            saved_head,
+            armed: false,
+        }
+    }
+
+    fn arm(&mut self) {
+        self.armed = true;
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ConflictReplayRollback<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        match self.repo.reset_hard_to(&self.saved_head) {
+            Ok(()) => warn!(
+                "sync: conflict replay failed; restored pre-rebase HEAD {}",
+                self.saved_head
+            ),
+            Err(error) => error!(
+                "sync: conflict replay rollback failed: {}. Local commit remains recoverable via reflog at {}",
+                error, self.saved_head
+            ),
+        }
+    }
+}
+
+fn is_quick_session_path(path: &Path) -> bool {
+    let path = path.to_string_lossy();
+    path.starts_with("quick-sessions/") || path.starts_with("archive/quick-sessions/")
+}
+
+fn complete_quick_session_pair(
+    meta: Option<String>,
+    thread: Option<String>,
+    description: &str,
+) -> Result<Option<(String, String)>, String> {
+    match (meta, thread) {
+        (Some(meta), Some(thread)) => Ok(Some((meta, thread))),
+        (None, None) => Ok(None),
+        _ => Err(format!("{description} transaction is incomplete")),
+    }
+}
+
+fn prepare_quick_session_resolutions(
+    repo: &GitStorage,
+    all_unpushed: &[PathBuf],
+) -> Result<QuickSessionResolutions, String> {
+    let quick_paths: Vec<&PathBuf> = all_unpushed
+        .iter()
+        .filter(|path| is_quick_session_path(path))
+        .collect();
+    if quick_paths.is_empty() {
+        return Ok(QuickSessionResolutions::default());
+    }
+
+    let mut sessions: HashMap<String, ()> = HashMap::new();
+    for path in quick_paths {
+        let path_str = path.to_string_lossy();
+        let rest = path_str
+            .strip_prefix("quick-sessions/")
+            .or_else(|| path_str.strip_prefix("archive/quick-sessions/"))
+            .ok_or_else(|| "invalid quick session path".to_string())?;
+        let (session_id, file) = rest
+            .split_once('/')
+            .ok_or_else(|| "invalid quick session path".to_string())?;
+        if file.contains('/') {
+            return Err("invalid quick session path".to_string());
+        }
+        match file {
+            "session.meta.yaml" | "discussion.thread" => {}
+            _ => return Err("unknown quick session file".to_string()),
+        }
+        sessions.insert(session_id.to_string(), ());
+    }
+
+    let read_working = |path: &Path| -> Result<Option<String>, String> {
+        let absolute = repo.root().join(path);
+        if !absolute.exists() {
+            return Ok(None);
+        }
+        std::fs::read_to_string(&absolute)
+            .map(Some)
+            .map_err(|error| format!("read {}: {error}", path.display()))
+    };
+    let read_remote = |path: &Path| -> Result<Option<String>, String> {
+        repo.show_file_at_ref("@{upstream}", &path.to_string_lossy())
+            .map_err(|error| error.to_string())
+    };
+    let read_base = |path: &Path| -> Result<Option<String>, String> {
+        repo.show_file_at_merge_base(&path.to_string_lossy())
+            .map_err(|error| error.to_string())
+    };
+
+    let mut resolutions = QuickSessionResolutions::default();
+    for session_id in sessions.into_keys() {
+        let active_meta = PathBuf::from(format!("quick-sessions/{session_id}/session.meta.yaml"));
+        let active_thread = PathBuf::from(format!("quick-sessions/{session_id}/discussion.thread"));
+        let archived_meta = PathBuf::from(format!(
+            "archive/quick-sessions/{session_id}/session.meta.yaml"
+        ));
+        let archived_thread = PathBuf::from(format!(
+            "archive/quick-sessions/{session_id}/discussion.thread"
+        ));
+
+        let local_active = complete_quick_session_pair(
+            read_working(&active_meta)?,
+            read_working(&active_thread)?,
+            &format!("quick session {session_id} local active"),
+        )?;
+        let local_archived = complete_quick_session_pair(
+            read_working(&archived_meta)?,
+            read_working(&archived_thread)?,
+            &format!("quick session {session_id} local archive"),
+        )?;
+        let remote_active = complete_quick_session_pair(
+            read_remote(&active_meta)?,
+            read_remote(&active_thread)?,
+            &format!("quick session {session_id} remote active"),
+        )?;
+        let remote_archived = complete_quick_session_pair(
+            read_remote(&archived_meta)?,
+            read_remote(&archived_thread)?,
+            &format!("quick session {session_id} remote archive"),
+        )?;
+        let base_active = complete_quick_session_pair(
+            read_base(&active_meta)?,
+            read_base(&active_thread)?,
+            &format!("quick session {session_id} base active"),
+        )?;
+        let base_archived = complete_quick_session_pair(
+            read_base(&archived_meta)?,
+            read_base(&archived_thread)?,
+            &format!("quick session {session_id} base archive"),
+        )?;
+
+        let (local_meta_yaml, local_thread_content, local_is_archived) =
+            match (local_active, local_archived) {
+                (Some((meta, thread)), None) => (meta, thread, false),
+                (None, Some((meta, thread))) => (meta, thread, true),
+                _ => {
+                    return Err(format!(
+                        "quick session {session_id} local canonical location is ambiguous"
+                    ))
+                }
+            };
+        let (remote_meta_yaml, remote_thread_content, remote_is_archived) =
+            match (remote_active, remote_archived) {
+                (Some((meta, thread)), None) => (meta, thread, false),
+                (None, Some((meta, thread))) => (meta, thread, true),
+                _ => {
+                    return Err(format!(
+                        "quick session {session_id} remote canonical location is ambiguous"
+                    ))
+                }
+            };
+        let (base_meta_yaml, base_thread_content, base_is_archived) =
+            match (base_active, base_archived) {
+                (Some((meta, thread)), None) => (meta, thread, false),
+                (None, Some((meta, thread))) => (meta, thread, true),
+                _ => {
+                    return Err(format!(
+                        "quick session {session_id} create conflict requires manual resolution"
+                    ))
+                }
+            };
+
+        // An ordinary archive/unarchive move can share a commit with another
+        // file that caused the rebase conflict. When upstream still has the
+        // exact baseline session, replay that move byte-for-byte; archive-wins
+        // applies only when both nodes actually mutated the session.
+        if local_is_archived != base_is_archived
+            && remote_is_archived == base_is_archived
+            && remote_meta_yaml == base_meta_yaml
+            && remote_thread_content == base_thread_content
+        {
+            let target_meta = if local_is_archived {
+                archived_meta.clone()
+            } else {
+                active_meta.clone()
+            };
+            let target_thread = if local_is_archived {
+                archived_thread.clone()
+            } else {
+                active_thread.clone()
+            };
+            resolutions.writes.insert(target_meta, local_meta_yaml);
+            resolutions
+                .writes
+                .insert(target_thread, local_thread_content);
+            if local_is_archived {
+                resolutions.removals.push(active_meta);
+                resolutions.removals.push(active_thread);
+            } else {
+                resolutions.removals.push(archived_meta);
+                resolutions.removals.push(archived_thread);
+            }
+            continue;
+        }
+
+        let local_addition = local_thread_content
+            .strip_prefix(&base_thread_content)
+            .ok_or_else(|| {
+                format!("quick session {session_id} local thread changed outside append-only shape")
+            })?;
+        if !remote_thread_content.starts_with(&base_thread_content) {
+            return Err(format!(
+                "quick session {session_id} remote thread changed outside append-only shape"
+            ));
+        }
+
+        let archive_wins = local_is_archived || remote_is_archived;
+        let target_meta = if archive_wins {
+            archived_meta.clone()
+        } else {
+            active_meta.clone()
+        };
+        let target_thread = if archive_wins {
+            archived_thread.clone()
+        } else {
+            active_thread.clone()
+        };
+        let (merged_thread, mappings) = if local_addition.is_empty() {
+            (remote_thread_content, Vec::new())
+        } else {
+            let additions = HashMap::from([(target_thread.clone(), local_addition.to_string())]);
+            let remote_contents = HashMap::from([(target_thread.clone(), remote_thread_content)]);
+            let (resolved_files, mappings) =
+                conflict::resolve_content_pure(&additions, &remote_contents)
+                    .map_err(|error| error.to_string())?;
+            let merged_thread = resolved_files
+                .first()
+                .ok_or_else(|| format!("quick session {session_id} thread was not resolved"))?
+                .content
+                .clone();
+            (merged_thread, mappings)
+        };
+        let local_meta: gitim_core::types::QuickSessionMeta =
+            serde_yaml::from_str(&local_meta_yaml)
+                .map_err(|error| format!("quick session {session_id} local metadata: {error}"))?;
+        let remote_meta: gitim_core::types::QuickSessionMeta =
+            serde_yaml::from_str(&remote_meta_yaml)
+                .map_err(|error| format!("quick session {session_id} remote metadata: {error}"))?;
+        let merged_meta = conflict::merge_quick_session_meta(
+            &local_meta,
+            &remote_meta,
+            &merged_thread,
+            &mappings,
+            &target_thread,
+        )
+        .map_err(|error| error.to_string())?;
+        let yaml = serde_yaml::to_string(&merged_meta).map_err(|error| error.to_string())?;
+        resolutions.writes.insert(target_meta, yaml);
+        resolutions.writes.insert(target_thread, merged_thread);
+        resolutions.mappings.extend(mappings);
+        if archive_wins {
+            resolutions.removals.push(active_meta);
+            resolutions.removals.push(active_thread);
+        } else {
+            resolutions.removals.push(archived_meta);
+            resolutions.removals.push(archived_thread);
+        }
+    }
+    Ok(resolutions)
+}
 
 /// Hard safety net: if HEAD falls this far behind `@{upstream}`, sync is
 /// almost certainly wedged — most plausibly by an untracked working-tree
@@ -720,7 +1009,7 @@ fn sync_with_push(
     repo: &GitStorage,
     circuit: &mut AuthCircuit,
     commit_lock: &Mutex<()>,
-    on_pushed: &dyn Fn(),
+    on_pushed: &dyn Fn(String, String),
     on_renumbered: &dyn Fn(PathBuf, u64, u64),
     rebase_author: Option<&(String, String)>,
 ) -> SyncOutcome {
@@ -733,13 +1022,24 @@ fn sync_with_push(
         return SyncOutcome::Normal;
     }
 
+    let mut included_head_before_rewrite: Option<String> = None;
     for attempt in 1..=MAX_SYNC_RETRIES {
         // Try push directly
         let push_result = repo.push();
         observe_auth(circuit, &push_result);
         match push_result {
             Ok(()) => {
-                on_pushed();
+                let pushed_head = match repo.rev_parse("@{upstream}") {
+                    Ok(head) => head,
+                    Err(error) => {
+                        warn!("sync: failed to resolve pushed upstream HEAD: {}", error);
+                        return SyncOutcome::Normal;
+                    }
+                };
+                let included_head = included_head_before_rewrite
+                    .clone()
+                    .unwrap_or_else(|| pushed_head.clone());
+                on_pushed(pushed_head, included_head);
                 info!("sync: push complete (attempt {})", attempt);
                 return SyncOutcome::Normal;
             }
@@ -812,9 +1112,16 @@ fn sync_with_push(
         let rebase_guard = commit_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let local_head_before_rebase = match repo.rev_parse("HEAD") {
+            Ok(head) => head,
+            Err(error) => {
+                warn!("sync: failed to snapshot pre-rebase HEAD: {}", error);
+                return SyncOutcome::Normal;
+            }
+        };
 
         // Capture local additions BEFORE attempting rebase
-        let local_additions = match repo.diff_unpushed("*.thread") {
+        let mut local_additions = match repo.diff_since_merge_base("*.thread") {
             Ok(v) => v,
             Err(e) => {
                 warn!("sync: failed to diff unpushed additions: {}", e);
@@ -824,7 +1131,7 @@ fn sync_with_push(
 
         // Capture changed meta files BEFORE attempting rebase
         let changed_meta_files = repo
-            .changed_files_unpushed("*.meta.yaml")
+            .changed_files_since_merge_base("*.meta.yaml")
             .unwrap_or_default();
         let mut local_metas: HashMap<PathBuf, String> = HashMap::new();
         for rel_path in &changed_meta_files {
@@ -834,14 +1141,11 @@ fn sync_with_push(
             }
         }
 
-        // Capture the FULL unpushed file list BEFORE attempting rebase. After
-        // rebase failure, HEAD may be detached or in a partial-rebase state, so
-        // querying `@{upstream}..HEAD` then can return wrong/empty results and
-        // mask non-resolvable changes — falling through to discard_unpushed
-        // (data loss). We snapshot it here while HEAD is reliably on the local
-        // branch and use the cached list to decide whether the rebase failure
-        // is safe to recover from.
-        let all_unpushed_before_rebase = match repo.changed_files_unpushed_all() {
+        // Capture the complete local side before attempting rebase. The
+        // merge-base range excludes remote-only objects while HEAD still
+        // points to the local branch, so conflict classification remains
+        // stable after a failed rebase detaches HEAD.
+        let all_unpushed_before_rebase = match repo.changed_files_since_merge_base_all() {
             Ok(v) => v,
             Err(e) => {
                 warn!("sync: failed to list unpushed files: {}", e);
@@ -863,6 +1167,8 @@ fn sync_with_push(
         // Try rebase (fast path: no .thread conflicts)
         match repo.rebase_onto_origin() {
             Ok(()) => {
+                included_head_before_rewrite
+                    .get_or_insert_with(|| local_head_before_rebase.clone());
                 drop(rebase_guard);
                 // Epoch fence, checkpoint (3) — backstop: the rebase may have
                 // replayed local messages on top of a just-pulled R. Never
@@ -874,7 +1180,19 @@ fn sync_with_push(
                 observe_auth(circuit, &push_after_rebase);
                 match push_after_rebase {
                     Ok(()) => {
-                        on_pushed();
+                        let pushed_head = match repo.rev_parse("@{upstream}") {
+                            Ok(head) => head,
+                            Err(error) => {
+                                warn!("sync: failed to resolve pushed upstream HEAD: {}", error);
+                                return SyncOutcome::Normal;
+                            }
+                        };
+                        on_pushed(
+                            pushed_head,
+                            included_head_before_rewrite
+                                .clone()
+                                .unwrap_or_else(|| local_head_before_rebase.clone()),
+                        );
                         info!("sync: push complete after rebase (attempt {})", attempt);
                         return SyncOutcome::Normal;
                     }
@@ -901,6 +1219,23 @@ fn sync_with_push(
                 }
             }
             Err(_) => {
+                if let Err(error) = repo.abort_rebase() {
+                    warn!("sync: failed to abort conflicted rebase: {}", error);
+                    return SyncOutcome::Normal;
+                }
+                let quick_session_resolutions =
+                    match prepare_quick_session_resolutions(repo, &all_unpushed_before_rebase) {
+                        Ok(resolutions) => resolutions,
+                        Err(error) => {
+                            warn!(
+                                "sync: quick session conflict preserved for manual resolution: {}",
+                                error
+                            );
+                            return SyncOutcome::Normal;
+                        }
+                    };
+                local_additions.retain(|path, _| !is_quick_session_path(path));
+                local_metas.retain(|path, _| !is_quick_session_path(path));
                 // Rebase failed. Two paths:
                 //
                 //   1. All unpushed files are in the resolvable set
@@ -935,17 +1270,25 @@ fn sync_with_push(
                 }
 
                 // Rebase failed — use thread-aware + meta + board conflict resolution
-                if local_additions.is_empty() && local_metas.is_empty() && local_boards.is_empty() {
+                if local_additions.is_empty()
+                    && local_metas.is_empty()
+                    && local_boards.is_empty()
+                    && quick_session_resolutions.writes.is_empty()
+                {
                     let _ = repo.abort_rebase();
                     warn!("sync: rebase conflict with no resolvable changes, aborted");
                     return SyncOutcome::Normal;
                 }
+
+                let mut replay_rollback =
+                    ConflictReplayRollback::new(repo, local_head_before_rebase.clone());
 
                 // SyncLoop manages git state; resolve_content does pure content transform
                 if let Err(e) = repo.discard_unpushed() {
                     warn!("sync: discard_unpushed failed: {}", e);
                     return SyncOutcome::Normal;
                 }
+                replay_rollback.arm();
 
                 let mut modified_paths: Vec<String> = Vec::new();
 
@@ -982,12 +1325,12 @@ fn sync_with_push(
                                 parent.display(),
                                 e
                             );
-                            continue;
+                            return SyncOutcome::Normal;
                         }
                     }
                     if let Err(e) = std::fs::write(&abs_path, local_content) {
                         warn!("sync: failed to write back local board: {}", e);
-                        continue;
+                        return SyncOutcome::Normal;
                     }
                     modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
                 }
@@ -1005,7 +1348,7 @@ fn sync_with_push(
                                     rel_path.display(),
                                     e
                                 );
-                                continue;
+                                return SyncOutcome::Normal;
                             }
                         };
                         let local_meta: gitim_core::types::ChannelMeta =
@@ -1017,7 +1360,7 @@ fn sync_with_push(
                                         rel_path.display(),
                                         e
                                     );
-                                    continue;
+                                    return SyncOutcome::Normal;
                                 }
                             };
                         let remote_meta: gitim_core::types::ChannelMeta =
@@ -1029,7 +1372,7 @@ fn sync_with_push(
                                         rel_path.display(),
                                         e
                                     );
-                                    continue;
+                                    return SyncOutcome::Normal;
                                 }
                             };
                         let merged = conflict::merge_channel_meta(&local_meta, &remote_meta);
@@ -1037,57 +1380,113 @@ fn sync_with_push(
                             Ok(yaml) => {
                                 if let Err(e) = std::fs::write(&abs_path, &yaml) {
                                     warn!("sync: failed to write merged meta: {}", e);
-                                    continue;
+                                    return SyncOutcome::Normal;
                                 }
                             }
                             Err(e) => {
                                 warn!("sync: failed to serialize merged meta: {}", e);
-                                continue;
+                                return SyncOutcome::Normal;
                             }
                         }
                     } else {
                         // User meta or other: write local content back as-is
                         if let Err(e) = std::fs::write(&abs_path, local_content) {
                             warn!("sync: failed to write back local meta: {}", e);
-                            continue;
+                            return SyncOutcome::Normal;
                         }
                     }
                     modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
                 }
 
-                // Commit resolved content
-                if !modified_paths.is_empty() {
-                    let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
-                    let commit_msg = if !thread_mappings.is_empty() {
-                        build_rebase_commit_msg(&thread_mappings, &local_additions)
-                    } else if !local_boards.is_empty() && local_metas.is_empty() {
-                        "board: sync after rebase".to_string()
-                    } else if !local_boards.is_empty() {
-                        "sync: board/meta after rebase".to_string()
-                    } else {
-                        "meta: sync after rebase".to_string()
-                    };
-                    // Under normal operation every local commit on this clone
-                    // belongs to one handler (the daemon owner), so stamping
-                    // the rebase-resolution commit with that handler matches
-                    // reality. Committer still comes from git config — only
-                    // author is rewritten. `None` preserves the legacy
-                    // behaviour (git config picks author too).
-                    let commit_result = match rebase_author {
-                        Some((name, email)) => {
-                            repo.add_and_commit_as(&path_refs, &commit_msg, Some((name, email)))
+                // Quick Sessions resolve as a two-file transaction. Archive
+                // wins any active/archive race, while the core merge keeps
+                // append-only messages and completion markers and clears a
+                // stale running claim.
+                for rel_path in &quick_session_resolutions.removals {
+                    let abs_path = repo.root().join(rel_path);
+                    if abs_path.exists() {
+                        if let Err(e) = std::fs::remove_file(&abs_path) {
+                            warn!(
+                                "sync: failed to remove superseded quick session file {}: {}",
+                                rel_path.display(),
+                                e
+                            );
+                            return SyncOutcome::Normal;
                         }
-                        None => repo.add_and_commit(&path_refs, &commit_msg),
-                    };
-                    if let Err(e) = commit_result {
-                        warn!("sync: commit after conflict resolution failed: {}", e);
-                        return SyncOutcome::Normal;
+                        modified_paths.push(rel_path.to_string_lossy().to_string());
+                        if let Some(parent) = abs_path.parent() {
+                            let _ = std::fs::remove_dir(parent);
+                        }
                     }
                 }
+                for (rel_path, content) in &quick_session_resolutions.writes {
+                    let abs_path = repo.root().join(rel_path);
+                    if let Some(parent) = abs_path.parent() {
+                        if let Err(e) = std::fs::create_dir_all(parent) {
+                            warn!(
+                                "sync: failed to create quick session dir {}: {}",
+                                parent.display(),
+                                e
+                            );
+                            return SyncOutcome::Normal;
+                        }
+                    }
+                    if let Err(e) = std::fs::write(&abs_path, content) {
+                        warn!(
+                            "sync: failed to write resolved quick session file {}: {}",
+                            rel_path.display(),
+                            e
+                        );
+                        return SyncOutcome::Normal;
+                    }
+                    modified_paths.push(rel_path.to_string_lossy().to_string());
+                }
 
-                for m in &thread_mappings {
+                if modified_paths.is_empty() {
+                    warn!("sync: conflict replay produced no modified paths");
+                    return SyncOutcome::Normal;
+                }
+
+                // Commit resolved content
+                let path_refs: Vec<&str> = modified_paths.iter().map(|s| s.as_str()).collect();
+                let commit_msg = if !quick_session_resolutions.writes.is_empty() {
+                    "session: sync after rebase".to_string()
+                } else if !thread_mappings.is_empty() {
+                    build_rebase_commit_msg(&thread_mappings, &local_additions)
+                } else if !local_boards.is_empty() && local_metas.is_empty() {
+                    "board: sync after rebase".to_string()
+                } else if !local_boards.is_empty() {
+                    "sync: board/meta after rebase".to_string()
+                } else {
+                    "meta: sync after rebase".to_string()
+                };
+                // Under normal operation every local commit on this clone
+                // belongs to one handler (the daemon owner), so stamping
+                // the rebase-resolution commit with that handler matches
+                // reality. Committer still comes from git config — only
+                // author is rewritten. `None` preserves the legacy
+                // behaviour (git config picks author too).
+                let commit_result = match rebase_author {
+                    Some((name, email)) => {
+                        repo.add_and_commit_as(&path_refs, &commit_msg, Some((name, email)))
+                    }
+                    None => repo.add_and_commit(&path_refs, &commit_msg),
+                };
+                if let Err(e) = commit_result {
+                    warn!("sync: commit after conflict resolution failed: {}", e);
+                    return SyncOutcome::Normal;
+                }
+                replay_rollback.disarm();
+
+                for m in thread_mappings
+                    .iter()
+                    .chain(quick_session_resolutions.mappings.iter())
+                {
                     on_renumbered(m.file.clone(), m.old_line, m.new_line);
                 }
+
+                included_head_before_rewrite
+                    .get_or_insert_with(|| local_head_before_rebase.clone());
 
                 // Resolve committed — commit tree is stable again, release
                 // before the network round-trip so a slow push doesn't hold
@@ -1098,7 +1497,19 @@ fn sync_with_push(
                 observe_auth(circuit, &push_after_resolve);
                 match push_after_resolve {
                     Ok(()) => {
-                        on_pushed();
+                        let pushed_head = match repo.rev_parse("@{upstream}") {
+                            Ok(head) => head,
+                            Err(error) => {
+                                warn!("sync: failed to resolve pushed upstream HEAD: {}", error);
+                                return SyncOutcome::Normal;
+                            }
+                        };
+                        on_pushed(
+                            pushed_head,
+                            included_head_before_rewrite
+                                .clone()
+                                .unwrap_or_else(|| local_head_before_rebase.clone()),
+                        );
                         info!(
                             "sync: push complete after conflict resolution (attempt {})",
                             attempt

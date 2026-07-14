@@ -288,6 +288,12 @@ mod tests {
                 event_type: "tool_use".to_string(),
                 detail: format!("evt-{i}"),
                 timestamp: "2026-04-18T00:00:00Z".to_string(),
+                scope: crate::http::ActivityScope::default(),
+                session_id: None,
+                r#ref: None,
+                session_revision: None,
+                attempt_id: None,
+                context_generation: None,
             };
             assert!(ctx.activity_tx.send(event).is_ok(), "send {i} failed");
         }
@@ -304,6 +310,12 @@ mod tests {
             event_type: "t".to_string(),
             detail: "d".to_string(),
             timestamp: "2026".to_string(),
+            scope: crate::http::ActivityScope::default(),
+            session_id: None,
+            r#ref: None,
+            session_revision: None,
+            attempt_id: None,
+            context_generation: None,
         });
         assert!(rx_a.try_recv().is_err());
     }

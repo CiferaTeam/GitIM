@@ -10,6 +10,7 @@ pub mod link;
 pub mod message;
 pub mod meta;
 pub mod project;
+pub mod quick_session;
 
 pub use asset::{
     AssetRef, AssetRefError, ASSET_REF_VERSION, MAX_ASSETS_PER_MESSAGE, MAX_ASSET_BYTES,
@@ -38,3 +39,12 @@ pub use link::{Link, LinkKind};
 pub use message::{ChannelEvent, Message, ThreadEntry, ThreadFile, ThreadLine};
 pub use meta::{validate_user_meta, ChannelMeta, UserMeta, UserMetaError, MAX_INTRODUCTION_LEN};
 pub use project::{ProjectMeta, ProjectSlug, ProjectSlugError, RESERVED_PROJECT_SLUGS};
+pub use quick_session::{
+    apply_quick_session_transition, truncate_quick_session_preview,
+    validate_quick_session_attempt_id, validate_quick_session_id, validate_quick_session_meta,
+    validate_quick_session_summary, validate_quick_session_title, QuickSessionError,
+    QuickSessionMeta, QuickSessionStatus, QuickSessionTitleSource, QuickSessionTransition,
+    TransitionOutcome, QUICK_SESSION_ATTEMPT_ID_PREFIX, QUICK_SESSION_ID_PREFIX,
+    QUICK_SESSION_PREVIEW_MAX_CHARS, QUICK_SESSION_SUMMARY_MAX_CHARS,
+    QUICK_SESSION_TITLE_MAX_CHARS,
+};

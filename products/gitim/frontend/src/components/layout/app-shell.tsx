@@ -13,6 +13,7 @@ import { DonateDialog } from "../donate-dialog";
 import { MobileTabBar } from "../mobile/mobile-tab-bar";
 import { NavTabs } from "./nav-tabs";
 import { ConnectionStatusButton } from "./connection-status-button";
+import { QuickSessionHub } from "../sessions/quick-session-hub";
 
 interface AppShellProps {
   children?: ReactNode;
@@ -47,6 +48,7 @@ export function AppShell({ children }: AppShellProps) {
 
         {/* Right: theme toggle + twitter + update indicator + help + current user */}
         <div className="flex shrink-0 items-center justify-end gap-1 md:gap-2 md:min-w-[140px]">
+          <QuickSessionHub />
           <ThemeToggle />
           <TimezoneToggle />
           <a

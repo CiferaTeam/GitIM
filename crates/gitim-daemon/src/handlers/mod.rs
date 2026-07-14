@@ -46,6 +46,32 @@ pub(super) async fn resolve_author(
     }
 }
 
+async fn resolve_quick_session_actor(
+    author: Option<String>,
+    state: &SharedState,
+) -> Result<String, Response> {
+    let current = state.current_user.read().await.clone().ok_or_else(|| {
+        Response::error_with_code(
+            "quick session write requires current user identity",
+            "quick_session_forbidden",
+        )
+    })?;
+    if author
+        .as_deref()
+        .is_some_and(|requested| !requested.is_empty() && requested != current)
+    {
+        return Err(Response::error_with_code(
+            format!(
+                "quick session actor mismatch: current user is {current}, requested {}",
+                author.unwrap_or_default()
+            ),
+            "quick_session_forbidden",
+        ));
+    }
+    ensure_author_not_departed(state, &current)?;
+    Ok(current)
+}
+
 /// Reject any author write whose `archive/users/<author>.meta.yaml`
 /// exists. Per archive-protocol Contract 2: once a handler is departed,
 /// the actor identity is terminally retired — any subsequent attempt
@@ -185,6 +211,14 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::DeleteCron { .. }
                 | Request::LabelsAdd { .. }
                 | Request::LabelsRemove { .. }
+                | Request::CreateQuickSession { .. }
+                | Request::SendQuickSessionMessage { .. }
+                | Request::SetQuickSessionTitle { .. }
+                | Request::SetQuickSessionSummary { .. }
+                | Request::ClaimQuickSessionTurn { .. }
+                | Request::MarkQuickSessionError { .. }
+                | Request::ArchiveQuickSession { .. }
+                | Request::UnarchiveQuickSession { .. }
         );
         if is_write {
             return Response::error("guest mode: write operations are not allowed");
@@ -276,6 +310,140 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             introduction,
         } => handle_update_user(state, handler, display_name, introduction).await,
         Request::Poll { since } => handle_poll(state, since).await,
+        Request::CreateQuickSession {
+            session_id,
+            agent_id,
+            first_message,
+            author,
+        } => {
+            let author = match resolve_quick_session_actor(author, &state).await {
+                Ok(author) => author,
+                Err(response) => return response,
+            };
+            crate::quick_session_handlers::handle_create_quick_session(
+                state,
+                session_id,
+                agent_id,
+                first_message,
+                author,
+            )
+            .await
+        }
+        Request::ListQuickSessions {
+            archived,
+            agent_id,
+            actionable,
+            status,
+            limit,
+        } => {
+            crate::quick_session_handlers::handle_list_quick_sessions(
+                state, archived, agent_id, actionable, status, limit,
+            )
+            .await
+        }
+        Request::ReadQuickSession {
+            session_id,
+            limit,
+            since,
+        } => {
+            crate::quick_session_handlers::handle_read_quick_session(
+                state, session_id, limit, since,
+            )
+            .await
+        }
+        Request::SendQuickSessionMessage {
+            session_id,
+            body,
+            reply_to,
+            request_id,
+            attempt_id,
+            author,
+        } => {
+            let author = match resolve_quick_session_actor(author, &state).await {
+                Ok(author) => author,
+                Err(response) => return response,
+            };
+            crate::quick_session_handlers::handle_send_quick_session_message(
+                state, session_id, body, reply_to, request_id, attempt_id, author,
+            )
+            .await
+        }
+        Request::SetQuickSessionTitle {
+            session_id,
+            title,
+            attempt_id,
+            author,
+        } => {
+            let author = match resolve_quick_session_actor(author, &state).await {
+                Ok(author) => author,
+                Err(response) => return response,
+            };
+            crate::quick_session_handlers::handle_set_quick_session_title(
+                state, session_id, title, attempt_id, author,
+            )
+            .await
+        }
+        Request::SetQuickSessionSummary {
+            session_id,
+            summary,
+            attempt_id,
+            author,
+        } => {
+            let author = match resolve_quick_session_actor(author, &state).await {
+                Ok(author) => author,
+                Err(response) => return response,
+            };
+            crate::quick_session_handlers::handle_set_quick_session_summary(
+                state, session_id, summary, attempt_id, author,
+            )
+            .await
+        }
+        Request::ClaimQuickSessionTurn {
+            session_id,
+            input_line,
+            attempt_id,
+            author,
+        } => {
+            let author = match resolve_quick_session_actor(author, &state).await {
+                Ok(author) => author,
+                Err(response) => return response,
+            };
+            crate::quick_session_handlers::handle_claim_quick_session_turn(
+                state, session_id, input_line, attempt_id, author,
+            )
+            .await
+        }
+        Request::MarkQuickSessionError {
+            session_id,
+            attempt_id,
+            error,
+            author,
+        } => {
+            let author = match resolve_quick_session_actor(author, &state).await {
+                Ok(author) => author,
+                Err(response) => return response,
+            };
+            crate::quick_session_handlers::handle_mark_quick_session_error(
+                state, session_id, attempt_id, error, author,
+            )
+            .await
+        }
+        Request::ArchiveQuickSession { session_id, author } => {
+            let author = match resolve_quick_session_actor(author, &state).await {
+                Ok(author) => author,
+                Err(response) => return response,
+            };
+            crate::quick_session_handlers::handle_archive_quick_session(state, session_id, author)
+                .await
+        }
+        Request::UnarchiveQuickSession { session_id, author } => {
+            let author = match resolve_quick_session_actor(author, &state).await {
+                Ok(author) => author,
+                Err(response) => return response,
+            };
+            crate::quick_session_handlers::handle_unarchive_quick_session(state, session_id, author)
+                .await
+        }
         Request::Stop => handle_stop(state).await,
         Request::Onboard {
             git_server,

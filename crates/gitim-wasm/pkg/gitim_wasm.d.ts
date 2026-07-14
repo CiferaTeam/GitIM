@@ -3,6 +3,8 @@
 
 export function appendBoardSection(board: any, section: string, value: string): any;
 
+export function applyQuickSessionTransition(meta: any, transition: any): any;
+
 export function buildRebaseCommitMsg(mappings_json: string, additions_json: string): string;
 
 export function defaultBoard(handler: string, timestamp: string): any;
@@ -21,11 +23,15 @@ export function githubIdentityFromUserJson(user_json: string): any;
 
 export function mergeChannelMeta(local_yaml: string, remote_yaml: string): any;
 
+export function mergeQuickSessionMeta(local: any, remote: any, merged_thread: string, mappings: any, thread_path: string): any;
+
 export function parseBoardMarkdown(markdown: string): any;
 
 export function parseCardMeta(yaml: string): any;
 
 export function parseChannelMeta(yaml: string): any;
+
+export function parseQuickSessionMeta(yaml: string): any;
 
 export function parseThread(text: string): any;
 
@@ -34,6 +40,8 @@ export function parseUserMeta(yaml: string): any;
 export function renumberBatch(batch: string, max_existing: bigint): string;
 
 export function resolveContentPure(additions_json: string, remote_json: string): any;
+
+export function serializeQuickSessionMeta(meta: any): string;
 
 export function setBoardField(board: any, field: string, value: string): any;
 
@@ -59,6 +67,8 @@ export function validateJoin(author: string, targets: any, users: any, members: 
 
 export function validateLeave(author: string, targets: any, users: any, members: any): void;
 
+export function validateQuickSessionId(id: string): void;
+
 export function validateUserMeta(yaml: string): any;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -73,6 +83,10 @@ export interface InitOutput {
     readonly validateJoin: (a: number, b: number, c: any, d: any, e: any) => [number, number];
     readonly validateLeave: (a: number, b: number, c: any, d: any, e: any) => [number, number];
     readonly validateHandler: (a: number, b: number) => [number, number, number, number];
+    readonly validateQuickSessionId: (a: number, b: number) => [number, number];
+    readonly parseQuickSessionMeta: (a: number, b: number) => [number, number, number];
+    readonly serializeQuickSessionMeta: (a: any) => [number, number, number, number];
+    readonly applyQuickSessionTransition: (a: any, b: any) => [number, number, number];
     readonly parseChannelMeta: (a: number, b: number) => [number, number, number];
     readonly parseUserMeta: (a: number, b: number) => [number, number, number];
     readonly validateUserMeta: (a: number, b: number) => [number, number, number];
@@ -95,6 +109,7 @@ export interface InitOutput {
     readonly mergeChannelMeta: (a: number, b: number, c: number, d: number) => [number, number, number];
     readonly buildRebaseCommitMsg: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly resolveContentPure: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly mergeQuickSessionMeta: (a: any, b: any, c: number, d: number, e: any, f: number, g: number) => [number, number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

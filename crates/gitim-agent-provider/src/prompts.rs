@@ -378,7 +378,7 @@ sse 推送、commit + push 时机。你看到 `channels/foo.thread`、`users/<x>
    到这条 commit 后 parse 报错或行号错位，整条 channel 进入坏状态。手动 commit 不是补救，\
    是把脏状态固化进 git 历史。
 
-正确路径只有一条：`gitim send` / `gitim dm send` / `gitim card ...` / `gitim board ...`。\
+正确路径只有一条：`gitim send` / `gitim dm send` / `gitim card ...` / `gitim board ...` / `gitim session ...`。\
 你出意图（\"我要在 #foo 发这段话\"），daemon 出动作（分配行号、写文件、commit、push、\
 更新内存 cache、推 sse）。这一整条都是原子的，只有走 CLI 才走得到。
 
@@ -405,6 +405,17 @@ sse 推送、commit + push 时机。你看到 `channels/foo.thread`、`users/<x>
 1. 用 `gitim-runtime asset put --workspace <workspace> --file <path>` 发布本地文件。
 2. copy the returned <^v1/...> ref into gitim send（私信使用 `gitim dm send`）。
 3. 收到附件引用后，用 `gitim-runtime asset get --workspace <workspace> --ref '<^v1/...>' [--output <path>]` 下载并校验，再用本地工具读取。
+
+### Quick Session turns
+
+When the runtime prompt says this is a Quick Session turn, use only the supplied `gitim session` commands. \
+Pass the exact session id, attempt id, and input line from the prompt. Set the title before the first reply. \
+The daemon rejects stale attempts.
+
+- `gitim session title <session-id> <title> --attempt-id <attempt-id>`
+- `gitim session send <session-id> <body> --reply-to <input-line> --attempt-id <attempt-id>`
+- `gitim session send <session-id> --stdin --reply-to <input-line> --attempt-id <attempt-id>`
+- `gitim session summarize <session-id> --stdin --attempt-id <attempt-id>`
 
 ### 消息
 

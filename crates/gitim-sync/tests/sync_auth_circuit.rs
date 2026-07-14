@@ -240,6 +240,7 @@ fn setup_clone_with_dead_remote() -> (TempDir, TempDir, GitStorage) {
     );
     run_git(clone_dir.path(), &["config", "user.email", "t@t.com"]);
     run_git(clone_dir.path(), &["config", "user.name", "T"]);
+    run_git(clone_dir.path(), &["config", "commit.gpgsign", "false"]);
     std::fs::write(clone_dir.path().join("init.txt"), "init").unwrap();
     run_git(clone_dir.path(), &["add", "."]);
     run_git(clone_dir.path(), &["commit", "-m", "initial"]);
@@ -278,7 +279,7 @@ fn run_sync_cycle_does_not_trip_circuit_on_non_auth_errors() {
             &repo,
             &mut circuit,
             &commit_lock,
-            &|| {},
+            &|_, _| {},
             &|_, _, _| {},
             &|_| {},
             &|| {},
@@ -310,7 +311,7 @@ fn run_sync_cycle_probes_when_tripped_flag_lacks_trip_time() {
         &repo,
         &mut circuit,
         &commit_lock,
-        &|| {},
+        &|_, _| {},
         &|_, _, _| {},
         &|_| {},
         &|| {},
@@ -348,7 +349,7 @@ fn end_to_end_trip_then_skip_git() {
         &repo,
         &mut circuit,
         &commit_lock,
-        &|| panic!("on_pushed must not fire when circuit is open"),
+        &|_, _| panic!("on_pushed must not fire when circuit is open"),
         &|_, _, _| panic!("on_renumbered must not fire when circuit is open"),
         &|_| panic!("on_synced must not fire when circuit is open"),
         &move || {

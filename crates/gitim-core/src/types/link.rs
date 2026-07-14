@@ -1,15 +1,15 @@
 use crate::types::asset::AssetRef;
 use crate::types::handler::Handler;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A link extracted from a message body.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Link {
     pub kind: LinkKind,
     pub raw: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LinkKind {
     Channel {
@@ -24,6 +24,10 @@ pub enum LinkKind {
         card_id: String,
         line_number: Option<u64>,
         label: Option<String>,
+    },
+    QuickSession {
+        session_id: String,
+        line_number: Option<u64>,
     },
     UserProfile {
         handler: Handler,

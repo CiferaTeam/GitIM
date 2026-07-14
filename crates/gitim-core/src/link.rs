@@ -1,4 +1,6 @@
-use crate::types::{validate_card_id, AssetRef, Handler, Link, LinkKind};
+use crate::types::{
+    validate_card_id, validate_quick_session_id, AssetRef, Handler, Link, LinkKind,
+};
 use crate::validator::validate_channel_name;
 use regex::Regex;
 use std::str::FromStr;
@@ -6,6 +8,10 @@ use std::sync::LazyLock;
 
 static LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::preconditions::regex_literal(r"<([#~!])([^>\n]+)>|<\^([^<>\n]+)>"));
+
+static QUICK_SESSION_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    crate::preconditions::regex_literal(r"session:(qs-[0-9A-HJKMNP-TV-Z]{26})(?::L([0-9]{6,}))?")
+});
 
 static MSG_LINK_RE: LazyLock<Regex> =
     LazyLock::new(|| crate::preconditions::regex_literal(r"^(.+):L(\d{6,})$"));
@@ -33,13 +39,61 @@ pub fn extract_links(body: &str) -> Vec<Link> {
             None
         };
         if let Some(kind) = kind {
-            result.push(Link {
-                kind,
-                raw: raw.as_str().to_string(),
-            });
+            result.push((
+                raw.start(),
+                Link {
+                    kind,
+                    raw: raw.as_str().to_string(),
+                },
+            ));
         }
     }
-    result
+    for caps in QUICK_SESSION_LINK_RE.captures_iter(body) {
+        let Some(matched) = caps.get(0) else {
+            continue;
+        };
+        if !valid_quick_session_ref_boundaries(body, matched.start(), matched.end()) {
+            continue;
+        }
+        let session_id = caps[1].to_string();
+        if validate_quick_session_id(&session_id).is_err() {
+            continue;
+        }
+        let line_number = match caps.get(2) {
+            Some(value) => match value.as_str().parse() {
+                Ok(line_number) => Some(line_number),
+                Err(_) => continue,
+            },
+            None => None,
+        };
+        result.push((
+            matched.start(),
+            Link {
+                kind: LinkKind::QuickSession {
+                    session_id,
+                    line_number,
+                },
+                raw: matched.as_str().to_string(),
+            },
+        ));
+    }
+    result.sort_by_key(|(start, _)| *start);
+    result.into_iter().map(|(_, link)| link).collect()
+}
+
+fn valid_quick_session_ref_boundaries(body: &str, start: usize, end: usize) -> bool {
+    let invalid_boundary = |character: char| {
+        character.is_alphanumeric() || matches!(character, '_' | '-' | '/' | '\\')
+    };
+    if body[..start]
+        .chars()
+        .next_back()
+        .is_some_and(invalid_boundary)
+        || body[end..].chars().next().is_some_and(invalid_boundary)
+    {
+        return false;
+    }
+    !body[end..].starts_with(":L")
 }
 
 fn parse_channel_or_message(content: &str) -> Option<LinkKind> {

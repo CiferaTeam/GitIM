@@ -2,13 +2,9 @@
 //! Verify how sync_loop handles non-thread, non-meta files (e.g. cron
 //! `crons/<name>/spec.yaml`) on the rebase-conflict path.
 //!
-//! Context: `sync_loop::sync_with_push` captures `local_additions` via
-//! `diff_unpushed("*.thread")` and `local_metas` via
-//! `changed_files_unpushed("*.meta.yaml")`. If the rebase fails AND both
-//! collections are empty, it currently calls `discard_unpushed()` on the
-//! local clone — which `git reset --hard @{upstream}` blows away the
-//! local commit. For files outside those globs (cron specs, future
-//! protocol additions) this is silent data loss.
+//! `sync_loop::sync_with_push` classifies the local side from merge-base to
+//! HEAD before rebasing. Non-resolvable local objects must remain committed
+//! when a rebase conflict cannot be merged automatically.
 //!
 //! These tests run against the real `run_sync_cycle` entry point — same
 //! code path the daemon hits in production — using a bare repo + two
@@ -19,6 +15,7 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 
+use gitim_core::types::{apply_quick_session_transition, QuickSessionMeta, QuickSessionTransition};
 use gitim_sync::git::GitStorage;
 use gitim_sync::sync_loop::{run_sync_cycle, AuthCircuit};
 use tempfile::TempDir;
@@ -101,7 +98,7 @@ fn drive_one_cycle(repo: &GitStorage) -> bool {
         repo,
         &mut circuit,
         &commit_lock,
-        &move || {
+        &move |_, _| {
             pushed_clone.store(true, std::sync::atomic::Ordering::SeqCst);
         },
         &|_, _, _| {},
@@ -117,6 +114,53 @@ fn drive_one_cycle(repo: &GitStorage) -> bool {
 /// state before and after a sync cycle.
 fn read_or_missing(path: &Path) -> Option<String> {
     std::fs::read_to_string(path).ok()
+}
+
+fn write_quick_session(root: &Path, session_id: &str, archived: bool) {
+    let mut meta = QuickSessionMeta::new(
+        session_id.to_string(),
+        "bob".to_string(),
+        "alice".to_string(),
+        "2026-07-11T00:00:00Z".to_string(),
+    );
+    apply_quick_session_transition(
+        &mut meta,
+        QuickSessionTransition::HumanMessage {
+            actor: "alice".to_string(),
+            line_number: 1,
+            request_id: None,
+            preview: "remote only".to_string(),
+            now: "2026-07-11T00:00:01Z".to_string(),
+        },
+    )
+    .unwrap();
+    if archived {
+        apply_quick_session_transition(
+            &mut meta,
+            QuickSessionTransition::Archive {
+                actor: "alice".to_string(),
+                now: "2026-07-11T00:00:02Z".to_string(),
+            },
+        )
+        .unwrap();
+    }
+    let prefix = if archived {
+        "archive/quick-sessions"
+    } else {
+        "quick-sessions"
+    };
+    let directory = root.join(format!("{prefix}/{session_id}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("session.meta.yaml"),
+        serde_yaml::to_string(&meta).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("discussion.thread"),
+        "[L000001][P000000][@alice][20260711T000001Z] remote only\n",
+    )
+    .unwrap();
 }
 
 // ── Baseline: different non-thread files, no conflict ────────────────
@@ -329,18 +373,8 @@ fn non_thread_conflict_same_file_does_not_silently_drop_local() {
 // `crons/<name>/spec.yaml` (non-thread, non-meta — UNresolvable). A
 // pushes a conflicting append on the same thread first.
 //
-// Pre-fix behaviour (the bug): the rebase fails on the thread side; the
-// guard runs `changed_files_unpushed_all()` AFTER the rebase has already
-// failed, which on a partial-rebase HEAD can return wrong/empty results;
-// `local_additions` from before the rebase is non-empty (the thread side)
-// so the resolvable path runs; `discard_unpushed` does
-// `git reset --hard @{upstream}` and silently destroys the spec.yaml side
-// of the same commit.
-//
-// Post-fix: the unpushed file list is captured BEFORE the rebase. After
-// the rebase fails, the cached list still contains the cron spec; the
-// presence of any non-thread non-meta file forces the bail path
-// (abort_rebase + warn), and B's local commit is preserved intact.
+// The local-side snapshot includes both paths before rebase. The cron path
+// makes the whole commit non-resolvable, so sync aborts and preserves it.
 
 #[test]
 fn mixed_commit_with_thread_conflict_preserves_non_thread_change() {
@@ -436,4 +470,71 @@ fn mixed_commit_with_thread_conflict_preserves_non_thread_change() {
         still_unpushed,
         spec_after.is_some(),
     );
+}
+
+#[test]
+fn remote_only_quick_sessions_do_not_classify_as_local_conflict_work() {
+    let (bare, clone_a, clone_b) = setup_two_clones();
+    let repo_a = GitStorage::new(clone_a.path());
+    let repo_b = GitStorage::new(clone_b.path());
+    let thread_rel = "channels/general.thread";
+
+    std::fs::create_dir_all(clone_a.path().join("channels")).unwrap();
+    let base = "[L000001][P000000][@alice][20260711T100000Z] base\n";
+    std::fs::write(clone_a.path().join(thread_rel), base).unwrap();
+    repo_a
+        .add_and_commit(&[thread_rel], "thread: create base")
+        .unwrap();
+    repo_a.push().unwrap();
+    repo_b.fetch().unwrap();
+    repo_b.rebase_onto_origin().unwrap();
+
+    let remote_thread =
+        format!("{base}[L000002][P000001][@alice][20260711T100100Z] remote append\n");
+    std::fs::write(clone_a.path().join(thread_rel), remote_thread).unwrap();
+    let active_id = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    let archived_id = "qs-01K00000000000000000000000";
+    write_quick_session(clone_a.path(), active_id, false);
+    write_quick_session(clone_a.path(), archived_id, true);
+    run_git(clone_a.path(), &["add", "."]);
+    run_git(
+        clone_a.path(),
+        &["commit", "-m", "remote append and quick sessions"],
+    );
+    run_git(clone_a.path(), &["push"]);
+
+    let local_thread = format!("{base}[L000002][P000001][@bob][20260711T100200Z] local append\n");
+    std::fs::write(clone_b.path().join(thread_rel), local_thread).unwrap();
+    repo_b
+        .add_and_commit(&[thread_rel], "thread: local append")
+        .unwrap();
+
+    assert!(
+        drive_one_cycle(&repo_b),
+        "remote-only Quick Sessions must not block local channel conflict resolution"
+    );
+    assert!(!repo_b.has_stale_rebase_state());
+
+    let verify = TempDir::new().unwrap();
+    run_git(
+        verify.path().parent().unwrap(),
+        &[
+            "clone",
+            bare.path().to_str().unwrap(),
+            verify.path().to_str().unwrap(),
+        ],
+    );
+    assert!(verify
+        .path()
+        .join(format!("quick-sessions/{active_id}/session.meta.yaml"))
+        .exists());
+    assert!(verify
+        .path()
+        .join(format!(
+            "archive/quick-sessions/{archived_id}/session.meta.yaml"
+        ))
+        .exists());
+    let merged = std::fs::read_to_string(verify.path().join(thread_rel)).unwrap();
+    assert!(merged.contains("remote append"));
+    assert!(merged.contains("local append"));
 }

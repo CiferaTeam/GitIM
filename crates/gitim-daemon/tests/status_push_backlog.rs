@@ -36,14 +36,17 @@ async fn status_reports_pending_push_backlog() {
         pending.push(PendingMessage {
             channel: "general".to_string(),
             line_number: 1,
+            commit_id: "commit-1".to_string(),
         });
         pending.push(PendingMessage {
             channel: "general".to_string(),
             line_number: 2,
+            commit_id: "commit-2".to_string(),
         });
         pending.push(PendingMessage {
             channel: "dm:a--b".to_string(),
             line_number: 5,
+            commit_id: "commit-3".to_string(),
         });
     }
 

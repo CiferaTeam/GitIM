@@ -45,6 +45,29 @@ pub struct Session {
     cancel_token: CancellationToken,
 }
 
+/// Scoped hard-cancellation for a provider execution.
+///
+/// Dropping this guard aborts the provider task. Call [`Self::disarm`] only
+/// after the session's final result has been received.
+#[must_use = "dropping the guard aborts the provider execution"]
+pub struct SessionAbortGuard {
+    abort_handle: Option<AbortHandle>,
+}
+
+impl SessionAbortGuard {
+    pub fn disarm(mut self) {
+        self.abort_handle = None;
+    }
+}
+
+impl Drop for SessionAbortGuard {
+    fn drop(&mut self) {
+        if let Some(abort_handle) = self.abort_handle.take() {
+            abort_handle.abort();
+        }
+    }
+}
+
 impl Session {
     pub fn new(
         events: mpsc::Receiver<Event>,
@@ -65,6 +88,16 @@ impl Session {
     /// Use cancel() instead when you need a valid session_token in the ExecResult.
     pub fn abort(&self) {
         self.abort_handle.abort();
+    }
+
+    /// Arm a scoped hard-cancellation guard for this execution.
+    ///
+    /// The guard owns a clone of the task's abort handle, so callers may
+    /// continue moving `events` and `result` out of `Session` as before.
+    pub fn abort_on_drop(&self) -> SessionAbortGuard {
+        SessionAbortGuard {
+            abort_handle: Some(self.abort_handle.clone()),
+        }
     }
 
     /// Gracefully cancel the running execution.
@@ -193,6 +226,29 @@ impl ProviderUsageReport {
             billing: usage.clone(),
             context: usage,
         }
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn scoped_abort_guard_aborts_provider_task_when_dropped() {
+        let (_event_tx, event_rx) = mpsc::channel(1);
+        let (_result_tx, result_rx) = oneshot::channel();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let session = Session::new(
+            event_rx,
+            result_rx,
+            task.abort_handle(),
+            CancellationToken::new(),
+        );
+
+        let guard = session.abort_on_drop();
+        drop(guard);
+
+        assert!(task.await.unwrap_err().is_cancelled());
     }
 }
 

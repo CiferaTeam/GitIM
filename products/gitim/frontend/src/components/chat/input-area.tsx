@@ -6,6 +6,7 @@ import {
   useState,
   type ChangeEvent,
   type ClipboardEvent,
+  type DragEvent,
   type KeyboardEvent,
 } from "react";
 import { create } from "zustand";
@@ -34,6 +35,10 @@ import {
   DialogTitle,
 } from "../ui/dialog";
 import { Button } from "../ui/button";
+import {
+  parseQuickSessionRef,
+  QUICK_SESSION_DRAG_MIME,
+} from "../../lib/quick-session-ref";
 
 /**
  * Routing context for the draft-recipient preview. Required and discriminated
@@ -603,6 +608,49 @@ export function InputArea({
     ? "Attach files"
     : "Attachments require the GitIM Runtime";
 
+  function handleQuickSessionDrop(event: DragEvent<HTMLTextAreaElement>) {
+    const encoded = event.dataTransfer.getData(QUICK_SESSION_DRAG_MIME);
+    if (!encoded) return;
+    event.preventDefault();
+    let payload: { ref?: unknown; workspaceKey?: unknown };
+    try {
+      payload = JSON.parse(encoded) as {
+        ref?: unknown;
+        workspaceKey?: unknown;
+      };
+    } catch {
+      return;
+    }
+    if (
+      payload.workspaceKey !== activeWorkspaceKey ||
+      typeof payload.ref !== "string" ||
+      !parseQuickSessionRef(payload.ref)
+    ) {
+      return;
+    }
+    const ta = textareaRef.current;
+    if (!ta) return;
+    const start = ta.selectionStart ?? text.length;
+    const end = ta.selectionEnd ?? start;
+    const before = text.slice(0, start);
+    const after = text.slice(end);
+    const needsBoundarySpace = (value: string | undefined) =>
+      value !== undefined && /[\p{L}\p{N}_/\\-]/u.test(value);
+    const prefix = needsBoundarySpace(before.at(-1)) ? " " : "";
+    const suffix =
+      needsBoundarySpace(after[0]) || after.startsWith(":L") ? " " : "";
+    const inserted = `${prefix}${payload.ref}${suffix}`;
+    const next = before + inserted + after;
+    setText(next);
+    clearSendError(activeAttachmentKey);
+    localStorage.setItem(draftKey(activeWorkspaceKey, activeScopeKey), next);
+    requestAnimationFrame(() => {
+      const cursor = start + inserted.length;
+      ta.focus();
+      ta.setSelectionRange(cursor, cursor);
+    });
+  }
+
   return (
     <div className="border-t border-border bg-card/60 px-4 py-3 shrink-0">
       {replyTo && (
@@ -655,6 +703,13 @@ export function InputArea({
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
+          onDragOver={(event) => {
+            if (event.dataTransfer.types.includes(QUICK_SESSION_DRAG_MIME)) {
+              event.preventDefault();
+              event.dataTransfer.dropEffect = "copy";
+            }
+          }}
+          onDrop={handleQuickSessionDrop}
           disabled={busy}
           placeholder={resolvedPlaceholder(placeholder, isMobile)}
           enterKeyHint={isMobile ? "enter" : "send"}

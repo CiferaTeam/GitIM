@@ -5,6 +5,7 @@ export type Fragment =
   | { type: "mention"; handler: string }
   | { type: "channel-link"; channel: string }
   | { type: "message-link"; channel: string; line: number }
+  | { type: "session-link"; sessionId: string; line?: number }
   | { type: "card-link"; channel: string; cardId: string; line?: number; label?: string }
   | { type: "user-profile"; handler: string }
   | { type: "external-link"; url: string; title?: string }
@@ -33,12 +34,13 @@ function isValidCardId(s: string): boolean {
 }
 
 // Combined inline pattern — ordered by priority:
-// 1. GitIM links: <[@#~!]content> and asset references
-// 2. Inline code: `code`
-// 3. Bold: **text**
-// 4. Italic: *text* (not part of **)
+// 1. Stable Quick Session refs
+// 2. GitIM links: <[@#~!]content> and asset references
+// 3. Inline code: `code`
+// 4. Bold: **text**
+// 5. Italic: *text* (not part of **)
 const INLINE_RE =
-  /(^|(?<![\w/<]))#([a-z0-9]+(?:-[a-z0-9]+)*)\/([0-9a-f-]{1,20})(?:\s+L(\d+))?|<([#~!@])([^>\n]+)>|<\^([^<>\n]+)>|`([^`\n]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/g;
+  /(?<![\p{L}\p{N}_\x2f\\-])session:(qs-[0-9A-HJKMNP-TV-Z]{26})(?::L(\d{6,}))?(?![\p{L}\p{N}_\x2f\\-]|:L)|(^|(?<![\w/<]))#([a-z0-9]+(?:-[a-z0-9]+)*)\/([0-9a-f-]{1,20})(?:\s+L(\d+))?|<([#~!@])([^>\n]+)>|<\^([^<>\n]+)>|`([^`\n]+)`|\*\*(.+?)\*\*|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)/gu;
 
 function parseGitimLink(prefix: string, content: string): Fragment | null {
   if (prefix === "@") {
@@ -113,6 +115,8 @@ function parseInline(text: string): Fragment[] {
 
     const [
       full,
+      sessionId,
+      sessionLine,
       legacyBoundary,
       legacyChannel,
       legacyCardId,
@@ -125,7 +129,13 @@ function parseInline(text: string): Fragment[] {
       italicContent,
     ] = match;
 
-    if (legacyChannel !== undefined) {
+    if (sessionId !== undefined) {
+      fragments.push({
+        type: "session-link",
+        sessionId,
+        ...(sessionLine !== undefined && { line: parseInt(sessionLine, 10) }),
+      });
+    } else if (legacyChannel !== undefined) {
       if (legacyBoundary) {
         fragments.push({ type: "text", content: legacyBoundary });
       }

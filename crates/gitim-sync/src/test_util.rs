@@ -58,6 +58,11 @@ pub fn configure_git_identity(clone: &Path, user: &str, email: &str) {
         .current_dir(clone)
         .output()
         .unwrap();
+    Command::new("git")
+        .args(["config", "commit.gpgsign", "false"])
+        .current_dir(clone)
+        .output()
+        .unwrap();
 }
 
 /// Write `content` to `clone/name`, stage everything, commit with `msg`.

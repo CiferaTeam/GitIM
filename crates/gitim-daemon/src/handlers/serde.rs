@@ -29,6 +29,15 @@ pub(crate) fn link_to_json(link: &Link) -> serde_json::Value {
             "label": label,
             "raw": link.raw,
         }),
+        LinkKind::QuickSession {
+            session_id,
+            line_number,
+        } => serde_json::json!({
+            "kind": "quick_session",
+            "session_id": session_id,
+            "line_number": line_number,
+            "raw": link.raw,
+        }),
         LinkKind::UserProfile { handler } => serde_json::json!({
             "kind": "user_profile",
             "handler": handler.as_str(),
@@ -132,5 +141,23 @@ mod tests {
             })
         );
         Ok(())
+    }
+
+    #[test]
+    fn serializes_quick_session_link() {
+        let link = Link {
+            raw: "session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ:L000004".to_string(),
+            kind: LinkKind::QuickSession {
+                session_id: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string(),
+                line_number: Some(4),
+            },
+        };
+
+        let json = link_to_json(&link);
+
+        assert_eq!(json["kind"], "quick_session");
+        assert_eq!(json["session_id"], "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ");
+        assert_eq!(json["line_number"], 4);
+        assert_eq!(json["raw"], link.raw);
     }
 }

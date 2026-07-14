@@ -413,6 +413,21 @@ impl GitStorage {
         )))
     }
 
+    /// Return additions introduced by local-only commits since the common
+    /// ancestor with upstream. Remote-only paths are excluded even after a
+    /// fetch makes the two branch tips divergent.
+    pub fn diff_since_merge_base(
+        &self,
+        pattern: &str,
+    ) -> Result<HashMap<PathBuf, String>, GitError> {
+        let merge_base = self.merge_base_with_upstream()?;
+        let range = format!("{merge_base}..HEAD");
+        let output = run_git(&["diff", "--no-renames", &range, "--", pattern], &self.root)?;
+        Ok(Self::parse_diff_output(&String::from_utf8_lossy(
+            &output.stdout,
+        )))
+    }
+
     fn parse_diff_output(stdout: &str) -> HashMap<PathBuf, String> {
         let mut result: HashMap<PathBuf, String> = HashMap::new();
         let mut current_path: Option<PathBuf> = None;
@@ -479,11 +494,13 @@ impl GitStorage {
             .collect())
     }
 
+    pub fn changed_files_since_merge_base_all(&self) -> Result<Vec<PathBuf>, GitError> {
+        let merge_base = self.merge_base_with_upstream()?;
+        self.changed_files_range(&merge_base, "HEAD")
+    }
+
     pub fn changed_files_since_merge_base(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
-        let merge_base_output = run_git(&["merge-base", "@{upstream}", "HEAD"], &self.root)?;
-        let merge_base = String::from_utf8_lossy(&merge_base_output.stdout)
-            .trim()
-            .to_string();
+        let merge_base = self.merge_base_with_upstream()?;
         let range = format!("{}..HEAD", merge_base);
         let output = run_git(
             &["diff", "--name-only", "--no-renames", &range, "--", pattern],
@@ -494,6 +511,11 @@ impl GitStorage {
             .filter(|l| !l.is_empty())
             .map(PathBuf::from)
             .collect())
+    }
+
+    fn merge_base_with_upstream(&self) -> Result<String, GitError> {
+        let output = run_git(&["merge-base", "@{upstream}", "HEAD"], &self.root)?;
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
     pub fn mv(&self, from: &str, to: &str) -> Result<(), GitError> {
@@ -739,6 +761,14 @@ impl GitStorage {
         }
     }
 
+    /// Read a path from the current branch/upstream merge base without
+    /// checking out either side. Conflict resolvers use this to recover the
+    /// common append-only prefix even when one side moved an object.
+    pub fn show_file_at_merge_base(&self, path: &str) -> Result<Option<String>, GitError> {
+        let merge_base = self.merge_base_with_upstream()?;
+        self.show_file_at_ref(&merge_base, path)
+    }
+
     /// `git push --atomic origin <new>:refs/heads/<new> <old>:refs/heads/<old>`.
     /// Both refs update or neither does — this is the rotation arbiter.
     /// A reject classifies through `classify_remote_error` like every other
@@ -957,6 +987,20 @@ pub(crate) fn classify_remote_error(raw_stderr: &str) -> GitError {
 mod tests {
     use super::*;
 
+    fn configure_test_identity(root: &Path, name: &str, email: &str) {
+        for args in [
+            ["config", "user.email", email],
+            ["config", "user.name", name],
+            ["config", "commit.gpgsign", "false"],
+        ] {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .output()
+                .unwrap();
+        }
+    }
+
     #[test]
     fn rate_limit_detection_matches_known_patterns() {
         assert!(is_rate_limited(
@@ -1144,16 +1188,7 @@ mod tests {
             ])
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "a@test.com"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "A"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
+        configure_test_identity(clone_dir.path(), "A", "a@test.com");
         std::fs::write(clone_dir.path().join("seed.txt"), "seed").unwrap();
         std::process::Command::new("git")
             .args(["add", "."])
@@ -1212,16 +1247,7 @@ mod tests {
 
         // Seed a commit so HEAD resolves to something — otherwise
         // symbolic-ref on a freshly-init repo is its own edge case.
-        std::process::Command::new("git")
-            .args(["config", "user.email", "t@test.com"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "T"])
-            .current_dir(dir.path())
-            .output()
-            .unwrap();
+        configure_test_identity(dir.path(), "T", "t@test.com");
         std::fs::write(dir.path().join("seed"), "seed").unwrap();
         std::process::Command::new("git")
             .args(["add", "."])
@@ -1267,16 +1293,7 @@ mod tests {
             ])
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "t@test.com"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "T"])
-            .current_dir(clone_dir.path())
-            .output()
-            .unwrap();
+        configure_test_identity(clone_dir.path(), "T", "t@test.com");
         std::fs::write(clone_dir.path().join("seed"), "seed").unwrap();
         std::process::Command::new("git")
             .args(["add", "."])
@@ -1400,16 +1417,7 @@ mod tests {
             .current_dir(bare_dir.path().parent().unwrap())
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "a@test.com"])
-            .current_dir(clone_a.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "A"])
-            .current_dir(clone_a.path())
-            .output()
-            .unwrap();
+        configure_test_identity(clone_a.path(), "A", "a@test.com");
 
         std::fs::write(clone_a.path().join("init.txt"), "init").unwrap();
         std::process::Command::new("git")
@@ -1437,16 +1445,7 @@ mod tests {
             .current_dir(bare_dir.path().parent().unwrap())
             .output()
             .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.email", "b@test.com"])
-            .current_dir(clone_b.path())
-            .output()
-            .unwrap();
-        std::process::Command::new("git")
-            .args(["config", "user.name", "B"])
-            .current_dir(clone_b.path())
-            .output()
-            .unwrap();
+        configure_test_identity(clone_b.path(), "B", "b@test.com");
 
         std::fs::write(clone_a.path().join("init.txt"), "A's version").unwrap();
         std::process::Command::new("git")

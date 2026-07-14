@@ -10,6 +10,7 @@ pub mod labels;
 pub mod messaging;
 pub mod onboard;
 pub mod project;
+pub mod session;
 pub mod timer;
 pub mod update;
 

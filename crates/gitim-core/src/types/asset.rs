@@ -2,7 +2,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const ASSET_REF_VERSION: u8 = 1;
@@ -86,7 +86,7 @@ pub enum AssetRefError {
     NonCanonical,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetRef {
     pub version: u8,
     pub origin_runtime_id: String,

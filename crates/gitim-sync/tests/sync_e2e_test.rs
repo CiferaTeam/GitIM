@@ -32,6 +32,7 @@ fn run_git(dir: &Path, args: &[&str]) {
 fn setup_git_config(dir: &Path, name: &str, email: &str) {
     run_git(dir, &["config", "user.email", email]);
     run_git(dir, &["config", "user.name", name]);
+    run_git(dir, &["config", "commit.gpgsign", "false"]);
 }
 
 /// Create a bare repo + two clones with an initial commit on main
@@ -417,7 +418,7 @@ fn test_sync_preserves_local_board_after_rebase_conflict() {
         &repo_b,
         &mut circuit,
         &commit_lock,
-        &|| pushed_flag.store(true, Ordering::SeqCst),
+        &|_, _| pushed_flag.store(true, Ordering::SeqCst),
         &|_, _, _| {},
         &|head| *synced_head_flag.lock().unwrap() = Some(head),
         &|| {},
@@ -519,7 +520,7 @@ fn test_sync_keeps_remote_only_board_after_thread_rebase_conflict() {
         &repo_b,
         &mut circuit,
         &commit_lock,
-        &|| pushed_flag.store(true, Ordering::SeqCst),
+        &|_, _| pushed_flag.store(true, Ordering::SeqCst),
         &|_, _, _| {},
         &|_| {},
         &|| {},
@@ -639,7 +640,7 @@ fn test_sync_cycle_recovers_from_mid_rebase_state() {
         &repo_b,
         &mut circuit,
         &commit_lock,
-        &|| {},
+        &|_, _| {},
         &|_, _, _| {},
         &|_head| {},
         &|| cycle_done_flag.store(true, Ordering::SeqCst),

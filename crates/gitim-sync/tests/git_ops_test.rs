@@ -26,8 +26,7 @@ fn setup_repo_pair() -> (TempDir, TempDir, GitStorage) {
     );
 
     // Configure user in clone (needed for commits)
-    run_git(clone_dir.path(), &["config", "user.email", "test@test.com"]);
-    run_git(clone_dir.path(), &["config", "user.name", "Test"]);
+    setup_git_config(clone_dir.path(), "Test", "test@test.com");
 
     // Create initial commit so main branch exists
     let init_file = clone_dir.path().join("init.txt");
@@ -56,6 +55,12 @@ fn run_git(dir: &Path, args: &[&str]) {
     }
 }
 
+fn setup_git_config(dir: &Path, name: &str, email: &str) {
+    run_git(dir, &["config", "user.email", email]);
+    run_git(dir, &["config", "user.name", name]);
+    run_git(dir, &["config", "commit.gpgsign", "false"]);
+}
+
 #[test]
 fn test_fetch_succeeds_with_remote() {
     let (bare_dir, _clone_dir, repo) = setup_repo_pair();
@@ -70,8 +75,7 @@ fn test_fetch_succeeds_with_remote() {
             second_clone.path().to_str().unwrap(),
         ],
     );
-    run_git(second_clone.path(), &["config", "user.email", "b@b.com"]);
-    run_git(second_clone.path(), &["config", "user.name", "B"]);
+    setup_git_config(second_clone.path(), "B", "b@b.com");
     std::fs::write(second_clone.path().join("new.txt"), "data").unwrap();
     run_git(second_clone.path(), &["add", "new.txt"]);
     run_git(second_clone.path(), &["commit", "-m", "remote commit"]);
@@ -174,8 +178,7 @@ fn test_pull_rebase_conflict_leaves_rebase_state_and_discard_recovers() {
             clone_b_dir.path().to_str().unwrap(),
         ],
     );
-    run_git(clone_b_dir.path(), &["config", "user.email", "b@test.com"]);
-    run_git(clone_b_dir.path(), &["config", "user.name", "B"]);
+    setup_git_config(clone_b_dir.path(), "B", "b@test.com");
 
     // Clone A: modify init.txt and push
     std::fs::write(clone_dir.path().join("init.txt"), "A's version").unwrap();
@@ -395,16 +398,7 @@ fn count_commits_on_branch_returns_total_reachable_count() {
         .current_dir(dir.path())
         .status()
         .unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "t@t"])
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "t"])
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
+    setup_git_config(dir.path(), "t", "t@t");
 
     // Make 3 commits.
     for i in 0..3 {
@@ -459,16 +453,7 @@ fn create_orphan_commit_produces_root_commit_on_new_branch() {
         .current_dir(dir.path())
         .status()
         .unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "t@t"])
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "t"])
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
+    setup_git_config(dir.path(), "t", "t@t");
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
     Command::new("git")
         .args(["add", "."])
@@ -550,16 +535,7 @@ fn create_orphan_commit_restores_existing_epoch_yaml_in_head() {
         .current_dir(dir.path())
         .status()
         .unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "t@t"])
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "t"])
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
+    setup_git_config(dir.path(), "t", "t@t");
     // Seed: gitim.epoch.yaml ALREADY exists in HEAD with "ORIGINAL" content.
     std::fs::write(
         dir.path().join("gitim.epoch.yaml"),
@@ -629,8 +605,7 @@ fn clone_from(bare: &TempDir) -> TempDir {
             clone.path().to_str().unwrap(),
         ],
     );
-    run_git(clone.path(), &["config", "user.email", "test@test.com"]);
-    run_git(clone.path(), &["config", "user.name", "Test"]);
+    setup_git_config(clone.path(), "Test", "test@test.com");
     clone
 }
 
@@ -990,16 +965,7 @@ fn write_redirect_commit_appends_to_current_branch() {
         .current_dir(dir.path())
         .status()
         .unwrap();
-    Command::new("git")
-        .args(["config", "user.email", "t@t"])
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
-    Command::new("git")
-        .args(["config", "user.name", "t"])
-        .current_dir(dir.path())
-        .status()
-        .unwrap();
+    setup_git_config(dir.path(), "t", "t@t");
     std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
     Command::new("git")
         .args(["add", "."])

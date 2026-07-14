@@ -1,9 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { SyncResult } from "./sync";
 
 const files = vi.hoisted(() => new Map<string, string>());
 const dirs = vi.hoisted(() => new Map<string, string[]>());
 const commits = vi.hoisted(() => [] as Array<{ filepaths: string[]; message: string }>);
-const runSyncMock = vi.hoisted(() => vi.fn(async () => undefined));
+const runSyncMock = vi.hoisted(() =>
+  vi.fn<() => Promise<SyncResult>>(async () => ({
+    beforeHead: "base",
+    afterHead: "new-head",
+    changed: true,
+    status: "pushed",
+  })),
+);
 const activeFsName = vi.hoisted(() => ({ value: "gitim" }));
 const readdirFailures = vi.hoisted(() => new Map<string, string>());
 
@@ -305,7 +313,12 @@ function seedState() {
   activeFsName.value = "gitim";
   readdirFailures.clear();
   runSyncMock.mockReset();
-  runSyncMock.mockResolvedValue(undefined);
+  runSyncMock.mockResolvedValue({
+    beforeHead: "base",
+    afterHead: "new-head",
+    changed: true,
+    status: "pushed",
+  });
 
   dirs.set("/repo/channels", ["general.meta.yaml", "general.thread"]);
   dirs.set("/repo/channels/general/cards", ["20260317-120000-abc"]);
@@ -392,7 +405,12 @@ describe("daemon-web handlers", () => {
   beforeEach(seedState);
 
   it("initializes an existing cached repo without a token", async () => {
+    const git = vi.mocked(await import("./git"));
     dirs.set("/repo/.git", []);
+    git.resolveHead.mockResolvedValueOnce("local-offline-head");
+    git.resolveRemoteHead.mockRejectedValueOnce(
+      new Error("remote ref unavailable offline"),
+    );
 
     const res = await init({
       workspaceId: "ws_cached",
@@ -410,6 +428,8 @@ describe("daemon-web handlers", () => {
       sync_enabled: false,
       needs_token: true,
     }));
+    expect(getState().headCommit).toBe("local-offline-head");
+    expect(git.fetchOrigin).not.toHaveBeenCalled();
   });
 
   it("users() returns sorted handler list plus additive user_infos with display_name", async () => {
@@ -449,6 +469,58 @@ describe("daemon-web handlers", () => {
 
     expect(res.ok).toBe(true);
     expect(getState().headCommit).toBe("remote-synced-head");
+  });
+
+  it("recovers a missing cached remote baseline before enabling sync", async () => {
+    const git = vi.mocked(await import("./git"));
+    dirs.set("/repo/.git", []);
+    git.resolveHead.mockResolvedValueOnce("local-unsynced-head");
+    git.resolveRemoteHead
+      .mockRejectedValueOnce(new Error("remote ref missing"))
+      .mockResolvedValueOnce("remote-recovered-head");
+
+    const res = await init({
+      workspaceId: "ws_cached",
+      remoteUrl: "https://github.com/acme/room",
+      corsProxy: "https://proxy.example",
+      token: "new-token",
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-ws_cached", repoDir: "/repo" },
+    });
+
+    expect(res.ok).toBe(true);
+    expect(git.fetchOrigin).toHaveBeenCalledWith(
+      "/repo",
+      "https://proxy.example",
+      expect.any(Function),
+    );
+    expect(getState().headCommit).toBe("remote-recovered-head");
+    git.fetchOrigin.mockClear();
+  });
+
+  it("does not enable sync when a cached remote baseline remains unreadable", async () => {
+    const git = vi.mocked(await import("./git"));
+    dirs.set("/repo/.git", []);
+    git.resolveHead.mockResolvedValueOnce("local-unsynced-head");
+    git.resolveRemoteHead
+      .mockRejectedValueOnce(new Error("remote ref missing"))
+      .mockRejectedValueOnce(new Error("remote ref remains unreadable"));
+    const resetCallsBefore = git.resetToRemote.mock.calls.length;
+
+    const res = await init({
+      workspaceId: "ws_cached",
+      remoteUrl: "https://github.com/acme/room",
+      corsProxy: "https://proxy.example",
+      token: "new-token",
+      handler: "lewis",
+      storage: { fsName: "gitim-ws-ws_cached", repoDir: "/repo" },
+    });
+
+    expect(res.ok).toBe(false);
+    expect(res.error).toContain("remote ref remains unreadable");
+    expect(getState().headCommit).toBe("base");
+    expect(git.resetToRemote).toHaveBeenCalledTimes(resetCallsBefore);
+    git.fetchOrigin.mockClear();
   });
 
   it("rejects a cached browser repo when the requested remote changed", async () => {
@@ -1145,8 +1217,11 @@ describe("daemon-web handlers", () => {
   });
 
   it("reports the post-sync commit id for browser board writes", async () => {
-    runSyncMock.mockImplementationOnce(async () => {
-      setState({ headCommit: "rebased-head" });
+    runSyncMock.mockResolvedValueOnce({
+      beforeHead: "base",
+      afterHead: "rebased-head",
+      changed: true,
+      status: "rebased",
     });
 
     const res = await initBoard();
@@ -1158,6 +1233,75 @@ describe("daemon-web handlers", () => {
       status: "committed",
       commit_id: "rebased-head",
       sync_status: "pushed",
+    }));
+  });
+
+  it("reports the local replay commit when a board conflict replay cannot be pushed", async () => {
+    const git = vi.mocked(await import("./git"));
+    runSyncMock.mockImplementationOnce(async () => {
+      setState({ headCommit: "remote-conflict-head" });
+      throw new Error("push offline");
+    });
+    git.resolveHead.mockResolvedValueOnce("replay-board-head");
+
+    const res = await initBoard();
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual(expect.objectContaining({
+      handler: "lewis",
+      path: "showboards/lewis/board.md",
+      status: "committed",
+      commit_id: "replay-board-head",
+      sync_status: "commit_only",
+      sync_error: "push offline",
+    }));
+  });
+
+  it("keeps a board commit local when sync resolves reconnect_required", async () => {
+    runSyncMock.mockResolvedValueOnce({
+      beforeHead: "base",
+      afterHead: "base",
+      changed: false,
+      status: "reconnect_required",
+    });
+
+    const res = await initBoard();
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual(expect.objectContaining({
+      handler: "lewis",
+      path: "showboards/lewis/board.md",
+      status: "committed",
+      commit_id: "new-head",
+      sync_status: "commit_only",
+      sync_error: "Reconnect token to publish the local commit.",
+      error_code: "reconnect_required",
+      needs_token: true,
+    }));
+  });
+
+  it("keeps an epoch-fenced board replay local", async () => {
+    runSyncMock.mockImplementationOnce(async () => {
+      setState({ epochRedirected: true });
+      return {
+        beforeHead: "base",
+        afterHead: "replay-board-head",
+        changed: true,
+        status: "rebased" as const,
+      };
+    });
+
+    const res = await initBoard();
+
+    expect(res.ok).toBe(true);
+    expect(res.data).toEqual(expect.objectContaining({
+      handler: "lewis",
+      path: "showboards/lewis/board.md",
+      status: "committed",
+      commit_id: "replay-board-head",
+      sync_status: "commit_only",
+      sync_error: "Workspace epoch is redirected; the local commit was not published.",
+      error_code: "epoch_redirected",
     }));
   });
 
@@ -1382,6 +1526,122 @@ describe("daemon-web handlers", () => {
         entries: [expect.objectContaining({ line_number: 1, body: "card note" })],
       },
     ]);
+  });
+
+  it("classifies active quick session metadata and transcript changes", async () => {
+    const sessionId = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    dirs.set("/repo/quick-sessions", [sessionId]);
+    dirs.set(`/repo/quick-sessions/${sessionId}`, [
+      "session.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/quick-sessions/${sessionId}/session.meta.yaml`,
+      [
+        `id: ${sessionId}`,
+        "title_source: none",
+        "agent_id: alice",
+        "created_by: lewis",
+        "status: needs_title",
+        "created_at: 20260711T010203Z",
+        "updated_at: 20260711T010203Z",
+        "last_message_preview: hello",
+        "last_human_line: 1",
+        "revision: 2",
+        "",
+      ].join("\n"),
+    );
+    files.set(
+      `/repo/quick-sessions/${sessionId}/discussion.thread`,
+      "[L000001][P000000][@lewis][20260711T010203Z] hello\n",
+    );
+    vi.mocked(await import("./git")).diffTrees.mockResolvedValueOnce([
+      `quick-sessions/${sessionId}/session.meta.yaml`,
+      `quick-sessions/${sessionId}/discussion.thread`,
+    ]);
+    vi.mocked(await import("./git")).resolveHead.mockResolvedValueOnce("next-head");
+
+    const res = await poll("base");
+
+    expect(res.data?.changes).toEqual([
+      {
+        channel: sessionId,
+        kind: "quick_session_meta",
+        entries: [{
+          type: "quick_session_meta",
+          session_id: sessionId,
+          agent_id: "alice",
+          status: "needs_title",
+          revision: 2,
+          recipients: ["alice"],
+        }],
+      },
+      {
+        channel: sessionId,
+        kind: "quick_session_thread",
+        entries: [expect.objectContaining({
+          line_number: 1,
+          body: "hello",
+          recipients: ["alice"],
+        })],
+      },
+    ]);
+  });
+
+  it("emits only quick session transcript entries added since the poll baseline", async () => {
+    const sessionId = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    const threadPath = `quick-sessions/${sessionId}/discussion.thread`;
+    const firstEntry =
+      "[L000001][P000000][@lewis][20260711T010203Z] first\n";
+    const secondEntry =
+      "[L000002][P000001][@lewis][20260711T010303Z] second\n";
+    dirs.set("/repo/quick-sessions", [sessionId]);
+    dirs.set(`/repo/quick-sessions/${sessionId}`, [
+      "session.meta.yaml",
+      "discussion.thread",
+    ]);
+    files.set(
+      `/repo/quick-sessions/${sessionId}/session.meta.yaml`,
+      [
+        `id: ${sessionId}`,
+        "title_source: none",
+        "agent_id: alice",
+        "created_by: lewis",
+        "status: needs_title",
+        "created_at: 20260711T010203Z",
+        "updated_at: 20260711T010303Z",
+        "last_message_preview: second",
+        "last_human_request_id: request-second",
+        "last_human_line: 2",
+        "revision: 3",
+        "",
+      ].join("\n"),
+    );
+    files.set(`/repo/${threadPath}`, firstEntry + secondEntry);
+    const git = vi.mocked(await import("./git"));
+    setState({ headCommit: "worker-sync-baseline" });
+    git.diffTrees.mockResolvedValueOnce([threadPath]);
+    git.resolveHead.mockResolvedValueOnce("local-unpushed-head");
+    git.readFileAtCommit.mockImplementationOnce(async () => firstEntry);
+
+    const res = await poll("caller-baseline");
+
+    expect(res.data?.changes).toEqual([
+      {
+        channel: sessionId,
+        kind: "quick_session_thread",
+        entries: [expect.objectContaining({
+          line_number: 2,
+          body: "second",
+          recipients: ["alice"],
+        })],
+      },
+    ]);
+    expect(git.readFileAtCommit).toHaveBeenCalledWith(
+      "/repo",
+      "caller-baseline",
+      threadPath,
+    );
   });
 
   it("reports archived channel changes from poll", async () => {

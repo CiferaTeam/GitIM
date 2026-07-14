@@ -6,10 +6,16 @@
  */
 import type {
   ApiResponse,
+  ArchiveQuickSessionResponse,
   BoardReadResponse,
   BoardSummary,
   BoardWriteResponse,
   CardStatus,
+  CreateQuickSessionResponse,
+  QuickSessionDetail,
+  QuickSessionListItem,
+  SendQuickSessionMessageResponse,
+  UnarchiveQuickSessionResponse,
 } from "./types";
 import type {
   WorkerRequest,
@@ -123,6 +129,52 @@ export interface UpdateCardPatch {
   status?: CardStatus;
   labels?: string[];
   assignee?: string | null;
+}
+
+export interface CreateQuickSessionInput {
+  session_id: string;
+  agent_id: string;
+  first_message: string;
+}
+
+export interface QuickSessionListQuery {
+  archived?: boolean;
+  agent_id?: string;
+  actionable?: boolean;
+  limit?: number;
+}
+
+export interface ReadQuickSessionQuery {
+  limit?: number;
+  since?: number;
+}
+
+export interface SendQuickSessionInput {
+  body: string;
+  request_id: string;
+}
+
+export interface QuickSessionBackend {
+  createQuickSession(
+    input: CreateQuickSessionInput,
+  ): Promise<ApiResponse<CreateQuickSessionResponse>>;
+  listQuickSessions(
+    query?: QuickSessionListQuery,
+  ): Promise<ApiResponse<{ sessions: QuickSessionListItem[] }>>;
+  readQuickSession(
+    id: string,
+    query?: ReadQuickSessionQuery,
+  ): Promise<ApiResponse<{ session: QuickSessionDetail }>>;
+  sendQuickSessionMessage(
+    id: string,
+    input: SendQuickSessionInput,
+  ): Promise<ApiResponse<SendQuickSessionMessageResponse>>;
+  archiveQuickSession(
+    id: string,
+  ): Promise<ApiResponse<ArchiveQuickSessionResponse>>;
+  unarchiveQuickSession(
+    id: string,
+  ): Promise<ApiResponse<UnarchiveQuickSessionResponse>>;
 }
 
 export interface CardBackend {
@@ -507,6 +559,52 @@ export class LocalBackend implements Backend {
   }
   users(): Promise<ApiResponse> {
     return this.call("users");
+  }
+  createQuickSession(
+    input: CreateQuickSessionInput,
+  ): Promise<ApiResponse<CreateQuickSessionResponse>> {
+    return this.call<CreateQuickSessionResponse>("createQuickSession", input);
+  }
+  listQuickSessions(
+    query: QuickSessionListQuery = {},
+  ): Promise<ApiResponse<{ sessions: QuickSessionListItem[] }>> {
+    return this.call<{ sessions: QuickSessionListItem[] }>(
+      "listQuickSessions",
+      query,
+    );
+  }
+  readQuickSession(
+    id: string,
+    query: ReadQuickSessionQuery = {},
+  ): Promise<ApiResponse<{ session: QuickSessionDetail }>> {
+    return this.call<{ session: QuickSessionDetail }>(
+      "readQuickSession",
+      id,
+      query,
+    );
+  }
+  sendQuickSessionMessage(
+    id: string,
+    input: SendQuickSessionInput,
+  ): Promise<ApiResponse<SendQuickSessionMessageResponse>> {
+    return this.call<SendQuickSessionMessageResponse>(
+      "sendQuickSessionMessage",
+      id,
+      input,
+    );
+  }
+  archiveQuickSession(
+    id: string,
+  ): Promise<ApiResponse<ArchiveQuickSessionResponse>> {
+    return this.call<ArchiveQuickSessionResponse>("archiveQuickSession", id);
+  }
+  unarchiveQuickSession(
+    id: string,
+  ): Promise<ApiResponse<UnarchiveQuickSessionResponse>> {
+    return this.call<UnarchiveQuickSessionResponse>(
+      "unarchiveQuickSession",
+      id,
+    );
   }
   listBoards(): Promise<ApiResponse<{ boards: BoardSummary[] }>> {
     return this.call("listBoards");

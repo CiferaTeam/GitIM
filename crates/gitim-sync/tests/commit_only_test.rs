@@ -33,6 +33,7 @@ fn add_and_commit_only_as_ignores_unrelated_staged_files() {
     git(root, &["init"]);
     git(root, &["config", "user.name", "test"]);
     git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
     fs::write(root.join("board.md"), "v1\n").unwrap();
     fs::write(root.join("other.txt"), "v1\n").unwrap();
     git(root, &["add", "."]);

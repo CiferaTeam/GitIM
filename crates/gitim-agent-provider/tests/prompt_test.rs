@@ -223,6 +223,26 @@ fn gitim_api_exposes_card_and_archive_commands() {
 }
 
 #[test]
+fn prompts_expose_quick_session_turn_contract() {
+    let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+    let api = provider.prompt_gitim_api(&ctx);
+
+    assert!(api.contains("Quick Session"));
+    assert!(api.contains("gitim session title"));
+    assert!(api.contains("gitim session send"));
+    assert!(api.contains("gitim session summarize"));
+    assert!(api.contains("exact session id, attempt id, and input line"));
+    assert!(api.contains("Set the title before the first reply"));
+    assert!(api.contains("rejects stale attempts"));
+    assert!(api.contains("commands. Pass"));
+    assert!(api.contains("reply. The"));
+}
+
+#[test]
 fn gitim_api_exposes_board_commands() {
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {

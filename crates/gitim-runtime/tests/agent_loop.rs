@@ -4,8 +4,25 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use gitim_agent_provider::{mock::MockProvider, ExecOptions, Provider, ProviderError, Session};
+use gitim_core::responses::{
+    ClaimQuickSessionTurnResponse, ListQuickSessionsResponse, MarkQuickSessionErrorResponse,
+    ReadQuickSessionResponse,
+};
+use gitim_core::types::QuickSessionStatus;
 use gitim_runtime::agent_loop::detect_steering_trigger;
+use gitim_runtime::agent_loop::{
+    plan_cycle_turns, should_scan_quick_sessions, split_quick_session_changes, CycleTurn,
+    QuickSessionQueue,
+};
 use gitim_runtime::poller::ChannelChange;
+use gitim_runtime::quick_session_executor::QuickSessionBackend;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::UnixListener;
 
 fn make_entry(author: &str, body: &str) -> serde_json::Value {
     serde_json::json!({
@@ -26,6 +43,229 @@ fn make_changes(entries: Vec<(&str, &str)>) -> Vec<ChannelChange> {
             .map(|(author, body)| make_entry(author, body))
             .collect(),
     }]
+}
+
+#[derive(Default)]
+struct FailingRecoveryBackend {
+    list_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait]
+impl QuickSessionBackend for FailingRecoveryBackend {
+    async fn list(
+        &self,
+        _agent_id: &str,
+        _actionable: bool,
+        _status: Option<QuickSessionStatus>,
+    ) -> Result<ListQuickSessionsResponse, String> {
+        self.list_calls.fetch_add(1, Ordering::SeqCst);
+        Err("injected recovery scan failure".to_string())
+    }
+
+    async fn read(&self, _session_id: &str) -> Result<ReadQuickSessionResponse, String> {
+        Err("unexpected read".to_string())
+    }
+
+    async fn read_since(
+        &self,
+        _session_id: &str,
+        _since: u64,
+        _limit: usize,
+    ) -> Result<ReadQuickSessionResponse, String> {
+        Err("unexpected read_since".to_string())
+    }
+
+    async fn claim(
+        &self,
+        _session_id: &str,
+        _input_line: u64,
+        _attempt_id: &str,
+    ) -> Result<ClaimQuickSessionTurnResponse, String> {
+        Err("unexpected claim".to_string())
+    }
+
+    async fn mark_error(
+        &self,
+        _session_id: &str,
+        _attempt_id: &str,
+        _error: &str,
+    ) -> Result<MarkQuickSessionErrorResponse, String> {
+        Err("unexpected mark_error".to_string())
+    }
+}
+
+struct RecordingPrimaryProvider {
+    prompts: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl Provider for RecordingPrimaryProvider {
+    async fn execute(&self, prompt: &str, opts: ExecOptions) -> Result<Session, ProviderError> {
+        self.prompts.lock().unwrap().push(prompt.to_string());
+        MockProvider::with_response("done".to_string())
+            .execute(prompt, opts)
+            .await
+    }
+}
+
+fn spawn_poll_daemon(repo_root: &std::path::Path) -> tokio::task::JoinHandle<()> {
+    let run_dir = repo_root.join(".gitim/run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let socket_path = run_dir.join("gitim.sock");
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = UnixListener::bind(socket_path).unwrap();
+    tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let (reader, mut writer) = stream.into_split();
+                let mut line = String::new();
+                if BufReader::new(reader)
+                    .read_line(&mut line)
+                    .await
+                    .unwrap_or(0)
+                    == 0
+                {
+                    return;
+                }
+                let request: serde_json::Value = serde_json::from_str(&line).unwrap();
+                let since = request["since"].as_str();
+                let changes = if since == Some("cursor-0") {
+                    serde_json::json!([{
+                        "channel": "general",
+                        "kind": "message",
+                        "entries": [{
+                            "author": "alice",
+                            "body": "primary survives recovery failure",
+                            "line_number": 1,
+                            "point_to": 0,
+                            "timestamp": "2026-07-11T00:00:00Z",
+                            "recipients": ["bot"]
+                        }]
+                    }])
+                } else {
+                    serde_json::json!([])
+                };
+                let mut response = serde_json::json!({
+                    "ok": true,
+                    "data": { "commit_id": "cursor-1", "changes": changes }
+                })
+                .to_string();
+                response.push('\n');
+                writer.write_all(response.as_bytes()).await.unwrap();
+            });
+        }
+    })
+}
+
+#[tokio::test]
+async fn polled_primary_batch_executes_once_when_recovery_scan_fails() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path().join("bot");
+    std::fs::create_dir_all(repo_root.join(".gitim")).unwrap();
+    std::fs::write(repo_root.join(".gitim/me.json"), r#"{"handler":"bot"}"#).unwrap();
+    gitim_runtime::AgentState {
+        cursor: Some("cursor-0".to_string()),
+        ..gitim_runtime::AgentState::default()
+    }
+    .save(&repo_root)
+    .unwrap();
+    let daemon = spawn_poll_daemon(&repo_root);
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut agent_loop =
+        gitim_runtime::AgentLoop::with_provider(&repo_root, "mock", "bot").unwrap();
+    agent_loop.replace_provider_for_test(Box::new(RecordingPrimaryProvider {
+        prompts: prompts.clone(),
+    }));
+    let recovery = Arc::new(FailingRecoveryBackend::default());
+    agent_loop.set_quick_session_backend_for_test(recovery.clone());
+
+    assert!(agent_loop.run_once().await.unwrap());
+    assert!(recovery.list_calls.load(Ordering::SeqCst) > 0);
+    assert!(!agent_loop.run_once().await.unwrap());
+
+    let prompts = prompts.lock().unwrap();
+    assert_eq!(prompts.len(), 1);
+    assert!(prompts[0].contains("primary survives recovery failure"));
+    assert_eq!(
+        gitim_runtime::AgentState::load(&repo_root)
+            .unwrap()
+            .cursor
+            .as_deref(),
+        Some("cursor-1")
+    );
+    daemon.abort();
+}
+
+#[test]
+fn quick_session_changes_are_not_formatted_into_primary_prompt() {
+    let quick_change = ChannelChange {
+        channel: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string(),
+        kind: "quick_session_thread".to_string(),
+        entries: vec![serde_json::json!({
+            "author": "alice",
+            "body": "private quick work",
+            "recipients": ["bot"]
+        })],
+    };
+    assert!(gitim_runtime::format_changes_as_prompt(
+        &[ChannelChange {
+            channel: quick_change.channel.clone(),
+            kind: quick_change.kind.clone(),
+            entries: quick_change.entries.clone(),
+        }],
+        "bot"
+    )
+    .is_none());
+    let changes = vec![
+        quick_change,
+        make_changes(vec![("alice", "normal channel work")]).remove(0),
+    ];
+
+    let (primary, quick_ids) = split_quick_session_changes(changes, "bot");
+    let prompt = gitim_runtime::format_changes_as_prompt(&primary, "bot").unwrap();
+    assert!(prompt.contains("normal channel work"));
+    assert!(!prompt.contains("private quick work"));
+    assert_eq!(quick_ids, vec!["qs-01JZZZZZZZZZZZZZZZZZZZZZZZ"]);
+}
+
+#[test]
+fn quick_session_ids_enqueue_once_in_fifo_order() {
+    let mut queue = QuickSessionQueue::default();
+    queue.enqueue("qs-a".to_string());
+    queue.enqueue("qs-b".to_string());
+    queue.enqueue("qs-a".to_string());
+    assert_eq!(queue.pop(), Some("qs-a".to_string()));
+    assert_eq!(queue.pop(), Some("qs-b".to_string()));
+    assert_eq!(queue.pop(), None);
+}
+
+#[test]
+fn primary_turn_runs_before_one_quick_session_turn() {
+    let mut queue = QuickSessionQueue::default();
+    queue.enqueue("qs-a".to_string());
+    queue.enqueue("qs-b".to_string());
+    assert_eq!(
+        plan_cycle_turns(Some("primary".to_string()), &mut queue),
+        vec![
+            CycleTurn::Primary("primary".to_string()),
+            CycleTurn::Quick("qs-a".to_string())
+        ]
+    );
+    assert_eq!(queue.pop(), Some("qs-b".to_string()));
+}
+
+#[test]
+fn quick_session_recovery_scan_cadence_is_never_faster_than_sixty_seconds() {
+    let start = std::time::Instant::now();
+    assert!(!should_scan_quick_sessions(
+        Some(start),
+        start + std::time::Duration::from_secs(59)
+    ));
+    assert!(should_scan_quick_sessions(
+        Some(start),
+        start + std::time::Duration::from_secs(60)
+    ));
+    assert!(should_scan_quick_sessions(None, start));
 }
 
 #[test]

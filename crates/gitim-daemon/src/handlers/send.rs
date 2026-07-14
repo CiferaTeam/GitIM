@@ -209,15 +209,10 @@ pub async fn handle_send(
             }
         };
 
-    // Local commit is the ack point. Drop the commit lock so the next
-    // writer can proceed; push is sync_loop's responsibility and runs
-    // out-of-band from this response.
-    drop(write_guard);
-
     // Track the message in pending_push so sync_loop can emit a
     // MessagesPushed event once it lands on the remote (consumed by
     // SSE-driven UIs and by sync_loop's renumber bookkeeping).
-    {
+    if let Some(commit_id) = commit_id.as_ref() {
         let mut pending = state
             .pending_push
             .write()
@@ -225,8 +220,13 @@ pub async fn handle_send(
         pending.push(PendingMessage {
             channel: thread_name.clone(),
             line_number: next_line,
+            commit_id: commit_id.clone(),
         });
     }
+
+    // Local commit is the ack point. The pending watermark is installed
+    // before releasing the commit lock so push confirmation cannot pass it.
+    drop(write_guard);
 
     // Invalidate cache
     state.thread_cache.write().await.remove(&thread_name);

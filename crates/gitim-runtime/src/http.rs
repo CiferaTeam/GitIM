@@ -304,6 +304,20 @@ struct AgentAddResponse {
 /// `workspace_id` always carries the originating workspace's slug so SSE
 /// subscribers can route or filter events. Events are published on the
 /// workspace-scoped `broadcast::Sender` held in `WorkspaceContext`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivityScope {
+    #[default]
+    AgentMain,
+    QuickSession,
+}
+
+impl ActivityScope {
+    pub fn is_main(&self) -> bool {
+        matches!(self, Self::AgentMain)
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AgentActivityEvent {
     pub agent_id: String,
@@ -311,6 +325,18 @@ pub struct AgentActivityEvent {
     pub event_type: String, // "tool_use", "thinking", "done", "error", "usage", "burned"
     pub detail: String,
     pub timestamp: String, // ISO8601
+    #[serde(default, skip_serializing_if = "ActivityScope::is_main")]
+    pub scope: ActivityScope,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_generation: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -764,6 +790,59 @@ fn api_response_to_json(
     }
 }
 
+fn typed_api_response_to_json<T: Serialize>(
+    result: Result<T, gitim_client::ClientError>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use gitim_client::ClientError;
+    match result {
+        Ok(data) => match serde_json::to_value(data) {
+            Ok(data) => Json(gitim_client::ApiResponse {
+                ok: true,
+                data: Some(data),
+                error: None,
+                error_code: None,
+            })
+            .into_response(),
+            Err(error) => Json(ErrorBody::new(format!(
+                "failed to serialize daemon response: {error}"
+            )))
+            .into_response(),
+        },
+        Err(ClientError::Api { message, code }) => {
+            let body = match code {
+                Some(code) => ErrorBody::with_code(message, code),
+                None => ErrorBody::new(message),
+            };
+            Json(body).into_response()
+        }
+        Err(error) => Json(ErrorBody::new(error.to_string())).into_response(),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn quick_session_client(
+    state: &SharedRuntimeState,
+    slug: &str,
+) -> Result<GitimClient, axum::response::Response> {
+    match with_workspace_snapshot(state, slug, human_repo_path)? {
+        Some(path) => Ok(GitimClient::new(&path)),
+        None => Err(human_not_initialized()),
+    }
+}
+
+#[allow(clippy::result_large_err)]
+fn validate_quick_session_workspace_slug(slug: &str) -> Result<(), axum::response::Response> {
+    use axum::response::IntoResponse;
+    crate::slug::validate(slug).map_err(|error| {
+        (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorBody::new(format!("invalid slug: {error}"))),
+        )
+            .into_response()
+    })
+}
+
 // -- /im/me --
 
 async fn im_me(
@@ -991,6 +1070,190 @@ async fn im_users(
         Err(e) => return e,
     };
     api_response_to_json(client.list_users().await)
+}
+
+// -- /im/quick-sessions --
+
+#[derive(Deserialize)]
+struct CreateQuickSessionRequest {
+    session_id: String,
+    agent_id: String,
+    first_message: String,
+}
+
+#[derive(Deserialize)]
+struct ListQuickSessionsQuery {
+    #[serde(default)]
+    archived: bool,
+    #[serde(default)]
+    agent_id: Option<String>,
+    #[serde(default)]
+    actionable: bool,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct ReadQuickSessionQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    since: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct SendQuickSessionMessageRequest {
+    body: String,
+    #[serde(default)]
+    request_id: Option<String>,
+}
+
+async fn im_create_quick_session(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    Json(request): Json<CreateQuickSessionRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let client = match quick_session_client(&state, &slug) {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    let users_response = match client.list_users().await {
+        Ok(response) => response,
+        Err(error) => return Json(ErrorBody::new(error.to_string())).into_response(),
+    };
+    if !users_response.ok {
+        return api_response_to_json(Ok(users_response));
+    }
+    let users = match users_response.parse_data::<gitim_core::responses::ListUsersResponse>() {
+        Ok(users) => users,
+        Err(error) => return Json(ErrorBody::new(error.to_string())).into_response(),
+    };
+    if !users
+        .users
+        .iter()
+        .any(|handler| handler == &request.agent_id)
+    {
+        return Json(ErrorBody::with_code(
+            format!("quick session agent @{} is not active", request.agent_id),
+            "quick_session_agent_not_found",
+        ))
+        .into_response();
+    }
+    typed_api_response_to_json(
+        client
+            .create_quick_session(
+                &request.session_id,
+                &request.agent_id,
+                &request.first_message,
+            )
+            .await,
+    )
+}
+
+async fn im_list_quick_sessions(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Query(query): axum::extract::Query<ListQuickSessionsQuery>,
+) -> axum::response::Response {
+    let client = match quick_session_client(&state, &slug) {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    typed_api_response_to_json(
+        client
+            .list_quick_sessions(
+                query.archived,
+                query.agent_id.as_deref(),
+                query.actionable,
+                query.limit,
+            )
+            .await,
+    )
+}
+
+async fn im_read_quick_session(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, session_id)): axum::extract::Path<(String, String)>,
+    axum::extract::Query(query): axum::extract::Query<ReadQuickSessionQuery>,
+) -> axum::response::Response {
+    if let Err(response) = validate_quick_session_workspace_slug(&slug) {
+        return response;
+    }
+    let client = match quick_session_client(&state, &slug) {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    typed_api_response_to_json(
+        client
+            .read_quick_session(&session_id, query.limit, query.since)
+            .await,
+    )
+}
+
+async fn im_send_quick_session_message(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, session_id)): axum::extract::Path<(String, String)>,
+    Json(request): Json<SendQuickSessionMessageRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if let Err(response) = validate_quick_session_workspace_slug(&slug) {
+        return response;
+    }
+    let request_id = match request
+        .request_id
+        .as_deref()
+        .filter(|request_id| !request_id.trim().is_empty())
+    {
+        Some(request_id) => request_id,
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(ErrorBody::with_code(
+                    "quick session request_id is required",
+                    "invalid_quick_session_request_id",
+                )),
+            )
+                .into_response();
+        }
+    };
+    let client = match quick_session_client(&state, &slug) {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    typed_api_response_to_json(
+        client
+            .send_quick_session_message(&session_id, &request.body, None, Some(request_id), None)
+            .await,
+    )
+}
+
+async fn im_archive_quick_session(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, session_id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    if let Err(response) = validate_quick_session_workspace_slug(&slug) {
+        return response;
+    }
+    let client = match quick_session_client(&state, &slug) {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    typed_api_response_to_json(client.archive_quick_session(&session_id).await)
+}
+
+async fn im_unarchive_quick_session(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::Path((slug, session_id)): axum::extract::Path<(String, String)>,
+) -> axum::response::Response {
+    if let Err(response) = validate_quick_session_workspace_slug(&slug) {
+        return response;
+    }
+    let client = match quick_session_client(&state, &slug) {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    typed_api_response_to_json(client.unarchive_quick_session(&session_id).await)
 }
 
 // -- /im/thread --
@@ -4803,6 +5066,12 @@ pub(crate) async fn cleanup_agent_runtime_side(
         event_type: "burned".to_string(),
         detail: format!("agent @{agent_id} departed the workspace"),
         timestamp: chrono::Utc::now().to_rfc3339(),
+        scope: ActivityScope::default(),
+        session_id: None,
+        r#ref: None,
+        session_revision: None,
+        attempt_id: None,
+        context_generation: None,
     });
 
     Ok(())
@@ -5388,6 +5657,12 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                 event_type: "error".to_string(),
                 detail: msg.clone(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
+                scope: ActivityScope::default(),
+                session_id: None,
+                r#ref: None,
+                session_revision: None,
+                attempt_id: None,
+                context_generation: None,
             });
             let mut s = crate::preconditions::arc_mutex_lock(&state);
             match s.workspaces.get_mut(slug) {
@@ -6798,6 +7073,26 @@ fn build_router_with_asset_router(
         .route("/im/read", post(im_read))
         .route("/im/poll", post(im_poll))
         .route("/im/users", get(im_users))
+        .route(
+            "/im/quick-sessions",
+            get(im_list_quick_sessions).post(im_create_quick_session),
+        )
+        .route(
+            "/im/quick-sessions/{session_id}",
+            get(im_read_quick_session),
+        )
+        .route(
+            "/im/quick-sessions/{session_id}/messages",
+            post(im_send_quick_session_message),
+        )
+        .route(
+            "/im/quick-sessions/{session_id}/archive",
+            post(im_archive_quick_session),
+        )
+        .route(
+            "/im/quick-sessions/{session_id}/unarchive",
+            post(im_unarchive_quick_session),
+        )
         .route("/im/thread", post(im_thread))
         .route("/im/boards", get(im_list_boards))
         .route("/im/boards/{handler}", get(im_show_board))
@@ -7319,6 +7614,11 @@ mod tests {
         let (router, state) = create_router();
         // 模拟启动期注入
         state.lock().unwrap().runtime_id = "test-runtime-id-1234".to_string();
+        state
+            .lock()
+            .unwrap()
+            .usage_save_failures
+            .store(7, std::sync::atomic::Ordering::Relaxed);
 
         let resp = router
             .oneshot(
@@ -7341,6 +7641,7 @@ mod tests {
         assert_eq!(body["service"], "gitim-runtime");
         // epoch observability: empty array when no workspaces registered
         assert_eq!(body["workspace_epochs"], serde_json::json!([]));
+        assert_eq!(body["usage_save_failures"], 7);
     }
 
     #[tokio::test]

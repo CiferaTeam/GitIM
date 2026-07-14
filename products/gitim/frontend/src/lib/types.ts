@@ -196,6 +196,8 @@ export interface AgentActivityEvent {
   // mis-labelling it as an error.
   event_type:
     | "tool_use"
+    | "stream"
+    | "status"
     | "thinking"
     | "done"
     | "error"
@@ -206,6 +208,13 @@ export interface AgentActivityEvent {
     | "retrying";
   detail: string;
   timestamp: string; // ISO8601
+  /** Missing means the agent's primary provider context. */
+  scope?: "agent_main" | "quick_session";
+  session_id?: string;
+  ref?: string;
+  session_revision?: number;
+  attempt_id?: string;
+  context_generation?: number;
 }
 
 export type FleetNodeConnectionStatus = "connecting" | "connected" | "down";
@@ -315,7 +324,9 @@ export type PollChangeKind =
   | "dm"
   | "board"
   | "card_meta"
-  | "card_thread";
+  | "card_thread"
+  | "quick_session_meta"
+  | "quick_session_thread";
 
 export interface PollChange {
   channel: string;
@@ -329,6 +340,88 @@ export interface PollResponse {
   reset?: boolean;
   sync_enabled?: boolean;
   needs_token?: boolean;
+}
+
+export type QuickSessionStatus =
+  | "needs_title"
+  | "running"
+  | "active"
+  | "error"
+  | "archived";
+
+export type QuickSessionTitleSource = "none" | "api_set";
+
+export interface QuickSessionMeta {
+  id: string;
+  title?: string;
+  title_source: QuickSessionTitleSource;
+  agent_id: string;
+  created_by: string;
+  status: QuickSessionStatus;
+  created_at: string;
+  updated_at: string;
+  archived_at?: string;
+  archived_from?: QuickSessionStatus;
+  summary?: string;
+  summary_updated_at?: string;
+  last_message_preview: string;
+  error?: string;
+  processing_input_line?: number;
+  processing_started_at?: string;
+  attempt_id?: string;
+  last_completed_attempt_id?: string;
+  last_completed_input_line?: number;
+  last_completed_line?: number;
+  last_failed_attempt_id?: string;
+  last_human_request_id?: string;
+  last_human_line?: number;
+  revision: number;
+}
+
+export interface QuickSessionListItem {
+  id: string;
+  title: string | null;
+  agent_id: string;
+  created_by: string;
+  status: QuickSessionStatus;
+  updated_at: string;
+  last_message_preview: string;
+  revision: number;
+  archived: boolean;
+  ref: string;
+}
+
+export interface QuickSessionDetail {
+  meta: QuickSessionMeta;
+  entries: Message[];
+  archived: boolean;
+}
+
+export interface CreateQuickSessionResponse {
+  session: QuickSessionDetail;
+  line_number: number;
+  ref: string;
+}
+
+export interface SendQuickSessionMessageResponse {
+  session_id: string;
+  line_number: number;
+  status: QuickSessionStatus;
+  revision: number;
+  ref: string;
+}
+
+export interface ArchiveQuickSessionResponse {
+  session_id: string;
+  status: QuickSessionStatus;
+  revision: number;
+  archived_at: string;
+}
+
+export interface UnarchiveQuickSessionResponse {
+  session_id: string;
+  status: QuickSessionStatus;
+  revision: number;
 }
 
 export type CardStatus = "todo" | "doing" | "done";

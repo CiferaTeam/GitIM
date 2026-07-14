@@ -9,6 +9,11 @@ import { isAuthFailure } from "./auth-errors";
 import { validateHandler } from "./paths";
 import { withRepoLock } from "./repo-lock";
 import { ensureWasmReady } from "./wasm-ready";
+import {
+  mergeQuickSessionMeta,
+  parseQuickSessionMeta,
+  serializeQuickSessionMeta,
+} from "gitim-wasm";
 
 interface RunSyncOptions {
   forceNewCycle?: boolean;
@@ -45,9 +50,60 @@ function boardHandlerFromPath(path: string): string | null {
   return validateHandler(match[1]) ? null : match[1];
 }
 
+interface QuickSessionChangedPaths {
+  id: string;
+  activeMetaPath?: string;
+  activeThreadPath?: string;
+  archivedMetaPath?: string;
+  archivedThreadPath?: string;
+}
+
+interface QuickSessionMove {
+  targetMetaPath: string;
+  targetThreadPath: string;
+  sourceMetaPath: string;
+  sourceThreadPath: string;
+  targetMeta: string;
+  targetThread: string;
+  commitMessage: string;
+}
+
+interface QuickSessionRelocation {
+  targetMetaPath: string;
+  targetThreadPath: string;
+  sourceMetaPath: string;
+  sourceThreadPath: string;
+}
+
+function quickSessionFileFromPath(path: string): {
+  archived: boolean;
+  id: string;
+  file: "meta" | "thread";
+} | null {
+  const match = /^(archive\/)?quick-sessions\/([^/]+)\/(session\.meta\.yaml|discussion\.thread)$/.exec(
+    path,
+  );
+  if (!match) return null;
+  return {
+    archived: match[1] !== undefined,
+    id: match[2],
+    file: match[3] === "session.meta.yaml" ? "meta" : "thread",
+  };
+}
+
 function parentPath(path: string): string {
   const idx = path.lastIndexOf("/");
   return idx <= 0 ? "/" : path.slice(0, idx);
+}
+
+function quickSessionPairState(
+  meta: string | null,
+  thread: string | null,
+  description: string,
+): "present" | "absent" {
+  if (meta === null && thread === null) return "absent";
+  if (meta !== null && thread !== null) return "present";
+  throw new Error(`${description} transaction is incomplete`);
 }
 
 async function mkdirp(
@@ -108,10 +164,10 @@ async function runSyncOnce(): Promise<SyncResult> {
 }
 
 /** Epoch fence, browser edition. Reads the working tree's
- *  gitim.epoch.yaml after a sync brought remote state in; a redirected
- *  status latches `epochRedirected` (write handlers refuse from then on)
- *  and parks syncStatus on "epoch_redirected" for the UI banner.
- *  Returns true when latched. */
+ *  gitim.epoch.yaml before publishing local work and after remote state is
+ *  materialized. A redirected status latches `epochRedirected` (write
+ *  handlers refuse from then on) and parks syncStatus on "epoch_redirected"
+ *  for the UI banner. Returns true when latched. */
 async function detectEpochRedirect(repoDir: string): Promise<boolean> {
   try {
     const { readFile } = await import("./storage");
@@ -130,6 +186,7 @@ async function detectEpochRedirect(repoDir: string): Promise<boolean> {
 async function runSyncOnceLocked(): Promise<SyncResult> {
   const s = getState();
   const beforeHead = s.headCommit;
+  let rollbackHead: string | null = null;
   if (!s.token) {
     setState({ syncStatus: "reconnect_required" });
     postReconnectRequired(beforeHead);
@@ -142,8 +199,13 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
 
     // 1. Try push first (fast path: no conflicts)
     const localHead = await gitOps.resolveHead(s.repoDir);
+    const workingTreeRedirected = await detectEpochRedirect(s.repoDir);
+    if (s.epochRedirected || workingTreeRedirected) {
+      setState({ epochRedirected: true, syncStatus: "epoch_redirected" });
+      return syncResult(beforeHead, localHead, "idle");
+    }
 
-    if (localHead !== s.headCommit && !s.epochRedirected) {
+    if (localHead !== s.headCommit) {
       try {
         await gitOps.push(s.repoDir, s.corsProxy, onAuth, s.defaultBranch);
         setState({ headCommit: localHead, syncStatus: "idle" });
@@ -179,18 +241,269 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     //    Collect append-only thread additions, reset to remote, then re-apply
     //    with renumbering. Non-thread conflicts fail safe: keep local commits
     //    in place and surface sync error instead of silently dropping changes.
+    const replayBase = await gitOps.findMergeBase(
+      s.repoDir,
+      localHead,
+      remoteHead,
+    );
     const changedFiles = await gitOps.diffTrees(
       s.repoDir,
-      s.headCommit,
+      replayBase,
       localHead,
     );
 
-    const { readFile } = await import("./storage");
-    const { extractThreadAdditions } = await import("./conflict");
+    const { exists, readFile } = await import("./storage");
+    const { extractThreadAdditions, resolveConflicts } = await import(
+      "./conflict"
+    );
     const localAdditions: Record<string, string> = {};
     const remoteContents: Record<string, string> = {};
     const localBoards: Record<string, string> = {};
+    const quickSessionPaths = new Set<string>();
+    const quickSessionChanges = new Map<string, QuickSessionChangedPaths>();
+
     for (const fp of changedFiles) {
+      const quickFile = quickSessionFileFromPath(fp);
+      if (!quickFile) {
+        if (
+          fp.startsWith("quick-sessions/") ||
+          fp.startsWith("archive/quick-sessions/")
+        ) {
+          throw new Error(`Cannot auto-merge local browser sync change: ${fp}`);
+        }
+        continue;
+      }
+      quickSessionPaths.add(fp);
+      const changed = quickSessionChanges.get(quickFile.id) ?? {
+        id: quickFile.id,
+      };
+      if (quickFile.archived) {
+        if (quickFile.file === "meta") changed.archivedMetaPath = fp;
+        else changed.archivedThreadPath = fp;
+      } else if (quickFile.file === "meta") {
+        changed.activeMetaPath = fp;
+      } else {
+        changed.activeThreadPath = fp;
+      }
+      quickSessionChanges.set(quickFile.id, changed);
+    }
+
+    const quickSessionMerges: Array<{
+      metaPath: string;
+      threadPath: string;
+      localMeta: string;
+      baseMeta: string;
+      remoteMeta: string;
+      remoteThread: string;
+    }> = [];
+    const quickSessionCreates: Record<string, string> = {};
+    const quickSessionMoves: QuickSessionMove[] = [];
+    const quickSessionRelocations: QuickSessionRelocation[] = [];
+
+    for (const changed of quickSessionChanges.values()) {
+      const activeMetaPath = `quick-sessions/${changed.id}/session.meta.yaml`;
+      const activeThreadPath = `quick-sessions/${changed.id}/discussion.thread`;
+      const archivedMetaPath =
+        `archive/quick-sessions/${changed.id}/session.meta.yaml`;
+      const archivedThreadPath =
+        `archive/quick-sessions/${changed.id}/discussion.thread`;
+      const [
+        baseActiveMeta,
+        baseActiveThread,
+        baseArchivedMeta,
+        baseArchivedThread,
+        remoteActiveMeta,
+        remoteActiveThread,
+        remoteArchivedMeta,
+        remoteArchivedThread,
+      ] = await Promise.all([
+        gitOps.readFileAtCommit(s.repoDir, replayBase, activeMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, replayBase, activeThreadPath),
+        gitOps.readFileAtCommit(s.repoDir, replayBase, archivedMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, replayBase, archivedThreadPath),
+        gitOps.readFileAtCommit(s.repoDir, remoteHead, activeMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, remoteHead, activeThreadPath),
+        gitOps.readFileAtCommit(s.repoDir, remoteHead, archivedMetaPath),
+        gitOps.readFileAtCommit(s.repoDir, remoteHead, archivedThreadPath),
+      ]);
+      const localActiveState = quickSessionPairState(
+        (await exists(`${s.repoDir}/${activeMetaPath}`))
+          ? await readFile(`${s.repoDir}/${activeMetaPath}`)
+          : null,
+        (await exists(`${s.repoDir}/${activeThreadPath}`))
+          ? await readFile(`${s.repoDir}/${activeThreadPath}`)
+          : null,
+        `Quick session ${changed.id} local active`,
+      );
+      const localArchivedState = quickSessionPairState(
+        (await exists(`${s.repoDir}/${archivedMetaPath}`))
+          ? await readFile(`${s.repoDir}/${archivedMetaPath}`)
+          : null,
+        (await exists(`${s.repoDir}/${archivedThreadPath}`))
+          ? await readFile(`${s.repoDir}/${archivedThreadPath}`)
+          : null,
+        `Quick session ${changed.id} local archive`,
+      );
+      if (localActiveState === localArchivedState) {
+        throw new Error(
+          `Quick session ${changed.id} local canonical location is ambiguous`,
+        );
+      }
+      const localArchived = localArchivedState === "present";
+      const localMetaPath = localArchived ? archivedMetaPath : activeMetaPath;
+      const localThreadPath = localArchived ? archivedThreadPath : activeThreadPath;
+      const [localMeta, localThread] = await Promise.all([
+        readFile(`${s.repoDir}/${localMetaPath}`),
+        readFile(`${s.repoDir}/${localThreadPath}`),
+      ]);
+
+      const baseActiveState = quickSessionPairState(
+        baseActiveMeta,
+        baseActiveThread,
+        `Quick session ${changed.id} baseline active`,
+      );
+      const baseArchivedState = quickSessionPairState(
+        baseArchivedMeta,
+        baseArchivedThread,
+        `Quick session ${changed.id} baseline archive`,
+      );
+      if (baseActiveState === "absent" && baseArchivedState === "absent") {
+        const remoteActiveState = quickSessionPairState(
+          remoteActiveMeta,
+          remoteActiveThread,
+          `Quick session ${changed.id} remote active`,
+        );
+        const remoteArchivedState = quickSessionPairState(
+          remoteArchivedMeta,
+          remoteArchivedThread,
+          `Quick session ${changed.id} remote archive`,
+        );
+        if (
+          localArchived ||
+          remoteActiveState === "present" ||
+          remoteArchivedState === "present"
+        ) {
+          throw new Error(
+            `Quick session ${changed.id} create conflict requires manual resolution`,
+          );
+        }
+        quickSessionCreates[activeMetaPath] = localMeta;
+        quickSessionCreates[activeThreadPath] = localThread;
+        continue;
+      }
+      if (baseActiveState === baseArchivedState) {
+        throw new Error(
+          `Quick session ${changed.id} move baseline is ambiguous`,
+        );
+      }
+      const baseArchived = baseArchivedState === "present";
+      const baseMeta = baseArchived ? baseArchivedMeta : baseActiveMeta;
+      const baseThread = baseArchived ? baseArchivedThread : baseActiveThread;
+      if (baseMeta === null || baseThread === null) {
+        throw new Error(
+          `Quick session ${changed.id} baseline transaction is incomplete`,
+        );
+      }
+
+      const remoteActiveState = quickSessionPairState(
+        remoteActiveMeta,
+        remoteActiveThread,
+        `Quick session ${changed.id} remote active`,
+      );
+      const remoteArchivedState = quickSessionPairState(
+        remoteArchivedMeta,
+        remoteArchivedThread,
+        `Quick session ${changed.id} remote archive`,
+      );
+      if (remoteActiveState === remoteArchivedState) {
+        throw new Error(
+          `Quick session ${changed.id} remote canonical location is ambiguous`,
+        );
+      }
+      const remoteArchived = remoteArchivedState === "present";
+      const remoteMeta = remoteArchived ? remoteArchivedMeta : remoteActiveMeta;
+      const remoteThread = remoteArchived
+        ? remoteArchivedThread
+        : remoteActiveThread;
+      if (remoteMeta === null || remoteThread === null) {
+        throw new Error(
+          `Quick session ${changed.id} remote transaction is incomplete`,
+        );
+      }
+      const parsedLocalMeta = parseQuickSessionMeta(localMeta) as {
+        status: string;
+      };
+      if ((parsedLocalMeta.status === "archived") !== localArchived) {
+        throw new Error(
+          `Quick session ${changed.id} local metadata does not match its canonical location`,
+        );
+      }
+
+      // Preserve the exact local move when the remote source is untouched.
+      // This keeps ordinary archive/unarchive retries byte-stable. Any
+      // cross-node mutation falls through to the shared WASM merge below.
+      if (
+        localArchived !== baseArchived &&
+        remoteArchived === baseArchived &&
+        remoteMeta === baseMeta &&
+        remoteThread === baseThread
+      ) {
+        const sourceMetaPath = baseArchived ? archivedMetaPath : activeMetaPath;
+        const sourceThreadPath = baseArchived
+          ? archivedThreadPath
+          : activeThreadPath;
+        quickSessionMoves.push({
+          targetMetaPath: localMetaPath,
+          targetThreadPath: localThreadPath,
+          sourceMetaPath,
+          sourceThreadPath,
+          targetMeta: localMeta,
+          targetThread: localThread,
+          commitMessage:
+            `session: ${localArchived ? "archive" : "unarchive"} ${changed.id} by @${s.me.handler}`,
+        });
+        continue;
+      }
+
+      if (!remoteThread.startsWith(baseThread)) {
+        throw new Error(
+          `Quick session ${changed.id} remote thread changed outside append-only shape`,
+        );
+      }
+      const archiveWins = localArchived || remoteArchived;
+      const targetMetaPath = archiveWins ? archivedMetaPath : activeMetaPath;
+      const targetThreadPath = archiveWins
+        ? archivedThreadPath
+        : activeThreadPath;
+      const additions = extractThreadAdditions(
+        targetThreadPath,
+        localThread,
+        baseThread,
+      );
+      if (additions.trim()) localAdditions[targetThreadPath] = additions;
+      remoteContents[targetThreadPath] = remoteThread;
+      quickSessionMerges.push({
+        metaPath: targetMetaPath,
+        threadPath: targetThreadPath,
+        localMeta,
+        baseMeta,
+        remoteMeta,
+        remoteThread,
+      });
+      if (archiveWins !== remoteArchived) {
+        quickSessionRelocations.push({
+          targetMetaPath,
+          targetThreadPath,
+          sourceMetaPath: remoteArchived ? archivedMetaPath : activeMetaPath,
+          sourceThreadPath: remoteArchived
+            ? archivedThreadPath
+            : activeThreadPath,
+        });
+      }
+    }
+
+    for (const fp of changedFiles) {
+      if (quickSessionPaths.has(fp)) continue;
       if (boardHandlerFromPath(fp)) {
         try {
           localBoards[fp] = await readFile(`${s.repoDir}/${fp}`);
@@ -203,7 +516,7 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       try {
         const [localContent, baseContent, remoteContent] = await Promise.all([
           readFile(`${s.repoDir}/${fp}`),
-          gitOps.readFileAtCommit(s.repoDir, s.headCommit, fp),
+          gitOps.readFileAtCommit(s.repoDir, replayBase, fp),
           gitOps.readFileAtCommit(s.repoDir, remoteHead, fp),
         ]);
         if (baseContent !== null && remoteContent === null) {
@@ -224,22 +537,90 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       }
     }
 
-    // Reset working tree to remote HEAD
+    // Resolve every content and metadata conflict before the destructive
+    // reset. Quick Session metadata uses the same Rust merge function as the
+    // native daemon, including title/claim/completion conflict rejection and
+    // line-number translation.
+    const resolved = resolveConflicts(localAdditions, remoteContents);
+    const quickSessionMetas: Record<string, string> = {};
+    const quickSessionThreads: Record<string, string> = {};
+    for (const quick of quickSessionMerges) {
+      const mergedThread = resolved.files[quick.threadPath] ?? quick.remoteThread;
+      if (resolved.files[quick.threadPath] === undefined) {
+        quickSessionThreads[quick.threadPath] = mergedThread;
+      }
+      const mappings = resolved.mappings.filter(
+        (mapping) => mapping.file === quick.threadPath,
+      );
+      const localLinesUnchanged = mappings.every(
+        (mapping) => mapping.old_line === mapping.new_line,
+      );
+      if (quick.remoteMeta === quick.baseMeta && localLinesUnchanged) {
+        quickSessionMetas[quick.metaPath] = quick.localMeta;
+        continue;
+      }
+      const mergedMeta = mergeQuickSessionMeta(
+        parseQuickSessionMeta(quick.localMeta),
+        parseQuickSessionMeta(quick.remoteMeta),
+        mergedThread,
+        mappings,
+        quick.threadPath,
+      );
+      quickSessionMetas[quick.metaPath] = serializeQuickSessionMeta(mergedMeta);
+    }
+
+    // From this point until the replay commit succeeds, every failure must
+    // restore the branch and working tree that still owns the local changes.
+    rollbackHead = localHead;
     await gitOps.resetToRemote(
       s.repoDir,
       `refs/remotes/origin/${s.defaultBranch}`,
     );
 
-    // Resolve via parser-based renumbering
-    const { resolveConflicts } = await import("./conflict");
-    const resolved = resolveConflicts(localAdditions, remoteContents);
-
     // Write resolved files back
-    const { writeFile, exists, mkdir } = await import("./storage");
+    const { writeFile, mkdir, removeDir, removeFile } = await import("./storage");
     const filePaths: string[] = [];
     for (const [fp, content] of Object.entries(resolved.files)) {
-      await writeFile(`${s.repoDir}/${fp}`, content);
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
       filePaths.push(fp);
+    }
+    for (const [fp, content] of Object.entries(quickSessionThreads)) {
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
+      filePaths.push(fp);
+    }
+    for (const [fp, content] of Object.entries(quickSessionMetas)) {
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
+      filePaths.push(fp);
+    }
+    for (const [fp, content] of Object.entries(quickSessionCreates)) {
+      const absPath = `${s.repoDir}/${fp}`;
+      await mkdirp(parentPath(absPath), exists, mkdir);
+      await writeFile(absPath, content);
+      filePaths.push(fp);
+    }
+    for (const move of quickSessionMoves) {
+      for (const [fp, content] of [
+        [move.targetMetaPath, move.targetMeta],
+        [move.targetThreadPath, move.targetThread],
+      ] as const) {
+        const absPath = `${s.repoDir}/${fp}`;
+        await mkdirp(parentPath(absPath), exists, mkdir);
+        await writeFile(absPath, content);
+      }
+      await removeFile(`${s.repoDir}/${move.sourceMetaPath}`);
+      await removeFile(`${s.repoDir}/${move.sourceThreadPath}`);
+      await removeDir(parentPath(`${s.repoDir}/${move.sourceMetaPath}`));
+    }
+    for (const relocation of quickSessionRelocations) {
+      await removeFile(`${s.repoDir}/${relocation.sourceMetaPath}`);
+      await removeFile(`${s.repoDir}/${relocation.sourceThreadPath}`);
+      await removeDir(parentPath(`${s.repoDir}/${relocation.sourceMetaPath}`));
     }
     for (const [fp, content] of Object.entries(localBoards)) {
       const absPath = `${s.repoDir}/${fp}`;
@@ -251,15 +632,54 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     // Commit the merge result
     const hasThreadFiles = Object.keys(resolved.files).length > 0;
     const hasBoardFiles = Object.keys(localBoards).length > 0;
-    const commitMessage = hasBoardFiles && !hasThreadFiles
-      ? "board: sync after rebase"
-      : resolved.commitMessage;
-    await gitOps.addAndCommit(
-      s.repoDir,
-      filePaths,
-      commitMessage,
-      s.me.handler,
-    );
+    const hasQuickSessionFiles =
+      Object.keys(quickSessionMetas).length > 0 ||
+      Object.keys(quickSessionCreates).length > 0;
+    const commitMessage =
+      hasBoardFiles && !hasThreadFiles && !hasQuickSessionFiles
+        ? "board: sync after rebase"
+        : hasQuickSessionFiles && !hasThreadFiles
+          ? "session: sync after rebase"
+          : resolved.commitMessage;
+    if (quickSessionMoves.length > 0 || quickSessionRelocations.length > 0) {
+      const moveAddPaths = [
+        ...quickSessionMoves.flatMap((move) => [
+          move.targetMetaPath,
+          move.targetThreadPath,
+        ]),
+        ...quickSessionRelocations.flatMap((move) => [
+          move.targetMetaPath,
+          move.targetThreadPath,
+        ]),
+      ];
+      const moveRemovePaths = [
+        ...quickSessionMoves.flatMap((move) => [
+          move.sourceMetaPath,
+          move.sourceThreadPath,
+        ]),
+        ...quickSessionRelocations.flatMap((move) => [
+          move.sourceMetaPath,
+          move.sourceThreadPath,
+        ]),
+      ];
+      await gitOps.addRemoveAndCommit(
+        s.repoDir,
+        [...filePaths, ...moveAddPaths],
+        moveRemovePaths,
+        quickSessionMoves.length > 0 && quickSessionRelocations.length === 0
+          ? quickSessionMoves.map((move) => move.commitMessage).join("\n")
+          : "session: sync after rebase",
+        s.me.handler,
+      );
+    } else {
+      await gitOps.addAndCommit(
+        s.repoDir,
+        filePaths,
+        commitMessage,
+        s.me.handler,
+      );
+    }
+    rollbackHead = null;
 
     // Epoch fence (invariant 1): the reset just materialized remote state
     // in the working tree — if that includes a redirected gitim.epoch.yaml,
@@ -287,7 +707,18 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
     postRepoChanged(newHead, "rebase");
     return syncResult(beforeHead, newHead, "rebased");
   } catch (e) {
-    const message = errorMessage(e);
+    let reportedError = e;
+    if (rollbackHead !== null) {
+      try {
+        await gitOps.resetToCommit(s.repoDir, rollbackHead);
+      } catch (restoreError) {
+        reportedError = new Error(
+          `${errorMessage(e)}; failed to restore local sync state: ${errorMessage(restoreError)}`,
+          { cause: e },
+        );
+      }
+    }
+    const message = errorMessage(reportedError);
     if (isAuthFailure(e)) {
       setState({ token: null, syncStatus: "reconnect_required" });
       postReconnectRequired(getState().headCommit, message);
@@ -295,8 +726,8 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       setState({ syncStatus: "error" });
       postMessage({ type: "sync_error", error: message });
     }
-    console.error("[daemon-web] sync error:", e);
-    throw e;
+    console.error("[daemon-web] sync error:", reportedError);
+    throw reportedError;
   }
 }
 

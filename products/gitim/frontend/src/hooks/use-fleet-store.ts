@@ -104,6 +104,11 @@ export function applyFleetAgentActivityEvent(envelope: FleetAgentActivityEnvelop
   const workspaceId = envelope.workspace_id;
   const agentId = envelope.agent_id;
 
+  // Remote Quick Sessions are owned by their node. This store has no
+  // node-scoped Quick Session key, so routing them as main activity would
+  // corrupt the fleet agent's primary status and usage.
+  if (event.scope === "quick_session") return;
+
   if (event.event_type === "burned") {
     useFleetStore.getState().removeAgent(nodeId, workspaceId, agentId);
     return;

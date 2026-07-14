@@ -917,13 +917,9 @@ pub async fn handle_send_card_message(
             }
         };
 
-    // Local commit is the ack. Release before any non-essential work so
-    // the next writer / sync_loop rebase can proceed.
-    drop(write_guard);
-
     // Track in pending_push so sync_loop can emit a push-confirmation event
     // when the commit reaches the remote.
-    {
+    if let Some(commit_id) = commit_id.as_ref() {
         let mut pending = state
             .pending_push
             .write()
@@ -931,8 +927,13 @@ pub async fn handle_send_card_message(
         pending.push(PendingMessage {
             channel: channel_key.clone(),
             line_number: next_line,
+            commit_id: commit_id.clone(),
         });
     }
+
+    // Local commit is the ack. The pending watermark is installed before
+    // releasing the commit lock so confirmation observes a complete entry.
+    drop(write_guard);
 
     let _ = state.event_tx.send(Event::CardMessageAppended {
         channel: ch_name.to_string(),

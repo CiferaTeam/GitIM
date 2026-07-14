@@ -80,6 +80,23 @@ export async function resolveRemoteHead(dir: string): Promise<string> {
   });
 }
 
+/** Resolve the single ancestry base shared by local and remote replay heads. */
+export async function findMergeBase(
+  dir: string,
+  localHead: string,
+  remoteHead: string,
+): Promise<string> {
+  const bases = await git.findMergeBase({
+    fs: getFs(),
+    dir,
+    oids: [localHead, remoteHead],
+  });
+  if (bases.length !== 1 || typeof bases[0] !== "string") {
+    throw new Error("browser sync history has no unique merge base");
+  }
+  return bases[0];
+}
+
 /** Stage files and create a commit. Returns the new commit SHA. */
 export async function addAndCommit(
   dir: string,
@@ -149,6 +166,18 @@ export async function addRemoveAndCommit(
     message,
     author: { name: author, email: `${author}@gitim` },
   });
+}
+
+/** Restore selected index entries to HEAD without changing working files. */
+export async function restoreIndexPaths(
+  dir: string,
+  filepaths: string[],
+): Promise<void> {
+  const fs = getFs();
+  for (const filepath of new Set(filepaths)) {
+    // resetIndex removes entries that are absent from HEAD, covering failed creates.
+    await git.resetIndex({ fs, dir, filepath, ref: "HEAD" });
+  }
 }
 
 /** Push local commits to origin. */
@@ -249,7 +278,17 @@ export async function resetToRemote(
   const fs = getFs();
   const commit = await git.resolveRef({ fs, dir, ref: remoteRef });
 
-  // Point the current branch at the remote commit
+  await resetToCommit(dir, commit);
+}
+
+/** Hard reset the current branch and working tree to an exact commit. */
+export async function resetToCommit(
+  dir: string,
+  commit: string,
+): Promise<void> {
+  const fs = getFs();
+
+  // Point the current branch at the target commit.
   const branch = await getCurrentBranch(dir);
   await git.writeRef({
     fs,

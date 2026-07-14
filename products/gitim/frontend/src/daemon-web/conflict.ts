@@ -19,6 +19,7 @@ import {
 export interface ResolveResult {
   files: Record<string, string>;
   commitMessage: string;
+  mappings: RenumberMapping[];
 }
 
 // Shape of gitim-sync's ResolvedFile / RenumberMapping as serialized by wasm.
@@ -26,7 +27,7 @@ interface ResolvedFile {
   path: string;
   content: string;
 }
-interface RenumberMapping {
+export interface RenumberMapping {
   file: string;
   old_line: number;
   new_line: number;
@@ -72,5 +73,5 @@ export function resolveConflicts(
     additionsJson,
   );
 
-  return { files: fileMap, commitMessage };
+  return { files: fileMap, commitMessage, mappings };
 }

@@ -1,4 +1,5 @@
 use gitim_core::auth_payload::AuthPayload;
+use gitim_core::types::QuickSessionStatus;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
@@ -126,6 +127,14 @@ pub enum Event {
         channel: String,
         project: Option<String>,
     },
+
+    #[serde(rename = "quick_session_changed")]
+    QuickSessionChanged {
+        session_id: String,
+        agent_id: String,
+        status: gitim_core::types::QuickSessionStatus,
+        revision: u64,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,6 +179,92 @@ pub enum Request {
     Poll {
         #[serde(default)]
         since: Option<String>,
+    },
+    #[serde(rename = "create_quick_session")]
+    CreateQuickSession {
+        session_id: String,
+        agent_id: String,
+        first_message: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "list_quick_sessions")]
+    ListQuickSessions {
+        #[serde(default)]
+        archived: bool,
+        #[serde(default)]
+        agent_id: Option<String>,
+        #[serde(default)]
+        actionable: bool,
+        #[serde(default)]
+        status: Option<QuickSessionStatus>,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    #[serde(rename = "read_quick_session")]
+    ReadQuickSession {
+        session_id: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        since: Option<u64>,
+    },
+    #[serde(rename = "send_quick_session_message")]
+    SendQuickSessionMessage {
+        session_id: String,
+        body: String,
+        #[serde(default)]
+        reply_to: Option<u64>,
+        #[serde(default)]
+        request_id: Option<String>,
+        #[serde(default)]
+        attempt_id: Option<String>,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "set_quick_session_title")]
+    SetQuickSessionTitle {
+        session_id: String,
+        title: String,
+        attempt_id: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "set_quick_session_summary")]
+    SetQuickSessionSummary {
+        session_id: String,
+        summary: String,
+        attempt_id: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "claim_quick_session_turn")]
+    ClaimQuickSessionTurn {
+        session_id: String,
+        input_line: u64,
+        attempt_id: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "mark_quick_session_error")]
+    MarkQuickSessionError {
+        session_id: String,
+        attempt_id: String,
+        error: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "archive_quick_session")]
+    ArchiveQuickSession {
+        session_id: String,
+        #[serde(default)]
+        author: Option<String>,
+    },
+    #[serde(rename = "unarchive_quick_session")]
+    UnarchiveQuickSession {
+        session_id: String,
+        #[serde(default)]
+        author: Option<String>,
     },
     #[serde(rename = "register_user")]
     RegisterUser {
@@ -646,6 +741,24 @@ fn default_true() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_quick_sessions_status_filter_is_additive_and_defaults_to_none() {
+        let filtered: Request =
+            serde_json::from_str(r#"{"method":"list_quick_sessions","status":"running"}"#).unwrap();
+        match filtered {
+            Request::ListQuickSessions { status, .. } => {
+                assert_eq!(status, Some(gitim_core::types::QuickSessionStatus::Running));
+            }
+            _ => panic!("wrong variant"),
+        }
+
+        let legacy: Request = serde_json::from_str(r#"{"method":"list_quick_sessions"}"#).unwrap();
+        match legacy {
+            Request::ListQuickSessions { status, .. } => assert_eq!(status, None),
+            _ => panic!("wrong variant"),
+        }
+    }
 
     // Request deserialization tests: Request only derives Deserialize (wire format comes in as JSON).
     // We construct the JSON string directly (as clients would send it) and verify deserialization.

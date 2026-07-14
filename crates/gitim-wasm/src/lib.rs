@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use wasm_bindgen::prelude::*;
 
@@ -129,6 +129,52 @@ pub fn validate_leave(
 pub fn validate_handler(handler: &str) -> Result<String, JsError> {
     let h = gitim_core::types::Handler::new(handler).map_err(|e| JsError::new(&e.to_string()))?;
     Ok(h.as_str().to_string())
+}
+
+#[wasm_bindgen(js_name = "validateQuickSessionId")]
+pub fn validate_quick_session_id_wasm(id: &str) -> Result<(), JsError> {
+    gitim_core::types::validate_quick_session_id(id)
+        .map_err(|error| JsError::new(&error.to_string()))
+}
+
+#[wasm_bindgen(js_name = "parseQuickSessionMeta")]
+pub fn parse_quick_session_meta_wasm(yaml: &str) -> Result<JsValue, JsError> {
+    let meta: gitim_core::types::QuickSessionMeta =
+        serde_yaml::from_str(yaml).map_err(|error| JsError::new(&error.to_string()))?;
+    gitim_core::types::validate_quick_session_meta(&meta)
+        .map_err(|error| JsError::new(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&meta).map_err(|error| JsError::new(&error.to_string()))
+}
+
+#[wasm_bindgen(js_name = "serializeQuickSessionMeta")]
+pub fn serialize_quick_session_meta_wasm(meta: JsValue) -> Result<String, JsError> {
+    let meta: gitim_core::types::QuickSessionMeta =
+        serde_wasm_bindgen::from_value(meta).map_err(|error| JsError::new(&error.to_string()))?;
+    gitim_core::types::validate_quick_session_meta(&meta)
+        .map_err(|error| JsError::new(&error.to_string()))?;
+    serde_yaml::to_string(&meta).map_err(|error| JsError::new(&error.to_string()))
+}
+
+#[derive(serde::Serialize)]
+struct QuickSessionTransitionResult {
+    meta: gitim_core::types::QuickSessionMeta,
+    outcome: gitim_core::types::TransitionOutcome,
+}
+
+#[wasm_bindgen(js_name = "applyQuickSessionTransition")]
+pub fn apply_quick_session_transition_wasm(
+    meta: JsValue,
+    transition: JsValue,
+) -> Result<JsValue, JsError> {
+    let mut meta: gitim_core::types::QuickSessionMeta =
+        serde_wasm_bindgen::from_value(meta).map_err(|error| JsError::new(&error.to_string()))?;
+    let transition: gitim_core::types::QuickSessionTransition =
+        serde_wasm_bindgen::from_value(transition)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+    let outcome = gitim_core::types::apply_quick_session_transition(&mut meta, transition)
+        .map_err(|error| JsError::new(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&QuickSessionTransitionResult { meta, outcome })
+        .map_err(|error| JsError::new(&error.to_string()))
 }
 
 // `parseChannelMeta` / `parseUserMeta` mirror the daemon's *read* path, which
@@ -324,6 +370,32 @@ pub fn resolve_content_pure(additions_json: &str, remote_json: &str) -> Result<J
 
     let result = ResolveResult { files, mappings };
     serde_wasm_bindgen::to_value(&result).map_err(|e| JsError::new(&e.to_string()))
+}
+
+#[wasm_bindgen(js_name = "mergeQuickSessionMeta")]
+pub fn merge_quick_session_meta_wasm(
+    local: JsValue,
+    remote: JsValue,
+    merged_thread: &str,
+    mappings: JsValue,
+    thread_path: &str,
+) -> Result<JsValue, JsError> {
+    let local: gitim_core::types::QuickSessionMeta =
+        serde_wasm_bindgen::from_value(local).map_err(|error| JsError::new(&error.to_string()))?;
+    let remote: gitim_core::types::QuickSessionMeta =
+        serde_wasm_bindgen::from_value(remote).map_err(|error| JsError::new(&error.to_string()))?;
+    let mappings: Vec<gitim_sync::conflict::RenumberMapping> =
+        serde_wasm_bindgen::from_value(mappings)
+            .map_err(|error| JsError::new(&error.to_string()))?;
+    let merged = gitim_sync::conflict::merge_quick_session_meta(
+        &local,
+        &remote,
+        merged_thread,
+        &mappings,
+        Path::new(thread_path),
+    )
+    .map_err(|error| JsError::new(&error.to_string()))?;
+    serde_wasm_bindgen::to_value(&merged).map_err(|error| JsError::new(&error.to_string()))
 }
 
 #[cfg(all(test, target_arch = "wasm32"))]

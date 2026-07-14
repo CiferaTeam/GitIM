@@ -26,13 +26,36 @@ fn rotation_threshold() -> u64 {
         .unwrap_or(ROTATION_THRESHOLD_DEFAULT)
 }
 
+fn pending_channel_for_thread_path(path: &std::path::Path) -> String {
+    let components: Vec<_> = path.components().collect();
+    let quick_sessions = components
+        .iter()
+        .position(|component| component.as_os_str() == "quick-sessions");
+    if let Some(index) = quick_sessions {
+        let session_id = components.get(index + 1).and_then(|component| {
+            component.as_os_str().to_str().filter(|_| {
+                path.file_name()
+                    .is_some_and(|name| name == "discussion.thread")
+            })
+        });
+        if let Some(session_id) = session_id {
+            return format!("quick_session:{session_id}");
+        }
+    }
+
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 /// In-flight tracker for a locally-committed message that the sync loop
 /// has not yet pushed to the remote.
 ///
-/// `send` enqueues an entry after a successful local commit and returns
-/// to the caller immediately. The sync loop drains entries on push
-/// success (emitting `Event::MessagesPushed`) and rewrites `line_number`
-/// when rebase renumbers the message.
+/// `send` enqueues an entry under `commit_lock` after a successful local
+/// commit and returns immediately. `commit_id` is the push watermark. The
+/// sync loop only confirms entries included in the pushed snapshot and
+/// rewrites `line_number` when conflict resolution renumbers the message.
 ///
 /// There is no per-entry result channel: push outcome is observable via
 /// `Event::MessagesPushed` (success) and sync_loop log + `auth_failed`
@@ -41,6 +64,7 @@ fn rotation_threshold() -> u64 {
 pub struct PendingMessage {
     pub channel: String,
     pub line_number: u64,
+    pub commit_id: String,
 }
 
 pub struct AppState {
@@ -414,30 +438,8 @@ impl AppState {
                 push_notify,
                 auth_failed,
                 commit_lock,
-                move || {
-                    // on_pushed: drain pending_push and broadcast
-                    // MessagesPushed events grouped by channel. Push result
-                    // is no longer reported back to the request handler —
-                    // SSE consumers (WebUI, runtime) get the event instead.
-                    let mut pending = push_state
-                        .pending_push
-                        .write()
-                        .unwrap_or_else(|e| e.into_inner());
-                    let mut by_channel: std::collections::HashMap<String, Vec<u64>> =
-                        std::collections::HashMap::new();
-                    for msg in pending.drain(..) {
-                        by_channel
-                            .entry(msg.channel)
-                            .or_default()
-                            .push(msg.line_number);
-                    }
-                    drop(pending);
-                    for (channel, line_numbers) in by_channel {
-                        let _ = push_state.event_tx.send(Event::MessagesPushed {
-                            channel,
-                            line_numbers,
-                        });
-                    }
+                move |pushed_head, included_head| {
+                    push_state.confirm_pending_pushes(&pushed_head, &included_head);
 
                     // Rotation check: this push may have tipped the epoch
                     // over threshold. Throttled (60s) — counting a 1M-commit
@@ -455,12 +457,7 @@ impl AppState {
                 },
                 move |file, old_line, new_line| {
                     // on_renumbered: broadcast MessageRenumbered and update pending_push
-                    // Extract channel name from file path (e.g. "channels/general.thread" -> "general")
-                    let channel_name = file
-                        .file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let channel_name = pending_channel_for_thread_path(&file);
                     let mut pending = renum_state
                         .pending_push
                         .write()
@@ -632,6 +629,49 @@ impl AppState {
         tracing::info!("sync loop started");
     }
 
+    /// Confirm all locally committed messages after the sync loop reports a
+    /// successful push. `included_head` identifies the local snapshot before
+    /// rebase rewriting; `pushed_head` is the rewritten snapshot that reached
+    /// the remote. Entries outside both confirmed histories remain pending.
+    pub fn confirm_pending_pushes(&self, pushed_head: &str, included_head: &str) {
+        let _guard = self
+            .commit_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !is_ancestor(pushed_head, "@{upstream}", &self.repo_root) {
+            tracing::warn!(%pushed_head, "push callback head is not reachable from upstream");
+            return;
+        }
+        let mut pending = self
+            .pending_push
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let mut by_channel: HashMap<String, Vec<u64>> = HashMap::new();
+        let mut remaining = Vec::new();
+        for message in pending.drain(..) {
+            let included = is_ancestor(&message.commit_id, pushed_head, &self.repo_root)
+                || (included_head != pushed_head
+                    && is_ancestor(&message.commit_id, included_head, &self.repo_root));
+            if included {
+                by_channel
+                    .entry(message.channel.clone())
+                    .or_default()
+                    .push(message.line_number);
+            } else {
+                remaining.push(message);
+            }
+        }
+        *pending = remaining;
+        drop(pending);
+
+        for (channel, line_numbers) in by_channel {
+            let _ = self.event_tx.send(Event::MessagesPushed {
+                channel,
+                line_numbers,
+            });
+        }
+    }
+
     /// Spawn the cron engine task for this state. Mirrors `spawn_sync_loop`:
     /// CAS-gated, called from both `main` (restart with existing identity)
     /// and `handle_onboard` (first-time setup) so identity-deferred startup
@@ -784,5 +824,25 @@ mod tests {
             .write()
             .unwrap_or_else(|e| e.into_inner()) = Some("alice@example.com".to_string());
         assert_eq!(state.author_for("alice").1, "alice@example.com");
+    }
+
+    #[test]
+    fn pending_channel_uses_quick_session_identity_for_discussion_threads() {
+        assert_eq!(
+            pending_channel_for_thread_path(std::path::Path::new(
+                "quick-sessions/qs-123/discussion.thread"
+            )),
+            "quick_session:qs-123"
+        );
+        assert_eq!(
+            pending_channel_for_thread_path(std::path::Path::new(
+                "archive/quick-sessions/qs-456/discussion.thread"
+            )),
+            "quick_session:qs-456"
+        );
+        assert_eq!(
+            pending_channel_for_thread_path(std::path::Path::new("channels/general.thread")),
+            "general"
+        );
     }
 }

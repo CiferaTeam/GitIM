@@ -9,23 +9,29 @@ const resolveRefMock = vi.hoisted(() => vi.fn(async () => "local-head"));
 const writeRefMock = vi.hoisted(() => vi.fn(async () => undefined));
 const readBlobMock = vi.hoisted(() => vi.fn());
 const walkMock = vi.hoisted(() => vi.fn());
+const findMergeBaseMock = vi.hoisted(() => vi.fn(async () => ["base"]));
 const statusMatrixMock = vi.hoisted(() =>
   vi.fn<() => Promise<StatusMatrixRow[]>>(async () => []),
 );
 const addMock = vi.hoisted(() => vi.fn(async () => undefined));
 const commitMock = vi.hoisted(() => vi.fn(async () => "new-head"));
+const checkoutMock = vi.hoisted(() => vi.fn(async () => undefined));
+const resetIndexMock = vi.hoisted(() => vi.fn(async () => undefined));
 const treeMock = vi.hoisted(() => vi.fn((input: unknown) => input));
 
 vi.mock("isomorphic-git", () => ({
   default: {
     add: addMock,
     commit: commitMock,
+    checkout: checkoutMock,
     push: pushMock,
     currentBranch: currentBranchMock,
     readBlob: readBlobMock,
     resolveRef: resolveRefMock,
+    resetIndex: resetIndexMock,
     statusMatrix: statusMatrixMock,
     TREE: treeMock,
+    findMergeBase: findMergeBaseMock,
     walk: walkMock,
     writeRef: writeRefMock,
   },
@@ -39,7 +45,15 @@ vi.mock("./storage", () => ({
   getFs: () => fsMock,
 }));
 
-import { addAndCommitOnly, diffTrees, push, readFileAtCommit } from "./git";
+import {
+  addAndCommitOnly,
+  diffTrees,
+  findMergeBase,
+  push,
+  readFileAtCommit,
+  resetToCommit,
+  restoreIndexPaths,
+} from "./git";
 
 function entry(type: "blob" | "tree", oid: string) {
   return {
@@ -55,10 +69,14 @@ describe("daemon-web git operations", () => {
     writeRefMock.mockClear();
     readBlobMock.mockReset();
     walkMock.mockReset();
+    findMergeBaseMock.mockReset();
+    findMergeBaseMock.mockResolvedValue(["base"]);
     statusMatrixMock.mockReset();
     statusMatrixMock.mockResolvedValue([]);
     addMock.mockClear();
     commitMock.mockClear();
+    checkoutMock.mockClear();
+    resetIndexMock.mockClear();
     treeMock.mockClear();
     currentBranchMock.mockReset();
     currentBranchMock.mockResolvedValue("main");
@@ -120,6 +138,23 @@ describe("daemon-web git operations", () => {
     await expect(diffTrees("/repo", "old", "new")).resolves.toEqual([
       "channels/general.thread",
     ]);
+  });
+
+  it("returns the unique merge base for two browser heads", async () => {
+    await expect(findMergeBase("/repo", "local", "remote"))
+      .resolves.toBe("base");
+    expect(findMergeBaseMock).toHaveBeenCalledWith({
+      fs: fsMock,
+      dir: "/repo",
+      oids: ["local", "remote"],
+    });
+  });
+
+  it("rejects browser histories without exactly one merge base", async () => {
+    findMergeBaseMock.mockResolvedValueOnce([]);
+
+    await expect(findMergeBase("/repo", "local", "remote"))
+      .rejects.toThrow("unique merge base");
   });
 
   it("reads text content from a commit", async () => {
@@ -194,5 +229,46 @@ describe("daemon-web git operations", () => {
 
     expect(addMock).not.toHaveBeenCalled();
     expect(commitMock).not.toHaveBeenCalled();
+  });
+
+  it("restores selected index entries to HEAD exactly once", async () => {
+    await restoreIndexPaths("/repo", [
+      "quick-sessions/one/session.meta.yaml",
+      "quick-sessions/one/discussion.thread",
+      "quick-sessions/one/session.meta.yaml",
+    ]);
+
+    expect(resetIndexMock.mock.calls).toEqual([
+      [{
+        fs: fsMock,
+        dir: "/repo",
+        filepath: "quick-sessions/one/session.meta.yaml",
+        ref: "HEAD",
+      }],
+      [{
+        fs: fsMock,
+        dir: "/repo",
+        filepath: "quick-sessions/one/discussion.thread",
+        ref: "HEAD",
+      }],
+    ]);
+  });
+
+  it("hard-resets the current branch and working tree to an exact commit", async () => {
+    await resetToCommit("/repo", "saved-local-head");
+
+    expect(writeRefMock).toHaveBeenCalledWith({
+      fs: fsMock,
+      dir: "/repo",
+      ref: "refs/heads/main",
+      value: "saved-local-head",
+      force: true,
+    });
+    expect(checkoutMock).toHaveBeenCalledWith({
+      fs: fsMock,
+      dir: "/repo",
+      ref: "main",
+      force: true,
+    });
   });
 });

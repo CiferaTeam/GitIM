@@ -234,6 +234,12 @@ enum Commands {
         command: CardCommands,
     },
 
+    /// Quick Session commands
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
+    },
+
     /// Board commands
     Board {
         #[command(subcommand)]
@@ -336,6 +342,60 @@ enum DmCommands {
 
     /// List DM conversations
     List,
+}
+
+#[derive(Subcommand)]
+enum SessionCommands {
+    /// List Quick Sessions
+    List {
+        /// List archived Quick Sessions only
+        #[arg(long, conflicts_with = "actionable")]
+        archived: bool,
+        /// Filter by assigned agent
+        #[arg(long = "agent")]
+        agent_id: Option<String>,
+        /// Return sessions waiting for agent work
+        #[arg(long)]
+        actionable: bool,
+        /// Maximum sessions to return
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Read a Quick Session transcript
+    Read {
+        session_id: String,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        since: Option<u64>,
+    },
+    /// Set the title for the active turn
+    Title {
+        session_id: String,
+        title: String,
+        #[arg(long)]
+        attempt_id: String,
+    },
+    /// Reply to the claimed input line
+    Send {
+        session_id: String,
+        #[arg(required_unless_present = "stdin", conflicts_with = "stdin")]
+        body: Option<String>,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long)]
+        reply_to: u64,
+        #[arg(long)]
+        attempt_id: String,
+    },
+    /// Persist a context handoff summary for the active turn
+    Summarize {
+        session_id: String,
+        #[arg(long, required = true)]
+        stdin: bool,
+        #[arg(long)]
+        attempt_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -980,6 +1040,64 @@ async fn main() {
             }
             CardCommands::Archived { channel } => {
                 commands::card::cmd_archived_cards(&client, &mode, channel.as_deref()).await
+            }
+        },
+        Commands::Session { command } => match command {
+            SessionCommands::List {
+                archived,
+                agent_id,
+                actionable,
+                limit,
+            } => {
+                commands::session::cmd_list(
+                    &client,
+                    &mode,
+                    archived,
+                    agent_id.as_deref(),
+                    actionable,
+                    limit,
+                )
+                .await
+            }
+            SessionCommands::Read {
+                session_id,
+                limit,
+                since,
+            } => commands::session::cmd_read(&client, &mode, &session_id, limit, since).await,
+            SessionCommands::Title {
+                session_id,
+                title,
+                attempt_id,
+            } => {
+                commands::session::cmd_title(&client, &mode, &session_id, &title, &attempt_id).await
+            }
+            SessionCommands::Send {
+                session_id,
+                body,
+                stdin,
+                reply_to,
+                attempt_id,
+            } => {
+                let body = read_body_or_exit(body, stdin);
+                commands::session::cmd_send(
+                    &client,
+                    &mode,
+                    &session_id,
+                    &body,
+                    reply_to,
+                    &attempt_id,
+                )
+                .await
+            }
+            SessionCommands::Summarize {
+                session_id,
+                stdin,
+                attempt_id,
+            } => {
+                let _ = stdin;
+                let summary = read_stdin_or_exit("failed to read Quick Session summary");
+                commands::session::cmd_summarize(&client, &mode, &session_id, &summary, &attempt_id)
+                    .await
             }
         },
         Commands::Board { command } => match command {

@@ -19,6 +19,19 @@ export function appendBoardSection(board, section, value) {
 }
 
 /**
+ * @param {any} meta
+ * @param {any} transition
+ * @returns {any}
+ */
+export function applyQuickSessionTransition(meta, transition) {
+    const ret = wasm.applyQuickSessionTransition(meta, transition);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * @param {string} mappings_json
  * @param {string} additions_json
  * @returns {string}
@@ -219,6 +232,26 @@ export function mergeChannelMeta(local_yaml, remote_yaml) {
 }
 
 /**
+ * @param {any} local
+ * @param {any} remote
+ * @param {string} merged_thread
+ * @param {any} mappings
+ * @param {string} thread_path
+ * @returns {any}
+ */
+export function mergeQuickSessionMeta(local, remote, merged_thread, mappings, thread_path) {
+    const ptr0 = passStringToWasm0(merged_thread, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ptr1 = passStringToWasm0(thread_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len1 = WASM_VECTOR_LEN;
+    const ret = wasm.mergeQuickSessionMeta(local, remote, ptr0, len0, mappings, ptr1, len1);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
  * @param {string} markdown
  * @returns {any}
  */
@@ -254,6 +287,20 @@ export function parseChannelMeta(yaml) {
     const ptr0 = passStringToWasm0(yaml, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
     const ret = wasm.parseChannelMeta(ptr0, len0);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * @param {string} yaml
+ * @returns {any}
+ */
+export function parseQuickSessionMeta(yaml) {
+    const ptr0 = passStringToWasm0(yaml, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.parseQuickSessionMeta(ptr0, len0);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }
@@ -329,6 +376,29 @@ export function resolveContentPure(additions_json, remote_json) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return takeFromExternrefTable0(ret[0]);
+}
+
+/**
+ * @param {any} meta
+ * @returns {string}
+ */
+export function serializeQuickSessionMeta(meta) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ret = wasm.serializeQuickSessionMeta(meta);
+        var ptr1 = ret[0];
+        var len1 = ret[1];
+        if (ret[3]) {
+            ptr1 = 0; len1 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred2_0 = ptr1;
+        deferred2_1 = len1;
+        return getStringFromWasm0(ptr1, len1);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
 }
 
 /**
@@ -532,6 +602,18 @@ export function validateLeave(author, targets, users, members) {
 }
 
 /**
+ * @param {string} id
+ */
+export function validateQuickSessionId(id) {
+    const ptr0 = passStringToWasm0(id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.validateQuickSessionId(ptr0, len0);
+    if (ret[1]) {
+        throw takeFromExternrefTable0(ret[0]);
+    }
+}
+
+/**
  * @param {string} yaml
  * @returns {any}
  */
@@ -562,6 +644,12 @@ function __wbg_get_imports() {
             getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
             getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
         },
+        __wbg___wbindgen_bigint_get_as_i64_d968e41184ae354f: function(arg0, arg1) {
+            const v = arg1;
+            const ret = typeof(v) === 'bigint' ? v : undefined;
+            getDataViewMemory0().setBigInt64(arg0 + 8 * 1, isLikeNone(ret) ? BigInt(0) : ret, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
+        },
         __wbg___wbindgen_boolean_get_fa956cfa2d1bd751: function(arg0) {
             const v = arg0;
             const ret = typeof(v) === 'boolean' ? v : undefined;
@@ -576,6 +664,10 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_in_aca499c5de7ff5e5: function(arg0, arg1) {
             const ret = arg0 in arg1;
+            return ret;
+        },
+        __wbg___wbindgen_is_bigint_2f76dc55065b4273: function(arg0) {
+            const ret = typeof(arg0) === 'bigint';
             return ret;
         },
         __wbg___wbindgen_is_function_1ff95bcc5517c252: function(arg0) {
@@ -593,6 +685,10 @@ function __wbg_get_imports() {
         },
         __wbg___wbindgen_is_undefined_c05833b95a3cf397: function(arg0) {
             const ret = arg0 === undefined;
+            return ret;
+        },
+        __wbg___wbindgen_jsval_eq_e659fcf7b0e32763: function(arg0, arg1) {
+            const ret = arg0 === arg1;
             return ret;
         },
         __wbg___wbindgen_jsval_loose_eq_db4c3b15f63fc170: function(arg0, arg1) {
@@ -648,6 +744,16 @@ function __wbg_get_imports() {
             let result;
             try {
                 result = arg0 instanceof ArrayBuffer;
+            } catch (_) {
+                result = false;
+            }
+            const ret = result;
+            return ret;
+        },
+        __wbg_instanceof_Map_e5b5e3db98422fcc: function(arg0) {
+            let result;
+            try {
+                result = arg0 instanceof Map;
             } catch (_) {
                 result = false;
             }
