@@ -5,7 +5,11 @@ import { parseMessageBody, type Fragment } from "../../lib/message-parser";
 import { HandlerName } from "./handler-name";
 import { useDirectory } from "../../hooks/use-display-name-directory";
 import { resolveDisplayName } from "../../lib/format-handler-display";
-import { CardReferenceLink, MessageReferenceLink } from "./reference-preview";
+import {
+  CardReferenceLink,
+  MessageReferenceLink,
+  QuickSessionReferenceLink,
+} from "./reference-preview";
 import { selectCardById, useCardStore } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
 import { AssetFragment } from "./asset-fragment";
@@ -244,6 +248,17 @@ function FragmentRenderer({
           reference={{ channel: fragment.channel, line: fragment.line }}
           onOpen={() => {
             onMessageLinkClick?.(fragment.channel, fragment.line);
+          }}
+        />
+      );
+
+    case "session-link":
+      return (
+        <QuickSessionReferenceLink
+          key={index}
+          reference={{
+            sessionId: fragment.sessionId,
+            ...(fragment.line !== undefined ? { line: fragment.line } : {}),
           }}
         />
       );

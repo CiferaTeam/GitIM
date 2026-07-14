@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ExternalLink, LayoutGrid, Loader2, MessageSquare } from "lucide-react";
+import {
+  Check,
+  Copy,
+  ExternalLink,
+  LayoutGrid,
+  Loader2,
+  MessageCircleMore,
+  MessageSquare,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   HoverCard,
@@ -16,7 +24,13 @@ import { useChatStore } from "@/hooks/use-chat-store";
 import { useTimezoneStore } from "@/hooks/use-timezone";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
-import { formatTimestamp, type Card, type Message } from "@/lib/types";
+import {
+  formatTimestamp,
+  type Card,
+  type Message,
+  type QuickSessionDetail,
+  type QuickSessionStatus,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { toApiChannel } from "@/lib/scope-name";
 import {
@@ -36,6 +50,11 @@ export interface CardReference {
 export interface MessageReference {
   channel: string;
   line: number;
+}
+
+export interface QuickSessionReference {
+  sessionId: string;
+  line?: number;
 }
 
 function shortCardId(cardId: string): string {
@@ -60,6 +79,21 @@ function windowAround(messages: Message[], line?: number): Message[] {
   const idx = realMessages.findIndex((m) => m.line_number === line);
   if (idx === -1) return realMessages.slice(0, 11);
   return realMessages.slice(Math.max(0, idx - 5), idx + 6);
+}
+
+function quickSessionStatusClass(status: QuickSessionStatus): string {
+  switch (status) {
+    case "active":
+      return "border-success/30 bg-success/10 text-success";
+    case "running":
+    case "needs_title":
+      return "border-primary/30 bg-primary/10 text-primary";
+    case "error":
+      return "border-destructive/30 bg-destructive/10 text-destructive";
+    case "archived":
+    default:
+      return "border-border bg-muted/50 text-text-muted";
+  }
 }
 
 function MessageRows({
@@ -355,6 +389,151 @@ export function MessageReferenceLink({
                 Loading preview...
               </div>
             ) : status === "error" && messages.length === 0 ? (
+              <div className="py-3 text-xs text-destructive">{error}</div>
+            ) : (
+              <MessageRows messages={messages} targetLine={reference.line} />
+            )}
+          </div>
+        </div>
+      </HoverCardContent>
+    </HoverCard>
+  );
+}
+
+export function QuickSessionReferenceLink({
+  reference,
+}: {
+  reference: QuickSessionReference;
+}) {
+  const activeSlug = useWorkspaceStore((state) => state.activeSlug);
+  const [open, setOpen] = useState(false);
+  const [status, setStatus] = useState<LoadStatus>("idle");
+  const [error, setError] = useState<string | null>(null);
+  const [detail, setDetail] = useState<QuickSessionDetail | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatus("idle");
+    setError(null);
+    setDetail(null);
+  }, [activeSlug, reference.line, reference.sessionId]);
+
+  useEffect(() => {
+    if (!open || !activeSlug) return;
+    let cancelled = false;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatus("loading");
+    setError(null);
+    const query = reference.line
+      ? { since: Math.max(0, reference.line - 6), limit: 11 }
+      : { limit: 8 };
+    void client
+      .readQuickSession(activeSlug, reference.sessionId, query)
+      .then((response) => {
+        if (cancelled) return;
+        if (!response.ok || !response.data) {
+          setStatus("error");
+          setError(response.error ?? "Failed to load Quick Session");
+          return;
+        }
+        setDetail(response.data.session);
+        setStatus("ok");
+      })
+      .catch((reason: unknown) => {
+        if (cancelled) return;
+        setStatus("error");
+        setError(reason instanceof Error ? reason.message : "Failed to load Quick Session");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSlug, open, reference.line, reference.sessionId]);
+
+  const ref = `session:${reference.sessionId}${
+    reference.line ? `:L${String(reference.line).padStart(6, "0")}` : ""
+  }`;
+  const title = detail?.meta.title ?? "Quick Session";
+  const messages = detail
+    ? windowAround(detail.entries, reference.line)
+    : [];
+
+  return (
+    <HoverCard open={open} onOpenChange={setOpen} openDelay={180} closeDelay={140}>
+      <HoverCardTrigger asChild>
+        <button
+          type="button"
+          className="inline-flex max-w-full items-center gap-1 rounded-md px-1 py-0.5 text-primary hover:bg-primary/10 hover:underline"
+          onClick={(event) => {
+            event.stopPropagation();
+            setOpen((value) => !value);
+          }}
+          title={ref}
+        >
+          <MessageCircleMore className="size-3 shrink-0" />
+          <span className="truncate">{detail?.meta.title ?? reference.sessionId}</span>
+          {reference.line ? (
+            <span className="font-mono text-[11px] text-primary/70">
+              L{String(reference.line).padStart(6, "0")}
+            </span>
+          ) : null}
+        </button>
+      </HoverCardTrigger>
+      <HoverCardContent align="start" className="w-[380px] max-w-[calc(100vw-24px)] p-0">
+        <div className="max-h-[380px] overflow-y-auto p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-foreground">{title}</div>
+              <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] text-text-muted">
+                {detail ? <span>@{detail.meta.agent_id}</span> : null}
+                <span className="font-mono">{reference.sessionId}</span>
+              </div>
+            </div>
+            <Button
+              variant="ghost"
+              size="xs"
+              className="gap-1"
+              onClick={(event) => {
+                event.stopPropagation();
+                void navigator.clipboard.writeText(ref).then(() => {
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1200);
+                }).catch(() => setCopied(false));
+              }}
+            >
+              {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+              {copied ? "Copied" : "Copy"}
+            </Button>
+          </div>
+
+          {detail ? (
+            <>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className={cn("rounded-md border px-1.5 py-0.5 text-[11px]", quickSessionStatusClass(detail.meta.status))}>
+                  {detail.meta.status}
+                </span>
+                {detail.archived ? (
+                  <span className="rounded-md border border-border bg-muted/30 px-1.5 py-0.5 text-[11px] text-text-muted">
+                    archived
+                  </span>
+                ) : null}
+              </div>
+              {detail.meta.summary ? (
+                <p className="mt-2 text-xs leading-relaxed text-text-secondary">{detail.meta.summary}</p>
+              ) : detail.meta.last_message_preview ? (
+                <p className="mt-2 line-clamp-2 text-xs leading-relaxed text-text-secondary">
+                  {detail.meta.last_message_preview}
+                </p>
+              ) : null}
+            </>
+          ) : null}
+
+          <div className="mt-3 border-t border-border pt-3">
+            {status === "loading" ? (
+              <div className="flex items-center gap-2 py-3 text-xs text-text-muted">
+                <Loader2 className="size-3.5 animate-spin" /> Loading preview…
+              </div>
+            ) : status === "error" ? (
               <div className="py-3 text-xs text-destructive">{error}</div>
             ) : (
               <MessageRows messages={messages} targetLine={reference.line} />

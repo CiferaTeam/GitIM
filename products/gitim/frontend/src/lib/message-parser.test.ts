@@ -295,6 +295,25 @@ describe("parseMessageBody", () => {
   });
 
   describe("edge cases", () => {
+    it("parses bounded Quick Session refs and optional line targets", () => {
+      expect(
+        findFirst(
+          parseMessageBody("See session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ:L000007."),
+          "session-link",
+        ),
+      ).toEqual({
+        type: "session-link",
+        sessionId: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+        line: 7,
+      });
+      expect(
+        findFirst(
+          parseMessageBody("xsession:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ"),
+          "session-link",
+        ),
+      ).toBeUndefined();
+    });
+
     it("ignores invalid handler in mention", () => {
       const frags = parseMessageBody("<@System>");
       expect(findFirst(frags, "mention")).toBeUndefined();

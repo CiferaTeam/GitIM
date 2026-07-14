@@ -10,6 +10,7 @@ import {
   useAttachmentDraftStore,
 } from "../../hooks/use-attachment-draft-store";
 import { InputArea } from "./input-area";
+import { QUICK_SESSION_DRAG_MIME } from "../../lib/quick-session-ref";
 
 const { uploadAssetsMock, mediaState, connectionState } = vi.hoisted(() => ({
   uploadAssetsMock: vi.fn(),
@@ -214,6 +215,86 @@ describe("InputArea card recipient preview", () => {
     const preview = document.querySelector("[data-recipient-preview]");
     expect(preview?.textContent).toContain("@leader1");
     expect(preview?.textContent).not.toContain("@lewis");
+  });
+
+  it("inserts a matching-workspace Quick Session ref at the cursor without sending", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <InputArea
+          workspaceKey="runtime:room"
+          scopeKey="general"
+          replyTo={null}
+          onReplyToChange={() => {}}
+          mentionCandidates={[]}
+          routing={{ kind: "channel", channel: null }}
+          onSend={noopSend}
+        />,
+      );
+      await Promise.resolve();
+    });
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      setTextareaValue(textarea, "before after");
+      textarea.setSelectionRange(7, 7);
+      const drop = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(drop, "dataTransfer", {
+        value: {
+          getData: (type: string) =>
+            type === QUICK_SESSION_DRAG_MIME
+              ? JSON.stringify({
+                  ref: "session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+                  workspaceKey: "runtime:room",
+                })
+              : "",
+        },
+      });
+      textarea.dispatchEvent(drop);
+      await Promise.resolve();
+    });
+    expect(textarea.value).toBe(
+      "before session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZafter",
+    );
+    expect(noopSend).not.toHaveBeenCalled();
+    expect(localStorage.getItem("gitim:draft:runtime:room:general")).toBe(
+      textarea.value,
+    );
+  });
+
+  it("rejects a Quick Session ref dragged from another workspace", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <InputArea
+          workspaceKey="runtime:room"
+          scopeKey="general"
+          replyTo={null}
+          onReplyToChange={() => {}}
+          mentionCandidates={[]}
+          routing={{ kind: "channel", channel: null }}
+          onSend={noopSend}
+        />,
+      );
+      await Promise.resolve();
+    });
+    const textarea = container.querySelector("textarea")!;
+    await act(async () => {
+      setTextareaValue(textarea, "keep");
+      const drop = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(drop, "dataTransfer", {
+        value: {
+          getData: () =>
+            JSON.stringify({
+              ref: "session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+              workspaceKey: "runtime:other",
+            }),
+        },
+      });
+      textarea.dispatchEvent(drop);
+      await Promise.resolve();
+    });
+    expect(textarea.value).toBe("keep");
+    expect(noopSend).not.toHaveBeenCalled();
   });
 });
 

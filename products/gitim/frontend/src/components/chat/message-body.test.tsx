@@ -43,6 +43,15 @@ vi.mock("./reference-preview", () => ({
     </span>
   ),
   MessageReferenceLink: () => <span data-testid="message-ref" />,
+  QuickSessionReferenceLink: ({
+    reference,
+  }: {
+    reference: { sessionId: string; line?: number };
+  }) => (
+    <span data-testid="session-ref">
+      {reference.sessionId}:L{reference.line ?? ""}
+    </span>
+  ),
 }));
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -540,5 +549,15 @@ describe("MessageBody", () => {
     expect(container.querySelector("code")?.textContent).toBe("code");
     expect(container.querySelector("strong")?.textContent).toBe("bold");
     expect(container.querySelector("em")?.textContent).toBe("italic");
+  });
+
+  it("renders stable Quick Session refs with an optional line target", async () => {
+    await renderBody(
+      "See session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ:L000007 next",
+    );
+
+    expect(container.querySelector("[data-testid=session-ref]")?.textContent).toBe(
+      "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ:L7",
+    );
   });
 });

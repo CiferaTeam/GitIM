@@ -1,4 +1,6 @@
 const CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+export const QUICK_SESSION_DRAG_MIME =
+  "application/x-gitim-quick-session-ref";
 const QUICK_SESSION_ID_RE = /^qs-[0-9A-HJKMNP-TV-Z]{26}$/;
 const QUICK_SESSION_REF_RE =
   /session:(qs-[0-9A-HJKMNP-TV-Z]{26})(?::L([0-9]{6,}))?/gu;
