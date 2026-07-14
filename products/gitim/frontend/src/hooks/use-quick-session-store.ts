@@ -9,6 +9,10 @@ import type {
   QuickSessionStatus,
   SessionUsageSnapshot,
 } from "../lib/types";
+import {
+  generateQuickSessionId,
+  generateQuickSessionRequestId,
+} from "../lib/quick-session-ref";
 import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 
 type QuickSessionOperation =
@@ -20,6 +24,20 @@ type QuickSessionOperation =
 
 type OperationFlags = Record<QuickSessionOperation, boolean>;
 type OperationErrors = Record<QuickSessionOperation, string | null>;
+
+interface PendingCreateOperation {
+  slug: string;
+  agentId: string;
+  firstMessage: string;
+  sessionId: string;
+}
+
+interface PendingSendOperation {
+  slug: string;
+  sessionId: string;
+  body: string;
+  requestId: string;
+}
 
 export interface QuickSessionRuntimeOverlay {
   status: QuickSessionStatus | AgentActivityEvent["event_type"];
@@ -39,6 +57,9 @@ interface QuickSessionState {
   showArchived: boolean;
   loading: OperationFlags;
   errors: OperationErrors;
+  /** At most one retryable mutation per operation; a changed payload cancels it. */
+  pendingCreate: PendingCreateOperation | null;
+  pendingSend: PendingSendOperation | null;
 
   setShowArchived: (showArchived: boolean) => void;
   select: (id: string | null) => void;
@@ -157,6 +178,40 @@ function setOperation(
   });
 }
 
+function rejectedOperationMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim() !== "") {
+    return error.message;
+  }
+  if (typeof error === "string" && error.trim() !== "") return error;
+  return fallback;
+}
+
+function sameCreatePayload(
+  pending: PendingCreateOperation,
+  slug: string,
+  agentId: string,
+  firstMessage: string,
+): boolean {
+  return (
+    pending.slug === slug &&
+    pending.agentId === agentId &&
+    pending.firstMessage === firstMessage
+  );
+}
+
+function sameSendPayload(
+  pending: PendingSendOperation,
+  slug: string,
+  sessionId: string,
+  body: string,
+): boolean {
+  return (
+    pending.slug === slug &&
+    pending.sessionId === sessionId &&
+    pending.body === body
+  );
+}
+
 export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
   activeSlug: null,
   items: [],
@@ -166,6 +221,8 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
   showArchived: false,
   loading: { ...EMPTY_LOADING },
   errors: { ...EMPTY_ERRORS },
+  pendingCreate: null,
+  pendingSend: null,
 
   setShowArchived: (showArchived) => set({ showArchived }),
   select: (selectedId) => set({ selectedId }),
@@ -174,31 +231,41 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
     activateSlug(slug);
     const request = beginOperation("list");
     setOperation(set, "list", true, null);
-    const response = await client.listQuickSessions(slug, {
-      archived: get().showArchived,
-    });
-    if (!operationIsCurrent(slug, "list", request)) return;
-    if (!response.ok || !response.data) {
+    try {
+      const response = await client.listQuickSessions(slug, {
+        archived: get().showArchived,
+      });
+      if (!operationIsCurrent(slug, "list", request)) return;
+      if (!response.ok || !response.data) {
+        setOperation(
+          set,
+          "list",
+          false,
+          response.error ?? "Failed to list Quick Sessions",
+        );
+        return;
+      }
+      set((state) => {
+        const existing = new Map(state.items.map((item) => [item.id, item]));
+        const items = response.data!.sessions.map((item) => {
+          const current = existing.get(item.id);
+          return current && current.revision > item.revision ? current : item;
+        });
+        return {
+          items,
+          loading: { ...state.loading, list: false },
+          errors: { ...state.errors, list: null },
+        };
+      });
+    } catch (error) {
+      if (!operationIsCurrent(slug, "list", request)) return;
       setOperation(
         set,
         "list",
         false,
-        response.error ?? "Failed to list Quick Sessions",
+        rejectedOperationMessage(error, "Failed to list Quick Sessions"),
       );
-      return;
     }
-    set((state) => {
-      const existing = new Map(state.items.map((item) => [item.id, item]));
-      const items = response.data!.sessions.map((item) => {
-        const current = existing.get(item.id);
-        return current && current.revision > item.revision ? current : item;
-      });
-      return {
-        items,
-        loading: { ...state.loading, list: false },
-        errors: { ...state.errors, list: null },
-      };
-    });
   },
 
   open: async (slug, id) => {
@@ -209,103 +276,212 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
       loading: { ...state.loading, detail: true },
       errors: { ...state.errors, detail: null },
     }));
-    const response = await client.readQuickSession(slug, id);
-    if (!operationIsCurrent(slug, "detail", request)) return;
-    if (!response.ok || !response.data) {
+    try {
+      const response = await client.readQuickSession(slug, id);
+      if (!operationIsCurrent(slug, "detail", request)) return;
+      if (!response.ok || !response.data) {
+        setOperation(
+          set,
+          "detail",
+          false,
+          response.error ?? "Failed to read Quick Session",
+        );
+        return;
+      }
+      get().applyDetail(response.data.session);
+      setOperation(set, "detail", false, null);
+    } catch (error) {
+      if (!operationIsCurrent(slug, "detail", request)) return;
       setOperation(
         set,
         "detail",
         false,
-        response.error ?? "Failed to read Quick Session",
+        rejectedOperationMessage(error, "Failed to read Quick Session"),
       );
-      return;
     }
-    get().applyDetail(response.data.session);
-    setOperation(set, "detail", false, null);
   },
 
   create: async (slug, agentId, firstMessage) => {
     activateSlug(slug);
     const request = beginOperation("create");
     setOperation(set, "create", true, null);
-    const response = await client.createQuickSession(slug, agentId, firstMessage);
-    if (!operationIsCurrent(slug, "create", request)) return null;
-    if (!response.ok || !response.data) {
+    try {
+      const currentPending = get().pendingCreate;
+      const pending =
+        currentPending &&
+        sameCreatePayload(
+          currentPending,
+          slug,
+          agentId,
+          firstMessage,
+        )
+          ? currentPending
+          : {
+              slug,
+              agentId,
+              firstMessage,
+              sessionId: generateQuickSessionId(),
+            };
+      if (pending !== currentPending) set({ pendingCreate: pending });
+
+      const response = await client.createQuickSession(
+        slug,
+        agentId,
+        firstMessage,
+        pending.sessionId,
+      );
+      if (!operationIsCurrent(slug, "create", request)) return null;
+      if (!response.ok || !response.data) {
+        setOperation(
+          set,
+          "create",
+          false,
+          response.error ?? "Failed to create Quick Session",
+        );
+        return null;
+      }
+      get().applyDetail(response.data.session);
+      set((state) => ({
+        selectedId: response.data!.session.meta.id,
+        pendingCreate:
+          state.pendingCreate?.sessionId === pending.sessionId
+            ? null
+            : state.pendingCreate,
+      }));
+      setOperation(set, "create", false, null);
+      return response.data.session.meta.id;
+    } catch (error) {
+      if (!operationIsCurrent(slug, "create", request)) return null;
       setOperation(
         set,
         "create",
         false,
-        response.error ?? "Failed to create Quick Session",
+        rejectedOperationMessage(error, "Failed to create Quick Session"),
       );
       return null;
     }
-    get().applyDetail(response.data.session);
-    set({ selectedId: response.data.session.meta.id });
-    setOperation(set, "create", false, null);
-    return response.data.session.meta.id;
   },
 
   send: async (slug, id, body) => {
     activateSlug(slug);
     const request = beginOperation("send");
     setOperation(set, "send", true, null);
-    const response = await client.sendQuickSessionMessage(slug, id, body);
-    if (!operationIsCurrent(slug, "send", request)) return false;
-    if (!response.ok) {
+    try {
+      const currentPending = get().pendingSend;
+      const pending =
+        currentPending && sameSendPayload(currentPending, slug, id, body)
+          ? currentPending
+          : {
+              slug,
+              sessionId: id,
+              body,
+              requestId: generateQuickSessionRequestId(),
+            };
+      if (pending !== currentPending) set({ pendingSend: pending });
+
+      const response = await client.sendQuickSessionMessage(
+        slug,
+        id,
+        body,
+        pending.requestId,
+      );
+      if (!operationIsCurrent(slug, "send", request)) return false;
+      if (!response.ok) {
+        setOperation(
+          set,
+          "send",
+          false,
+          response.error ?? "Failed to send Quick Session message",
+        );
+        return false;
+      }
+      set((state) => ({
+        pendingSend:
+          state.pendingSend?.requestId === pending.requestId
+            ? null
+            : state.pendingSend,
+      }));
+      await get().open(slug, id);
+      if (!operationIsCurrent(slug, "send", request)) return false;
+      setOperation(set, "send", false, null);
+      return true;
+    } catch (error) {
+      if (!operationIsCurrent(slug, "send", request)) return false;
       setOperation(
         set,
         "send",
         false,
-        response.error ?? "Failed to send Quick Session message",
+        rejectedOperationMessage(
+          error,
+          "Failed to send Quick Session message",
+        ),
       );
       return false;
     }
-    await get().open(slug, id);
-    if (!operationIsCurrent(slug, "send", request)) return false;
-    setOperation(set, "send", false, null);
-    return true;
   },
 
   archive: async (slug, id) => {
     activateSlug(slug);
     const request = beginOperation("archive");
     setOperation(set, "archive", true, null);
-    const response = await client.archiveQuickSession(slug, id);
-    if (!operationIsCurrent(slug, "archive", request)) return false;
-    if (!response.ok) {
+    try {
+      const response = await client.archiveQuickSession(slug, id);
+      if (!operationIsCurrent(slug, "archive", request)) return false;
+      if (!response.ok) {
+        setOperation(
+          set,
+          "archive",
+          false,
+          response.error ?? "Failed to archive Quick Session",
+        );
+        return false;
+      }
+      await get().refreshList(slug);
+      if (!operationIsCurrent(slug, "archive", request)) return false;
+      setOperation(set, "archive", false, null);
+      return true;
+    } catch (error) {
+      if (!operationIsCurrent(slug, "archive", request)) return false;
       setOperation(
         set,
         "archive",
         false,
-        response.error ?? "Failed to archive Quick Session",
+        rejectedOperationMessage(error, "Failed to archive Quick Session"),
       );
       return false;
     }
-    await get().refreshList(slug);
-    if (!operationIsCurrent(slug, "archive", request)) return false;
-    setOperation(set, "archive", false, null);
-    return true;
   },
 
   unarchive: async (slug, id) => {
     activateSlug(slug);
     const request = beginOperation("archive");
     setOperation(set, "archive", true, null);
-    const response = await client.unarchiveQuickSession(slug, id);
-    if (!operationIsCurrent(slug, "archive", request)) return false;
-    if (!response.ok) {
+    try {
+      const response = await client.unarchiveQuickSession(slug, id);
+      if (!operationIsCurrent(slug, "archive", request)) return false;
+      if (!response.ok) {
+        setOperation(
+          set,
+          "archive",
+          false,
+          response.error ?? "Failed to unarchive Quick Session",
+        );
+        return false;
+      }
+      await get().refreshList(slug);
+      if (!operationIsCurrent(slug, "archive", request)) return false;
+      setOperation(set, "archive", false, null);
+      return true;
+    } catch (error) {
+      if (!operationIsCurrent(slug, "archive", request)) return false;
       setOperation(
         set,
         "archive",
         false,
-        response.error ?? "Failed to unarchive Quick Session",
+        rejectedOperationMessage(error, "Failed to unarchive Quick Session"),
       );
       return false;
     }
-    await get().refreshList(slug);
-    if (!operationIsCurrent(slug, "archive", request)) return false;
-    setOperation(set, "archive", false, null);
-    return true;
   },
 
   refreshFromPoll: async (slug, changes) => {
@@ -432,6 +608,8 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
       showArchived: false,
       loading: { ...EMPTY_LOADING },
       errors: { ...EMPTY_ERRORS },
+      pendingCreate: null,
+      pendingSend: null,
     });
   },
 }));

@@ -26,10 +26,12 @@ vi.mock("../lib/client", () => api);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
     resolve = next;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function detail(overrides: Partial<QuickSessionDetail["meta"]> = {}): QuickSessionDetail {
@@ -147,6 +149,7 @@ describe("useQuickSessionStore", () => {
       "alpha",
       "alice",
       "Investigate flakes",
+      expect.stringMatching(/^qs-[0-9A-HJKMNP-TV-Z]{26}$/),
     );
 
     await useQuickSessionStore.getState().send("alpha", SESSION_ID, "continue");
@@ -154,6 +157,7 @@ describe("useQuickSessionStore", () => {
       "alpha",
       SESSION_ID,
       "continue",
+      expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/),
     );
 
     api.listQuickSessions.mockResolvedValue(ok({ sessions: [] }));
@@ -174,6 +178,177 @@ describe("useQuickSessionStore", () => {
 
     expect(useQuickSessionStore.getState().items).toEqual([]);
     expect(useQuickSessionStore.getState().loading.list).toBe(false);
+  });
+
+  it("reuses create and send ids after a committed response is lost", async () => {
+    let createdId = "";
+    api.createQuickSession
+      .mockRejectedValueOnce(new Error("create response lost"))
+      .mockImplementationOnce(
+        async (
+          _slug: string,
+          _agentId: string,
+          _firstMessage: string,
+          sessionId: string,
+        ) => {
+          createdId = sessionId;
+          return ok({
+            session: detail({ id: sessionId }),
+            line_number: 1,
+            ref: `session:${sessionId}`,
+          });
+        },
+      );
+
+    await expect(
+      useQuickSessionStore
+        .getState()
+        .create("alpha", "alice", "Investigate flakes"),
+    ).resolves.toBeNull();
+    const pendingSessionId = api.createQuickSession.mock.calls[0]?.[3];
+    expect(pendingSessionId).toMatch(/^qs-[0-9A-HJKMNP-TV-Z]{26}$/);
+
+    await expect(
+      useQuickSessionStore
+        .getState()
+        .create("alpha", "alice", "Investigate flakes"),
+    ).resolves.toBe(pendingSessionId);
+    expect(createdId).toBe(pendingSessionId);
+    expect(useQuickSessionStore.getState().pendingCreate).toBeNull();
+
+    api.sendQuickSessionMessage
+      .mockRejectedValueOnce(new Error("send response lost"))
+      .mockImplementationOnce(
+        async (
+          _slug: string,
+          sessionId: string,
+          _body: string,
+          requestId: string,
+        ) =>
+          ok({
+            session_id: sessionId,
+            line_number: 2,
+            status: "active",
+            revision: 4,
+            ref: `session:${sessionId}:L000002`,
+            request_id: requestId,
+          }),
+      );
+    api.readQuickSession.mockResolvedValue(
+      ok({ session: detail({ id: createdId, status: "active" }) }),
+    );
+
+    await expect(
+      useQuickSessionStore.getState().send("alpha", createdId, "continue"),
+    ).resolves.toBe(false);
+    const pendingRequestId = api.sendQuickSessionMessage.mock.calls[0]?.[3];
+    expect(pendingRequestId).toMatch(/^[0-9A-HJKMNP-TV-Z]{26}$/);
+    await expect(
+      useQuickSessionStore.getState().send("alpha", createdId, "continue"),
+    ).resolves.toBe(true);
+    expect(api.sendQuickSessionMessage.mock.calls[1]?.[3]).toBe(
+      pendingRequestId,
+    );
+    expect(useQuickSessionStore.getState().pendingSend).toBeNull();
+  });
+
+  it("does not reuse pending ids when the operation payload changes", async () => {
+    api.createQuickSession.mockRejectedValue(new Error("offline"));
+    await useQuickSessionStore
+      .getState()
+      .create("alpha", "alice", "first payload");
+    await useQuickSessionStore
+      .getState()
+      .create("alpha", "alice", "second payload");
+
+    expect(api.createQuickSession.mock.calls[0]?.[3]).toMatch(
+      /^qs-[0-9A-HJKMNP-TV-Z]{26}$/,
+    );
+    expect(api.createQuickSession.mock.calls[1]?.[3]).not.toBe(
+      api.createQuickSession.mock.calls[0]?.[3],
+    );
+
+    api.sendQuickSessionMessage.mockRejectedValue(new Error("offline"));
+    await useQuickSessionStore.getState().send("alpha", SESSION_ID, "first");
+    await useQuickSessionStore.getState().send("alpha", SESSION_ID, "second");
+    expect(api.sendQuickSessionMessage.mock.calls[0]?.[3]).toMatch(
+      /^[0-9A-HJKMNP-TV-Z]{26}$/,
+    );
+    expect(api.sendQuickSessionMessage.mock.calls[1]?.[3]).not.toBe(
+      api.sendQuickSessionMessage.mock.calls[0]?.[3],
+    );
+    expect(useQuickSessionStore.getState().pendingCreate).not.toBeNull();
+    expect(useQuickSessionStore.getState().pendingSend).not.toBeNull();
+
+    emitWorkspaceSwitch();
+    expect(useQuickSessionStore.getState().pendingCreate).toBeNull();
+    expect(useQuickSessionStore.getState().pendingSend).toBeNull();
+  });
+
+  it("turns transport rejections into per-operation errors", async () => {
+    const cases = [
+      {
+        operation: "list" as const,
+        mock: api.listQuickSessions,
+        run: () => useQuickSessionStore.getState().refreshList("alpha"),
+      },
+      {
+        operation: "detail" as const,
+        mock: api.readQuickSession,
+        run: () => useQuickSessionStore.getState().open("alpha", SESSION_ID),
+      },
+      {
+        operation: "create" as const,
+        mock: api.createQuickSession,
+        run: () =>
+          useQuickSessionStore
+            .getState()
+            .create("alpha", "alice", "Investigate flakes"),
+      },
+      {
+        operation: "send" as const,
+        mock: api.sendQuickSessionMessage,
+        run: () =>
+          useQuickSessionStore.getState().send("alpha", SESSION_ID, "continue"),
+      },
+      {
+        operation: "archive" as const,
+        mock: api.archiveQuickSession,
+        run: () => useQuickSessionStore.getState().archive("alpha", SESSION_ID),
+      },
+      {
+        operation: "archive" as const,
+        mock: api.unarchiveQuickSession,
+        run: () => useQuickSessionStore.getState().unarchive("alpha", SESSION_ID),
+      },
+    ];
+
+    for (const [index, testCase] of cases.entries()) {
+      useQuickSessionStore.getState().resetForWorkspaceSwitch();
+      testCase.mock.mockRejectedValueOnce(
+        new Error(`transport failed ${index}`),
+      );
+      await testCase.run();
+      expect(
+        useQuickSessionStore.getState().loading[testCase.operation],
+      ).toBe(false);
+      expect(
+        useQuickSessionStore.getState().errors[testCase.operation],
+      ).toBe(`transport failed ${index}`);
+    }
+  });
+
+  it("discards a transport rejection after the workspace changes", async () => {
+    const pending = deferred<ApiResponse<{ sessions: QuickSessionListItem[] }>>();
+    api.listQuickSessions.mockReturnValue(pending.promise);
+    const refresh = useQuickSessionStore.getState().refreshList("alpha");
+
+    emitWorkspaceSwitch();
+    pending.reject(new Error("late failure"));
+    await expect(refresh).resolves.toBeUndefined();
+
+    expect(useQuickSessionStore.getState().activeSlug).toBeNull();
+    expect(useQuickSessionStore.getState().errors.list).toBeNull();
   });
 
   it("keeps newer metadata when an older detail response arrives", async () => {
