@@ -1,5 +1,5 @@
 import { Check, MessageCircleMore, Plus } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -8,7 +8,9 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useChatStore } from "@/hooks/use-chat-store";
 import { useConnectionStore } from "@/hooks/use-connection-store";
+import { useFleetStore } from "@/hooks/use-fleet-store";
 import { useQuickSessionStore } from "@/hooks/use-quick-session-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import { workspaceIdentity } from "@/lib/workspace-key";
@@ -19,6 +21,40 @@ import { QuickSessionPanel } from "./quick-session-panel";
 const HOVER_CLOSE_DELAY_MS = 180;
 
 export function QuickSessionHub() {
+  const mode = useConnectionStore((state) => state.mode);
+  const activeSlug = useWorkspaceStore((state) => state.activeSlug);
+  const workspaces = useWorkspaceStore((state) => state.workspaces);
+  const activeWorkspace = workspaces.find((workspace) => workspace.slug === activeSlug);
+
+  if (!activeSlug || !activeWorkspace) return null;
+
+  const workspaceKey = workspaceIdentity(mode, activeWorkspace);
+  return (
+    <QuickSessionHubWorkspace
+      key={workspaceKey}
+      activeSlug={activeSlug}
+      workspaceKey={workspaceKey}
+      browserMode={mode === "local"}
+    />
+  );
+}
+
+interface QuickSessionHubWorkspaceProps {
+  activeSlug: string;
+  workspaceKey: string;
+  browserMode: boolean;
+}
+
+interface AgentOption {
+  handler: string;
+  label: string;
+}
+
+function QuickSessionHubWorkspace({
+  activeSlug,
+  workspaceKey,
+  browserMode,
+}: QuickSessionHubWorkspaceProps) {
   const [open, setOpen] = useState(false);
   const [pinned, setPinned] = useState(false);
   const [creating, setCreating] = useState(false);
@@ -27,14 +63,40 @@ export function QuickSessionHub() {
   const [copied, setCopied] = useState(false);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const mode = useConnectionStore((state) => state.mode);
   const agents = useAgentStore((state) => state.agents);
-  const activeSlug = useWorkspaceStore((state) => state.activeSlug);
-  const workspaces = useWorkspaceStore((state) => state.workspaces);
-  const activeWorkspace = workspaces.find((workspace) => workspace.slug === activeSlug);
-  const workspaceKey = activeWorkspace
-    ? workspaceIdentity(mode, activeWorkspace)
-    : "";
+  const fleetAgents = useFleetStore((state) => state.agents);
+  const workspaceHandlers = useChatStore((state) => state.users);
+  const agentOptions = useMemo(() => {
+    const byHandler = new Map<string, AgentOption>();
+    for (const agent of agents) {
+      byHandler.set(agent.handler, {
+        handler: agent.handler,
+        label: `${agent.name} (@${agent.handler})`,
+      });
+    }
+    for (const snapshot of fleetAgents) {
+      if (snapshot.workspaceId !== activeSlug || byHandler.has(snapshot.agent.handler)) {
+        continue;
+      }
+      const source = snapshot.nodeName ?? snapshot.nodeId;
+      byHandler.set(snapshot.agent.handler, {
+        handler: snapshot.agent.handler,
+        label: `${snapshot.agent.name} (@${snapshot.agent.handler}) · ${source}`,
+      });
+    }
+    if (browserMode) {
+      for (const handler of workspaceHandlers) {
+        if (byHandler.has(handler)) continue;
+        byHandler.set(handler, {
+          handler,
+          label: `@${handler} (unverified)`,
+        });
+      }
+    }
+    return Array.from(byHandler.values()).sort((a, b) =>
+      a.handler.localeCompare(b.handler),
+    );
+  }, [activeSlug, agents, browserMode, fleetAgents, workspaceHandlers]);
 
   const items = useQuickSessionStore((state) => state.items);
   const selectedId = useQuickSessionStore((state) => state.selectedId);
@@ -55,8 +117,8 @@ export function QuickSessionHub() {
 
   const enter = useCallback(() => {
     clearCloseTimer();
-    if (activeSlug) setOpen(true);
-  }, [activeSlug, clearCloseTimer]);
+    setOpen(true);
+  }, [clearCloseTimer]);
 
   const leave = useCallback(() => {
     clearCloseTimer();
@@ -66,10 +128,12 @@ export function QuickSessionHub() {
 
   useEffect(() => () => clearCloseTimer(), [clearCloseTimer]);
   useEffect(() => {
-    if (!open || !activeSlug) return;
+    if (!open) return;
     void useQuickSessionStore.getState().refreshList(activeSlug);
   }, [activeSlug, open, showArchived]);
-  const effectiveAgentId = agentId || agents[0]?.handler || "";
+  const effectiveAgentId = agentOptions.some((option) => option.handler === agentId)
+    ? agentId
+    : agentOptions[0]?.handler ?? "";
 
   async function copyRef(ref: string) {
     try {
@@ -80,8 +144,6 @@ export function QuickSessionHub() {
       setCopied(false);
     }
   }
-
-  if (!activeSlug || !activeWorkspace) return null;
 
   return (
     <Popover
@@ -171,11 +233,15 @@ export function QuickSessionHub() {
                 value={effectiveAgentId}
                 onChange={(event) => setAgentId(event.target.value)}
                 aria-label="Quick Session agent"
+                disabled={agentOptions.length === 0}
                 className="h-8 w-full rounded-md border border-border bg-background px-2 text-xs focus:border-primary/60 focus:outline-none"
               >
-                {agents.map((agent) => (
-                  <option key={agent.id} value={agent.handler}>
-                    {agent.name} (@{agent.handler})
+                {agentOptions.length === 0 ? (
+                  <option value="">No handlers available</option>
+                ) : null}
+                {agentOptions.map((option) => (
+                  <option key={option.handler} value={option.handler}>
+                    {option.label}
                   </option>
                 ))}
               </select>
@@ -214,6 +280,7 @@ export function QuickSessionHub() {
         </section>
 
         <QuickSessionPanel
+          key={`${workspaceKey}:${selectedId ?? "none"}`}
           detail={detail}
           runtime={runtime}
           loading={loading.detail}

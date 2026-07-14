@@ -8,6 +8,11 @@ async function stubRuntime(page: Page) {
   let sessionId = "";
   let archived = false;
   let channelSends = 0;
+  let agentReplyReleased = false;
+  let agentReplyVisible = false;
+  let processedPolls = 0;
+  let refreshedLists = 0;
+  let refreshedDetails = 0;
 
   await page.addInitScript(
     ({ port, activeSlug }) => {
@@ -106,7 +111,46 @@ async function stubRuntime(page: Page) {
       return;
     }
     if (url.pathname === `/workspaces/${slug}/im/poll`) {
-      await route.fulfill({ json: { ok: true, data: { commit_id: "1", changes: [] } } });
+      if (session && agentReplyReleased && !agentReplyVisible) {
+        const detail = session as {
+          meta: Record<string, unknown>;
+          entries: Record<string, unknown>[];
+        };
+        detail.meta.title = "Investigate flakes";
+        detail.meta.title_source = "api_set";
+        detail.meta.status = "active";
+        detail.meta.updated_at = "2026-07-11T00:00:02Z";
+        detail.meta.last_message_preview = "Ready to investigate";
+        detail.meta.revision = 4;
+        detail.entries.push({
+          line_number: 2,
+          point_to: 1,
+          author: "alice",
+          timestamp: "20260711T000002Z",
+          body: "Ready to investigate",
+        });
+        agentReplyVisible = true;
+        processedPolls += 1;
+        await route.fulfill({
+          json: {
+            ok: true,
+            data: {
+              commit_id: "2",
+              changes: [
+                { channel: sessionId, kind: "quick_session_meta" },
+                { channel: sessionId, kind: "quick_session_thread" },
+              ],
+            },
+          },
+        });
+        return;
+      }
+      await route.fulfill({
+        json: {
+          ok: true,
+          data: { commit_id: agentReplyVisible ? "2" : "1", changes: [] },
+        },
+      });
       return;
     }
     if (url.pathname === `/workspaces/${slug}/im/send`) {
@@ -126,15 +170,15 @@ async function stubRuntime(page: Page) {
         session = {
           meta: {
             id: sessionId,
-            title: "Investigate flakes",
-            title_source: "api_set",
+            title: null,
+            title_source: "none",
             agent_id: body.agent_id,
             created_by: "lewis",
-            status: "active",
+            status: "needs_title",
             created_at: "2026-07-11T00:00:00Z",
-            updated_at: "2026-07-11T00:00:02Z",
-            last_message_preview: "Ready to investigate",
-            revision: 4,
+            updated_at: "2026-07-11T00:00:00Z",
+            last_message_preview: body.first_message,
+            revision: 1,
           },
           entries: [
             {
@@ -143,13 +187,6 @@ async function stubRuntime(page: Page) {
               author: "lewis",
               timestamp: "20260711T000000Z",
               body: body.first_message,
-            },
-            {
-              line_number: 2,
-              point_to: 1,
-              author: body.agent_id,
-              timestamp: "20260711T000002Z",
-              body: "Ready to investigate",
             },
           ],
           archived: false,
@@ -162,6 +199,7 @@ async function stubRuntime(page: Page) {
         });
         return;
       }
+      if (agentReplyVisible) refreshedLists += 1;
       const wantsArchived = url.searchParams.get("archived") === "true";
       const sessions =
         session && wantsArchived === archived
@@ -177,6 +215,7 @@ async function stubRuntime(page: Page) {
       return;
     }
     if (sessionId && url.pathname === `/workspaces/${slug}/im/quick-sessions/${sessionId}`) {
+      if (agentReplyVisible) refreshedDetails += 1;
       await route.fulfill({ json: { ok: true, data: { session } } });
       return;
     }
@@ -200,7 +239,15 @@ async function stubRuntime(page: Page) {
     await route.fulfill({ status: 404, json: { ok: false, error: url.pathname } });
   });
 
-  return { channelSendCount: () => channelSends };
+  return {
+    channelSendCount: () => channelSends,
+    releaseAgentReply: () => {
+      agentReplyReleased = true;
+    },
+    processedPollCount: () => processedPolls,
+    refreshedListCount: () => refreshedLists,
+    refreshedDetailCount: () => refreshedDetails,
+  };
 }
 
 test("creates, references, and archives a Quick Session", async ({ page }) => {
@@ -212,7 +259,22 @@ test("creates, references, and archives a Quick Session", async ({ page }) => {
   await page.getByRole("button", { name: "New Quick Session" }).click();
   await page.getByPlaceholder("What should this session focus on?").fill("Investigate flakes");
   await page.getByRole("button", { name: "Start session" }).click();
-  await expect(page.getByText("Ready to investigate", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Untitled session" })).toBeVisible();
+  await expect(page.getByText("needs_title", { exact: true }).last()).toBeVisible();
+
+  runtime.releaseAgentReply();
+  await expect
+    .poll(() => runtime.processedPollCount(), { timeout: 10_000 })
+    .toBe(1);
+  await expect.poll(() => runtime.refreshedListCount()).toBeGreaterThan(0);
+  await expect.poll(() => runtime.refreshedDetailCount()).toBeGreaterThan(0);
+
+  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Quick Sessions" }).click();
+  await expect(page.getByRole("heading", { name: "Investigate flakes" })).toBeVisible({
+    timeout: 5_000,
+  });
+  await expect(page.getByText("Ready to investigate", { exact: true }).last()).toBeVisible();
 
   const row = page.getByRole("listitem").filter({ hasText: "Investigate flakes" });
   const composer = page.getByPlaceholder(/Type a message/);
@@ -220,7 +282,9 @@ test("creates, references, and archives a Quick Session", async ({ page }) => {
   await expect(composer).toHaveValue(/^session:qs-/);
   expect(runtime.channelSendCount()).toBe(0);
 
+  await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "Quick Sessions" }).click();
+  await row.getByRole("button", { name: /Investigate flakes/ }).first().click();
   await page.getByRole("button", { name: "Archive session" }).click();
   await page.getByLabel("Show archived").check();
   await expect(page.getByRole("listitem").filter({ hasText: "Investigate flakes" })).toBeVisible();

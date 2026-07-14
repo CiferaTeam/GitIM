@@ -261,6 +261,48 @@ describe("InputArea card recipient preview", () => {
     );
   });
 
+  it("inserts a Quick Session ref into the matching card-scoped draft", async () => {
+    await act(async () => {
+      root = createRoot(container);
+      root.render(
+        <InputArea
+          workspaceKey="runtime:room"
+          scopeKey="card:strategy/card-1"
+          replyTo={null}
+          onReplyToChange={() => {}}
+          mentionCandidates={[]}
+          routing={{
+            kind: "card",
+            card: { created_by: "leader", assignee: null },
+          }}
+          onSend={noopSend}
+        />,
+      );
+      await Promise.resolve();
+    });
+    const textarea = container.querySelector("textarea")!;
+    const ref = "session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
+    await act(async () => {
+      const drop = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(drop, "dataTransfer", {
+        value: {
+          getData: (type: string) =>
+            type === QUICK_SESSION_DRAG_MIME
+              ? JSON.stringify({ ref, workspaceKey: "runtime:room" })
+              : "",
+        },
+      });
+      textarea.dispatchEvent(drop);
+      await Promise.resolve();
+    });
+
+    expect(textarea.value).toBe(ref);
+    expect(noopSend).not.toHaveBeenCalled();
+    expect(
+      localStorage.getItem("gitim:draft:runtime:room:card:strategy/card-1"),
+    ).toBe(ref);
+  });
+
   it("rejects a Quick Session ref dragged from another workspace", async () => {
     await act(async () => {
       root = createRoot(container);

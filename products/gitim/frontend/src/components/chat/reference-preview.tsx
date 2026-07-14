@@ -21,6 +21,7 @@ import {
   useCardStore,
 } from "@/hooks/use-card-store";
 import { useChatStore } from "@/hooks/use-chat-store";
+import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useTimezoneStore } from "@/hooks/use-timezone";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import * as client from "@/lib/client";
@@ -32,7 +33,9 @@ import {
   type QuickSessionStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { QUICK_SESSION_DRAG_MIME } from "@/lib/quick-session-ref";
 import { toApiChannel } from "@/lib/scope-name";
+import { workspaceIdentity } from "@/lib/workspace-key";
 import {
   getCardPreviewReadQuery,
   selectCardPreviewMessages,
@@ -406,6 +409,12 @@ export function QuickSessionReferenceLink({
   reference: QuickSessionReference;
 }) {
   const activeSlug = useWorkspaceStore((state) => state.activeSlug);
+  const workspaces = useWorkspaceStore((state) => state.workspaces);
+  const mode = useConnectionStore((state) => state.mode);
+  const activeWorkspace = workspaces.find((workspace) => workspace.slug === activeSlug);
+  const workspaceKey = activeWorkspace
+    ? workspaceIdentity(mode, activeWorkspace)
+    : null;
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<LoadStatus>("idle");
   const [error, setError] = useState<string | null>(null);
@@ -463,6 +472,19 @@ export function QuickSessionReferenceLink({
       <HoverCardTrigger asChild>
         <button
           type="button"
+          draggable={Boolean(workspaceKey)}
+          onDragStart={(event) => {
+            if (!workspaceKey) {
+              event.preventDefault();
+              return;
+            }
+            event.dataTransfer.effectAllowed = "copy";
+            event.dataTransfer.setData(
+              QUICK_SESSION_DRAG_MIME,
+              JSON.stringify({ ref, workspaceKey }),
+            );
+            event.dataTransfer.setData("text/plain", ref);
+          }}
           className="inline-flex max-w-full items-center gap-1 rounded-md px-1 py-0.5 text-primary hover:bg-primary/10 hover:underline"
           onClick={(event) => {
             event.stopPropagation();

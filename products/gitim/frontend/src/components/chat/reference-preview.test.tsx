@@ -3,7 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { useCardStore } from "@/hooks/use-card-store";
+import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
+import { QUICK_SESSION_DRAG_MIME } from "@/lib/quick-session-ref";
 import type { Message } from "@/lib/types";
 import {
   CardReferenceLink,
@@ -13,6 +15,23 @@ import {
   getCardPreviewReadQuery,
   selectCardPreviewMessages,
 } from "./reference-preview-utils";
+
+vi.hoisted(() => {
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      get length() {
+        return values.size;
+      },
+      clear: () => values.clear(),
+      getItem: (key: string) => values.get(key) ?? null,
+      key: (index: number) => Array.from(values.keys())[index] ?? null,
+      removeItem: (key: string) => values.delete(key),
+      setItem: (key: string, value: string) => values.set(key, value),
+    },
+  });
+});
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -29,7 +48,19 @@ describe("CardReferenceLink", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     useCardStore.getState().resetForWorkspaceSwitch();
-    useWorkspaceStore.setState({ activeSlug: "room" });
+    useConnectionStore.setState({ mode: "remote" });
+    useWorkspaceStore.setState({
+      activeSlug: "room",
+      workspaces: [
+        {
+          slug: "room",
+          workspace_name: "Room",
+          path: "/tmp/room",
+          provider: "local",
+          initialized: true,
+        },
+      ],
+    });
     container = document.createElement("div");
     document.body.appendChild(container);
     root = createRoot(container);
@@ -151,5 +182,38 @@ describe("CardReferenceLink", () => {
       (element) => element.textContent?.includes("target line") && element.className.includes("bg-primary/10"),
     );
     expect(highlighted).toBeDefined();
+  });
+
+  it("drags a rendered Quick Session token with its workspace identity", async () => {
+    await act(async () => {
+      root.render(
+        <QuickSessionReferenceLink
+          reference={{
+            sessionId: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+            line: 7,
+          }}
+        />,
+      );
+    });
+    const setData = vi.fn();
+    const trigger = container.querySelector("button") as HTMLButtonElement;
+    const event = new Event("dragstart", { bubbles: true, cancelable: true });
+    Object.defineProperty(event, "dataTransfer", {
+      value: { effectAllowed: "none", setData },
+    });
+    await act(async () => trigger.dispatchEvent(event));
+
+    expect(trigger.draggable).toBe(true);
+    expect(setData).toHaveBeenCalledWith(
+      QUICK_SESSION_DRAG_MIME,
+      JSON.stringify({
+        ref: "session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ:L000007",
+        workspaceKey: "runtime:room",
+      }),
+    );
+    expect(setData).toHaveBeenCalledWith(
+      "text/plain",
+      "session:qs-01JZZZZZZZZZZZZZZZZZZZZZZZ:L000007",
+    );
   });
 });
