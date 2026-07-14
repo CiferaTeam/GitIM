@@ -834,14 +834,14 @@ Expected: named feature branch, clean worktree, and all implementation commits a
 
 | Review | Trigger | Why | Runs | Status | Findings |
 |--------|---------|-----|------|--------|----------|
-| CEO Review | `/plan-ceo-review` | Scope and strategy | 0 | Not run | Product semantics supplied by PR #47 and independently specified |
-| Codex Review | `/codex review` | Independent second opinion | 1 | Fallback reviewer completed | Durable claims, idempotency, revisions, generations, and wasm parity added |
-| Eng Review | `/plan-eng-review` | Architecture and tests | 1 | Clear | 8 findings resolved, 0 critical gaps |
-| Design Review | `/plan-design-review` | UI and UX gaps | 0 | Scheduled after implementation | `DESIGN.md` constraints are explicit in Task 8 |
-| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | Not required | Existing CLI and backend conventions reused |
+| CEO Review | `/plan-ceo-review` | Scope and strategy | 0 | Not run | PR #47 product semantics were supplied by the user and independently specified |
+| Codex Review | `/codex review` | Independent second opinion | 3 | Pass | 3 P1 and 1 P2 findings fixed; final rerun approved |
+| Eng Review | `/plan-eng-review` | Architecture and tests | 1 | Clear | 8 findings resolved before implementation |
+| Design Review | Task 8 spec and quality reviews | UI and UX correctness | 2 | Approved | Radix focus, workspace scope, bounded reads, stale async state, and reference DnD verified |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | Not required | Existing CLI, HTTP, Git, and browser conventions reused |
 
-**CROSS-MODEL:** Both reviews converged on durable identity, crash-safe turn claims, idempotent replies, shared protocol rules, and stale-event fencing.
+**CROSS-MODEL:** Independent reviews converged on durable identity, crash-safe turn claims, archive-wins convergence, transactional conflict replay, provider cancellation, shared protocol rules, and stale-event fencing.
 
 **UNRESOLVED:** 0
 
-**VERDICT:** Engineering review cleared; ready for subagent-driven TDD implementation.
+**VERDICT:** Implementation and review gates passed; ready for draft PR comparison and merge review.
