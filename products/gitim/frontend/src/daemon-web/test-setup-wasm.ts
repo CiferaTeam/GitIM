@@ -17,6 +17,33 @@ import { resolve } from "node:path";
 import { beforeAll } from "vitest";
 import initWasm from "gitim-wasm";
 
+function createMemoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => Array.from(values.keys())[index] ?? null,
+    removeItem: (key) => values.delete(key),
+    setItem: (key, value) => values.set(key, value),
+  };
+}
+
+function ensureTestStorage(name: "localStorage" | "sessionStorage") {
+  if (typeof globalThis[name]?.getItem === "function") return;
+  Object.defineProperty(globalThis, name, {
+    configurable: true,
+    value: createMemoryStorage(),
+  });
+}
+
+// Some Node runtimes expose a partial Web Storage object to jsdom. Normalize
+// the test contract before application stores are imported during collection.
+ensureTestStorage("localStorage");
+ensureTestStorage("sessionStorage");
+
 beforeAll(async () => {
   const wasmPath = resolve(
     process.cwd(),
