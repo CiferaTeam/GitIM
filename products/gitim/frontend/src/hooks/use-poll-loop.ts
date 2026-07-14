@@ -47,6 +47,7 @@ import {
 import { useConnectionDiagnosticsStore } from "./use-connection-diagnostics-store";
 import { useConnectionStore } from "./use-connection-store";
 import { useFleetStore } from "./use-fleet-store";
+import { useQuickSessionStore } from "./use-quick-session-store";
 import { useWorkspaceStore } from "./use-workspace-store";
 
 const POLL_INTERVAL_MS = 3000;
@@ -565,11 +566,19 @@ export function usePollLoop(): void {
       let needArchivedChannelInvalidate = false;
       let needCardRefresh = false;
       let needBoardRefresh = false;
+      const quickSessionChanges: PollChange[] = [];
 
       const chatActions = useChatStore.getState();
       const cardActions = useCardStore.getState();
 
       for (const change of changes) {
+        if (
+          change.kind === "quick_session_meta" ||
+          change.kind === "quick_session_thread"
+        ) {
+          quickSessionChanges.push(change);
+          continue;
+        }
         if (change.kind === "board") {
           needBoardRefresh = true;
           continue;
@@ -741,6 +750,13 @@ export function usePollLoop(): void {
             },
           );
         }
+      }
+
+      if (quickSessionChanges.length > 0) {
+        await useQuickSessionStore
+          .getState()
+          .refreshFromPoll(slug, quickSessionChanges);
+        if (!isCurrentPollTarget()) return;
       }
 
       if (needChannelRefresh) {

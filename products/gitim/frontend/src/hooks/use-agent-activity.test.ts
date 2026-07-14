@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
 import { beforeEach, describe, expect, it } from "vitest";
 import { useAgentStore } from "./use-agent-store";
-import { applyUsageActivityEvent } from "./use-agent-activity";
+import {
+  applyUsageActivityEvent,
+  routeAgentActivityEvent,
+} from "./use-agent-activity";
 import type { Agent } from "../lib/types";
+import { useAgentActivityStore } from "./use-agent-activity";
+import { useQuickSessionStore } from "./use-quick-session-store";
 
 function agentWithUsage(): Agent {
   return {
@@ -64,5 +69,56 @@ describe("applyUsageActivityEvent", () => {
     expect(usage?.sessionId).toBe("sid-after-reset");
     expect(usage?.usedPercent).toBe(6);
     expect(usage?.source).toBe("runtime_estimated");
+  });
+
+  it("routes scoped usage before main usage and activity consumers", () => {
+    useQuickSessionStore.getState().resetForWorkspaceSwitch();
+    useQuickSessionStore.getState().applyDetail({
+      meta: {
+        id: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+        title: "Scoped usage",
+        title_source: "api_set",
+        agent_id: "pc_op1",
+        created_by: "lewis",
+        status: "running",
+        created_at: "2026-07-11T00:00:00Z",
+        updated_at: "2026-07-11T00:00:01Z",
+        last_message_preview: "working",
+        processing_input_line: 1,
+        processing_started_at: "2026-07-11T00:00:01Z",
+        attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY",
+        revision: 3,
+      },
+      entries: [],
+      archived: false,
+    });
+    useAgentActivityStore.getState().clear();
+
+    routeAgentActivityEvent({
+      agent_id: "pc_op1",
+      event_type: "usage",
+      detail: JSON.stringify({
+        session_id: "provider-quick",
+        used_percent: 31,
+        source: "runtime_estimated",
+        updated_at: "2026-07-11T00:00:02Z",
+      }),
+      timestamp: "2026-07-11T00:00:02Z",
+      scope: "quick_session",
+      session_id: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
+      session_revision: 3,
+      attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY",
+      context_generation: 1,
+    });
+
+    expect(useAgentStore.getState().agents[0]?.sessionUsage?.sessionId).toBe(
+      "sid-before-reset",
+    );
+    expect(useAgentActivityStore.getState().activities).toEqual({});
+    expect(
+      useQuickSessionStore.getState().runtimeById[
+        "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ"
+      ]?.usage?.usedPercent,
+    ).toBe(31);
   });
 });

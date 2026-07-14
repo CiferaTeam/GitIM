@@ -9,6 +9,7 @@ import {
 import type { Agent, AgentActivityEvent } from "../lib/types";
 import { useConnectionStore } from "./use-connection-store";
 import { useAgentStore } from "./use-agent-store";
+import { useQuickSessionStore } from "./use-quick-session-store";
 import { useWorkspaceStore } from "./use-workspace-store";
 
 const MAX_EVENTS_PER_AGENT = 20;
@@ -105,6 +106,22 @@ export function applyUsageActivityEvent(event: AgentActivityEvent) {
   }
 }
 
+export function routeAgentActivityEvent(event: AgentActivityEvent): void {
+  if (event.scope === "quick_session") {
+    useQuickSessionStore.getState().applyActivityEvent(event);
+    return;
+  }
+  if (event.event_type === "usage") {
+    applyUsageActivityEvent(event);
+    return;
+  }
+  if (event.event_type === "burned") {
+    useAgentStore.getState().removeAgent(event.agent_id);
+    return;
+  }
+  useAgentActivityStore.getState().push(event);
+}
+
 /**
  * Connects to the SSE endpoint for agent activity events for the given
  * workspace. Closes and re-opens when `slug` changes so events from the
@@ -112,7 +129,6 @@ export function applyUsageActivityEvent(event: AgentActivityEvent) {
  */
 export function useAgentActivitySSE(slug: string | null) {
   const port = useConnectionStore((s) => s.port);
-  const push = useAgentActivityStore((s) => s.push);
   const ensureSlug = useAgentActivityStore((s) => s.ensureSlug);
   const esRef = useRef<LocalNetworkEventSource | null>(null);
   const refreshRef = useRef(false);
@@ -131,20 +147,7 @@ export function useAgentActivitySSE(slug: string | null) {
     es.onmessage = (e) => {
       try {
         const event: AgentActivityEvent = JSON.parse(e.data);
-        if (event.event_type === "usage") {
-          applyUsageActivityEvent(event);
-          return; // do NOT push usage events to the activity log
-        }
-        if (event.event_type === "burned") {
-          // archive-protocol terminal event: agent was burned (either via
-          // the WebUI burn button or the B.4 self-departed self-heal).
-          // Drop it from the active store so the agent disappears from
-          // the management list. The detail-page burn dialog also calls
-          // removeAgent eagerly to avoid a ghost row when SSE is delayed.
-          useAgentStore.getState().removeAgent(event.agent_id);
-          return; // skip activity-log push — the agent is gone
-        }
-        push(event);
+        routeAgentActivityEvent(event);
       } catch {
         // ignore malformed events
       }
@@ -165,5 +168,5 @@ export function useAgentActivitySSE(slug: string | null) {
       es.close();
       esRef.current = null;
     };
-  }, [port, slug, push, ensureSlug]);
+  }, [port, slug, ensureSlug]);
 }

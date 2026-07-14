@@ -9,6 +9,7 @@
 import type {
   Agent,
   ApiResponse,
+  ArchiveQuickSessionResponse,
   BoardReadResponse,
   BoardSummary,
   BoardWriteResponse,
@@ -16,6 +17,7 @@ import type {
   CardStatus,
   Channel,
   CreateCardResponse,
+  CreateQuickSessionResponse,
   CreateWorkspaceRequest,
   CronDetail,
   CronRunBody,
@@ -34,6 +36,10 @@ import type {
   NodeStatus,
   PollResponse,
   Project,
+  QuickSessionDetail,
+  QuickSessionListItem,
+  SendQuickSessionMessageResponse,
+  UnarchiveQuickSessionResponse,
   RunStatus,
   WorkspaceSummary,
 } from "./types";
@@ -49,6 +55,7 @@ import type {
   CardBackend,
   ChannelArchiveBackend,
   DmArchiveBackend,
+  QuickSessionBackend,
 } from "./backend";
 import { HttpBackend, LocalBackend } from "./backend";
 import {
@@ -73,6 +80,10 @@ import { useAttachmentDraftStore } from "@/hooks/use-attachment-draft-store";
 import { DEFAULT_GIT_CORS_PROXY } from "./git-cors-proxy";
 import { localNetworkFetch } from "./local-network-fetch";
 import { parseAssetRef, type AssetRef } from "./asset-ref";
+import {
+  generateQuickSessionId,
+  generateQuickSessionRequestId,
+} from "./quick-session-ref";
 
 let activeBackend: Backend = new HttpBackend(() => baseUrl());
 let activeLocalBackend: LocalBackend | null = null;
@@ -255,6 +266,10 @@ function localDmArchiveBackend(): DmArchiveBackend {
 
 function localBoardBackend(): BoardBackend {
   return activeBackend as Backend & BoardBackend;
+}
+
+function localQuickSessionBackend(): QuickSessionBackend {
+  return activeBackend as Backend & QuickSessionBackend;
 }
 
 function wsBase(slug: string): string {
@@ -1108,6 +1123,145 @@ export function validateSlug(slug: string): string | null {
   if (slug.startsWith("-") || slug.endsWith("-")) return "Cannot start or end with a hyphen";
   if (slug.includes("--")) return "Cannot contain consecutive hyphens";
   return null;
+}
+
+// --- Quick Session API: durable workspace-scoped conversations ---
+
+export interface QuickSessionListQuery {
+  archived?: boolean;
+  agentId?: string;
+  actionable?: boolean;
+  limit?: number;
+}
+
+export interface ReadQuickSessionQuery {
+  limit?: number;
+  since?: number;
+}
+
+export async function createQuickSession(
+  slug: string,
+  agentId: string,
+  firstMessage: string,
+  sessionId = generateQuickSessionId(),
+): Promise<ApiResponse<CreateQuickSessionResponse>> {
+  const input = {
+    session_id: sessionId,
+    agent_id: agentId,
+    first_message: firstMessage,
+  };
+  if (isLocalMode()) {
+    void slug;
+    return localQuickSessionBackend().createQuickSession(input);
+  }
+  const res = await localNetworkFetch(`${wsBase(slug)}/im/quick-sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return await res.json();
+}
+
+export async function listQuickSessions(
+  slug: string,
+  query: QuickSessionListQuery = {},
+): Promise<ApiResponse<{ sessions: QuickSessionListItem[] }>> {
+  const backendQuery = {
+    ...(query.archived !== undefined ? { archived: query.archived } : {}),
+    ...(query.agentId ? { agent_id: query.agentId } : {}),
+    ...(query.actionable !== undefined ? { actionable: query.actionable } : {}),
+    ...(query.limit !== undefined ? { limit: query.limit } : {}),
+  };
+  if (isLocalMode()) {
+    void slug;
+    return localQuickSessionBackend().listQuickSessions(backendQuery);
+  }
+  const params = new URLSearchParams();
+  if (query.archived !== undefined) params.set("archived", String(query.archived));
+  if (query.agentId) params.set("agent_id", query.agentId);
+  if (query.actionable !== undefined) {
+    params.set("actionable", String(query.actionable));
+  }
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  const res = await localNetworkFetch(
+    `${wsBase(slug)}/im/quick-sessions${suffix}`,
+  );
+  return await res.json();
+}
+
+export async function readQuickSession(
+  slug: string,
+  sessionId: string,
+  query: ReadQuickSessionQuery = {},
+): Promise<ApiResponse<{ session: QuickSessionDetail }>> {
+  if (isLocalMode()) {
+    void slug;
+    return localQuickSessionBackend().readQuickSession(sessionId);
+  }
+  const params = new URLSearchParams();
+  if (query.limit !== undefined) params.set("limit", String(query.limit));
+  if (query.since !== undefined) params.set("since", String(query.since));
+  const suffix = params.size > 0 ? `?${params.toString()}` : "";
+  const res = await localNetworkFetch(
+    `${wsBase(slug)}/im/quick-sessions/${encodeURIComponent(sessionId)}${suffix}`,
+  );
+  return await res.json();
+}
+
+export async function sendQuickSessionMessage(
+  slug: string,
+  sessionId: string,
+  body: string,
+  requestId = generateQuickSessionRequestId(),
+): Promise<ApiResponse<SendQuickSessionMessageResponse>> {
+  const input = { body, request_id: requestId };
+  if (isLocalMode()) {
+    void slug;
+    return localQuickSessionBackend().sendQuickSessionMessage(
+      sessionId,
+      input,
+    );
+  }
+  const res = await localNetworkFetch(
+    `${wsBase(slug)}/im/quick-sessions/${encodeURIComponent(sessionId)}/messages`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    },
+  );
+  return await res.json();
+}
+
+export async function archiveQuickSession(
+  slug: string,
+  sessionId: string,
+): Promise<ApiResponse<ArchiveQuickSessionResponse>> {
+  if (isLocalMode()) {
+    void slug;
+    return localQuickSessionBackend().archiveQuickSession(sessionId);
+  }
+  const res = await localNetworkFetch(
+    `${wsBase(slug)}/im/quick-sessions/${encodeURIComponent(sessionId)}/archive`,
+    { method: "POST" },
+  );
+  return await res.json();
+}
+
+export async function unarchiveQuickSession(
+  slug: string,
+  sessionId: string,
+): Promise<ApiResponse<UnarchiveQuickSessionResponse>> {
+  if (isLocalMode()) {
+    void slug;
+    return localQuickSessionBackend().unarchiveQuickSession(sessionId);
+  }
+  const res = await localNetworkFetch(
+    `${wsBase(slug)}/im/quick-sessions/${encodeURIComponent(sessionId)}/unarchive`,
+    { method: "POST" },
+  );
+  return await res.json();
 }
 
 // --- Card API: real runtime HTTP (all scoped to a workspace) ---
