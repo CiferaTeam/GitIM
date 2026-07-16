@@ -9,6 +9,7 @@ import type {
   QuickSessionStatus,
 } from "../lib/types";
 import {
+  formatQuickSessionRef,
   generateQuickSessionId,
   generateQuickSessionRequestId,
 } from "../lib/quick-session-ref";
@@ -141,7 +142,7 @@ function itemFromDetail(detail: QuickSessionDetail): QuickSessionListItem {
     last_message_preview: detail.meta.last_message_preview,
     revision: detail.meta.revision,
     archived: detail.archived,
-    ref: `session:${detail.meta.id}`,
+    ref: formatQuickSessionRef(detail.meta.id),
   };
 }
 

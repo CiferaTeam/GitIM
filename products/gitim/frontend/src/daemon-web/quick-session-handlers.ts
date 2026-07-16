@@ -22,6 +22,7 @@ import {
 } from "gitim-wasm";
 import { ensureWasmReady } from "./wasm-ready";
 import { validateHandler } from "./paths";
+import { formatQuickSessionRef } from "../lib/quick-session-ref";
 import { withRepoLock } from "./repo-lock";
 
 export type ApiResponse = {
@@ -231,7 +232,7 @@ export async function createQuickSession(
           data: {
             session: detail,
             line_number: 1,
-            ref: `session:${input.session_id}`,
+            ref: formatQuickSessionRef(input.session_id),
           },
         };
       }
@@ -297,7 +298,7 @@ export async function createQuickSession(
             archived: false,
           },
           line_number: 1,
-          ref: `session:${input.session_id}`,
+          ref: formatQuickSessionRef(input.session_id),
         },
       };
     });
@@ -781,7 +782,7 @@ function quickSessionListItem(
     last_message_preview: meta.last_message_preview,
     revision: meta.revision,
     archived,
-    ref: `session:${meta.id}`,
+    ref: formatQuickSessionRef(meta.id),
   };
 }
 
@@ -794,7 +795,7 @@ function quickSessionSendResponse(
     line_number: lineNumber,
     status: meta.status,
     revision: meta.revision,
-    ref: `session:${meta.id}`,
+    ref: formatQuickSessionRef(meta.id),
   };
 }
 
