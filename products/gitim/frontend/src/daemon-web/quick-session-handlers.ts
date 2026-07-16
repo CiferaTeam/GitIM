@@ -21,7 +21,7 @@ import {
   validateQuickSessionId,
 } from "gitim-wasm";
 import { ensureWasmReady } from "./wasm-ready";
-import { validateHandler } from "./paths";
+import { quickSessionFileFromPath, validateHandler } from "./paths";
 import { formatQuickSessionRef } from "../lib/quick-session-ref";
 import { withRepoLock } from "./repo-lock";
 
@@ -870,29 +870,12 @@ function utcTimestamp(): string {
 }
 
 
-function quickSessionChangeFromPath(path: string): {
-  archived: boolean;
-  sessionId: string;
-  file: "meta" | "thread";
-} | null {
-  const match = path.match(
-    /^(archive\/)?quick-sessions\/([^/]+)\/(session\.meta\.yaml|discussion\.thread)$/,
-  );
-  if (!match || quickSessionIdError(match[2])) return null;
-  return {
-    archived: match[1] !== undefined,
-    sessionId: match[2],
-    file: match[3] === "session.meta.yaml" ? "meta" : "thread",
-  };
-}
-
-
 export async function classifyQuickSessionPollChange(
   path: string,
   baseline?: string,
 ): Promise<ClassifiedQuickSessionPollChange | null | undefined> {
   await ensureWasmReady();
-  const parsed = quickSessionChangeFromPath(path);
+  const parsed = quickSessionFileFromPath(path);
   if (!parsed) return undefined;
 
   const s = getState();

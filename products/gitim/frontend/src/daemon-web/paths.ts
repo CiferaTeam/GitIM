@@ -1,4 +1,7 @@
-import { validateHandler as wasmValidateHandler } from "gitim-wasm";
+import {
+  validateHandler as wasmValidateHandler,
+  validateQuickSessionId as wasmValidateQuickSessionId,
+} from "gitim-wasm";
 
 export type ThreadTarget =
   | {
@@ -78,6 +81,35 @@ export function channelNameFromThreadPath(path: string): string | null {
   if (!path.startsWith("channels/") || !path.endsWith(".thread")) return null;
   const name = path.slice("channels/".length, -".thread".length);
   return validateChannelName(name) ? null : name;
+}
+
+export interface QuickSessionFileRef {
+  archived: boolean;
+  sessionId: string;
+  file: "meta" | "thread";
+}
+
+// Single parser for quick-session repo paths, shared by the sync loop and
+// the poll-change classifier. The captured id is validated through the
+// authoritative Rust validator (wasm must be initialized — callers go
+// through ensureWasmReady); invalid ids yield null just like non-matching
+// paths.
+export function quickSessionFileFromPath(path: string): QuickSessionFileRef | null {
+  const match =
+    /^(archive\/)?quick-sessions\/([^/]+)\/(session\.meta\.yaml|discussion\.thread)$/.exec(
+      path,
+    );
+  if (!match) return null;
+  try {
+    wasmValidateQuickSessionId(match[2]);
+  } catch {
+    return null;
+  }
+  return {
+    archived: match[1] !== undefined,
+    sessionId: match[2],
+    file: match[3] === "session.meta.yaml" ? "meta" : "thread",
+  };
 }
 
 export function dmApiNameFromThreadPath(path: string): string | null {

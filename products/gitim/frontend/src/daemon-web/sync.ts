@@ -6,7 +6,7 @@ import * as gitOps from "./git";
 import { getState, setState } from "./state";
 import { tokenAuth } from "./auth";
 import { isAuthFailure } from "./auth-errors";
-import { validateHandler } from "./paths";
+import { validateHandler, quickSessionFileFromPath } from "./paths";
 import { withRepoLock } from "./repo-lock";
 import { ensureWasmReady } from "./wasm-ready";
 import {
@@ -73,22 +73,6 @@ interface QuickSessionRelocation {
   targetThreadPath: string;
   sourceMetaPath: string;
   sourceThreadPath: string;
-}
-
-function quickSessionFileFromPath(path: string): {
-  archived: boolean;
-  id: string;
-  file: "meta" | "thread";
-} | null {
-  const match = /^(archive\/)?quick-sessions\/([^/]+)\/(session\.meta\.yaml|discussion\.thread)$/.exec(
-    path,
-  );
-  if (!match) return null;
-  return {
-    archived: match[1] !== undefined,
-    id: match[2],
-    file: match[3] === "session.meta.yaml" ? "meta" : "thread",
-  };
 }
 
 function parentPath(path: string): string {
@@ -274,8 +258,8 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
         continue;
       }
       quickSessionPaths.add(fp);
-      const changed = quickSessionChanges.get(quickFile.id) ?? {
-        id: quickFile.id,
+      const changed = quickSessionChanges.get(quickFile.sessionId) ?? {
+        id: quickFile.sessionId,
       };
       if (quickFile.archived) {
         if (quickFile.file === "meta") changed.archivedMetaPath = fp;
@@ -285,7 +269,7 @@ async function runSyncOnceLocked(): Promise<SyncResult> {
       } else {
         changed.activeThreadPath = fp;
       }
-      quickSessionChanges.set(quickFile.id, changed);
+      quickSessionChanges.set(quickFile.sessionId, changed);
     }
 
     const quickSessionMerges: Array<{
