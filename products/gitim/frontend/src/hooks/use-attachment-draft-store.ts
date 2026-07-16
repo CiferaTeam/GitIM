@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { formatAssetRef } from "@/lib/asset-ref";
+import { normalizedFilename } from "@/lib/asset-utils";
 import type { UploadedAsset } from "@/lib/client";
 
 export type AttachmentDraftStatus = "idle" | "uploading" | "sending" | "error";
@@ -102,14 +103,6 @@ export function attachmentDraftKey(workspaceKey: string, scopeKey: string): stri
 
 function selectionId(file: File): string {
   return JSON.stringify([file.name, file.size, file.lastModified, file.type]);
-}
-
-function normalizedFilename(name: string): string {
-  const basename = name.split(/[\\/]/).at(-1) ?? "";
-  const cleaned = Array.from(basename)
-    .filter((character) => !/\p{Cc}/u.test(character))
-    .join("");
-  return cleaned || "attachment";
 }
 
 function canFormatRuntimeReference(name: string, size: number): boolean {

@@ -4,46 +4,16 @@ use std::path::{Path, PathBuf};
 
 use futures::StreamExt;
 use gitim_core::types::{
-    AssetRef, ASSET_REF_VERSION, MAX_ASSETS_PER_MESSAGE, MAX_ASSET_BYTES, MAX_ASSET_REQUEST_BYTES,
+    AssetRef, ASSET_COMPONENT_ENCODE_SET, ASSET_REF_VERSION, MAX_ASSETS_PER_MESSAGE,
+    MAX_ASSET_BYTES, MAX_ASSET_REQUEST_BYTES,
 };
-use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
+use percent_encoding::utf8_percent_encode;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 use super::http::{CliError, Client, UploadFile};
 use super::workspace::resolve_workspace;
-
-const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'!')
-    .add(b'"')
-    .add(b'#')
-    .add(b'$')
-    .add(b'%')
-    .add(b'&')
-    .add(b'\'')
-    .add(b'(')
-    .add(b')')
-    .add(b'*')
-    .add(b'+')
-    .add(b',')
-    .add(b'/')
-    .add(b':')
-    .add(b';')
-    .add(b'<')
-    .add(b'=')
-    .add(b'>')
-    .add(b'?')
-    .add(b'@')
-    .add(b'[')
-    .add(b'\\')
-    .add(b']')
-    .add(b'^')
-    .add(b'`')
-    .add(b'{')
-    .add(b'|')
-    .add(b'}');
 
 #[derive(Debug)]
 pub struct PutArgs {
@@ -103,7 +73,7 @@ pub async fn get(client: &Client, args: GetArgs) -> Result<i32, CliError> {
     }
 
     let slug = resolve_workspace(client, args.workspace.as_deref()).await?;
-    let encoded_name = utf8_percent_encode(&asset.name, QUERY_ENCODE_SET);
+    let encoded_name = utf8_percent_encode(&asset.name, ASSET_COMPONENT_ENCODE_SET);
     let path = format!(
         "/workspaces/{slug}/assets/resolve/{}/{}?name={encoded_name}&download=1",
         asset.origin_runtime_id, asset.sha256

@@ -1,5 +1,6 @@
 use super::{
     AssetError, AssetMetadata, AssetService, AssetStore, AssetWorkspaceToken, RequestBudget,
+    MAX_INLINE_IMAGE_AXIS, MAX_INLINE_IMAGE_PIXELS,
 };
 use axum::body::Body;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, RawQuery, State};
@@ -25,8 +26,9 @@ use crate::http::{SharedRuntimeState, WorkspaceSlug};
 const MAX_UPLOAD_HTTP_BYTES: usize = 201 * 1024 * 1024;
 const CACHE_CONTROL_VALUE: &str = "private, immutable, max-age=31536000";
 const BROWSER_CACHE_CONTROL_VALUE: &str = "private, no-store";
-const MAX_INLINE_IMAGE_AXIS: u32 = 32_768;
-const MAX_INLINE_IMAGE_PIXELS: u64 = 100_000_000;
+// RFC 5987 `filename*` encoding for Content-Disposition. Intentionally NOT
+// gitim_core's ASSET_COMPONENT_ENCODE_SET: RFC 5987 attr-char additionally
+// allows ! # $ & + ^ ` | to appear unescaped, so this is a distinct set.
 const FILENAME_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')

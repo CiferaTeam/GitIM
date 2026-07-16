@@ -4,6 +4,7 @@ import { Download, FileText, RefreshCw, X } from "lucide-react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import type { AssetRef } from "../../lib/asset-ref";
+import { formatBinarySize } from "../../lib/asset-utils";
 import { assetResolveUrl } from "../../lib/client";
 import {
   Dialog,
@@ -24,6 +25,10 @@ const INLINE_IMAGE_TYPES = new Set([
 
 const MAX_DIMENSION_HINT = 4096;
 const MAX_FRAME_SIZE = 440;
+// Inline-image safety ceilings. Source of truth is the Rust asset module
+// (crates/gitim-runtime/src/assets/mod.rs: MAX_INLINE_IMAGE_AXIS /
+// MAX_INLINE_IMAGE_PIXELS), which enforces the same limits at upload
+// inspection and resolve time; keep these values in sync manually.
 const MAX_INLINE_IMAGE_AXIS = 32_768;
 const MAX_INLINE_IMAGE_PIXELS = 100_000_000;
 const MAX_ASPECT_RATIO = 4;
@@ -64,14 +69,6 @@ function imageGeometry(width?: number, height?: number): ImageGeometry | undefin
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
   };
-}
-
-function formatBinarySize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KiB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MiB`;
 }
 
 function shortOrigin(originRuntimeId: string): string {
