@@ -23,6 +23,7 @@ import {
 import { ensureWasmReady } from "./wasm-ready";
 import { quickSessionFileFromPath, validateHandler } from "./paths";
 import { formatQuickSessionRef } from "../lib/quick-session-ref";
+import type { QuickSessionMeta } from "../lib/types";
 import { withRepoLock } from "./repo-lock";
 
 export type ApiResponse = {
@@ -53,39 +54,6 @@ export interface ReadQuickSessionQuery {
 export interface SendQuickSessionInput {
   body: string;
   request_id: string;
-}
-
-type QuickSessionStatus =
-  | "needs_title"
-  | "running"
-  | "active"
-  | "error"
-  | "archived";
-
-interface QuickSessionMeta {
-  id: string;
-  title?: string;
-  agent_id: string;
-  created_by: string;
-  status: QuickSessionStatus;
-  created_at: string;
-  updated_at: string;
-  archived_at?: string;
-  archived_from?: QuickSessionStatus;
-  summary?: string;
-  summary_updated_at?: string;
-  last_message_preview: string;
-  error?: string;
-  processing_input_line?: number;
-  processing_started_at?: string;
-  attempt_id?: string;
-  last_completed_attempt_id?: string;
-  last_completed_input_line?: number;
-  last_completed_line?: number;
-  last_failed_attempt_id?: string;
-  last_human_request_id?: string;
-  last_human_line?: number;
-  revision: number;
 }
 
 interface QuickSessionTransitionResult {
