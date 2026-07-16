@@ -64,7 +64,6 @@ const session = {
   meta: {
     id: SESSION_ID,
     title: "Investigate flakes",
-    title_source: "api_set" as const,
     agent_id: "alice",
     created_by: "lewis",
     status: "active" as const,

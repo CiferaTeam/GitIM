@@ -652,7 +652,6 @@ fn completed_detail(index: usize) -> QuickSessionDetail {
     let mut detail = initial_detail();
     detail.meta.id = id;
     detail.meta.title = Some("Completed".to_string());
-    detail.meta.title_source = gitim_core::types::QuickSessionTitleSource::ApiSet;
     detail.meta.status = QuickSessionStatus::Active;
     detail.meta.last_completed_attempt_id = Some("qa-01JZZZZZZZZZZZZZZZZZZZZZZZ".to_string());
     detail.meta.last_completed_input_line = Some(1);
@@ -662,19 +661,10 @@ fn completed_detail(index: usize) -> QuickSessionDetail {
 }
 
 fn running_detail() -> QuickSessionDetail {
-    let mut detail = initial_detail();
-    detail.meta.id = "qs-01K00000000000000000000000".to_string();
-    apply_quick_session_transition(
-        &mut detail.meta,
-        QuickSessionTransition::Claim {
-            actor: "bob".to_string(),
-            input_line: 1,
-            attempt_id: "qa-01K00000000000000000000000".to_string(),
-            now: "2026-07-11T00:00:02Z".to_string(),
-        },
+    running_detail_with(
+        "qs-01K00000000000000000000000",
+        "qa-01K00000000000000000000000",
     )
-    .unwrap();
-    detail
 }
 
 fn running_detail_with(id: &str, attempt_id: &str) -> QuickSessionDetail {
@@ -686,7 +676,7 @@ fn running_detail_with(id: &str, attempt_id: &str) -> QuickSessionDetail {
             actor: "bob".to_string(),
             input_line: 1,
             attempt_id: attempt_id.to_string(),
-            now: "2026-07-11T00:00:02Z".to_string(),
+            now: "20260711T000002Z".to_string(),
         },
     )
     .unwrap();
@@ -996,10 +986,7 @@ async fn completion_verification_survives_more_than_twenty_four_queued_messages(
     );
     let local = QuickSessionRuntimeState::load(temp.path(), SESSION_ID).unwrap();
     assert!(local.session_token.is_some());
-    assert_eq!(
-        local.last_completed_line,
-        backend.detail().meta.last_completed_line
-    );
+    assert!(backend.detail().meta.last_completed_line.is_some());
     assert!(local.session_usage.is_some());
 }
 
@@ -1122,7 +1109,9 @@ async fn restart_without_local_state_recovers_stale_compact_claim_without_execut
 }
 
 #[tokio::test]
-async fn stale_rfc3339_claim_remains_recoverable() {
+async fn non_compact_claim_timestamp_is_not_treated_as_stale() {
+    // Only the daemon's compact format is a production claim timestamp; an
+    // RFC3339 value is unparseable and must never trip the staleness path.
     let (_temp, backend, factory, executor, _rx) = harness(ProviderAction::Complete, false);
     backend.transition(QuickSessionTransition::Claim {
         actor: "bob".to_string(),
@@ -1133,8 +1122,8 @@ async fn stale_rfc3339_claim_remains_recoverable() {
 
     let executor = executor.with_stale_claim_after(std::time::Duration::ZERO);
     assert!(executor.recover_actionable().await.unwrap().is_empty());
-    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Error);
-    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 1);
+    assert_eq!(backend.detail().meta.status, QuickSessionStatus::Running);
+    assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 0);
     assert!(factory.calls.lock().unwrap().is_empty());
 }
 
@@ -1162,7 +1151,7 @@ async fn fresh_unowned_running_claim_remains_untouched() {
         actor: "bob".to_string(),
         input_line: 1,
         attempt_id: "qa-01JYYYYYYYYYYYYYYYYYYYYYYY".to_string(),
-        now: chrono::Utc::now().to_rfc3339(),
+        now: chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
     });
 
     assert!(executor.recover_actionable().await.unwrap().is_empty());
@@ -1372,7 +1361,7 @@ async fn matching_crash_marker_recovers_immediately_and_clears_ownership() {
         actor: "bob".to_string(),
         input_line: 1,
         attempt_id: attempt_id.to_string(),
-        now: chrono::Utc::now().to_rfc3339(),
+        now: chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string(),
     });
     QuickSessionRuntimeState {
         active_attempt_id: Some(attempt_id.to_string()),

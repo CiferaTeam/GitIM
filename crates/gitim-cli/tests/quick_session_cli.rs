@@ -86,7 +86,7 @@ fn read_accepts_session_id_and_prints_transcript() {
         &clone,
         json!({"session":{
             "meta":{
-                "id":SESSION_ID,"title":"Investigate auth","title_source":"api_set",
+                "id":SESSION_ID,"title":"Investigate auth",
                 "agent_id":"bob","created_by":"alice","status":"active",
                 "created_at":"2026-07-11T00:00:00Z","updated_at":"2026-07-11T00:01:00Z",
                 "last_message_preview":"reply","revision":2

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use gitim_core::parser::{parse_thread, ParseError};
 use gitim_core::types::{
     truncate_quick_session_preview, validate_quick_session_meta, ChannelMeta, QuickSessionMeta,
-    QuickSessionStatus, QuickSessionTitleSource, ThreadEntry,
+    QuickSessionStatus, ThreadEntry,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -234,16 +234,14 @@ pub fn merge_quick_session_meta(
     let archive_wins = local.status == QuickSessionStatus::Archived
         || remote.status == QuickSessionStatus::Archived;
 
-    let (title, title_source) = match (&local.title, &remote.title) {
+    let title = match (&local.title, &remote.title) {
         (Some(local), Some(remote)) if local != remote => {
             return Err(ConflictError::QuickSession(
                 "concurrent titles differ".to_string(),
             ))
         }
-        (Some(title), _) | (_, Some(title)) => {
-            (Some(title.clone()), QuickSessionTitleSource::ApiSet)
-        }
-        (None, None) => (None, QuickSessionTitleSource::None),
+        (Some(title), _) | (_, Some(title)) => Some(title.clone()),
+        (None, None) => None,
     };
     let translate_local = |line: u64| {
         mappings
@@ -470,7 +468,6 @@ pub fn merge_quick_session_meta(
     let merged = QuickSessionMeta {
         id: local.id.clone(),
         title,
-        title_source,
         agent_id: local.agent_id.clone(),
         created_by: local.created_by.clone(),
         status,

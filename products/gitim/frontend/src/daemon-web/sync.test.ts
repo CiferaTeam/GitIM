@@ -103,7 +103,6 @@ const archivedSessionThreadPath =
 function quickSessionMeta(overrides: Record<string, unknown> = {}): string {
   return serializeQuickSessionMeta({
     id: sessionId,
-    title_source: "none",
     agent_id: "alice",
     created_by: "lewis",
     status: "needs_title",
@@ -781,7 +780,6 @@ describe("daemon-web sync", () => {
     const baseMeta = quickSessionMeta();
     const localMeta = quickSessionMeta({
       title: "Local title",
-      title_source: "api_set",
       status: "active",
       updated_at: "20260711T010303Z",
       last_message_preview: "local follow-up",
@@ -791,7 +789,6 @@ describe("daemon-web sync", () => {
     });
     const remoteMeta = quickSessionMeta({
       title: "Remote title",
-      title_source: "api_set",
       status: "active",
       updated_at: "20260711T010253Z",
       last_message_preview: "remote follow-up",
@@ -1041,7 +1038,6 @@ describe("daemon-web sync", () => {
     const activeMeta = quickSessionMeta();
     const completedMeta = quickSessionMeta({
       title: "Remote title",
-      title_source: "api_set",
       status: "active",
       updated_at: "20260711T010403Z",
       last_message_preview: "agent completion",
@@ -1139,7 +1135,6 @@ describe("daemon-web sync", () => {
     });
     const completedMeta = quickSessionMeta({
       title: "Local title",
-      title_source: "api_set",
       status: "active",
       updated_at: "20260711T010403Z",
       last_message_preview: "agent completion",

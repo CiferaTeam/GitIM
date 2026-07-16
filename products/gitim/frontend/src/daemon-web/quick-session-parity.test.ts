@@ -313,7 +313,6 @@ describe("daemon-web Quick Session parity", () => {
     const fixtures = [
       {
         id: SESSION_ID,
-        title_source: "none",
         agent_id: "alice",
         created_by: "lewis",
         status: "needs_title",
@@ -326,7 +325,6 @@ describe("daemon-web Quick Session parity", () => {
       {
         id: OTHER_SESSION_ID,
         title: "Investigate: \"quoted\" value\nnext line",
-        title_source: "api_set",
         agent_id: "alice",
         created_by: "lewis",
         status: "active",
@@ -674,7 +672,6 @@ describe("daemon-web Quick Session parity", () => {
     const activeMeta = {
       ...(created.session as { meta: Record<string, unknown> }).meta,
       title: "Title: \"quoted\"\ncontinued",
-      title_source: "api_set",
       status: "active",
       summary: "Summary line\n\n- key: value\n- # literal",
       summary_updated_at: "20260711T010203Z",

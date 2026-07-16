@@ -68,21 +68,11 @@ impl QuickSessionStatus {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum QuickSessionTitleSource {
-    #[default]
-    None,
-    ApiSet,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuickSessionMeta {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    #[serde(default)]
-    pub title_source: QuickSessionTitleSource,
     pub agent_id: String,
     pub created_by: String,
     #[serde(default)]
@@ -128,7 +118,6 @@ impl QuickSessionMeta {
         Self {
             id,
             title: None,
-            title_source: QuickSessionTitleSource::None,
             agent_id,
             created_by,
             status: QuickSessionStatus::NeedsTitle,
@@ -306,10 +295,8 @@ pub fn validate_quick_session_meta(meta: &QuickSessionMeta) -> Result<(), QuickS
     if meta.revision == 0 {
         return invalid_meta("revision must be positive");
     }
-    match (meta.title_source, meta.title.as_deref()) {
-        (QuickSessionTitleSource::None, None) => {}
-        (QuickSessionTitleSource::ApiSet, Some(title)) => validate_quick_session_title(title)?,
-        _ => return invalid_meta("title and title_source do not agree"),
+    if let Some(title) = meta.title.as_deref() {
+        validate_quick_session_title(title)?;
     }
     if meta.last_message_preview.chars().count() > QUICK_SESSION_PREVIEW_MAX_CHARS {
         return invalid_meta("last_message_preview exceeds its limit");
@@ -538,13 +525,10 @@ fn apply_transition(
             require_attempt(meta, &attempt_id)?;
             let title = title.trim().to_string();
             validate_quick_session_title(&title)?;
-            if meta.title.as_deref() == Some(&title)
-                && meta.title_source == QuickSessionTitleSource::ApiSet
-            {
+            if meta.title.as_deref() == Some(&title) {
                 return Ok(TransitionOutcome::Duplicate { line_number: None });
             }
             meta.title = Some(title);
-            meta.title_source = QuickSessionTitleSource::ApiSet;
             finish(meta, now)?;
         }
         QuickSessionTransition::SetSummary {
@@ -583,7 +567,7 @@ fn apply_transition(
             if meta.processing_input_line != Some(input_line) {
                 return Err(QuickSessionError::InputLineMismatch);
             }
-            if meta.title.is_none() || meta.title_source != QuickSessionTitleSource::ApiSet {
+            if meta.title.is_none() {
                 return Err(QuickSessionError::TitleRequired);
             }
             if output_line <= input_line {
@@ -696,7 +680,7 @@ fn require_attempt(meta: &QuickSessionMeta, attempt_id: &str) -> Result<(), Quic
 }
 
 fn title_derived_status(meta: &QuickSessionMeta) -> QuickSessionStatus {
-    if meta.title.is_some() && meta.title_source == QuickSessionTitleSource::ApiSet {
+    if meta.title.is_some() {
         QuickSessionStatus::Active
     } else {
         QuickSessionStatus::NeedsTitle

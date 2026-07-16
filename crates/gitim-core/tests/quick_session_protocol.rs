@@ -7,9 +7,9 @@ use gitim_core::types::{
     apply_quick_session_transition, truncate_quick_session_preview,
     validate_quick_session_attempt_id, validate_quick_session_id, validate_quick_session_meta,
     validate_quick_session_summary, validate_quick_session_title, Handler, LinkKind, Message,
-    QuickSessionMeta, QuickSessionStatus, QuickSessionTitleSource, QuickSessionTransition,
-    ThreadEntry, TransitionOutcome, QUICK_SESSION_PREVIEW_MAX_CHARS,
-    QUICK_SESSION_SUMMARY_MAX_CHARS, QUICK_SESSION_TITLE_MAX_CHARS,
+    QuickSessionMeta, QuickSessionStatus, QuickSessionTransition, ThreadEntry, TransitionOutcome,
+    QUICK_SESSION_PREVIEW_MAX_CHARS, QUICK_SESSION_SUMMARY_MAX_CHARS,
+    QUICK_SESSION_TITLE_MAX_CHARS,
 };
 
 const SESSION_ID: &str = "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ";
@@ -117,7 +117,6 @@ fn quick_session_unicode_limits_and_preview_are_scalar_safe() {
 fn quick_session_meta_constructor_and_serde_defaults_are_canonical() {
     let meta = meta_fixture();
     assert_eq!(meta.status, QuickSessionStatus::NeedsTitle);
-    assert_eq!(meta.title_source, QuickSessionTitleSource::None);
     assert_eq!(meta.revision, 1);
     assert_eq!(meta.updated_at, meta.created_at);
     assert!(validate_quick_session_meta(&meta).is_ok());
@@ -127,15 +126,22 @@ fn quick_session_meta_constructor_and_serde_defaults_are_canonical() {
     );
     let legacy: QuickSessionMeta = serde_yaml::from_str(&yaml).unwrap();
     assert_eq!(legacy.status, QuickSessionStatus::NeedsTitle);
-    assert_eq!(legacy.title_source, QuickSessionTitleSource::None);
     assert_eq!(legacy.revision, 1);
     assert_eq!(legacy.last_message_preview, "");
     assert_eq!(legacy.last_failed_attempt_id, None);
     assert!(validate_quick_session_meta(&legacy).is_ok());
 
+    // Metadata written before the title_source field was removed must still parse.
+    let with_legacy_field = format!(
+        "id: {SESSION_ID}\ntitle: Investigate auth\ntitle_source: api_set\nstatus: active\nagent_id: alice\ncreated_by: lewis\ncreated_at: 2026-07-11T00:00:00Z\nupdated_at: 2026-07-11T00:00:00Z\n"
+    );
+    let upgraded: QuickSessionMeta = serde_yaml::from_str(&with_legacy_field).unwrap();
+    assert_eq!(upgraded.title.as_deref(), Some("Investigate auth"));
+    assert!(validate_quick_session_meta(&upgraded).is_ok());
+
     let json = serde_json::to_value(&meta).unwrap();
     assert_eq!(json["status"], "needs_title");
-    assert_eq!(json["title_source"], "none");
+    assert!(json.get("title_source").is_none());
 }
 
 #[test]
@@ -146,10 +152,6 @@ fn quick_session_meta_validation_rejects_impossible_combinations() {
 
     let mut invalid = meta_fixture();
     invalid.title = Some("A title".to_string());
-    assert!(validate_quick_session_meta(&invalid).is_err());
-
-    let mut invalid = meta_fixture();
-    invalid.title_source = QuickSessionTitleSource::ApiSet;
     assert!(validate_quick_session_meta(&invalid).is_err());
 
     let mut invalid = meta_fixture();
@@ -180,12 +182,10 @@ fn quick_session_meta_enforces_stable_status_and_line_invariants() {
 
     let mut needs_title_with_title = meta_fixture();
     needs_title_with_title.title = Some("Already titled".to_string());
-    needs_title_with_title.title_source = QuickSessionTitleSource::ApiSet;
     assert!(validate_quick_session_meta(&needs_title_with_title).is_err());
 
     let mut archived_wrong_source = meta_fixture();
     archived_wrong_source.title = Some("Already titled".to_string());
-    archived_wrong_source.title_source = QuickSessionTitleSource::ApiSet;
     archived_wrong_source.status = QuickSessionStatus::Archived;
     archived_wrong_source.archived_at = Some("2026-07-11T00:00:01Z".to_string());
     archived_wrong_source.archived_from = Some(QuickSessionStatus::NeedsTitle);
@@ -398,7 +398,6 @@ fn quick_session_title_and_summary_are_attempt_bound_and_idempotent() {
     )
     .unwrap();
     assert_eq!(meta.title.as_deref(), Some("Investigate flaky test"));
-    assert_eq!(meta.title_source, QuickSessionTitleSource::ApiSet);
     assert_eq!(meta.status, QuickSessionStatus::Running);
 
     let revision = meta.revision;

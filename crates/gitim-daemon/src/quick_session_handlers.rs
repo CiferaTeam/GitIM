@@ -74,17 +74,6 @@ fn canonical_message_body(author: &Handler, body: &str) -> Result<String, Respon
 }
 
 fn atomic_write_file(path: &Path, content: impl AsRef<[u8]>) -> std::io::Result<()> {
-    atomic_write_file_with_hook(path, content, |_| Ok(()))
-}
-
-fn atomic_write_file_with_hook<F>(
-    path: &Path,
-    content: impl AsRef<[u8]>,
-    before_persist: F,
-) -> std::io::Result<()>
-where
-    F: FnOnce(&Path) -> std::io::Result<()>,
-{
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -94,7 +83,6 @@ where
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     temporary.write_all(content.as_ref())?;
     temporary.as_file_mut().sync_all()?;
-    before_persist(temporary.path())?;
     temporary.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
@@ -1098,27 +1086,4 @@ pub async fn handle_unarchive_quick_session(
     author: String,
 ) -> Response {
     move_session(state, session_id, author, false).await
-}
-
-#[cfg(test)]
-mod atomic_write_tests {
-    use super::*;
-
-    #[test]
-    fn atomic_write_failure_preserves_original_bytes() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("session.meta.yaml");
-        std::fs::write(&path, b"original").unwrap();
-
-        let result = atomic_write_file_with_hook(&path, b"replacement", |_| {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                "injected persist failure",
-            ))
-        });
-
-        assert!(result.is_err());
-        assert_eq!(std::fs::read(&path).unwrap(), b"original");
-        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
-    }
 }

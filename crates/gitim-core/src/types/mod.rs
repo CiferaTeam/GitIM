@@ -43,8 +43,7 @@ pub use quick_session::{
     apply_quick_session_transition, truncate_quick_session_preview,
     validate_quick_session_attempt_id, validate_quick_session_id, validate_quick_session_meta,
     validate_quick_session_summary, validate_quick_session_title, QuickSessionError,
-    QuickSessionMeta, QuickSessionStatus, QuickSessionTitleSource, QuickSessionTransition,
-    TransitionOutcome, QUICK_SESSION_ATTEMPT_ID_PREFIX, QUICK_SESSION_ID_PREFIX,
-    QUICK_SESSION_PREVIEW_MAX_CHARS, QUICK_SESSION_SUMMARY_MAX_CHARS,
-    QUICK_SESSION_TITLE_MAX_CHARS,
+    QuickSessionMeta, QuickSessionStatus, QuickSessionTransition, TransitionOutcome,
+    QUICK_SESSION_ATTEMPT_ID_PREFIX, QUICK_SESSION_ID_PREFIX, QUICK_SESSION_PREVIEW_MAX_CHARS,
+    QUICK_SESSION_SUMMARY_MAX_CHARS, QUICK_SESSION_TITLE_MAX_CHARS,
 };

@@ -64,7 +64,6 @@ type QuickSessionStatus =
 interface QuickSessionMeta {
   id: string;
   title?: string;
-  title_source: "none" | "api_set";
   agent_id: string;
   created_by: string;
   status: QuickSessionStatus;
@@ -240,7 +239,6 @@ export async function createQuickSession(
       const now = utcTimestamp();
       const initial: QuickSessionMeta = {
         id: input.session_id,
-        title_source: "none",
         agent_id: input.agent_id,
         created_by: creator,
         status: "needs_title",

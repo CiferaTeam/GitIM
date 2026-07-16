@@ -127,7 +127,6 @@ describe("CardReferenceLink", () => {
           meta: {
             id: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
             title: "Investigate flakes",
-            title_source: "api_set",
             agent_id: "alice",
             created_by: "lewis",
             status: "archived",

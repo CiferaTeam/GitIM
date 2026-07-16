@@ -77,7 +77,6 @@ describe("applyUsageActivityEvent", () => {
       meta: {
         id: "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ",
         title: "Scoped usage",
-        title_source: "api_set",
         agent_id: "pc_op1",
         created_by: "lewis",
         status: "running",
