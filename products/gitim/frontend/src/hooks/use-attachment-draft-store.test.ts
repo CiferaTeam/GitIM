@@ -289,7 +289,7 @@ describe("attachment draft operations", () => {
     expect(Object.isFrozen(first.items)).toBe(true);
     expect(Object.isFrozen(first.items[0])).toBe(true);
     expect(first.items[0]).not.toBe(store().drafts[key].items[0]);
-    expect(store().resetDraft(key)).toBe(true);
+    store().disposeWorkspace("workspace");
 
     store().addFiles(key, [file("new.txt", { lastModified: 2 })]);
     const second = store().beginOperation(key)!;
@@ -470,19 +470,16 @@ describe("attachment preview lifecycle", () => {
     expect(replacement.generation).toBeGreaterThan(operation.generation);
   });
 
-  it("revokes previews exactly once across removal, reset, success, and disposal", () => {
+  it("revokes previews exactly once across removal, success, and disposal", () => {
     const removeKey = attachmentDraftKey("workspace", "remove");
-    const resetKey = attachmentDraftKey("workspace", "reset");
     const successKey = attachmentDraftKey("workspace", "success");
     const disposeKey = attachmentDraftKey("workspace", "dispose");
     const removed = store().addFiles(removeKey, [png("removed.png")]).accepted[0];
-    store().addFiles(resetKey, [png("reset-a.png"), png("reset-b.png", { lastModified: 2 })]);
     store().addFiles(successKey, [png("success.png")]);
     store().addFiles(disposeKey, [png("dispose.png")]);
 
     expect(store().removeItem(removeKey, removed.id)).toBe(true);
     expect(store().drafts[removeKey]).toBeUndefined();
-    expect(store().resetDraft(resetKey)).toBe(true);
     const operation = store().beginOperation(successKey)!;
     expect(store().markUploaded(successKey, operation.generation, [{
       id: operation.items[0].id,
@@ -493,11 +490,9 @@ describe("attachment preview lifecycle", () => {
     store().disposeAll();
     store().disposeAll();
 
-    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(5);
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(3);
     for (const name of [
       "removed.png",
-      "reset-a.png",
-      "reset-b.png",
       "success.png",
       "dispose.png",
     ]) {
@@ -506,11 +501,11 @@ describe("attachment preview lifecycle", () => {
     expect(store().drafts).toEqual({});
   });
 
-  it("ignores stale success after reset and recreation without touching the newer preview", () => {
+  it("ignores stale success after disposal and recreation without touching the newer preview", () => {
     const key = attachmentDraftKey("workspace", "stale");
     const first = store().addFiles(key, [png("old.png")]);
     const operation = store().beginOperation(key)!;
-    expect(store().resetDraft(key)).toBe(true);
+    store().disposeWorkspace("workspace");
     store().addFiles(key, [png("new.png", { lastModified: 2 })]);
 
     expect(store().completeSuccess(key, operation.generation)).toBe(false);
@@ -522,14 +517,9 @@ describe("attachment preview lifecycle", () => {
 
   it("finishes every cleanup transition when individual URL revocations throw", () => {
     const removeKey = attachmentDraftKey("workspace", "remove-throw");
-    const resetKey = attachmentDraftKey("workspace", "reset-throw");
     const successKey = attachmentDraftKey("workspace", "success-throw");
     const disposeKey = attachmentDraftKey("workspace", "dispose-throw");
     const removed = store().addFiles(removeKey, [png("remove-fail.png")]).accepted[0];
-    store().addFiles(resetKey, [
-      png("reset-fail.png"),
-      png("reset-ok.png", { lastModified: 2 }),
-    ]);
     store().addFiles(successKey, [
       png("success-fail.png"),
       png("success-ok.png", { lastModified: 2 }),
@@ -546,8 +536,6 @@ describe("attachment preview lifecycle", () => {
 
     expect(store().removeItem(removeKey, removed.id)).toBe(true);
     expect(store().drafts[removeKey]).toBeUndefined();
-    expect(store().resetDraft(resetKey)).toBe(true);
-    expect(store().drafts[resetKey]).toBeUndefined();
 
     const operation = store().beginOperation(successKey)!;
     expect(store().markUploaded(successKey, operation.generation, operation.items.map((item) => ({
@@ -563,8 +551,6 @@ describe("attachment preview lifecycle", () => {
     expect(store().drafts).toEqual({});
     expect(attempted).toEqual([
       "blob:remove-fail.png",
-      "blob:reset-fail.png",
-      "blob:reset-ok.png",
       "blob:success-fail.png",
       "blob:success-ok.png",
       "blob:dispose-fail.png",

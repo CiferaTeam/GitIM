@@ -64,7 +64,6 @@ interface AttachmentDraftStore {
   markSending: (key: string, generation: number) => boolean;
   failOperation: (key: string, generation: number, error: string) => boolean;
   completeSuccess: (key: string, generation: number) => boolean;
-  resetDraft: (key: string) => boolean;
   disposeWorkspace: (workspaceKey: string) => void;
   disposeAll: () => void;
 }
@@ -453,14 +452,6 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       ) {
         return false;
       }
-      set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
-      revokeUrls(current.items);
-      return true;
-    },
-
-    resetDraft: (key) => {
-      const current = get().drafts[key];
-      if (current === undefined) return false;
       set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
       revokeUrls(current.items);
       return true;

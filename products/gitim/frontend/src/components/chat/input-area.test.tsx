@@ -1275,7 +1275,7 @@ describe("InputArea attachments", () => {
     expect(uploadAssetsMock).toHaveBeenCalledTimes(1);
     await act(async () => {
       const key = JSON.stringify(["ws", "general"]);
-      useAttachmentDraftStore.getState().resetDraft(key);
+      useAttachmentDraftStore.getState().disposeWorkspace("ws");
       useAttachmentDraftStore.getState().addFiles(key, [newFile]);
       await Promise.resolve();
     });
