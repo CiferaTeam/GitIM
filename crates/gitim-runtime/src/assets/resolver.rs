@@ -44,10 +44,52 @@ pub enum AssetLocality {
 
 #[derive(Clone, Copy)]
 struct ResolverBudgets {
+    connect: Duration,
     header: Duration,
     chunk_idle: Duration,
     candidate: Duration,
     whole: Duration,
+    head_concurrency: usize,
+}
+
+impl ResolverBudgets {
+    // Mirrors the `AssetLimits::from_environment` quota pattern: an injectable
+    // env reader keeps parsing tests free of process-env mutation, and invalid
+    // or non-positive values fall back to the production constants.
+    fn from_environment(mut read: impl FnMut(&str) -> Option<String>) -> Self {
+        Self {
+            connect: positive_duration_env(
+                &mut read,
+                "GITIM_ASSET_RESOLVER_CONNECT_TIMEOUT_SECS",
+                CONNECT_TIMEOUT,
+            ),
+            header: positive_duration_env(
+                &mut read,
+                "GITIM_ASSET_RESOLVER_HEADER_TIMEOUT_SECS",
+                HEADER_TIMEOUT,
+            ),
+            chunk_idle: positive_duration_env(
+                &mut read,
+                "GITIM_ASSET_RESOLVER_CHUNK_IDLE_TIMEOUT_SECS",
+                CHUNK_IDLE_TIMEOUT,
+            ),
+            candidate: positive_duration_env(
+                &mut read,
+                "GITIM_ASSET_RESOLVER_CANDIDATE_TIMEOUT_SECS",
+                CANDIDATE_TIMEOUT,
+            ),
+            whole: positive_duration_env(
+                &mut read,
+                "GITIM_ASSET_RESOLVER_WHOLE_RESOLVE_TIMEOUT_SECS",
+                WHOLE_RESOLVE_TIMEOUT,
+            ),
+            head_concurrency: positive_usize_env(
+                &mut read,
+                "GITIM_ASSET_RESOLVER_HEAD_CONCURRENCY",
+                HEAD_CONCURRENCY,
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -60,13 +102,31 @@ struct CandidateRequest<'a> {
 
 impl Default for ResolverBudgets {
     fn default() -> Self {
-        Self {
-            header: HEADER_TIMEOUT,
-            chunk_idle: CHUNK_IDLE_TIMEOUT,
-            candidate: CANDIDATE_TIMEOUT,
-            whole: WHOLE_RESOLVE_TIMEOUT,
-        }
+        Self::from_environment(|name| std::env::var(name).ok())
     }
+}
+
+fn positive_duration_env(
+    read: &mut impl FnMut(&str) -> Option<String>,
+    name: &str,
+    fallback: Duration,
+) -> Duration {
+    read(name)
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .map(Duration::from_secs)
+        .unwrap_or(fallback)
+}
+
+fn positive_usize_env(
+    read: &mut impl FnMut(&str) -> Option<String>,
+    name: &str,
+    fallback: usize,
+) -> usize {
+    read(name)
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(fallback)
 }
 
 #[derive(Debug)]
@@ -244,7 +304,7 @@ async fn resolve_get_with_budgets(
         }
         let mut hash_lock = Some(hash_lock);
         network_attempted.store(true, Ordering::Release);
-        let client = peer_client()?;
+        let client = peer_client(budgets.connect)?;
         let (metadata, peer) = fetch_candidates(
             state,
             service,
@@ -501,7 +561,7 @@ async fn fetch_fallbacks(
     hash_lock: &mut Option<HashLock>,
 ) -> Result<Option<(AssetMetadata, AssetPeer)>, AssetError> {
     let max_file_bytes = store.limits().max_file_bytes;
-    for window in peers.chunks(HEAD_CONCURRENCY) {
+    for window in peers.chunks(budgets.head_concurrency) {
         let mut probes = futures::stream::iter(window.iter().cloned().enumerate().map(
             |(index, peer)| async move {
                 let result =
@@ -509,7 +569,7 @@ async fn fetch_fallbacks(
                 (index, peer, result)
             },
         ))
-        .buffer_unordered(HEAD_CONCURRENCY);
+        .buffer_unordered(budgets.head_concurrency);
         let mut available = Vec::new();
         while let Some((index, peer, result)) = probes.next().await {
             match result {
@@ -815,9 +875,9 @@ fn peer_object_url(peer: &AssetPeer, hash: &str) -> Result<reqwest::Url, AssetEr
     Ok(url)
 }
 
-fn peer_client() -> Result<reqwest::Client, AssetError> {
+fn peer_client(connect_timeout: Duration) -> Result<reqwest::Client, AssetError> {
     reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
+        .connect_timeout(connect_timeout)
         .redirect(reqwest::redirect::Policy::none())
         .no_proxy()
         .build()
@@ -982,13 +1042,52 @@ mod tests {
     use std::task::Poll;
 
     #[test]
-    fn production_network_budgets_are_exact() {
-        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(5));
-        assert_eq!(HEADER_TIMEOUT, Duration::from_secs(10));
-        assert_eq!(CHUNK_IDLE_TIMEOUT, Duration::from_secs(15));
-        assert_eq!(CANDIDATE_TIMEOUT, Duration::from_secs(90));
-        assert_eq!(WHOLE_RESOLVE_TIMEOUT, Duration::from_secs(120));
-        assert_eq!(HEAD_CONCURRENCY, 8);
+    fn resolver_budgets_default_to_production_consts_without_env() {
+        let budgets = ResolverBudgets::from_environment(|_| None);
+        assert_eq!(budgets.connect, CONNECT_TIMEOUT);
+        assert_eq!(budgets.header, HEADER_TIMEOUT);
+        assert_eq!(budgets.chunk_idle, CHUNK_IDLE_TIMEOUT);
+        assert_eq!(budgets.candidate, CANDIDATE_TIMEOUT);
+        assert_eq!(budgets.whole, WHOLE_RESOLVE_TIMEOUT);
+        assert_eq!(budgets.head_concurrency, HEAD_CONCURRENCY);
+    }
+
+    #[test]
+    fn resolver_budgets_apply_valid_env_overrides() {
+        let budgets = ResolverBudgets::from_environment(|name| match name {
+            "GITIM_ASSET_RESOLVER_CONNECT_TIMEOUT_SECS" => Some("1".to_string()),
+            "GITIM_ASSET_RESOLVER_HEADER_TIMEOUT_SECS" => Some("2".to_string()),
+            "GITIM_ASSET_RESOLVER_CHUNK_IDLE_TIMEOUT_SECS" => Some("3".to_string()),
+            "GITIM_ASSET_RESOLVER_CANDIDATE_TIMEOUT_SECS" => Some("4".to_string()),
+            "GITIM_ASSET_RESOLVER_WHOLE_RESOLVE_TIMEOUT_SECS" => Some("5".to_string()),
+            "GITIM_ASSET_RESOLVER_HEAD_CONCURRENCY" => Some("6".to_string()),
+            _ => None,
+        });
+        assert_eq!(budgets.connect, Duration::from_secs(1));
+        assert_eq!(budgets.header, Duration::from_secs(2));
+        assert_eq!(budgets.chunk_idle, Duration::from_secs(3));
+        assert_eq!(budgets.candidate, Duration::from_secs(4));
+        assert_eq!(budgets.whole, Duration::from_secs(5));
+        assert_eq!(budgets.head_concurrency, 6);
+    }
+
+    #[test]
+    fn resolver_budgets_fall_back_to_defaults_on_invalid_env() {
+        let budgets = ResolverBudgets::from_environment(|name| match name {
+            "GITIM_ASSET_RESOLVER_CONNECT_TIMEOUT_SECS" => Some("garbage".to_string()),
+            "GITIM_ASSET_RESOLVER_HEADER_TIMEOUT_SECS" => Some("0".to_string()),
+            "GITIM_ASSET_RESOLVER_CHUNK_IDLE_TIMEOUT_SECS" => Some("-5".to_string()),
+            "GITIM_ASSET_RESOLVER_CANDIDATE_TIMEOUT_SECS" => Some(String::new()),
+            "GITIM_ASSET_RESOLVER_WHOLE_RESOLVE_TIMEOUT_SECS" => Some(" 120 ".to_string()),
+            "GITIM_ASSET_RESOLVER_HEAD_CONCURRENCY" => Some("1.5".to_string()),
+            _ => None,
+        });
+        assert_eq!(budgets.connect, CONNECT_TIMEOUT);
+        assert_eq!(budgets.header, HEADER_TIMEOUT);
+        assert_eq!(budgets.chunk_idle, CHUNK_IDLE_TIMEOUT);
+        assert_eq!(budgets.candidate, CANDIDATE_TIMEOUT);
+        assert_eq!(budgets.whole, WHOLE_RESOLVE_TIMEOUT);
+        assert_eq!(budgets.head_concurrency, HEAD_CONCURRENCY);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1013,7 +1112,7 @@ mod tests {
             base_url: "http://127.0.0.1:9".to_string(),
             remote_workspace_slug: "room".to_string(),
         };
-        let client = peer_client().unwrap();
+        let client = peer_client(CONNECT_TIMEOUT).unwrap();
         let hash = format!("{:x}", Sha256::digest(b"expected"));
         let recorder =
             ResolutionRecorder::new(&service, "room", &hash, peer.runtime_id.as_deref().unwrap());
