@@ -1340,6 +1340,8 @@ struct WorkspaceAssetState {
     #[cfg(feature = "test-support")]
     hash_lock_attempts: AtomicU64,
     #[cfg(feature = "test-support")]
+    dedupe_digest_attempts: AtomicU64,
+    #[cfg(feature = "test-support")]
     free_space_override: Mutex<Option<(u64, u64)>>,
     #[cfg(feature = "test-support")]
     materialize_pause: Mutex<Option<MaterializePause>>,
@@ -2462,6 +2464,12 @@ impl AssetStore {
 
     #[cfg(feature = "test-support")]
     #[doc(hidden)]
+    pub fn dedupe_digest_attempts(&self) -> u64 {
+        self.state.dedupe_digest_attempts.load(Ordering::Acquire)
+    }
+
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
     pub fn inject_free_space(&self, available: u64, total: u64) {
         *lock(&self.state.free_space_override) = Some((available, total));
     }
@@ -2742,17 +2750,40 @@ impl AssetStore {
         source: &AssetSource,
     ) -> Result<DedupeOutcome, AssetError> {
         let object_path = self.raw_object_path(hash)?;
-        match fs::symlink_metadata(&object_path) {
+        let object_metadata = match fs::symlink_metadata(&object_path) {
             Ok(metadata) if !metadata.file_type().is_file() => {
                 self.quarantine_corrupt(hash, &object_path)?;
                 return Ok(DedupeOutcome::Corrupt);
             }
-            Ok(_) => {}
+            Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(DedupeOutcome::Missing);
             }
             Err(error) => return Err(AssetError::Store(error)),
+        };
+        set_path_file_mode(&object_path)?;
+        let metadata_path = self.raw_metadata_path(hash)?;
+        // Same trust shortcut as the hot read path (`refresh_metadata`): a
+        // valid sidecar matching object size + mtime means the bytes were
+        // verified when they were written, so the forced re-hash is skipped.
+        // Corruption that preserves both size and mtime is not detected here;
+        // that residual risk is accepted because it matches the hot path's
+        // trust model.
+        if object_metadata.len() <= self.limits.max_file_bytes {
+            let modified_ns = modified_ns(&object_metadata)?;
+            let trusted = read_sidecar(&metadata_path)
+                .ok()
+                .filter(|sidecar| valid_sidecar(sidecar, hash, object_metadata.len(), modified_ns));
+            if let Some(sidecar) = trusted {
+                set_path_file_mode(&metadata_path)?;
+                self.register_existing_object(hash, sidecar.size)?;
+                return Ok(DedupeOutcome::Present(sidecar));
+            }
         }
+        #[cfg(feature = "test-support")]
+        self.state
+            .dedupe_digest_attempts
+            .fetch_add(1, Ordering::AcqRel);
         let snapshot = match read_file_digest(&object_path, self.limits.max_file_bytes) {
             Ok(snapshot) => snapshot,
             Err(AssetError::Missing) => return Ok(DedupeOutcome::Missing),
@@ -2766,7 +2797,6 @@ impl AssetStore {
             self.quarantine_corrupt(hash, &object_path)?;
             return Ok(DedupeOutcome::Corrupt);
         }
-        let metadata_path = self.raw_metadata_path(hash)?;
         let existing_sidecar = read_sidecar(&metadata_path).ok();
         let metadata = if existing_sidecar.as_ref().is_some_and(|sidecar| {
             valid_sidecar(sidecar, hash, snapshot.size, snapshot.modified_ns)

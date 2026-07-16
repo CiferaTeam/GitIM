@@ -696,7 +696,18 @@ async fn staged_dedupe_repairs_same_length_corruption_before_discarding_known_go
     let workspace = TempDir::new().unwrap();
     let store = open_store(workspace.path(), 1024);
     let original = store.put_bytes(b"good", AssetSource::LocalUpload).unwrap();
-    fs::write(store.object_path(&original.sha256).unwrap(), b"evil").unwrap();
+    let object = store.object_path(&original.sha256).unwrap();
+    let modified = fs::metadata(&object).unwrap().modified().unwrap();
+    fs::write(&object, b"evil").unwrap();
+    // The dedupe-hit trust shortcut skips the re-hash when size+mtime still
+    // match the sidecar, so the corruption must move the mtime to guarantee
+    // the digest path runs on every filesystem timestamp granularity.
+    OpenOptions::new()
+        .write(true)
+        .open(&object)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(modified + Duration::from_secs(1)))
+        .unwrap();
     let staged = store.stage_bytes("repair.txt", b"good").await.unwrap();
 
     let repaired = store
@@ -1826,7 +1837,32 @@ fn object_only_fleet_dedupe_records_the_requested_origin_source() {
 }
 
 #[test]
-fn dedupe_force_hash_repairs_same_size_same_mtime_corruption() {
+fn dedupe_trusts_unchanged_object_without_rehash() {
+    // A dedupe hit whose on-disk object still matches the sidecar's size and
+    // mtime is trusted without re-hashing — the same trust model as the hot
+    // read path. Corruption that preserves both size and mtime is therefore
+    // not detected on this path; that residual risk is accepted (the hot read
+    // path behaves the same way).
+    let workspace = TempDir::new().unwrap();
+    let store = open_store(workspace.path(), 1024);
+    let stored = store.put_bytes(b"good", AssetSource::LocalUpload).unwrap();
+    let attempts = store.dedupe_digest_attempts();
+
+    let duplicate = store.put_bytes(b"good", AssetSource::LocalUpload).unwrap();
+    assert_eq!(duplicate.sha256, stored.sha256);
+    assert_eq!(store.dedupe_digest_attempts(), attempts);
+    assert_eq!(
+        store.usage().unwrap(),
+        AssetUsage {
+            bytes: 4,
+            objects: 1
+        }
+    );
+    assert_eq!(store.read(&stored.sha256).unwrap(), b"good");
+}
+
+#[test]
+fn dedupe_rehashes_when_object_metadata_changes() {
     let workspace = TempDir::new().unwrap();
     let store = open_store(workspace.path(), 1024);
     let stored = store.put_bytes(b"good", AssetSource::LocalUpload).unwrap();
@@ -1837,10 +1873,12 @@ fn dedupe_force_hash_repairs_same_size_same_mtime_corruption() {
         .write(true)
         .open(&object)
         .unwrap()
-        .set_times(FileTimes::new().set_modified(modified))
+        .set_times(FileTimes::new().set_modified(modified + Duration::from_secs(1)))
         .unwrap();
+    let attempts = store.dedupe_digest_attempts();
 
     store.put_bytes(b"good", AssetSource::LocalUpload).unwrap();
+    assert!(store.dedupe_digest_attempts() > attempts);
     assert_eq!(store.read(&stored.sha256).unwrap(), b"good");
     assert_eq!(
         store.usage().unwrap(),
