@@ -98,18 +98,6 @@ describe("uploadAssets", () => {
     expect((capturedInit?.body as FormData).getAll("file")).toEqual([fileA, fileB]);
   });
 
-  it("propagates the optional AbortSignal", async () => {
-    const client = await setup();
-    const controller = new AbortController();
-    let capturedInit: RequestInit | undefined;
-    vi.spyOn(globalThis, "fetch").mockImplementation(async (_input, init) => {
-      capturedInit = init;
-      return jsonResponse(200, successBody());
-    });
-    await client.uploadAssets("room", [new File(["a"], "a.txt")], controller.signal);
-    expect(capturedInit?.signal).toBe(controller.signal);
-  });
-
   it("normalizes a complete Runtime success body", async () => {
     const client = await setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(200, successBody()));

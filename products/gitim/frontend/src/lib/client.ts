@@ -381,7 +381,6 @@ function isAbortError(error: unknown): error is Error | DOMException {
 export async function uploadAssets(
   slug: string,
   files: File[],
-  signal?: AbortSignal,
 ): Promise<ApiResponse<{ assets: UploadedAsset[] }>> {
   if (isLocalMode()) return ASSET_LOCAL_UNAVAILABLE;
   const validationError = validateUploadFiles(files);
@@ -395,7 +394,6 @@ export async function uploadAssets(
     response = await localNetworkFetch(`${wsBase(slug)}/assets`, {
       method: "POST",
       body: form,
-      ...(signal && { signal }),
     });
   } catch (error) {
     if (isAbortError(error)) throw error;
