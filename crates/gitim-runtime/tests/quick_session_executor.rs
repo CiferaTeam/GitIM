@@ -1267,7 +1267,7 @@ async fn cancellation_after_session_return_aborts_provider_before_late_write() {
 }
 
 #[tokio::test]
-async fn archiving_a_running_session_aborts_provider_before_late_write() {
+async fn archiving_a_running_session_discards_late_result_after_turn_completes() {
     let release = Arc::new(Notify::new());
     let exited = Arc::new(Notify::new());
     let writes = Arc::new(AtomicUsize::new(0));
@@ -1279,7 +1279,6 @@ async fn archiving_a_running_session_aborts_provider_before_late_write() {
         },
         false,
     );
-    let executor = executor.with_attempt_poll_interval(std::time::Duration::from_millis(10));
     let task = tokio::spawn(async move { executor.execute(SESSION_ID).await });
     loop {
         let event = rx.recv().await.unwrap();
@@ -1292,18 +1291,20 @@ async fn archiving_a_running_session_aborts_provider_before_late_write() {
         actor: "alice".to_string(),
         now: "2026-07-11T00:00:11Z".to_string(),
     });
+    // Claim loss no longer aborts the in-flight turn; the provider runs to
+    // completion and the late result is rejected by the ownership check.
+    release.notify_one();
     let outcome = tokio::time::timeout(std::time::Duration::from_millis(250), task)
         .await
-        .expect("archive cancellation should be bounded")
+        .expect("discarded completion should be bounded")
         .unwrap()
         .unwrap();
     assert_eq!(outcome, QuickSessionRunOutcome::Discarded);
 
-    release.notify_waiters();
     tokio::time::timeout(std::time::Duration::from_millis(250), exited.notified())
         .await
-        .expect("provider task should be hard-aborted");
-    assert_eq!(writes.load(Ordering::SeqCst), 0);
+        .expect("provider task should run to completion");
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
     assert_eq!(backend.detail().meta.status, QuickSessionStatus::Archived);
     assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 0);
     let local = QuickSessionRuntimeState::load(temp.path(), SESSION_ID).unwrap();
@@ -1325,7 +1326,6 @@ async fn archive_then_unarchive_cannot_revive_a_running_provider_attempt() {
         },
         false,
     );
-    let executor = executor.with_attempt_poll_interval(std::time::Duration::from_millis(10));
     let task = tokio::spawn(async move { executor.execute(SESSION_ID).await });
     loop {
         let event = rx.recv().await.unwrap();
@@ -1342,18 +1342,20 @@ async fn archive_then_unarchive_cannot_revive_a_running_provider_attempt() {
         actor: "alice".to_string(),
         now: "2026-07-11T00:00:12Z".to_string(),
     });
+    // The stale attempt runs to completion; its late result cannot revive the
+    // session and is rejected by the ownership check.
+    release.notify_one();
     let outcome = tokio::time::timeout(std::time::Duration::from_millis(250), task)
         .await
-        .expect("stale attempt cancellation should be bounded")
+        .expect("discarded completion should be bounded")
         .unwrap()
         .unwrap();
     assert_eq!(outcome, QuickSessionRunOutcome::Discarded);
 
-    release.notify_waiters();
     tokio::time::timeout(std::time::Duration::from_millis(250), exited.notified())
         .await
-        .expect("provider task should be hard-aborted");
-    assert_eq!(writes.load(Ordering::SeqCst), 0);
+        .expect("provider task should run to completion");
+    assert_eq!(writes.load(Ordering::SeqCst), 1);
     assert_eq!(backend.detail().meta.status, QuickSessionStatus::NeedsTitle);
     assert_eq!(backend.inner.lock().unwrap().mark_error_calls, 0);
     assert_eq!(
