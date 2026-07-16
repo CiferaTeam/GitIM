@@ -223,18 +223,20 @@ function ImageCard({
   downloadUrl: string;
   url: string;
 }) {
-  const [state, setState] = useState<"loading" | "loaded" | "unavailable">("loading");
+  const [loaded, setLoaded] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const geometry = imageGeometry(asset.width, asset.height);
 
-  if (state === "unavailable") {
+  if (unavailable) {
     return (
       <UnavailableCard
         asset={asset}
         downloadUrl={downloadUrl}
         onRetry={() => {
           setAttempt((current) => current + 1);
-          setState("loading");
+          setLoaded(false);
+          setUnavailable(false);
         }}
       />
     );
@@ -267,11 +269,11 @@ function ImageCard({
               loading="lazy"
               alt={asset.name}
               {...(geometry && { width: geometry.width, height: geometry.height })}
-              onLoad={() => setState("loaded")}
-              onError={() => setState("unavailable")}
+              onLoad={() => setLoaded(true)}
+              onError={() => setUnavailable(true)}
               className="block h-full max-h-[440px] w-full max-w-full object-contain"
             />
-            {state === "loading" && (
+            {!loaded && (
               <span
                 role="status"
                 className="absolute inset-0 flex items-center justify-center bg-background/70 text-xs text-text-muted"
@@ -321,7 +323,7 @@ function ImageCard({
             src={url}
             crossOrigin="anonymous"
             alt={asset.name}
-            onError={() => setState("unavailable")}
+            onError={() => setUnavailable(true)}
             className="max-h-full max-w-full object-contain"
           />
         </div>
