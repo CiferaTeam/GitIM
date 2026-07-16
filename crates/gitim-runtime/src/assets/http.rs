@@ -206,7 +206,10 @@ fn router_with_policy(
     let resolve = Router::new()
         .route(
             "/assets/resolve/{origin}/{hash}",
-            get(resolve_asset).head(resolve_asset),
+            // HEAD is rejected explicitly: axum would otherwise fall back to
+            // the GET handler for HEAD requests, turning a cheap metadata
+            // probe into a full (possibly remote) asset fetch.
+            get(resolve_asset).head(resolve_head_not_allowed),
         )
         .route_layer(middleware::from_fn_with_state(
             policy,
@@ -618,6 +621,10 @@ async fn resolve_asset(
     .await
 }
 
+async fn resolve_head_not_allowed() -> StatusCode {
+    StatusCode::METHOD_NOT_ALLOWED
+}
+
 async fn local_object(
     State(state): State<SharedRuntimeState>,
     Path(path): Path<ObjectPath>,
@@ -666,50 +673,21 @@ async fn serve_local(
     let mut remote_resolution = false;
     if allow_fleet {
         let workspace_identity = snapshot.workspace_identity.as_deref().unwrap_or_default();
-        if request.method() == Method::HEAD {
-            let etag = format!("\"sha256-{hash}\"");
-            let not_modified = exact_strong_if_none_match(request.headers(), &etag);
-            let availability = match super::resolver::resolve_head(
-                &state,
-                &service,
-                &store,
-                &slug,
-                workspace_identity,
-                &origin_runtime_id,
-                &hash,
-            )
-            .await
-            {
-                Ok(availability) => availability,
-                Err(error) => return resolver_error_response(error),
-            };
-            if availability.locality == super::resolver::AssetLocality::Remote {
-                return if not_modified {
-                    head_availability_response(availability, &hash, &options, true)
-                } else if request.headers().get_all(header::RANGE).iter().count() > 1 {
-                    head_range_not_satisfiable_response(availability, &hash, &options)
-                } else {
-                    head_availability_response(availability, &hash, &options, false)
-                };
+        match super::resolver::resolve_get(
+            &state,
+            &service,
+            &store,
+            &slug,
+            workspace_identity,
+            &origin_runtime_id,
+            &hash,
+        )
+        .await
+        {
+            Ok(replica) => {
+                remote_resolution = replica.locality == super::resolver::AssetLocality::Remote;
             }
-        }
-        if request.method() != Method::HEAD {
-            match super::resolver::resolve_get(
-                &state,
-                &service,
-                &store,
-                &slug,
-                workspace_identity,
-                &origin_runtime_id,
-                &hash,
-            )
-            .await
-            {
-                Ok(replica) => {
-                    remote_resolution = replica.locality == super::resolver::AssetLocality::Remote;
-                }
-                Err(error) => return resolver_error_response(error),
-            }
+            Err(error) => return resolver_error_response(error),
         }
     };
     let lookup = tokio::task::spawn_blocking({
@@ -776,74 +754,6 @@ async fn serve_local(
         service.record_local_hit(&slug, &hash, metadata.size, &origin_runtime_id);
     }
     decorate_file_response(response, &metadata, &etag, &options)
-}
-
-fn head_availability_response(
-    availability: super::resolver::HeadAvailability,
-    hash: &str,
-    options: &ResolveOptions,
-    not_modified: bool,
-) -> Response {
-    let etag = format!("\"sha256-{hash}\"");
-    let mut response = if not_modified {
-        not_modified_response(&etag)
-    } else {
-        StatusCode::OK.into_response()
-    };
-    let headers = response.headers_mut();
-    if !not_modified {
-        if let Ok(value) = HeaderValue::from_str(&availability.size.to_string()) {
-            headers.insert(header::CONTENT_LENGTH, value);
-        }
-        if let Ok(value) = HeaderValue::from_str(&availability.media_type) {
-            headers.insert(header::CONTENT_TYPE, value);
-        }
-    }
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(CACHE_CONTROL_VALUE),
-    );
-    if let Ok(value) = HeaderValue::from_str(&etag) {
-        headers.insert(header::ETAG, value);
-    }
-    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    headers.insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
-    if let Ok(value) = content_disposition(false, options.name.as_deref()) {
-        headers.insert(header::CONTENT_DISPOSITION, value);
-    }
-    response
-}
-
-fn head_range_not_satisfiable_response(
-    availability: super::resolver::HeadAvailability,
-    hash: &str,
-    options: &ResolveOptions,
-) -> Response {
-    let etag = format!("\"sha256-{hash}\"");
-    let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
-    let headers = response.headers_mut();
-    if let Ok(value) = HeaderValue::from_str(&format!("bytes */{}", availability.size)) {
-        headers.insert(header::CONTENT_RANGE, value);
-    }
-    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static(CACHE_CONTROL_VALUE),
-    );
-    if let Ok(value) = HeaderValue::from_str(&etag) {
-        headers.insert(header::ETAG, value);
-    }
-    headers.insert(
-        "x-content-type-options",
-        HeaderValue::from_static("nosniff"),
-    );
-    if let Ok(value) = content_disposition(false, options.name.as_deref()) {
-        headers.insert(header::CONTENT_DISPOSITION, value);
-    }
-    response
 }
 
 fn exact_strong_if_none_match(headers: &HeaderMap, etag: &str) -> bool {
