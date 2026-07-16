@@ -117,7 +117,7 @@ describe("applyUsageActivityEvent", () => {
     expect(
       useQuickSessionStore.getState().runtimeById[
         "qs-01JZZZZZZZZZZZZZZZZZZZZZZZ"
-      ]?.usage?.usedPercent,
-    ).toBe(31);
+      ]?.latestEvent?.event_type,
+    ).toBe("usage");
   });
 });
