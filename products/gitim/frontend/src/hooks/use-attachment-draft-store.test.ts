@@ -10,6 +10,7 @@ import {
   type PendingAttachment,
   useAttachmentDraftStore,
 } from "./use-attachment-draft-store";
+import { useComposerOperationStore } from "./use-composer-operation-store";
 
 const ORIGIN = "3c6a295e-744a-41dc-ba60-5c21bb94e5a2";
 const HASH = "8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88";
@@ -468,6 +469,25 @@ describe("attachment preview lifecycle", () => {
     store().addFiles(failedKey, [png("replacement.png", { lastModified: 2 })]);
     const replacement = store().beginOperation(failedKey)!;
     expect(replacement.token).toBeGreaterThan(operation.token);
+  });
+
+  it("invalidates draft-less text operations when their workspace is disposed", () => {
+    const workspace = "runtime:room";
+    const textKey = attachmentDraftKey(workspace, "channel:general");
+    const otherKey = attachmentDraftKey("runtime:other", "channel:general");
+    const operationStore = useComposerOperationStore.getState();
+    const stale = operationStore.beginOperation(textKey, "text")!;
+    const other = operationStore.beginOperation(otherKey, "text")!;
+
+    // The scope holds a text-only operation: no attachment draft exists for it.
+    expect(store().drafts[textKey]).toBeUndefined();
+    store().disposeWorkspace(workspace);
+
+    const operations = useComposerOperationStore.getState();
+    expect(operations.isOperationCurrent(textKey, stale.token)).toBe(false);
+    expect(operations.isOperationCurrent(otherKey, other.token)).toBe(true);
+    // The recreated same workspace/scope is not busy and can start immediately.
+    expect(operations.beginOperation(textKey, "text")).not.toBeNull();
   });
 
   it("revokes previews exactly once across removal, success, and disposal", () => {

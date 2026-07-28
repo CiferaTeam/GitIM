@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { useComposerOperationStore } from "./use-composer-operation-store";
+import { attachmentDraftKey } from "./use-attachment-draft-store";
+import {
+  scopeWorkspaceKey,
+  useComposerOperationStore,
+} from "./use-composer-operation-store";
 
 function store() {
   return useComposerOperationStore.getState();
@@ -44,26 +48,71 @@ describe("composer operation tokens", () => {
     expect(store().isOperationCurrent("scope", first.token)).toBe(false);
   });
 
-  it("invalidates the given scopes and ignores unknown or idle ones", () => {
-    const a = store().beginOperation("a", "text")!;
-    const b = store().beginOperation("b", "attachments")!;
+  it("invalidates operations by encoded workspace key, including draft-less scopes", () => {
+    const keyA = attachmentDraftKey("ws-a", "general");
+    const keyB = attachmentDraftKey("ws-b", "general");
+    const otherScope = attachmentDraftKey("ws-a", "dm:peer");
+    const a = store().beginOperation(keyA, "text")!;
+    const b = store().beginOperation(keyB, "attachments")!;
+    const c = store().beginOperation(otherScope, "text")!;
 
-    store().invalidateScopes(["a", "never-begun"]);
+    store().invalidateWorkspace("ws-a");
 
-    expect(store().isOperationCurrent("a", a.token)).toBe(false);
-    expect(store().isOperationCurrent("b", b.token)).toBe(true);
+    expect(store().isOperationCurrent(keyA, a.token)).toBe(false);
+    expect(store().isOperationCurrent(otherScope, c.token)).toBe(false);
+    expect(store().isOperationCurrent(keyB, b.token)).toBe(true);
 
     store().invalidateAll();
-    expect(store().isOperationCurrent("b", b.token)).toBe(false);
+    expect(store().isOperationCurrent(keyB, b.token)).toBe(false);
     expect(store().operations).toEqual({});
   });
 
-  it("keeps the completion stream append-only across invalidation", () => {
+  it("derives the workspace segment from encoded scope keys", () => {
+    expect(scopeWorkspaceKey(attachmentDraftKey("a:b", "c"))).toBe("a:b");
+    expect(scopeWorkspaceKey("not-json")).toBeUndefined();
+    expect(scopeWorkspaceKey(JSON.stringify(["a"]))).toBeUndefined();
+    expect(scopeWorkspaceKey(JSON.stringify([1, "b"]))).toBeUndefined();
+    expect(scopeWorkspaceKey(JSON.stringify(["a", "b", "c"]))).toBeUndefined();
+  });
+
+  it("settles atomically only while the token is current", () => {
     const key = "scope";
+    const base = store().completionSequence;
+    const stale = store().beginOperation(key, "text")!;
+    store().invalidateAll();
+    const current = store().beginOperation(key, "text")!;
+
+    expect(
+      store().settleOperation(key, stale.token, { text: "sent", replyLine: null }),
+    ).toBe(false);
+    expect(store().completionSequence).toBe(base);
+    expect(store().isOperationCurrent(key, current.token)).toBe(true);
+
+    expect(
+      store().settleOperation(key, current.token, { text: "sent", replyLine: 3 }),
+    ).toBe(true);
+    expect(store().isOperationCurrent(key, current.token)).toBe(false);
+    expect(store().completionSequence).toBe(base + 1);
+    expect(store().completions.at(-1)).toMatchObject({
+      sequence: base + 1,
+      key,
+      token: current.token,
+      text: "sent",
+      replyLine: 3,
+    });
+
+    expect(
+      store().settleOperation(key, current.token, { text: "sent", replyLine: 3 }),
+    ).toBe(false);
+    expect(store().completionSequence).toBe(base + 1);
+  });
+
+  it("keeps the completion stream append-only across invalidation", () => {
+    const key = attachmentDraftKey("ws", "scope");
     const operation = store().beginOperation(key, "text")!;
     const base = store().completionSequence;
     store().publishCompletion(key, operation.token, "sent text", 7);
-    store().invalidateScopes([key]);
+    store().invalidateWorkspace("ws");
 
     const completion = store().completions.at(-1);
     expect(store().completionSequence).toBe(base + 1);

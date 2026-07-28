@@ -491,16 +491,17 @@ export function InputArea({
         }
         return;
       }
+      const settled = useComposerOperationStore
+        .getState()
+        .settleOperation(capturedAttachmentKey, textOperation.token, {
+          text: capturedText,
+          replyLine: capturedReplyLine,
+        });
+      if (!settled) return;
       clearCapturedTextStorage(
         capturedWorkspaceKey,
         capturedScopeKey,
         capturedText,
-      );
-      useComposerOperationStore.getState().publishCompletion(
-        capturedAttachmentKey,
-        textOperation.token,
-        capturedText,
-        capturedReplyLine,
       );
       completed = true;
     } catch (caught) {

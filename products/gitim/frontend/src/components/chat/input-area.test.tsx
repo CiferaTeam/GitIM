@@ -995,6 +995,58 @@ describe("InputArea attachments", () => {
     expect(localStorage.getItem("gitim:draft:ws:general")).toBe("new caption");
   });
 
+  it("ignores a stale text settlement after disposeAll and a newer same-key send", async () => {
+    const sendA = deferred<{ ok: true }>();
+    const sendB = deferred<{ ok: true }>();
+    const onSend = vi.fn()
+      .mockImplementationOnce(() => sendA.promise)
+      .mockImplementationOnce(() => sendB.promise);
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    await act(async () => {
+      setTextareaValue(textarea, "same text");
+      pressEnter(textarea);
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(textarea.disabled).toBe(true);
+
+    await act(async () => {
+      useAttachmentDraftStore.getState().disposeAll();
+      await Promise.resolve();
+    });
+    expect(textarea.disabled).toBe(false);
+    expect(textarea.value).toBe("same text");
+
+    await act(async () => {
+      pressEnter(textarea);
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(2);
+
+    // The stale first send succeeds: its settlement must be rejected, so the
+    // newer send's text and stored draft survive and nothing is published.
+    await act(async () => {
+      sendA.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(textarea.value).toBe("same text");
+    expect(textarea.disabled).toBe(true);
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBe("same text");
+
+    // The newer send still settles normally.
+    await act(async () => {
+      sendB.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(textarea.value).toBe("");
+    expect(textarea.disabled).toBe(false);
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
+  });
+
   it("releases shared text busy and retains the remounted caption after failure", async () => {
     const send = deferred<{ ok: false; error: string }>();
     const onSend = vi.fn(() => send.promise);
