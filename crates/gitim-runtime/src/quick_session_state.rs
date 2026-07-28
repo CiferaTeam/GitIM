@@ -21,12 +21,6 @@ pub struct QuickSessionRuntimeState {
     pub last_session_usage: Option<LastSessionUsage>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reset_required: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_attempted_line: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_completed_input_line: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_completed_line: Option<u64>,
     #[serde(default, skip_serializing_if = "is_zero")]
     pub context_generation: u64,
 }

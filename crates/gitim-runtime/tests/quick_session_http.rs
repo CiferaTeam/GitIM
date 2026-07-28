@@ -127,7 +127,6 @@ fn session_meta(status: &str) -> Value {
     json!({
         "id": SESSION_ID,
         "title": null,
-        "title_source": "none",
         "agent_id": "alice",
         "created_by": "lewis",
         "status": status,
@@ -162,7 +161,7 @@ fn quick_session_state_roundtrips_atomically_with_private_permissions() {
     let tmp = TempDir::new().unwrap();
     let state = QuickSessionRuntimeState {
         estimated_tokens: 42,
-        last_attempted_line: Some(7),
+        context_generation: 7,
         ..QuickSessionRuntimeState::default()
     };
 

@@ -1539,7 +1539,6 @@ describe("daemon-web handlers", () => {
       `/repo/quick-sessions/${sessionId}/session.meta.yaml`,
       [
         `id: ${sessionId}`,
-        "title_source: none",
         "agent_id: alice",
         "created_by: lewis",
         "status: needs_title",
@@ -1604,7 +1603,6 @@ describe("daemon-web handlers", () => {
       `/repo/quick-sessions/${sessionId}/session.meta.yaml`,
       [
         `id: ${sessionId}`,
-        "title_source: none",
         "agent_id: alice",
         "created_by: lewis",
         "status: needs_title",

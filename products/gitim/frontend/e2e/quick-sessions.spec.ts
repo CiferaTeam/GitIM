@@ -117,7 +117,6 @@ async function stubRuntime(page: Page) {
           entries: Record<string, unknown>[];
         };
         detail.meta.title = "Investigate flakes";
-        detail.meta.title_source = "api_set";
         detail.meta.status = "active";
         detail.meta.updated_at = "2026-07-11T00:00:02Z";
         detail.meta.last_message_preview = "Ready to investigate";
@@ -171,7 +170,6 @@ async function stubRuntime(page: Page) {
           meta: {
             id: sessionId,
             title: null,
-            title_source: "none",
             agent_id: body.agent_id,
             created_by: "lewis",
             status: "needs_title",

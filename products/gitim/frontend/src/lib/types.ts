@@ -349,12 +349,9 @@ export type QuickSessionStatus =
   | "error"
   | "archived";
 
-export type QuickSessionTitleSource = "none" | "api_set";
-
 export interface QuickSessionMeta {
   id: string;
   title?: string;
-  title_source: QuickSessionTitleSource;
   agent_id: string;
   created_by: string;
   status: QuickSessionStatus;

@@ -357,7 +357,6 @@ impl QuickSessionExecutor {
         let mut rollback_local = original_local.clone();
         rollback_local.active_attempt_id = None;
         let mut local = original_local.clone();
-        local.last_attempted_line = Some(input_line);
         local.active_attempt_id = Some(attempt_id.clone());
         let _active_attempt = ActiveAttemptGuard::register(
             self.live_attempts.clone(),
@@ -673,8 +672,6 @@ impl QuickSessionExecutor {
         } else {
             local.reset_required = false;
         }
-        local.last_completed_input_line = after.meta.last_completed_input_line;
-        local.last_completed_line = after.meta.last_completed_line;
         local.active_attempt_id = None;
         if reset_requested && !self_managed {
             local.session_token = None;
@@ -896,6 +893,9 @@ fn claim_is_stale(
     now.signed_duration_since(started_at) >= stale_after
 }
 
+/// Parses the compact `%Y%m%dT%H%M%SZ` timestamp the daemon stamps on claims.
+/// This is the only production format; anything else is treated as unparseable
+/// and therefore never stale.
 fn parse_quick_session_claim_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let bytes = value.as_bytes();
     let is_compact = bytes.len() == QUICK_SESSION_COMPACT_TIMESTAMP_LEN
@@ -903,18 +903,12 @@ fn parse_quick_session_claim_timestamp(value: &str) -> Option<chrono::DateTime<c
         && bytes[15] == b'Z'
         && bytes[..8].iter().all(u8::is_ascii_digit)
         && bytes[9..15].iter().all(u8::is_ascii_digit);
-    if is_compact {
-        return chrono::NaiveDateTime::parse_from_str(
-            value,
-            QUICK_SESSION_COMPACT_TIMESTAMP_FORMAT,
-        )
-        .ok()
-        .map(|timestamp| timestamp.and_utc());
+    if !is_compact {
+        return None;
     }
-
-    chrono::DateTime::parse_from_rfc3339(value)
+    chrono::NaiveDateTime::parse_from_str(value, QUICK_SESSION_COMPACT_TIMESTAMP_FORMAT)
         .ok()
-        .map(|timestamp| timestamp.with_timezone(&chrono::Utc))
+        .map(|timestamp| timestamp.and_utc())
 }
 
 fn provider_error(error: String) -> RuntimeError {

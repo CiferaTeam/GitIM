@@ -40,7 +40,6 @@ function detail(overrides: Partial<QuickSessionDetail["meta"]> = {}): QuickSessi
     meta: {
       id: SESSION_ID,
       title: "Investigate flakes",
-      title_source: "api_set",
       agent_id: "alice",
       created_by: "lewis",
       status: "running",
