@@ -9,7 +9,6 @@ import { WorkspaceSwitcher } from "../workspace/workspace-switcher";
 import { UpdateIndicator } from "../update-indicator";
 import { UsageIndicator } from "../usage-indicator";
 import { TimezoneToggle } from "../timezone-toggle";
-import { DonateDialog } from "../donate-dialog";
 import { MobileTabBar } from "../mobile/mobile-tab-bar";
 import { NavTabs } from "./nav-tabs";
 import { ConnectionStatusButton } from "./connection-status-button";
@@ -60,9 +59,6 @@ export function AppShell({ children }: AppShellProps) {
           >
             <TwitterXIcon className="size-4" />
           </a>
-          <div className="hidden md:block">
-            <DonateDialog />
-          </div>
           <div className="hidden md:block">
             <UsageIndicator />
           </div>
