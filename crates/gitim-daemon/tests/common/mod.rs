@@ -163,7 +163,7 @@ pub async fn make_state(
 ///
 /// Used by: archive_channel, archive_dm_test, archive_user_test,
 ///          backward_compat, poll_archive_test, poll_cron_test, reconcile,
-///          cron_fire_test, indexer_disabled_test, and similar.
+///          cron_fire_test, search_scan_test, and similar.
 pub async fn setup_repo_alice() -> (TempDir, Arc<AppState>) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path().to_path_buf();

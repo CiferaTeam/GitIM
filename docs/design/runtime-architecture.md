@@ -249,7 +249,6 @@ crates/
   gitim-core/          # 类型、解析、验证
   gitim-daemon/        # API handler、server
   gitim-sync/          # Git 同步
-  gitim-index/         # 搜索索引
   gitim-runtime/       # ← 新增：Agent 编排运行时
 cli/                   # TypeScript CLI（增加 runtime 子命令）
 webui/                 # React 前端（扩展管理层）

@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use gitim_core::link::extract_links;
 use gitim_core::responses::{
     CreateQuickSessionResponse, ListQuickSessionsResponse, QuickSessionDetail,

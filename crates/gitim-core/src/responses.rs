@@ -300,9 +300,7 @@ pub struct ChannelEventResponse {
     pub status: String,
 }
 
-/// One row in `SearchResponse.messages`. Mirrors the `gitim_index`
-/// search hit projection that handler `handle_search` was building by
-/// hand from a `SearchHit`.
+/// One message whose body matched a search query.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchMessage {
     pub channel: String,
@@ -320,15 +318,6 @@ pub struct SearchMessage {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SearchResponse {
     pub messages: Vec<SearchMessage>,
-    pub total: u64,
-}
-
-/// Response payload for `Request::Reindex`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ReindexResponse {
-    /// Currently always `"complete"` on success.
-    pub status: String,
-    pub messages_indexed: u64,
 }
 
 /// Response payload for `Request::RegisterUser`.
@@ -1280,32 +1269,15 @@ mod tests {
                 timestamp: "20260507T120000Z".to_string(),
                 body: "hello".to_string(),
             }],
-            total: 1,
         };
         let v = serde_json::to_value(&r).unwrap();
         let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 2);
-        assert_eq!(obj.get("total").and_then(|v| v.as_u64()), Some(1));
+        assert_eq!(obj.len(), 1);
         let msgs = obj.get("messages").unwrap().as_array().unwrap();
         let m = msgs[0].as_object().unwrap();
         assert_eq!(m.len(), 7);
         assert_eq!(m.get("body").and_then(|v| v.as_str()), Some("hello"));
         assert_eq!(m.get("parent_line").and_then(|v| v.as_u64()), Some(0));
-    }
-
-    #[test]
-    fn reindex_response_wire_shape() {
-        let r = ReindexResponse {
-            status: "complete".to_string(),
-            messages_indexed: 12345,
-        };
-        let v = serde_json::to_value(&r).unwrap();
-        let obj = v.as_object().unwrap();
-        assert_eq!(obj.len(), 2);
-        assert_eq!(
-            obj.get("messages_indexed").and_then(|v| v.as_u64()),
-            Some(12345),
-        );
     }
 
     #[test]

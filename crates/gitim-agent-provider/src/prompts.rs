@@ -629,12 +629,7 @@ EOF
 
 ### 搜索
 
-- `gitim search \"<query>\"` — 全文搜索
-- `gitim search --author <handler>` — 按作者
-- `gitim search --channel <channel>` — 按频道
-
-搜索索引是 per-clone opt-in。agent clone 上如果看到 `search index disabled`，不要直接改 `index.db`。\
-先用 `gitim read` / `gitim channels` 做窄范围回查；确实需要全文搜索时，请 owner 决定是否在该 clone 的 `.gitim/config.yaml` 打开 `indexer.enabled=true` 并重启 daemon。
+- `gitim search \"<query>\"` — 在当前 active channel、可见 DM 和 card discussion 的消息正文中做大小写不敏感的字面匹配，返回最新 10 条消息
 
 ### 线程链
 

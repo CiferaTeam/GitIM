@@ -498,28 +498,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             )
             .await
         }
-        Request::Search {
-            query,
-            author,
-            channel,
-            channel_type,
-            limit,
-            offset,
-            include_cards,
-        } => {
-            handle_search(
-                state,
-                query,
-                author,
-                channel,
-                channel_type,
-                limit,
-                offset,
-                include_cards,
-            )
-            .await
-        }
-        Request::Reindex => handle_reindex(state).await,
+        Request::Search { query } => handle_search(state, query).await,
         Request::ArchiveChannel { channel, author } => {
             let resolved_author = match resolve_author(author, &state).await {
                 Ok(a) => a,

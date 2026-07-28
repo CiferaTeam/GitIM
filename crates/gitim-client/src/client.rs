@@ -514,34 +514,8 @@ impl GitimClient {
         decode_typed(resp)
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn search(
-        &self,
-        query: Option<&str>,
-        author: Option<&str>,
-        channel: Option<&str>,
-        channel_type: Option<&str>,
-        limit: Option<u64>,
-        offset: Option<u64>,
-        include_cards: bool,
-    ) -> Result<ApiResponse, ClientError> {
-        self.request(
-            "search",
-            json!({
-                "query": query,
-                "author": author,
-                "channel": channel,
-                "channel_type": channel_type,
-                "limit": limit.unwrap_or(50),
-                "offset": offset.unwrap_or(0),
-                "include_cards": include_cards,
-            }),
-        )
-        .await
-    }
-
-    pub async fn reindex(&self) -> Result<ApiResponse, ClientError> {
-        self.request("reindex", json!({})).await
+    pub async fn search(&self, query: &str) -> Result<ApiResponse, ClientError> {
+        self.request("search", json!({ "query": query })).await
     }
 
     pub async fn create_card(

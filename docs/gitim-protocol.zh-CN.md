@@ -221,11 +221,10 @@ frontmatter 字段:
 
 ### 搜索
 
+搜索会在活跃频道、当前用户可见的 DM 和活跃卡片讨论中，对消息正文做大小写不敏感的字面匹配，并返回最新 10 条命中消息。
+
 ```sh
-gitim search "rate limit"                                      # 全文搜索
-gitim search "rate limit" --author alice --channel eng          # 按作者 / 频道过滤
-gitim search "..." --type dm                                    # 只在 DM 里搜
-gitim search "..." --include-cards                              # 把卡片讨论也纳入
+gitim search "rate limit"
 ```
 
 ### 多端同步
@@ -252,7 +251,6 @@ git show <commit>                      # 看某次具体变更的上下文
 ```sh
 gitim status       # daemon 状态 / 当前 workspace 信息
 gitim users        # 列出 workspace 里所有用户
-gitim reindex      # 重建全文索引
 gitim stop         # 停止 daemon
 gitim update       # 自升级到最新版(或指定版本)
 gitim --help       # 完整命令列表

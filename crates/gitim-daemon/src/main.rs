@@ -142,11 +142,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
-    // Initialize search index (best effort — search is unavailable if this fails)
-    if let Err(e) = state::AppState::initialize_index(&app_state) {
-        tracing::warn!("index initialization failed (search unavailable): {}", e);
-    }
-
     // Load gitim.epoch.yaml once at boot so the daemon knows whether this
     // repo is on an active or redirected epoch. Missing file is normal
     // (legacy repos, fresh clones predating snapshot pack); parse failures

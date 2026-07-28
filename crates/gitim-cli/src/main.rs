@@ -159,30 +159,9 @@ enum Commands {
 
     /// Search messages
     Search {
-        /// Search query
-        query: Option<String>,
-        /// Filter by author handler
-        #[arg(short, long)]
-        author: Option<String>,
-        /// Filter by channel name
-        #[arg(short, long)]
-        channel: Option<String>,
-        /// Filter by channel type (channel or dm)
-        #[arg(short = 't', long = "type")]
-        channel_type: Option<String>,
-        /// Maximum results to return
-        #[arg(short, long, default_value = "50")]
-        limit: u64,
-        /// Offset for pagination
-        #[arg(long, default_value = "0")]
-        offset: u64,
-        /// Include card discussion messages in results
-        #[arg(long)]
-        include_cards: bool,
+        /// Case-insensitive message body query
+        query: String,
     },
-
-    /// Rebuild the search index
-    Reindex,
 
     /// Onboard: clone/create repo, start daemon, register identity
     Onboard {
@@ -896,29 +875,7 @@ async fn main() {
         Commands::ListArchivedUsers => commands::dm::cmd_list_archived_users(&client, &mode).await,
         Commands::BurnSelf => commands::burn::cmd_burn_self(&client, &mode).await,
         Commands::Users => commands::admin::cmd_users(&client, &mode).await,
-        Commands::Search {
-            query,
-            author,
-            channel,
-            channel_type,
-            limit,
-            offset,
-            include_cards,
-        } => {
-            commands::admin::cmd_search(
-                &client,
-                &mode,
-                query.as_deref(),
-                author.as_deref(),
-                channel.as_deref(),
-                channel_type.as_deref(),
-                limit,
-                offset,
-                include_cards,
-            )
-            .await
-        }
-        Commands::Reindex => commands::admin::cmd_reindex(&client, &mode).await,
+        Commands::Search { query } => commands::admin::cmd_search(&client, &mode, &query).await,
         Commands::Dm { command } => match command {
             DmCommands::Send {
                 handler,

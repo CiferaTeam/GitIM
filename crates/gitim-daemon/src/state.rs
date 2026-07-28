@@ -96,7 +96,6 @@ pub struct AppState {
     pub cron_engine_started: AtomicBool,
     pub is_admin: AtomicBool,
     pub is_guest: AtomicBool,
-    pub index: std::sync::RwLock<Option<Arc<gitim_index::Index>>>,
     /// Parsed `gitim.epoch.yaml` for this repo, refreshed on daemon boot and
     /// after every sync cycle. `None` covers both "file does not exist"
     /// (legacy repos predating snapshot pack — treated as Active) and
@@ -175,7 +174,6 @@ impl AppState {
             cron_engine_started: AtomicBool::new(false),
             is_admin: AtomicBool::new(false),
             is_guest: AtomicBool::new(false),
-            index: std::sync::RwLock::new(None),
             epoch_status: std::sync::RwLock::new(None),
             last_rotation_check: StdMutex::new(None),
             last_client_activity: AtomicU64::new(
@@ -333,65 +331,6 @@ impl AppState {
         self.epoch_status.read().ok().and_then(|g| g.clone())
     }
 
-    /// Open (or rebuild) the search index at `.gitim/index.db`.
-    /// Compares stored commit with HEAD; does incremental update or full rebuild as needed.
-    /// Returns immediately without touching SQLite or state.index when `enabled` is false.
-    pub fn initialize_index(state: &SharedState) -> Result<(), String> {
-        if !state.config.indexer.enabled {
-            tracing::info!("indexer disabled by config");
-            return Ok(());
-        }
-
-        let db_path = state.repo_root.join(".gitim").join("index.db");
-        let index = gitim_index::Index::open(&db_path)
-            .map_err(|e| format!("failed to open index: {}", e))?;
-
-        let current_head = state
-            .git_storage
-            .rev_parse("HEAD")
-            .map_err(|e| format!("failed to get HEAD: {}", e))?;
-
-        let stored_commit = index
-            .get_commit_id()
-            .map_err(|e| format!("failed to get stored commit: {}", e))?;
-
-        match stored_commit {
-            Some(ref stored) if stored == &current_head => {
-                tracing::info!("index up to date at {}", &current_head[..8]);
-            }
-            Some(ref stored) if is_ancestor(stored, &current_head, &state.repo_root) => {
-                tracing::info!(
-                    "index incremental update {}..{}",
-                    &stored[..8],
-                    &current_head[..8]
-                );
-                let diff = state
-                    .git_storage
-                    .diff_range(stored, &current_head)
-                    .map_err(|e| format!("diff_range failed: {}", e))?;
-                let diff_strings: HashMap<String, String> = diff
-                    .into_iter()
-                    .map(|(k, v)| (k.to_string_lossy().to_string(), v))
-                    .collect();
-                let count = index
-                    .append_from_diff(&diff_strings, &current_head)
-                    .map_err(|e| format!("append_from_diff failed: {}", e))?;
-                tracing::info!("index updated: {} messages added", count);
-            }
-            _ => {
-                tracing::info!("index full rebuild for {}", &current_head[..8]);
-                let count = index
-                    .rebuild(&state.repo_root, &current_head)
-                    .map_err(|e| format!("rebuild failed: {}", e))?;
-                tracing::info!("index rebuilt: {} messages indexed", count);
-            }
-        }
-
-        let arc_index = Arc::new(index);
-        *state.index.write().unwrap_or_else(|e| e.into_inner()) = Some(arc_index);
-        Ok(())
-    }
-
     /// Spawn the sync loop for this state.  Safe to call from both main (on
     /// restart) and from handle_onboard (after first-time identity setup).
     /// The AtomicBool ensures the loop is only ever started once.
@@ -473,7 +412,7 @@ impl AppState {
                         }
                     }
                 },
-                move |head_commit| {
+                move |_head_commit| {
                     // on_synced: refresh users list from disk
                     let users_dir = synced_state.repo_root.join("users");
                     if let Ok(entries) = std::fs::read_dir(&users_dir) {
@@ -500,10 +439,7 @@ impl AppState {
                     // A remote-published redirect (Phase B's coordinator
                     // writes this) becomes visible to this daemon on the
                     // next cycle; Subtask C's write gate consumes the
-                    // updated state. Done before the index block because
-                    // that block has several early-return paths (disabled
-                    // indexer, no diff to apply, etc.) and the refresh
-                    // must happen on every cycle regardless.
+                    // updated state.
                     if let Err(e) = synced_state.refresh_epoch_status() {
                         tracing::warn!("on_synced: epoch status refresh failed: {}", e);
                     }
@@ -538,58 +474,6 @@ impl AppState {
                                 }
                             }
                             Err(e) => tracing::warn!("on_synced: current_branch failed: {}", e),
-                        }
-                    }
-
-                    // update index after each sync cycle
-                    let index_guard = synced_state.index.read().unwrap_or_else(|e| e.into_inner());
-                    let index = match &*index_guard {
-                        Some(idx) => idx.clone(),
-                        None => return,
-                    };
-                    drop(index_guard);
-
-                    let stored = match index.get_commit_id() {
-                        Ok(Some(s)) if s == head_commit => return, // already up to date
-                        Ok(Some(s)) => Some(s),
-                        Ok(None) => None,
-                        Err(e) => {
-                            tracing::warn!("on_synced: failed to get stored commit: {}", e);
-                            return;
-                        }
-                    };
-
-                    match stored {
-                        Some(ref s) if is_ancestor(s, &head_commit, &synced_state.repo_root) => {
-                            let diff = match synced_state.git_storage.diff_range(s, &head_commit) {
-                                Ok(d) => d,
-                                Err(e) => {
-                                    tracing::warn!("on_synced: diff_range failed: {}", e);
-                                    return;
-                                }
-                            };
-                            let diff_strings: HashMap<String, String> = diff
-                                .into_iter()
-                                .map(|(k, v)| (k.to_string_lossy().to_string(), v))
-                                .collect();
-                            match index.append_from_diff(&diff_strings, &head_commit) {
-                                Ok(n) => {
-                                    tracing::info!("on_synced: index updated, {} messages added", n)
-                                }
-                                Err(e) => {
-                                    tracing::warn!("on_synced: append_from_diff failed: {}", e)
-                                }
-                            }
-                        }
-                        _ => {
-                            // No stored commit or not ancestor — full rebuild
-                            match index.rebuild(&synced_state.repo_root, &head_commit) {
-                                Ok(n) => tracing::info!(
-                                    "on_synced: index rebuilt, {} messages indexed",
-                                    n
-                                ),
-                                Err(e) => tracing::warn!("on_synced: rebuild failed: {}", e),
-                            }
                         }
                     }
                 },

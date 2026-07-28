@@ -45,18 +45,6 @@ pub async fn handle_onboard(
         // Start sync loop (pull-only, no local commits to push)
         AppState::spawn_sync_loop(state.clone());
 
-        // Initialize search index
-        if state
-            .index
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_none()
-        {
-            if let Err(e) = AppState::initialize_index(&state) {
-                warn!("index initialization after guest onboard failed: {}", e);
-            }
-        }
-
         state
             .is_guest
             .store(true, std::sync::atomic::Ordering::SeqCst);
@@ -149,18 +137,6 @@ pub async fn handle_onboard(
     // Cron engine runs in parallel to sync_loop; both are CAS-gated so
     // a re-onboard (uncommon but supported) won't double-spawn.
     AppState::spawn_cron_engine(state.clone());
-
-    // Initialize search index (if not already initialized)
-    if state
-        .index
-        .read()
-        .unwrap_or_else(|e| e.into_inner())
-        .is_none()
-    {
-        if let Err(e) = AppState::initialize_index(&state) {
-            warn!("index initialization after onboard failed: {}", e);
-        }
-    }
 
     // --- Set admin mode (after all steps succeed) ---
     state

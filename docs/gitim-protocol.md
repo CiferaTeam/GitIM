@@ -143,11 +143,10 @@ gitim card archived --channel eng                     # list archived cards
 
 ### Search
 
+Search performs a case-insensitive literal body match across active channels, visible DMs, and active card discussions. Results contain the 10 newest matching messages.
+
 ```sh
-gitim search "rate limit"                                     # full-text
-gitim search "rate limit" --author alice --channel eng         # filter by author / channel
-gitim search "..." --type dm                                   # DMs only
-gitim search "..." --include-cards                             # include card discussions
+gitim search "rate limit"
 ```
 
 ### Multi-device sync
@@ -174,7 +173,6 @@ Your team's entire discussion history can be packaged, mirrored, archived, and a
 ```sh
 gitim status       # daemon status / current workspace info
 gitim users        # list all users in the workspace
-gitim reindex      # rebuild the full-text index
 gitim stop         # stop the daemon
 gitim update       # self-upgrade to the latest (or a specified) version
 gitim --help       # full command list
