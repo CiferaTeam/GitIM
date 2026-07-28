@@ -3,6 +3,11 @@ import { create } from "zustand";
 import { formatAssetRef } from "@/lib/asset-ref";
 import { normalizedFilename } from "@/lib/asset-utils";
 import type { UploadedAsset } from "@/lib/client";
+import {
+  scopeWorkspaceKey,
+  useComposerOperationStore,
+  type ComposerSettlement,
+} from "@/hooks/use-composer-operation-store";
 
 export type AttachmentDraftStatus = "idle" | "uploading" | "sending" | "error";
 
@@ -14,7 +19,6 @@ export interface PendingAttachment {
 }
 
 export interface AttachmentDraft {
-  readonly generation: number;
   readonly status: AttachmentDraftStatus;
   readonly items: readonly PendingAttachment[];
   readonly error?: string;
@@ -48,7 +52,7 @@ export interface UploadedAttachmentMapping {
 
 export interface AttachmentOperationSnapshot {
   readonly key: string;
-  readonly generation: number;
+  readonly token: number;
   readonly items: readonly Readonly<PendingAttachment>[];
 }
 
@@ -59,12 +63,12 @@ interface AttachmentDraftStore {
   beginOperation: (key: string) => AttachmentOperationSnapshot | null;
   markUploaded: (
     key: string,
-    generation: number,
+    token: number,
     mappings: readonly UploadedAttachmentMapping[],
   ) => boolean;
-  markSending: (key: string, generation: number) => boolean;
-  failOperation: (key: string, generation: number, error: string) => boolean;
-  completeSuccess: (key: string, generation: number) => boolean;
+  markSending: (key: string, token: number) => boolean;
+  failOperation: (key: string, token: number, error: string) => boolean;
+  completeSuccess: (key: string, token: number, settlement: ComposerSettlement) => boolean;
   disposeWorkspace: (workspaceKey: string) => void;
   disposeAll: () => void;
 }
@@ -142,13 +146,11 @@ function addFilesResult(
 }
 
 function publishedDraft(
-  generation: number,
   status: AttachmentDraftStatus,
   items: readonly PendingAttachment[],
   error?: string,
 ): AttachmentDraft {
   return Object.freeze({
-    generation,
     status,
     items: Object.freeze([...items]),
     ...(error !== undefined && { error }),
@@ -200,7 +202,7 @@ function frozenAsset(asset: UploadedAsset): UploadedAsset {
 
 function operationSnapshot(
   key: string,
-  generation: number,
+  token: number,
   items: readonly PendingAttachment[],
 ): AttachmentOperationSnapshot {
   const snapshotItems = items.map((item) =>
@@ -211,7 +213,7 @@ function operationSnapshot(
   );
   return Object.freeze({
     key,
-    generation,
+    token,
     items: Object.freeze(snapshotItems),
   });
 }
@@ -220,20 +222,11 @@ function isBusy(draft: AttachmentDraft): boolean {
   return draft.status === "uploading" || draft.status === "sending";
 }
 
-function draftWorkspaceKey(key: string): string | undefined {
-  try {
-    const tuple: unknown = JSON.parse(key);
-    return Array.isArray(tuple) && tuple.length === 2 && typeof tuple[0] === "string"
-      ? tuple[0]
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) => {
-  let nextGeneration = 1;
-  const allocateGeneration = (): number => nextGeneration++;
+  const isOperationCurrent = (key: string, token: number): boolean =>
+    useComposerOperationStore.getState().isOperationCurrent(key, token);
+  const endOperation = (key: string, token: number): boolean =>
+    useComposerOperationStore.getState().endOperation(key, token);
 
   return {
     drafts: EMPTY_DRAFTS,
@@ -301,14 +294,12 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       }
 
       if (accepted.length > 0 || rejected.length > 0) {
-        const generation = current?.generation ?? allocateGeneration();
         const validationError = rejected[0]?.message;
         set((state) => ({
           drafts: replaceDraft(
             state.drafts,
             key,
             publishedDraft(
-              generation,
               validationError === undefined ? "idle" : "error",
               items,
               validationError,
@@ -328,10 +319,7 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
 
       const removed = current.items[index];
       const items = current.items.filter((_, itemIndex) => itemIndex !== index);
-      const draft =
-        items.length === 0
-          ? undefined
-          : publishedDraft(current.generation, "idle", items);
+      const draft = items.length === 0 ? undefined : publishedDraft("idle", items);
       set((state) => ({ drafts: replaceDraft(state.drafts, key, draft) }));
       revokeUrls([removed]);
       return true;
@@ -341,22 +329,44 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       const current = get().drafts[key];
       if (current === undefined || current.items.length === 0 || isBusy(current)) return null;
 
-      const generation = allocateGeneration();
-      set((state) => ({
-        drafts: replaceDraft(
-          state.drafts,
-          key,
-          publishedDraft(generation, "uploading", current.items),
-        ),
-      }));
-      return operationSnapshot(key, generation, current.items);
+      const operation = useComposerOperationStore
+        .getState()
+        .beginOperation(key, "attachments");
+      if (operation === null) return null;
+      // Re-validate inside the update: the mint above notifies subscribers
+      // synchronously, and a dispose landing there can invalidate the token
+      // and replace the draft before this write runs. Marking the fresh
+      // draft busy under the dead token would wedge the composer — every
+      // later settle with that token is rejected and busy drafts block new
+      // begins — so bail and release the operation instead.
+      let begunItems: readonly PendingAttachment[] | null = null;
+      set((state) => {
+        const draft = state.drafts[key];
+        if (
+          draft === undefined ||
+          draft.items.length === 0 ||
+          isBusy(draft) ||
+          !isOperationCurrent(key, operation.token)
+        ) {
+          return state;
+        }
+        begunItems = draft.items;
+        return {
+          drafts: replaceDraft(state.drafts, key, publishedDraft("uploading", draft.items)),
+        };
+      });
+      if (begunItems === null) {
+        endOperation(key, operation.token);
+        return null;
+      }
+      return operationSnapshot(key, operation.token, begunItems);
     },
 
-    markUploaded: (key, generation, mappings) => {
+    markUploaded: (key, token, mappings) => {
       const current = get().drafts[key];
       if (
         current === undefined ||
-        current.generation !== generation ||
+        !isOperationCurrent(key, token) ||
         current.status !== "uploading"
       ) {
         return false;
@@ -391,17 +401,17 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         drafts: replaceDraft(
           state.drafts,
           key,
-          publishedDraft(current.generation, current.status, items, current.error),
+          publishedDraft(current.status, items, current.error),
         ),
       }));
       return true;
     },
 
-    markSending: (key, generation) => {
+    markSending: (key, token) => {
       const current = get().drafts[key];
       if (
         current === undefined ||
-        current.generation !== generation ||
+        !isOperationCurrent(key, token) ||
         current.status !== "uploading" ||
         current.items.some((item) => item.uploaded === undefined)
       ) {
@@ -411,53 +421,76 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         drafts: replaceDraft(
           state.drafts,
           key,
-          publishedDraft(current.generation, "sending", current.items),
+          publishedDraft("sending", current.items),
         ),
       }));
       return true;
     },
 
-    failOperation: (key, generation, error) => {
+    failOperation: (key, token, error) => {
       const current = get().drafts[key];
-      if (
-        current === undefined ||
-        current.generation !== generation ||
-        !isBusy(current)
-      ) {
-        return false;
-      }
-      set((state) => ({
-        drafts: replaceDraft(
-          state.drafts,
-          key,
-          publishedDraft(current.generation, "error", current.items, error),
-        ),
-      }));
-      return true;
+      if (current === undefined || !isBusy(current)) return false;
+      // endOperation is the compare-and-swap gate: a stale token must not
+      // write an error draft over a newer operation's composer state.
+      if (!endOperation(key, token)) return false;
+      // endOperation notifies subscribers synchronously; a dispose + re-begin
+      // there can replace the draft under a new token. Only stamp error when
+      // the draft is still the one we ended — otherwise return false so
+      // callers do not focus / treat the newer op as failed.
+      let applied = false;
+      set((state) => {
+        const draft = state.drafts[key];
+        if (draft === undefined || draft.items !== current.items || !isBusy(draft)) {
+          return state;
+        }
+        applied = true;
+        return {
+          drafts: replaceDraft(
+            state.drafts,
+            key,
+            publishedDraft("error", draft.items, error),
+          ),
+        };
+      });
+      return applied;
     },
 
-    completeSuccess: (key, generation) => {
+    completeSuccess: (key, token, settlement) => {
       const current = get().drafts[key];
-      if (
-        current === undefined ||
-        current.generation !== generation ||
-        current.status !== "sending"
-      ) {
+      if (current === undefined || current.status !== "sending") return false;
+      // settleOperation is the single atomic gate: it CAS-validates the
+      // token, releases the scope, and publishes the completion event in one
+      // store update. A stale send bails before the draft delete and before
+      // any caller-side effect on captured text storage.
+      if (!useComposerOperationStore.getState().settleOperation(key, token, settlement)) {
         return false;
       }
-      set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
-      revokeUrls(current.items);
+      // settle notifies subscribers synchronously; a dispose + re-begin can
+      // install a newer draft before this write. Delete only when the draft
+      // is still the settled one (items identity); settle already published,
+      // so callers may clear captured storage either way.
+      let cleared = false;
+      set((state) => {
+        const draft = state.drafts[key];
+        if (draft === undefined || draft.items !== current.items) return state;
+        cleared = true;
+        return { drafts: replaceDraft(state.drafts, key) };
+      });
+      if (cleared) revokeUrls(current.items);
       return true;
     },
 
     disposeWorkspace: (workspaceKey) => {
+      // Invalidate operation tokens by their encoded workspace key directly —
+      // a text-only operation has no draft entry and must be invalidated too.
+      useComposerOperationStore.getState().invalidateWorkspace(workspaceKey);
       const drafts = get().drafts;
       const disposed = Object.entries(drafts).filter(
-        ([key]) => draftWorkspaceKey(key) === workspaceKey,
+        ([key]) => scopeWorkspaceKey(key) === workspaceKey,
       );
       if (disposed.length === 0) return;
       const next = Object.fromEntries(
-        Object.entries(drafts).filter(([key]) => draftWorkspaceKey(key) !== workspaceKey),
+        Object.entries(drafts).filter(([key]) => scopeWorkspaceKey(key) !== workspaceKey),
       );
       set({ drafts: Object.freeze(next) });
       revokeUrls(disposed.flatMap(([, draft]) => draft.items));
@@ -465,6 +498,7 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
 
     disposeAll: () => {
       const drafts = get().drafts;
+      useComposerOperationStore.getState().invalidateAll();
       set({ drafts: EMPTY_DRAFTS });
       revokeUrls(Object.values(drafts).flatMap((draft) => draft.items));
     },

@@ -9,7 +9,6 @@ import {
   type DragEvent,
   type KeyboardEvent,
 } from "react";
-import { create } from "zustand";
 import {
   computeCardDraftRecipients,
   computeDraftRecipients,
@@ -20,6 +19,7 @@ import {
   attachmentDraftKey,
   useAttachmentDraftStore,
 } from "../../hooks/use-attachment-draft-store";
+import { useComposerOperationStore } from "../../hooks/use-composer-operation-store";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useIsMobile } from "../../hooks/use-media-query";
 import { MentionPopup } from "./mention-popup";
@@ -77,62 +77,6 @@ const MAX_HEIGHT = 200;
 const DESKTOP_ENTER_HINT = " (Enter to send, Shift+Enter for newline)";
 const ATTACHMENT_RECIPIENT_SENTINEL = "attachment";
 const RUNTIME_ATTACHMENT_HELP = "Attachments require a GitIM Runtime connection.";
-const MAX_COMPLETION_EVENTS = 32;
-
-interface ComposerCompletion {
-  readonly sequence: number;
-  readonly attachmentKey: string;
-  readonly text: string;
-  readonly replyLine: number | null;
-}
-
-interface ComposerLifecycleState {
-  readonly textBusyKeys: ReadonlySet<string>;
-  readonly completionSequence: number;
-  readonly completions: readonly ComposerCompletion[];
-  claimTextSend: (key: string) => boolean;
-  releaseTextSend: (key: string) => void;
-  publishCompletion: (
-    completion: Omit<ComposerCompletion, "sequence">,
-  ) => void;
-}
-
-const useComposerLifecycleStore = create<ComposerLifecycleState>((set) => ({
-  textBusyKeys: new Set<string>(),
-  completionSequence: 0,
-  completions: [],
-  claimTextSend: (key) => {
-    let claimed = false;
-    set((state) => {
-      if (state.textBusyKeys.has(key)) return state;
-      claimed = true;
-      const textBusyKeys = new Set(state.textBusyKeys);
-      textBusyKeys.add(key);
-      return { textBusyKeys };
-    });
-    return claimed;
-  },
-  releaseTextSend: (key) => {
-    set((state) => {
-      if (!state.textBusyKeys.has(key)) return state;
-      const textBusyKeys = new Set(state.textBusyKeys);
-      textBusyKeys.delete(key);
-      return { textBusyKeys };
-    });
-  },
-  publishCompletion: (completion) => {
-    set((state) => {
-      const sequence = state.completionSequence + 1;
-      return {
-        completionSequence: sequence,
-        completions: [
-          ...state.completions,
-          { ...completion, sequence },
-        ].slice(-MAX_COMPLETION_EVENTS),
-      };
-    });
-  },
-}));
 
 function draftKey(workspaceKey: string, scopeKey: string) {
   return `gitim:draft:${workspaceKey}:${scopeKey}`;
@@ -200,13 +144,15 @@ export function InputArea({
   const currentAttachmentKey = workspaceKey && scopeKey
     ? attachmentDraftKey(workspaceKey, scopeKey)
     : null;
-  const textBusy = useComposerLifecycleStore((state) =>
-    currentAttachmentKey ? state.textBusyKeys.has(currentAttachmentKey) : false);
-  const completionSequence = useComposerLifecycleStore(
+  const textBusy = useComposerOperationStore((state) =>
+    currentAttachmentKey
+      ? state.operations[currentAttachmentKey]?.kind === "text"
+      : false);
+  const completionSequence = useComposerOperationStore(
     (state) => state.completionSequence,
   );
   const lastCompletionSequenceRef = useRef(
-    useComposerLifecycleStore.getState().completionSequence,
+    useComposerOperationStore.getState().completionSequence,
   );
   const attachmentDraft = useAttachmentDraftStore((state) =>
     currentAttachmentKey ? state.drafts[currentAttachmentKey] : undefined);
@@ -266,15 +212,15 @@ export function InputArea({
   }, [workspaceKey, scopeKey]);
 
   useEffect(() => {
-    const lifecycle = useComposerLifecycleStore.getState();
-    const completions = lifecycle.completions.filter(
+    const operationStore = useComposerOperationStore.getState();
+    const completions = operationStore.completions.filter(
       (completion) => completion.sequence > lastCompletionSequenceRef.current,
     );
-    lastCompletionSequenceRef.current = lifecycle.completionSequence;
+    lastCompletionSequenceRef.current = operationStore.completionSequence;
     if (!mountedRef.current || !currentAttachmentKey) return;
 
     for (const completion of completions) {
-      if (completion.attachmentKey !== currentAttachmentKey) continue;
+      if (completion.key !== currentAttachmentKey) continue;
       if (textRef.current !== completion.text) continue;
       textRef.current = "";
       setText("");
@@ -370,14 +316,33 @@ export function InputArea({
 
   function failAttachmentInvariant(
     key: string,
-    generation: number,
+    token: number,
     message: string,
     requestWorkspaceKey: string,
     requestScopeKey: string,
   ) {
-    const failed = failOperation(key, generation, message);
+    const failed = failOperation(key, token, message);
     if (failed) focusCurrentScope(requestWorkspaceKey, requestScopeKey);
     return failed;
+  }
+
+  // Failure/exception effects are applied only when the operation is still
+  // the scope's current one: endOperation is the token-matched CAS, so a
+  // stale late result renders nothing, focuses nothing, and cannot release
+  // a newer operation's busy mark.
+  function failTextSend(
+    key: string,
+    token: number,
+    message: string,
+    requestWorkspaceKey: string,
+    requestScopeKey: string,
+  ) {
+    const ended = useComposerOperationStore.getState().endOperation(key, token);
+    if (!ended) return;
+    if (isCurrentSendScope(requestWorkspaceKey, requestScopeKey)) {
+      setSendError(key, message);
+    }
+    focusCurrentScope(requestWorkspaceKey, requestScopeKey);
   }
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
@@ -450,10 +415,10 @@ export function InputArea({
           }
           mappings = pendingItems.map((item, index) => ({ id: item.id, asset: assets[index] }));
         }
-        if (!markUploaded(capturedAttachmentKey, operation.generation, mappings)) {
+        if (!markUploaded(capturedAttachmentKey, operation.token, mappings)) {
           failAttachmentInvariant(
             capturedAttachmentKey,
-            operation.generation,
+            operation.token,
             "Uploaded attachments did not match the selected files. Try again.",
             capturedWorkspaceKey,
             capturedScopeKey,
@@ -464,12 +429,14 @@ export function InputArea({
         const uploadedDraft = useAttachmentDraftStore.getState().drafts[capturedAttachmentKey];
         if (
           !uploadedDraft ||
-          uploadedDraft.generation !== operation.generation ||
+          !useComposerOperationStore
+            .getState()
+            .isOperationCurrent(capturedAttachmentKey, operation.token) ||
           uploadedDraft.items.some((item) => item.uploaded === undefined)
         ) {
           failAttachmentInvariant(
             capturedAttachmentKey,
-            operation.generation,
+            operation.token,
             "Uploaded attachment state was incomplete. Try again.",
             capturedWorkspaceKey,
             capturedScopeKey,
@@ -478,10 +445,10 @@ export function InputArea({
         }
         const refs = uploadedDraft.items.map((item) => item.uploaded!.ref);
         const finalBody = [capturedHumanBody, ...refs].filter(Boolean).join("\n");
-        if (!markSending(capturedAttachmentKey, operation.generation)) {
+        if (!markSending(capturedAttachmentKey, operation.token)) {
           failAttachmentInvariant(
             capturedAttachmentKey,
-            operation.generation,
+            operation.token,
             "Attachments were not ready to send. Try again.",
             capturedWorkspaceKey,
             capturedScopeKey,
@@ -494,72 +461,85 @@ export function InputArea({
           capturedReply?.line_number ?? 0,
         );
         if (!sendResult.ok) {
-          failOperation(
+          failAttachmentInvariant(
             capturedAttachmentKey,
-            operation.generation,
+            operation.token,
             sendResult.error ?? "Send failed",
+            capturedWorkspaceKey,
+            capturedScopeKey,
           );
-          focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
           return;
         }
-        if (!completeSuccess(capturedAttachmentKey, operation.generation)) return;
+        // completeSuccess settles through the operation-store CAS (token
+        // check + completion publish). The draft clear is identity-gated on
+        // the settled items so a sync re-begin cannot lose its newer draft;
+        // a stale send still bails without clearing captured text storage.
+        if (
+          !completeSuccess(capturedAttachmentKey, operation.token, {
+            text: capturedText,
+            replyLine: capturedReplyLine,
+          })
+        ) {
+          return;
+        }
 
         clearCapturedTextStorage(
           capturedWorkspaceKey,
           capturedScopeKey,
           capturedText,
         );
-        useComposerLifecycleStore.getState().publishCompletion({
-          attachmentKey: capturedAttachmentKey,
-          text: capturedText,
-          replyLine: capturedReplyLine,
-        });
       } catch (caught) {
-        failOperation(
+        failAttachmentInvariant(
           capturedAttachmentKey,
-          operation.generation,
+          operation.token,
           caught instanceof Error ? caught.message : "Send failed",
+          capturedWorkspaceKey,
+          capturedScopeKey,
         );
-        focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
       }
       return;
     }
 
-    if (!useComposerLifecycleStore.getState().claimTextSend(capturedAttachmentKey)) return;
+    const textOperation = useComposerOperationStore
+      .getState()
+      .beginOperation(capturedAttachmentKey, "text");
+    if (!textOperation) return;
 
-    let completed = false;
     try {
       const sendResult = await capturedOnSend(
         capturedHumanBody,
         capturedReply?.line_number ?? 0,
       );
       if (!sendResult.ok) {
-        if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
-          setSendError(capturedAttachmentKey, sendResult.error ?? "Send failed");
-        }
+        failTextSend(
+          capturedAttachmentKey,
+          textOperation.token,
+          sendResult.error ?? "Send failed",
+          capturedWorkspaceKey,
+          capturedScopeKey,
+        );
         return;
       }
+      const settled = useComposerOperationStore
+        .getState()
+        .settleOperation(capturedAttachmentKey, textOperation.token, {
+          text: capturedText,
+          replyLine: capturedReplyLine,
+        });
+      if (!settled) return;
       clearCapturedTextStorage(
         capturedWorkspaceKey,
         capturedScopeKey,
         capturedText,
       );
-      useComposerLifecycleStore.getState().publishCompletion({
-        attachmentKey: capturedAttachmentKey,
-        text: capturedText,
-        replyLine: capturedReplyLine,
-      });
-      completed = true;
     } catch (caught) {
-      if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
-        setSendError(
-          capturedAttachmentKey,
-          caught instanceof Error ? caught.message : "Send failed",
-        );
-      }
-    } finally {
-      useComposerLifecycleStore.getState().releaseTextSend(capturedAttachmentKey);
-      if (!completed) focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
+      failTextSend(
+        capturedAttachmentKey,
+        textOperation.token,
+        caught instanceof Error ? caught.message : "Send failed",
+        capturedWorkspaceKey,
+        capturedScopeKey,
+      );
     }
   }
 
