@@ -18,9 +18,7 @@
 //! - >  500ms → prints "ABOVE BASELINE" with measured latency. The test
 //!   still passes (returns `Ok`) — A.9 is explicitly non-blocking for v1
 //!   merge. If above baseline, an optimization follow-up plan should be
-//!   filed at `docs/plans/<date>-archive-perf-optimization/`. Likely
-//!   candidate: replace per-thread parse with a `gitim-index` author
-//!   reverse-lookup so Phase 1 only opens threads alice actually wrote in.
+//!   filed at `docs/plans/<date>-archive-perf-optimization/`.
 //!
 //! Setup itself is NOT measured — only the `depart_user` invocation.
 //! The setup uses one bulk `git add . && git commit` to keep prep time
@@ -224,7 +222,5 @@ async fn depart_user_baseline_1k_threads() {
         eprintln!("[verdict] Likely cause: Phase 1 parses every thread file to");
         eprintln!("[verdict] check authorship; cost dominated by git subprocess");
         eprintln!("[verdict] fork per commit (~10ms × {} commits).", commits);
-        eprintln!("[verdict] Candidate optimization: gitim-index author reverse-");
-        eprintln!("[verdict] lookup so Phase 1 only opens threads alice authored.");
     }
 }

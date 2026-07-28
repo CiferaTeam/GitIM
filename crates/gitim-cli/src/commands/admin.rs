@@ -58,30 +58,8 @@ pub async fn cmd_users(client: &GitimClient, mode: &OutputMode) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn cmd_search(
-    client: &GitimClient,
-    mode: &OutputMode,
-    query: Option<&str>,
-    author: Option<&str>,
-    channel: Option<&str>,
-    channel_type: Option<&str>,
-    limit: u64,
-    offset: u64,
-    include_cards: bool,
-) {
-    match client
-        .search(
-            query,
-            author,
-            channel,
-            channel_type,
-            Some(limit),
-            Some(offset),
-            include_cards,
-        )
-        .await
-    {
+pub async fn cmd_search(client: &GitimClient, mode: &OutputMode, query: &str) {
+    match client.search(query).await {
         Ok(resp) => {
             if !resp.ok {
                 let msg = resp.error.as_deref().unwrap_or("unknown error");
@@ -91,17 +69,11 @@ pub async fn cmd_search(
             match mode {
                 OutputMode::Human => {
                     let data = resp.data.as_ref();
-                    let total = data
-                        .and_then(|d| d.get("total"))
-                        .and_then(|t| t.as_u64())
-                        .unwrap_or(0);
-
-                    println!("Found {total} results:");
-
                     if let Some(messages) = data
                         .and_then(|d| d.get("messages"))
                         .and_then(|m| m.as_array())
                     {
+                        println!("Found {} results:", messages.len());
                         for msg in messages {
                             let ch = msg
                                 .get("channel")
@@ -145,48 +117,6 @@ pub async fn cmd_search(
         }
         Err(e) => {
             eprintln!("Error: {e}");
-            process::exit(1);
-        }
-    }
-}
-
-pub async fn cmd_reindex(client: &GitimClient, mode: &OutputMode) {
-    match mode {
-        OutputMode::Human => eprintln!("Rebuilding search index..."),
-        OutputMode::Json => {}
-    }
-
-    match client.reindex().await {
-        Ok(resp) => {
-            if !resp.ok {
-                let msg = resp.error.as_deref().unwrap_or("unknown error");
-                eprintln!("Reindex failed: {msg}");
-                process::exit(1);
-            }
-            match mode {
-                OutputMode::Human => {
-                    let n = resp
-                        .data
-                        .as_ref()
-                        .and_then(|d| d.get("messages_indexed"))
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0);
-                    println!("Done. {n} messages indexed.");
-                }
-                OutputMode::Json => {
-                    let data = resp.data.unwrap_or(serde_json::Value::Null);
-                    match serde_json::to_string(&data) {
-                        Ok(s) => println!("{s}"),
-                        Err(e) => {
-                            eprintln!("Error: failed to format output: {e}");
-                            process::exit(1);
-                        }
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("Reindex failed: {e}");
             process::exit(1);
         }
     }

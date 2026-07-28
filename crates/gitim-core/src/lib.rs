@@ -1,7 +1,6 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod auth_payload;
-pub mod config_patch;
 pub mod dm;
 pub mod epoch;
 pub mod flow;

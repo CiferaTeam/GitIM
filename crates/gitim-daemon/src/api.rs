@@ -358,24 +358,7 @@ pub enum Request {
     },
 
     #[serde(rename = "search")]
-    Search {
-        #[serde(default)]
-        query: Option<String>,
-        #[serde(default)]
-        author: Option<String>,
-        #[serde(default)]
-        channel: Option<String>,
-        #[serde(default)]
-        channel_type: Option<String>,
-        #[serde(default = "default_limit")]
-        limit: usize,
-        #[serde(default)]
-        offset: usize,
-        #[serde(default)]
-        include_cards: bool,
-    },
-    #[serde(rename = "reindex")]
-    Reindex,
+    Search { query: String },
     #[serde(rename = "archive_channel")]
     ArchiveChannel {
         channel: String,
@@ -712,10 +695,6 @@ pub enum Request {
     /// Excludes departed handlers.
     #[serde(rename = "agents_with_labels")]
     AgentsWithLabels { labels: Vec<String> },
-}
-
-fn default_limit() -> usize {
-    50
 }
 
 fn default_archived_dms_limit() -> usize {

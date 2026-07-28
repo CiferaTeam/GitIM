@@ -1,95 +1,180 @@
+use std::path::Path;
+
+use gitim_core::dm::parse_dm_filename;
+use gitim_core::parser::parse_thread;
+use gitim_core::responses::{SearchMessage, SearchResponse};
+use tracing::warn;
+
 use crate::api::Response;
 use crate::state::SharedState;
 
-const INDEXER_DISABLED_MSG: &str =
-    "search index disabled for this clone (set indexer.enabled=true in .gitim/config.yaml and restart daemon)";
+const SEARCH_RESULT_LIMIT: usize = 10;
 
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_search(
-    state: SharedState,
-    query: Option<String>,
-    author: Option<String>,
-    channel: Option<String>,
-    channel_type: Option<String>,
-    limit: usize,
-    offset: usize,
-    include_cards: bool,
-) -> Response {
+pub async fn handle_search(state: SharedState, query: String) -> Response {
+    if query.is_empty() {
+        return Response::error("search requires a non-empty query");
+    }
+    let repo_root = state.repo_root.clone();
     let current_user = state.current_user.read().await.clone();
-    let index = {
-        let guard = state.index.read().unwrap_or_else(|e| e.into_inner());
-        match &*guard {
-            Some(idx) => idx.clone(),
-            None => return Response::error(INDEXER_DISABLED_MSG),
-        }
-    };
 
-    let params = gitim_index::SearchParams {
-        query,
-        author,
-        channel,
-        channel_type,
-        current_user,
-        limit,
-        offset,
-        include_cards,
-    };
-
-    match tokio::task::spawn_blocking(move || index.search(params)).await {
-        Ok(Ok(result)) => {
-            use gitim_core::responses::{SearchMessage, SearchResponse};
-            let messages: Vec<SearchMessage> = result
-                .messages
-                .iter()
-                .map(|m| SearchMessage {
-                    channel: m.channel.clone(),
-                    channel_type: m.channel_type.clone(),
-                    line_number: m.line_number,
-                    parent_line: m.parent_line,
-                    author: m.author.clone(),
-                    timestamp: m.timestamp.clone(),
-                    body: m.body.clone(),
-                })
-                .collect();
-            let payload = SearchResponse {
-                messages,
-                total: result.total as u64,
-            };
-            Response::json(payload)
-        }
-        Ok(Err(gitim_index::IndexError::Rebuilding)) => Response::error("indexing_in_progress"),
-        Ok(Err(gitim_index::IndexError::EmptySearch)) => {
-            Response::error("search requires at least one of: query, author")
-        }
-        Ok(Err(e)) => Response::error(format!("search failed: {}", e)),
-        Err(e) => Response::error(format!("search task failed: {}", e)),
+    match tokio::task::spawn_blocking(move || {
+        search_messages(&repo_root, current_user.as_deref(), &query)
+    })
+    .await
+    {
+        Ok(messages) => Response::json(SearchResponse { messages }),
+        Err(error) => Response::error(format!("search task failed: {error}")),
     }
 }
 
-pub async fn handle_reindex(state: SharedState) -> Response {
-    let index = {
-        let guard = state.index.read().unwrap_or_else(|e| e.into_inner());
-        match &*guard {
-            Some(idx) => idx.clone(),
-            None => return Response::error(INDEXER_DISABLED_MSG),
-        }
-    };
+fn search_messages(
+    repo_root: &Path,
+    current_user: Option<&str>,
+    query: &str,
+) -> Vec<SearchMessage> {
+    let mut matches = Vec::new();
 
-    let repo_root = state.repo_root.clone();
-    let head = match state.git_storage.rev_parse("HEAD") {
-        Ok(h) => h,
-        Err(e) => return Response::error(format!("failed to get HEAD: {}", e)),
-    };
+    scan_flat_threads(
+        &repo_root.join("channels"),
+        "channel",
+        query,
+        &mut matches,
+        |path| {
+            path.file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_string)
+        },
+    );
 
-    match tokio::task::spawn_blocking(move || index.reindex(&repo_root, &head)).await {
-        Ok(Ok(count)) => {
-            let payload = gitim_core::responses::ReindexResponse {
-                status: "complete".to_string(),
-                messages_indexed: count as u64,
-            };
-            Response::json(payload)
-        }
-        Ok(Err(e)) => Response::error(format!("reindex failed: {}", e)),
-        Err(e) => Response::error(format!("reindex task failed: {}", e)),
+    scan_card_threads(repo_root, query, &mut matches);
+
+    if let Some(current_user) = current_user {
+        scan_flat_threads(&repo_root.join("dm"), "dm", query, &mut matches, |path| {
+            let channel = path.file_stem()?.to_str()?;
+            let (first, second) = parse_dm_filename(channel)?;
+            (first == current_user || second == current_user).then(|| channel.to_string())
+        });
     }
+
+    matches.sort_by(|left, right| {
+        right
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| left.channel.cmp(&right.channel))
+            .then_with(|| right.line_number.cmp(&left.line_number))
+    });
+    matches.truncate(SEARCH_RESULT_LIMIT);
+    matches
+}
+
+fn scan_flat_threads(
+    directory: &Path,
+    channel_type: &str,
+    query: &str,
+    matches: &mut Vec<SearchMessage>,
+    channel_for_path: impl Fn(&Path) -> Option<String>,
+) {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            warn!("search: cannot read {}: {}", directory.display(), error);
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("thread") {
+            continue;
+        }
+        let Some(channel) = channel_for_path(&path) else {
+            continue;
+        };
+        scan_thread(&path, &channel, channel_type, query, matches);
+    }
+}
+
+fn scan_card_threads(repo_root: &Path, query: &str, matches: &mut Vec<SearchMessage>) {
+    let channels_dir = repo_root.join("channels");
+    let channels = match std::fs::read_dir(&channels_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            warn!("search: cannot read {}: {}", channels_dir.display(), error);
+            return;
+        }
+    };
+
+    for channel_entry in channels.flatten() {
+        let channel_path = channel_entry.path();
+        if !channel_path.is_dir() {
+            continue;
+        }
+        let Some(channel) = channel_path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let cards_dir = channel_path.join("cards");
+        let cards = match std::fs::read_dir(&cards_dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                warn!("search: cannot read {}: {}", cards_dir.display(), error);
+                continue;
+            }
+        };
+
+        for card_entry in cards.flatten() {
+            let card_path = card_entry.path();
+            if !card_path.is_dir() {
+                continue;
+            }
+            let Some(card_id) = card_path.file_name().and_then(|value| value.to_str()) else {
+                continue;
+            };
+            let thread_path = card_path.join("discussion.thread");
+            let identifier = format!("channels/{channel}/cards/{card_id}");
+            scan_thread(&thread_path, &identifier, "card", query, matches);
+        }
+    }
+}
+
+fn scan_thread(
+    path: &Path,
+    channel: &str,
+    channel_type: &str,
+    query: &str,
+    matches: &mut Vec<SearchMessage>,
+) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+        Err(error) => {
+            warn!("search: cannot read {}: {}", path.display(), error);
+            return;
+        }
+    };
+    let thread = match parse_thread(&content) {
+        Ok(thread) => thread,
+        Err(error) => {
+            warn!("search: cannot parse {}: {}", path.display(), error);
+            return;
+        }
+    };
+
+    matches.extend(
+        thread
+            .messages()
+            .into_iter()
+            .filter(|message| message.body.contains(query))
+            .map(|message| SearchMessage {
+                channel: channel.to_string(),
+                channel_type: channel_type.to_string(),
+                line_number: message.line_number,
+                parent_line: message.point_to,
+                author: message.author.to_string(),
+                timestamp: message.timestamp.clone(),
+                body: message.body.clone(),
+            }),
+    );
 }

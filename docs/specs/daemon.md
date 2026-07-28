@@ -10,11 +10,10 @@
 crates/
 ├── gitim-core/    # 类型、解析、格式化、验证（无 IO）
 ├── gitim-daemon/  # API、onboard、生命周期、服务入口
-├── gitim-sync/    # Git 操作、冲突解决、watcher、sync loop
-└── gitim-index/   # SQLite FTS5 搜索索引
+└── gitim-sync/    # Git 操作、冲突解决、watcher、sync loop
 ```
 
-`gitim-daemon` 是唯一二进制，链接其余三个 crate。
+`gitim-daemon` 负责协议写入、同步协调和按需消息搜索。
 
 ---
 
@@ -116,7 +115,6 @@ Unix socket 上使用行分隔 JSON。
 | `leave_channel` | 频道移除 / 自离开 |
 | `create_channel` | 创建新频道 |
 | `search` | 搜索消息 |
-| `reindex` | 重建搜索索引 |
 
 ### HTTP 调试模式
 
@@ -188,7 +186,7 @@ watcher 监控 `channels/` 和 `dm/` 目录下的 `.thread` / `.meta.yaml` 变�
 - **Rust daemon + TS CLI 分离**：避免多进程直接并发写文本文件。
 - **Unix socket 为主，HTTP 仅调试/桥接**：保持本地通信默认安全边界。
 - **事件只推“变了什么”，不推“完整内容”**：让客户端按需 `read` 或 `poll`。
-- **搜索索引本地化**：SQLite 只服务当前工作副本，不污染共享 Git 数据。
+- **搜索读取源文件**：按需解析当前工作副本中的 active `.thread` 文件。
 
 ## 涉及源文件
 
@@ -200,9 +198,9 @@ watcher 监控 `channels/` 和 `dm/` 目录下的 `.thread` / `.meta.yaml` 变�
 | `crates/gitim-daemon/src/api.rs` | Request / Response / Event 类型 |
 | `crates/gitim-daemon/src/handlers.rs` | API 方法处理逻辑 |
 | `crates/gitim-daemon/src/onboard.rs` | onboard 编排 |
-| `crates/gitim-daemon/src/state.rs` | AppState、sync loop 协调、索引初始化 |
+| `crates/gitim-daemon/src/state.rs` | AppState、sync loop 协调 |
+| `crates/gitim-daemon/src/handlers/search.rs` | 按需消息正文搜索 |
 | `crates/gitim-sync/src/git.rs` | Git 操作封装 |
 | `crates/gitim-sync/src/sync_loop.rs` | 后台同步循环 |
 | `crates/gitim-sync/src/conflict.rs` | 冲突解决与成员列表并集合并 |
 | `crates/gitim-sync/src/watcher.rs` | 文件监听 |
-| `crates/gitim-index/src/lib.rs` | FTS5 索引 |

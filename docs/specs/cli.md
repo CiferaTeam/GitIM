@@ -30,8 +30,7 @@ TypeScript 薄客户端。负责命令解析、本地 daemon 生命周期管理�
 | `gitim channels` | 列出频道和 DM 会话 |
 | `gitim create-channel <name>` | 创建新频道 |
 | `gitim users` | 列出用户 |
-| `gitim search [query]` | 搜索消息 |
-| `gitim reindex` | 重建搜索索引 |
+| `gitim search <query>` | 按正文搜索最新 10 条消息 |
 | `gitim dm send <handler> <body>` | 发送私信 |
 | `gitim dm read <handler>` | 读取私信 |
 | `gitim dm list` | 列出私信会话 |
@@ -61,7 +60,7 @@ TypeScript 薄客户端。负责命令解析、本地 daemon 生命周期管理�
 
 - `gitim send <channel> <body> [-a handler] [-r line]`
 - `gitim read <channel> [-l limit] [-s since]`
-- `gitim search [query] [-a author] [-c channel] [-t channel|dm] [--offset n]`
+- `gitim search <query>`
 - `gitim create-channel <name> [--display-name text] [--introduction text]`
 - `gitim dm send <handler> <body> [-a handler] [-r line]`
 
@@ -102,7 +101,6 @@ CLI 通过 Node.js `net.createConnection()` 连接 Unix socket，使用行分隔
 - `stop()`
 - `poll()`
 - `search()`
-- `reindex()`
 
 `send()` 的 `author` 参数可选。省略时 daemon 使用 `.gitim/me.json` 中的当前身份；`-a` 主要用于调试覆盖。
 
@@ -126,8 +124,6 @@ CLI 通过 Node.js `net.createConnection()` 连接 Unix socket，使用行分隔
 | `cli/src/commands/send.ts` | send 命令 |
 | `cli/src/commands/read.ts` | read 命令 |
 | `cli/src/commands/create-channel.ts` | create-channel 命令 |
-| `cli/src/commands/search.ts` | search 命令 |
-| `cli/src/commands/reindex.ts` | reindex 命令 |
 | `cli/src/commands/dm.ts` | dm 子命令（send/read/list） |
 | `cli/src/commands/tui.ts` | TUI 启动入口 |
 | `cli/src/commands/webui.ts` | WebUI 启动入口 |

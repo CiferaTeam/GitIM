@@ -889,6 +889,23 @@ async fn im_channels(
     api_response_to_json(client.list_channels().await)
 }
 
+#[derive(Deserialize)]
+struct SearchQuery {
+    query: String,
+}
+
+async fn im_search(
+    State(state): State<SharedRuntimeState>,
+    WorkspaceSlug(slug): WorkspaceSlug,
+    axum::extract::Query(req): axum::extract::Query<SearchQuery>,
+) -> axum::response::Response {
+    let client = match human_client(&state, &slug) {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    api_response_to_json(client.search(&req.query).await)
+}
+
 // -- /im/create-channel --
 
 #[derive(Deserialize)]
@@ -7067,6 +7084,7 @@ fn build_router_with_asset_router(
         .merge(asset_router)
         .route("/im/me", get(im_me))
         .route("/im/channels", get(im_channels))
+        .route("/im/search", get(im_search))
         .route("/im/create-channel", post(im_create))
         .route("/im/join", post(im_join))
         .route("/im/send", post(im_send))
@@ -7478,6 +7496,31 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/workspaces/missing/im/boards")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["ok"], false);
+        assert_eq!(body["error"], "unknown workspace");
+    }
+
+    #[tokio::test]
+    async fn im_search_route_reaches_workspace_lookup() {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (router, _state) = create_router();
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .uri("/workspaces/missing/im/search?query=needle")
                     .body(Body::empty())
                     .unwrap(),
             )
