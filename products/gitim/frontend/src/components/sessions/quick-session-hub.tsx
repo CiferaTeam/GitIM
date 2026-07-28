@@ -1,5 +1,5 @@
 import { Check, MessageCircleMore, Plus } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -11,14 +11,13 @@ import { useAgentStore } from "@/hooks/use-agent-store";
 import { useChatStore } from "@/hooks/use-chat-store";
 import { useConnectionStore } from "@/hooks/use-connection-store";
 import { useFleetStore } from "@/hooks/use-fleet-store";
+import { usePopoverPin } from "@/hooks/use-popover-pin";
 import { useQuickSessionStore } from "@/hooks/use-quick-session-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import { workspaceIdentity } from "@/lib/workspace-key";
 import { cn } from "@/lib/utils";
 import { QuickSessionList } from "./quick-session-list";
 import { QuickSessionPanel } from "./quick-session-panel";
-
-const HOVER_CLOSE_DELAY_MS = 180;
 
 export function QuickSessionHub() {
   const mode = useConnectionStore((state) => state.mode);
@@ -55,16 +54,23 @@ function QuickSessionHubWorkspace({
   workspaceKey,
   browserMode,
 }: QuickSessionHubWorkspaceProps) {
-  const [open, setOpen] = useState(false);
-  const [pinned, setPinned] = useState(false);
   const [creating, setCreating] = useState(false);
   const [agentId, setAgentId] = useState("");
   const [firstMessage, setFirstMessage] = useState("");
   const [copied, setCopied] = useState(false);
-  const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const openSource = useRef<"hover" | "focus" | "click" | null>(null);
-  const closeSource = useRef<"hover" | "dismiss" | "trigger" | null>(null);
-  const ignoreRestoredTriggerFocus = useRef(false);
+  const {
+    open,
+    pinned,
+    clearCloseTimer,
+    openFromHover,
+    openFromFocus,
+    scheduleHoverClose,
+    handleOpenChange,
+    handleTriggerClick,
+    handleOpenAutoFocus,
+    handleCloseAutoFocus,
+    handleEscapeKeyDown,
+  } = usePopoverPin();
 
   const agents = useAgentStore((state) => state.agents);
   const fleetAgents = useFleetStore((state) => state.agents);
@@ -113,40 +119,6 @@ function QuickSessionHubWorkspace({
   const loading = useQuickSessionStore((state) => state.loading);
   const errors = useQuickSessionStore((state) => state.errors);
 
-  const clearCloseTimer = useCallback(() => {
-    if (closeTimer.current) clearTimeout(closeTimer.current);
-    closeTimer.current = null;
-  }, []);
-
-  const openFromHover = useCallback(() => {
-    clearCloseTimer();
-    closeSource.current = null;
-    openSource.current = "hover";
-    setOpen(true);
-  }, [clearCloseTimer]);
-
-  const openFromFocus = useCallback(() => {
-    clearCloseTimer();
-    if (ignoreRestoredTriggerFocus.current) {
-      ignoreRestoredTriggerFocus.current = false;
-      return;
-    }
-    closeSource.current = null;
-    if (!open) openSource.current = "focus";
-    setOpen(true);
-  }, [clearCloseTimer, open]);
-
-  const leave = useCallback(() => {
-    clearCloseTimer();
-    if (pinned) return;
-    closeTimer.current = setTimeout(() => {
-      closeSource.current = "hover";
-      openSource.current = null;
-      setOpen(false);
-    }, HOVER_CLOSE_DELAY_MS);
-  }, [clearCloseTimer, pinned]);
-
-  useEffect(() => () => clearCloseTimer(), [clearCloseTimer]);
   useEffect(() => {
     if (!open) return;
     void useQuickSessionStore.getState().refreshList(activeSlug);
@@ -166,21 +138,8 @@ function QuickSessionHubWorkspace({
   }
 
   return (
-    <Popover
-      open={open}
-      onOpenChange={(next) => {
-        clearCloseTimer();
-        if (!next && closeSource.current === null) {
-          closeSource.current = "dismiss";
-        }
-        setOpen(next);
-        if (!next) {
-          openSource.current = null;
-          setPinned(false);
-        }
-      }}
-    >
-      <div onPointerEnter={openFromHover} onPointerLeave={leave} className="hidden md:block">
+    <Popover open={open} onOpenChange={handleOpenChange}>
+      <div onPointerEnter={openFromHover} onPointerLeave={scheduleHoverClose} className="hidden md:block">
         <PopoverTrigger asChild>
           <button
             type="button"
@@ -192,21 +151,7 @@ function QuickSessionHubWorkspace({
               open && "bg-primary/10 text-primary",
             )}
             onFocus={openFromFocus}
-            onClick={(event) => {
-              event.preventDefault();
-              clearCloseTimer();
-              if (pinned) {
-                closeSource.current = "trigger";
-                openSource.current = null;
-                setPinned(false);
-                setOpen(false);
-              } else {
-                closeSource.current = null;
-                openSource.current = "click";
-                setPinned(true);
-                setOpen(true);
-              }
-            }}
+            onClick={handleTriggerClick}
           >
             <MessageCircleMore className="size-4" />
             <span>Sessions</span>
@@ -220,28 +165,11 @@ function QuickSessionHubWorkspace({
         align="center"
         sideOffset={8}
         className="hidden h-[520px] w-[760px] max-w-[calc(100vw-24px)] overflow-hidden p-0 md:flex"
-        onOpenAutoFocus={(event) => {
-          if (openSource.current === "hover") event.preventDefault();
-        }}
-        onCloseAutoFocus={(event) => {
-          if (closeSource.current === "hover") {
-            event.preventDefault();
-          } else {
-            ignoreRestoredTriggerFocus.current = true;
-            queueMicrotask(() => {
-              ignoreRestoredTriggerFocus.current = false;
-            });
-          }
-          closeSource.current = null;
-        }}
+        onOpenAutoFocus={handleOpenAutoFocus}
+        onCloseAutoFocus={handleCloseAutoFocus}
         onPointerEnter={clearCloseTimer}
-        onPointerLeave={leave}
-        onEscapeKeyDown={() => {
-          closeSource.current = "dismiss";
-          openSource.current = null;
-          setPinned(false);
-          setOpen(false);
-        }}
+        onPointerLeave={scheduleHoverClose}
+        onEscapeKeyDown={handleEscapeKeyDown}
       >
         <section className="flex w-[280px] min-w-0 flex-col border-r border-border bg-card/80">
           <div className="flex items-center justify-between border-b border-border px-3 py-2.5">

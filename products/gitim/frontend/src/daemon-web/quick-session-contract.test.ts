@@ -1,3 +1,12 @@
+// daemon-web Quick Session CONTRACT test.
+//
+// This file does NOT spawn the Rust daemon and contains no golden diff; the
+// name "contract" is deliberate. It exercises the daemon-web (browser worker)
+// quick-session handlers against mocked storage/git/sync plus the real
+// gitim-wasm logic, pinning the daemon-web API behavior (payloads, error
+// codes, file transactions) as a regression net. True Rust-daemon parity
+// would require spawning gitim-daemon and diffing outputs — that is not what
+// happens here.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const files = vi.hoisted(() => new Map<string, string>());
@@ -238,7 +247,7 @@ function sessionFile(id: string, archived: boolean, name: string): string {
   return `/repo/${archived ? "archive/quick-sessions" : "quick-sessions"}/${id}/${name}`;
 }
 
-describe("daemon-web Quick Session parity", () => {
+describe("daemon-web Quick Session contract", () => {
   beforeEach(seed);
 
   it("creates the canonical Rust object idempotently from a client id", async () => {

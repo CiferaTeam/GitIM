@@ -7,9 +7,9 @@ import type {
   QuickSessionDetail,
   QuickSessionListItem,
   QuickSessionStatus,
-  SessionUsageSnapshot,
 } from "../lib/types";
 import {
+  formatQuickSessionRef,
   generateQuickSessionId,
   generateQuickSessionRequestId,
 } from "../lib/quick-session-ref";
@@ -45,7 +45,6 @@ export interface QuickSessionRuntimeOverlay {
   attemptId?: string;
   contextGeneration?: number;
   latestEvent?: AgentActivityEvent;
-  usage?: SessionUsageSnapshot;
 }
 
 interface QuickSessionState {
@@ -143,7 +142,7 @@ function itemFromDetail(detail: QuickSessionDetail): QuickSessionListItem {
     last_message_preview: detail.meta.last_message_preview,
     revision: detail.meta.revision,
     archived: detail.archived,
-    ref: `session:${detail.meta.id}`,
+    ref: formatQuickSessionRef(detail.meta.id),
   };
 }
 
@@ -154,26 +153,6 @@ function sortQuickSessionItems(
     const updated = right.updated_at.localeCompare(left.updated_at);
     return updated || left.id.localeCompare(right.id);
   });
-}
-
-function mapQuickSessionUsage(detail: string): SessionUsageSnapshot | undefined {
-  if (detail.trim() === "") return undefined;
-  try {
-    const raw = JSON.parse(detail) as Record<string, unknown>;
-    return {
-      sessionId: (raw.session_id as string) ?? "",
-      inputTokens: raw.input_tokens as number | undefined,
-      outputTokens: raw.output_tokens as number | undefined,
-      maxTokens: raw.max_tokens as number | undefined,
-      usedPercent: (raw.used_percent as number) ?? 0,
-      source:
-        (raw.source as SessionUsageSnapshot["source"]) ??
-        "provider_reported",
-      updatedAt: (raw.updated_at as string) ?? "",
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 function setOperation(
@@ -569,7 +548,6 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
             ...(detail.meta.attempt_id
               ? { attemptId: detail.meta.attempt_id }
               : {}),
-            ...(previousRuntime?.usage ? { usage: previousRuntime.usage } : {}),
           };
       return {
         items,
@@ -627,10 +605,6 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
     }
     set((state) => {
       const current = state.runtimeById[event.session_id!];
-      const usage =
-        event.event_type === "usage"
-          ? mapQuickSessionUsage(event.detail)
-          : current?.usage;
       return {
         runtimeById: {
           ...state.runtimeById,
@@ -644,7 +618,6 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
             attemptId: event.attempt_id,
             contextGeneration: event.context_generation,
             latestEvent: event,
-            ...(usage ? { usage } : {}),
           },
         },
       };

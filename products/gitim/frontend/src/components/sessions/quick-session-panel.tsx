@@ -3,6 +3,7 @@ import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import type { QuickSessionRuntimeOverlay } from "@/hooks/use-quick-session-store";
+import { formatQuickSessionRef } from "@/lib/quick-session-ref";
 import { formatTimestamp, type QuickSessionDetail } from "@/lib/types";
 import { useTimezoneStore } from "@/hooks/use-timezone";
 
@@ -51,7 +52,7 @@ export function QuickSessionPanel({
     );
   }
 
-  const ref = `session:${detail.meta.id}`;
+  const ref = formatQuickSessionRef(detail.meta.id);
   const activity = runtime?.latestEvent;
   return (
     <div className="flex min-h-0 flex-1 flex-col">

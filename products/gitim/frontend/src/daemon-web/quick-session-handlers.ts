@@ -21,7 +21,9 @@ import {
   validateQuickSessionId,
 } from "gitim-wasm";
 import { ensureWasmReady } from "./wasm-ready";
-import { validateHandler } from "./paths";
+import { quickSessionFileFromPath, validateHandler } from "./paths";
+import { formatQuickSessionRef } from "../lib/quick-session-ref";
+import type { QuickSessionMeta } from "../lib/types";
 import { withRepoLock } from "./repo-lock";
 
 export type ApiResponse = {
@@ -52,39 +54,6 @@ export interface ReadQuickSessionQuery {
 export interface SendQuickSessionInput {
   body: string;
   request_id: string;
-}
-
-type QuickSessionStatus =
-  | "needs_title"
-  | "running"
-  | "active"
-  | "error"
-  | "archived";
-
-interface QuickSessionMeta {
-  id: string;
-  title?: string;
-  agent_id: string;
-  created_by: string;
-  status: QuickSessionStatus;
-  created_at: string;
-  updated_at: string;
-  archived_at?: string;
-  archived_from?: QuickSessionStatus;
-  summary?: string;
-  summary_updated_at?: string;
-  last_message_preview: string;
-  error?: string;
-  processing_input_line?: number;
-  processing_started_at?: string;
-  attempt_id?: string;
-  last_completed_attempt_id?: string;
-  last_completed_input_line?: number;
-  last_completed_line?: number;
-  last_failed_attempt_id?: string;
-  last_human_request_id?: string;
-  last_human_line?: number;
-  revision: number;
 }
 
 interface QuickSessionTransitionResult {
@@ -231,7 +200,7 @@ export async function createQuickSession(
           data: {
             session: detail,
             line_number: 1,
-            ref: `session:${input.session_id}`,
+            ref: formatQuickSessionRef(input.session_id),
           },
         };
       }
@@ -297,7 +266,7 @@ export async function createQuickSession(
             archived: false,
           },
           line_number: 1,
-          ref: `session:${input.session_id}`,
+          ref: formatQuickSessionRef(input.session_id),
         },
       };
     });
@@ -781,7 +750,7 @@ function quickSessionListItem(
     last_message_preview: meta.last_message_preview,
     revision: meta.revision,
     archived,
-    ref: `session:${meta.id}`,
+    ref: formatQuickSessionRef(meta.id),
   };
 }
 
@@ -794,7 +763,7 @@ function quickSessionSendResponse(
     line_number: lineNumber,
     status: meta.status,
     revision: meta.revision,
-    ref: `session:${meta.id}`,
+    ref: formatQuickSessionRef(meta.id),
   };
 }
 
@@ -869,29 +838,12 @@ function utcTimestamp(): string {
 }
 
 
-function quickSessionChangeFromPath(path: string): {
-  archived: boolean;
-  sessionId: string;
-  file: "meta" | "thread";
-} | null {
-  const match = path.match(
-    /^(archive\/)?quick-sessions\/([^/]+)\/(session\.meta\.yaml|discussion\.thread)$/,
-  );
-  if (!match || quickSessionIdError(match[2])) return null;
-  return {
-    archived: match[1] !== undefined,
-    sessionId: match[2],
-    file: match[3] === "session.meta.yaml" ? "meta" : "thread",
-  };
-}
-
-
 export async function classifyQuickSessionPollChange(
   path: string,
   baseline?: string,
 ): Promise<ClassifiedQuickSessionPollChange | null | undefined> {
   await ensureWasmReady();
-  const parsed = quickSessionChangeFromPath(path);
+  const parsed = quickSessionFileFromPath(path);
   if (!parsed) return undefined;
 
   const s = getState();

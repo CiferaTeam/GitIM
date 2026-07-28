@@ -33,7 +33,10 @@ import {
   type QuickSessionStatus,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { QUICK_SESSION_DRAG_MIME } from "@/lib/quick-session-ref";
+import {
+  formatQuickSessionRef,
+  QUICK_SESSION_DRAG_MIME,
+} from "@/lib/quick-session-ref";
 import { toApiChannel } from "@/lib/scope-name";
 import { workspaceIdentity } from "@/lib/workspace-key";
 import {
@@ -459,9 +462,7 @@ export function QuickSessionReferenceLink({
     };
   }, [activeSlug, open, reference.line, reference.sessionId]);
 
-  const ref = `session:${reference.sessionId}${
-    reference.line ? `:L${String(reference.line).padStart(6, "0")}` : ""
-  }`;
+  const ref = formatQuickSessionRef(reference.sessionId, reference.line);
   const title = detail?.meta.title ?? "Quick Session";
   const messages = detail
     ? windowAround(detail.entries, reference.line)

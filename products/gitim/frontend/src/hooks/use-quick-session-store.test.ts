@@ -562,9 +562,6 @@ describe("useQuickSessionStore", () => {
         }),
       ),
     ).toBe(true);
-    expect(
-      useQuickSessionStore.getState().runtimeById[SESSION_ID]?.usage?.usedPercent,
-    ).toBe(42);
 
     expect(
       useQuickSessionStore.getState().applyActivityEvent(
