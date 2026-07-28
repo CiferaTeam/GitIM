@@ -108,10 +108,12 @@ function pressEnter(textarea: HTMLTextAreaElement) {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((resolvePromise) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
     resolve = resolvePromise;
+    reject = rejectPromise;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 const channel: Channel = {
@@ -1037,6 +1039,106 @@ describe("InputArea attachments", () => {
     expect(localStorage.getItem("gitim:draft:ws:general")).toBe("same text");
 
     // The newer send still settles normally.
+    await act(async () => {
+      sendB.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(textarea.value).toBe("");
+    expect(textarea.disabled).toBe(false);
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
+  });
+
+  it("ignores a stale text failure after disposeAll and a newer same-key send", async () => {
+    const sendA = deferred<{ ok: false; error: string }>();
+    const sendB = deferred<{ ok: true }>();
+    const onSend = vi.fn()
+      .mockImplementationOnce(() => sendA.promise)
+      .mockImplementationOnce(() => sendB.promise);
+    const focus = vi.spyOn(HTMLTextAreaElement.prototype, "focus");
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    await act(async () => {
+      setTextareaValue(textarea, "same text");
+      pressEnter(textarea);
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      useAttachmentDraftStore.getState().disposeAll();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pressEnter(textarea);
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(2);
+    focus.mockClear();
+
+    // The stale first send fails: no error render, no focus steal, and the
+    // newer send's busy mark is not released.
+    await act(async () => {
+      sendA.resolve({ ok: false, error: "stale failure" });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain("stale failure");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(textarea.disabled).toBe(true);
+    expect(focus).not.toHaveBeenCalled();
+
+    // The newer send still settles normally.
+    await act(async () => {
+      sendB.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(textarea.value).toBe("");
+    expect(textarea.disabled).toBe(false);
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
+  });
+
+  it("ignores a stale text exception after disposeAll and a newer same-key send", async () => {
+    const sendA = deferred<never>();
+    const sendB = deferred<{ ok: true }>();
+    const onSend = vi.fn()
+      .mockImplementationOnce(() => sendA.promise)
+      .mockImplementationOnce(() => sendB.promise);
+    const focus = vi.spyOn(HTMLTextAreaElement.prototype, "focus");
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    await act(async () => {
+      setTextareaValue(textarea, "same text");
+      pressEnter(textarea);
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      useAttachmentDraftStore.getState().disposeAll();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pressEnter(textarea);
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledTimes(2);
+    focus.mockClear();
+
+    // The stale first send throws: the catch path must ignore it completely.
+    await act(async () => {
+      sendA.reject(new Error("stale exception"));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(container.textContent).not.toContain("stale exception");
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(textarea.disabled).toBe(true);
+    expect(focus).not.toHaveBeenCalled();
+
     await act(async () => {
       sendB.resolve({ ok: true });
       await Promise.resolve();

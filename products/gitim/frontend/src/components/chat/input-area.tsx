@@ -326,6 +326,25 @@ export function InputArea({
     return failed;
   }
 
+  // Failure/exception effects are applied only when the operation is still
+  // the scope's current one: endOperation is the token-matched CAS, so a
+  // stale late result renders nothing, focuses nothing, and cannot release
+  // a newer operation's busy mark.
+  function failTextSend(
+    key: string,
+    token: number,
+    message: string,
+    requestWorkspaceKey: string,
+    requestScopeKey: string,
+  ) {
+    const ended = useComposerOperationStore.getState().endOperation(key, token);
+    if (!ended) return;
+    if (isCurrentSendScope(requestWorkspaceKey, requestScopeKey)) {
+      setSendError(key, message);
+    }
+    focusCurrentScope(requestWorkspaceKey, requestScopeKey);
+  }
+
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.currentTarget.files ?? []);
     addSelectedFiles(files);
@@ -442,12 +461,13 @@ export function InputArea({
           capturedReply?.line_number ?? 0,
         );
         if (!sendResult.ok) {
-          failOperation(
+          failAttachmentInvariant(
             capturedAttachmentKey,
             operation.token,
             sendResult.error ?? "Send failed",
+            capturedWorkspaceKey,
+            capturedScopeKey,
           );
-          focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
           return;
         }
         if (!completeSuccess(capturedAttachmentKey, operation.token)) return;
@@ -464,12 +484,13 @@ export function InputArea({
           capturedReplyLine,
         );
       } catch (caught) {
-        failOperation(
+        failAttachmentInvariant(
           capturedAttachmentKey,
           operation.token,
           caught instanceof Error ? caught.message : "Send failed",
+          capturedWorkspaceKey,
+          capturedScopeKey,
         );
-        focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
       }
       return;
     }
@@ -479,16 +500,19 @@ export function InputArea({
       .beginOperation(capturedAttachmentKey, "text");
     if (!textOperation) return;
 
-    let completed = false;
     try {
       const sendResult = await capturedOnSend(
         capturedHumanBody,
         capturedReply?.line_number ?? 0,
       );
       if (!sendResult.ok) {
-        if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
-          setSendError(capturedAttachmentKey, sendResult.error ?? "Send failed");
-        }
+        failTextSend(
+          capturedAttachmentKey,
+          textOperation.token,
+          sendResult.error ?? "Send failed",
+          capturedWorkspaceKey,
+          capturedScopeKey,
+        );
         return;
       }
       const settled = useComposerOperationStore
@@ -503,19 +527,14 @@ export function InputArea({
         capturedScopeKey,
         capturedText,
       );
-      completed = true;
     } catch (caught) {
-      if (isCurrentSendScope(capturedWorkspaceKey, capturedScopeKey)) {
-        setSendError(
-          capturedAttachmentKey,
-          caught instanceof Error ? caught.message : "Send failed",
-        );
-      }
-    } finally {
-      useComposerOperationStore
-        .getState()
-        .endOperation(capturedAttachmentKey, textOperation.token);
-      if (!completed) focusCurrentScope(capturedWorkspaceKey, capturedScopeKey);
+      failTextSend(
+        capturedAttachmentKey,
+        textOperation.token,
+        caught instanceof Error ? caught.message : "Send failed",
+        capturedWorkspaceKey,
+        capturedScopeKey,
+      );
     }
   }
 
