@@ -11,6 +11,7 @@ import { usePollLoop } from "./hooks/use-poll-loop";
 import { useWorkspaceStore } from "./hooks/use-workspace-store";
 import { SetupGate } from "./components/setup/setup-gate";
 import { CreateWorkspaceForm } from "./components/workspace/create-workspace-form";
+import { LandingPage } from "./components/landing/landing-page";
 import { Toaster } from "sonner";
 
 const AgentDetail = lazy(() =>
@@ -135,7 +136,11 @@ function WorkspaceIncomplete({ slug }: { slug: string }) {
   );
 }
 
-export default function App() {
+/**
+ * Runtime-backed workspace UI. Mounted only after SetupGate has a ready
+ * connection — never on the public `/` marketing route.
+ */
+function WorkspaceApp() {
   const mode = useConnectionStore((s) => s.mode);
   const workspaces = useWorkspaceStore((s) => s.workspaces);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
@@ -143,21 +148,12 @@ export default function App() {
   const isMobile = useIsMobile();
   const location = useLocation();
 
-  // Owns workspace lifecycle: init, recursive poll, per-workspace store
-  // resets, SSE sync-reset path, management-route agent refresh.
   usePollLoop();
-
-  // SSE streams for live agent activity and fleet status — scoped to active
-  // remote workspace.
   useAgentActivitySSE(mode === "remote" ? activeSlug : null);
   useFleetSSE(mode === "remote" ? activeSlug : null);
 
-  // /docs is a standalone reference — let it render regardless of workspace
-  // state so setup-screen hints ("What scopes does the PAT need?") can deep-link
-  // into it without getting bounced back by the gate.
   const isDocsRoute = location.pathname.startsWith("/docs");
 
-  // Render-time gate: until we have a workspace selected, bypass the chat UI.
   let gated: ReactNode;
   if (isDocsRoute) {
     gated = (
@@ -182,103 +178,107 @@ export default function App() {
         <DisplayNameDirectoryProvider>
           <Routes>
             <Route element={<AppShell />}>
-            <Route
-              index
-              element={
-                <Navigate
-                  to={mode === "local" || isMobile ? "/chat" : "/management"}
-                  replace
-                />
-              }
-            />
-            {mode === "remote" && (
-              <>
+              <Route
+                index
+                element={
+                  <Navigate
+                    to={mode === "local" || isMobile ? "/chat" : "/management"}
+                    replace
+                  />
+                }
+              />
+              {mode === "remote" && (
+                <>
+                  <Route
+                    path="/management"
+                    element={
+                      isMobile ? (
+                        <Navigate to="/chat" replace />
+                      ) : (
+                        <ManagementPage />
+                      )
+                    }
+                  />
+                  <Route
+                    path="/management/:agentId"
+                    element={
+                      isMobile ? (
+                        <Navigate to="/chat" replace />
+                      ) : (
+                        <PageSuspense>
+                          <AgentDetail />
+                        </PageSuspense>
+                      )
+                    }
+                  />
+                </>
+              )}
+              <Route
+                path="/cards"
+                element={
+                  <PageSuspense>
+                    <CardKanban />
+                  </PageSuspense>
+                }
+              />
+              <Route
+                path="/cards/:channel/:card_id"
+                element={
+                  <PageSuspense>
+                    <CardDetail />
+                  </PageSuspense>
+                }
+              />
+              <Route
+                path="/boards"
+                element={
+                  <PageSuspense>
+                    <BoardsView />
+                  </PageSuspense>
+                }
+              />
+              <Route path="/chat" element={<ChatPage />} />
+              {mode === "remote" && (
                 <Route
-                  path="/management"
+                  path="/crons"
                   element={
-                    isMobile ? <Navigate to="/chat" replace /> : <ManagementPage />
+                    <PageSuspense>
+                      <CronCalendar />
+                    </PageSuspense>
                   }
                 />
+              )}
+              {mode === "remote" && (
                 <Route
-                  path="/management/:agentId"
+                  path="/flows"
                   element={
-                    isMobile ? (
-                      <Navigate to="/chat" replace />
-                    ) : (
-                      <PageSuspense>
-                        <AgentDetail />
-                      </PageSuspense>
-                    )
+                    <PageSuspense>
+                      <FlowsView />
+                    </PageSuspense>
                   }
                 />
-              </>
-            )}
-            <Route
-              path="/cards"
-              element={
-                <PageSuspense>
-                  <CardKanban />
-                </PageSuspense>
-              }
-            />
-            <Route
-              path="/cards/:channel/:card_id"
-              element={
-                <PageSuspense>
-                  <CardDetail />
-                </PageSuspense>
-              }
-            />
-            <Route
-              path="/boards"
-              element={
-                <PageSuspense>
-                  <BoardsView />
-                </PageSuspense>
-              }
-            />
-            <Route path="/chat" element={<ChatPage />} />
-            {mode === "remote" && (
+              )}
+              {mode === "remote" && (
+                <Route
+                  path="/runs/:runId"
+                  element={
+                    <PageSuspense>
+                      <RunDetail />
+                    </PageSuspense>
+                  }
+                />
+              )}
               <Route
-                path="/crons"
+                path="/docs"
                 element={
                   <PageSuspense>
-                    <CronCalendar />
+                    <DocsPage />
                   </PageSuspense>
                 }
               />
-            )}
-            {mode === "remote" && (
-              <Route
-                path="/flows"
-                element={
-                  <PageSuspense>
-                    <FlowsView />
-                  </PageSuspense>
-                }
-              />
-            )}
-            {mode === "remote" && (
-              <Route
-                path="/runs/:runId"
-                element={
-                  <PageSuspense>
-                    <RunDetail />
-                  </PageSuspense>
-                }
-              />
-            )}
-            <Route
-              path="/docs"
-              element={
-                <PageSuspense>
-                  <DocsPage />
-                </PageSuspense>
-              }
-            />
-            {mode === "local" && (
-              <Route path="*" element={<Navigate to="/chat" replace />} />
-            )}
+              {mode === "local" && (
+                <Route path="*" element={<Navigate to="/chat" replace />} />
+              )}
             </Route>
           </Routes>
         </DisplayNameDirectoryProvider>
@@ -286,18 +286,39 @@ export default function App() {
     }
   }
 
+  return gated;
+}
+
+export default function App() {
+  const location = useLocation();
+  const isMobile = useIsMobile();
+  const isPublic = location.pathname === "/";
+
+  const toaster = (
+    <Toaster
+      position={isMobile ? "bottom-center" : "top-right"}
+      mobileOffset={{
+        bottom: "calc(env(safe-area-inset-bottom) + 72px)",
+        left: 16,
+        right: 16,
+      }}
+      richColors
+    />
+  );
+
+  if (isPublic) {
+    return (
+      <>
+        {toaster}
+        <LandingPage />
+      </>
+    );
+  }
+
   return (
     <SetupGate>
-      <Toaster
-        position={isMobile ? "bottom-center" : "top-right"}
-        mobileOffset={{
-          bottom: "calc(env(safe-area-inset-bottom) + 72px)",
-          left: 16,
-          right: 16,
-        }}
-        richColors
-      />
-      {gated}
+      {toaster}
+      <WorkspaceApp />
     </SetupGate>
   );
 }

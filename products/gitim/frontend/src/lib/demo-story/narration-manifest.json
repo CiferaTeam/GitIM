@@ -1,0 +1,86 @@
+{
+  "incident-opening": {
+    "file": "demo-narration/incident-opening.mp3",
+    "durationMs": 7520
+  },
+  "incident-typing": {
+    "file": "demo-narration/incident-typing.mp3",
+    "durationMs": 6080
+  },
+  "incident-send": {
+    "file": "demo-narration/incident-send.mp3",
+    "durationMs": 1280
+  },
+  "incident-commit": {
+    "file": "demo-narration/incident-commit.mp3",
+    "durationMs": 6560
+  },
+  "incident-wake": {
+    "file": "demo-narration/incident-wake.mp3",
+    "durationMs": 4320
+  },
+  "teamup-reply": {
+    "file": "demo-narration/teamup-reply.mp3",
+    "durationMs": 6080
+  },
+  "teamup-investigator": {
+    "file": "demo-narration/teamup-investigator.mp3",
+    "durationMs": 3360
+  },
+  "teamup-investigator-file": {
+    "file": "demo-narration/teamup-investigator-file.mp3",
+    "durationMs": 6240
+  },
+  "teamup-fixer": {
+    "file": "demo-narration/teamup-fixer.mp3",
+    "durationMs": 5280
+  },
+  "teamup-cards-up": {
+    "file": "demo-narration/teamup-cards-up.mp3",
+    "durationMs": 3680
+  },
+  "teamup-card-one": {
+    "file": "demo-narration/teamup-card-one.mp3",
+    "durationMs": 2720
+  },
+  "teamup-card-one-files": {
+    "file": "demo-narration/teamup-card-one-files.mp3",
+    "durationMs": 6400
+  },
+  "teamup-assign": {
+    "file": "demo-narration/teamup-assign.mp3",
+    "durationMs": 5280
+  },
+  "delivery-claim": {
+    "file": "demo-narration/delivery-claim.mp3",
+    "durationMs": 5600
+  },
+  "delivery-investigate": {
+    "file": "demo-narration/delivery-investigate.mp3",
+    "durationMs": 5600
+  },
+  "delivery-handoff": {
+    "file": "demo-narration/delivery-handoff.mp3",
+    "durationMs": 4640
+  },
+  "delivery-fix": {
+    "file": "demo-narration/delivery-fix.mp3",
+    "durationMs": 6560
+  },
+  "delivery-receipt": {
+    "file": "demo-narration/delivery-receipt.mp3",
+    "durationMs": 4480
+  },
+  "delivery-investigator-reports": {
+    "file": "demo-narration/delivery-investigator-reports.mp3",
+    "durationMs": 5440
+  },
+  "delivery-fixer-reports": {
+    "file": "demo-narration/delivery-fixer-reports.mp3",
+    "durationMs": 5440
+  },
+  "delivery-finale": {
+    "file": "demo-narration/delivery-finale.mp3",
+    "durationMs": 6720
+  }
+}
