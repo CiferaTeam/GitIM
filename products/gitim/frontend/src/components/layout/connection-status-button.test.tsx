@@ -57,10 +57,6 @@ vi.mock("../timezone-toggle", () => ({
   TimezoneToggle: () => null,
 }));
 
-vi.mock("../donate-dialog", () => ({
-  DonateDialog: () => null,
-}));
-
 describe("ConnectionStatusButton", () => {
   let container: HTMLDivElement;
   let root: Root;
