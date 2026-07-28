@@ -470,18 +470,23 @@ export function InputArea({
           );
           return;
         }
-        if (!completeSuccess(capturedAttachmentKey, operation.token)) return;
+        // completeSuccess applies the same atomic settle contract as the
+        // text path: it CAS-validates the token, publishes the completion
+        // event, and replaces the draft behind one gate, so a stale send
+        // bails without touching the newer operation's captured text.
+        if (
+          !completeSuccess(capturedAttachmentKey, operation.token, {
+            text: capturedText,
+            replyLine: capturedReplyLine,
+          })
+        ) {
+          return;
+        }
 
         clearCapturedTextStorage(
           capturedWorkspaceKey,
           capturedScopeKey,
           capturedText,
-        );
-        useComposerOperationStore.getState().publishCompletion(
-          capturedAttachmentKey,
-          operation.token,
-          capturedText,
-          capturedReplyLine,
         );
       } catch (caught) {
         failAttachmentInvariant(

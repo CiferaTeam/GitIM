@@ -111,7 +111,9 @@ describe("composer operation tokens", () => {
     const key = attachmentDraftKey("ws", "scope");
     const operation = store().beginOperation(key, "text")!;
     const base = store().completionSequence;
-    store().publishCompletion(key, operation.token, "sent text", 7);
+    expect(
+      store().settleOperation(key, operation.token, { text: "sent text", replyLine: 7 }),
+    ).toBe(true);
     store().invalidateWorkspace("ws");
 
     const completion = store().completions.at(-1);
@@ -127,8 +129,16 @@ describe("composer operation tokens", () => {
 
   it("sequences completions and caps the ring at 32 events", () => {
     const base = store().completionSequence;
+    let lastToken = 0;
     for (let index = 0; index < 40; index += 1) {
-      store().publishCompletion("scope", index + 1, `text-${index}`, null);
+      const operation = store().beginOperation("scope", "text")!;
+      lastToken = operation.token;
+      expect(
+        store().settleOperation("scope", operation.token, {
+          text: `text-${index}`,
+          replyLine: null,
+        }),
+      ).toBe(true);
     }
 
     const state = store();
@@ -138,7 +148,7 @@ describe("composer operation tokens", () => {
     expect(state.completions.at(-1)).toMatchObject({
       sequence: base + 40,
       key: "scope",
-      token: 40,
+      token: lastToken,
       text: "text-39",
       replyLine: null,
     });

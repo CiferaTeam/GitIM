@@ -6,6 +6,7 @@ import type { UploadedAsset } from "@/lib/client";
 import {
   scopeWorkspaceKey,
   useComposerOperationStore,
+  type ComposerSettlement,
 } from "@/hooks/use-composer-operation-store";
 
 export type AttachmentDraftStatus = "idle" | "uploading" | "sending" | "error";
@@ -67,7 +68,7 @@ interface AttachmentDraftStore {
   ) => boolean;
   markSending: (key: string, token: number) => boolean;
   failOperation: (key: string, token: number, error: string) => boolean;
-  completeSuccess: (key: string, token: number) => boolean;
+  completeSuccess: (key: string, token: number, settlement: ComposerSettlement) => boolean;
   disposeWorkspace: (workspaceKey: string) => void;
   disposeAll: () => void;
 }
@@ -224,9 +225,8 @@ function isBusy(draft: AttachmentDraft): boolean {
 export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) => {
   const isOperationCurrent = (key: string, token: number): boolean =>
     useComposerOperationStore.getState().isOperationCurrent(key, token);
-  const endOperation = (key: string, token: number): void => {
+  const endOperation = (key: string, token: number): boolean =>
     useComposerOperationStore.getState().endOperation(key, token);
-  };
 
   return {
     drafts: EMPTY_DRAFTS,
@@ -333,14 +333,33 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         .getState()
         .beginOperation(key, "attachments");
       if (operation === null) return null;
-      set((state) => ({
-        drafts: replaceDraft(
-          state.drafts,
-          key,
-          publishedDraft("uploading", current.items),
-        ),
-      }));
-      return operationSnapshot(key, operation.token, current.items);
+      // Re-validate inside the update: the mint above notifies subscribers
+      // synchronously, and a dispose landing there can invalidate the token
+      // and replace the draft before this write runs. Marking the fresh
+      // draft busy under the dead token would wedge the composer — every
+      // later settle with that token is rejected and busy drafts block new
+      // begins — so bail and release the operation instead.
+      let begunItems: readonly PendingAttachment[] | null = null;
+      set((state) => {
+        const draft = state.drafts[key];
+        if (
+          draft === undefined ||
+          draft.items.length === 0 ||
+          isBusy(draft) ||
+          !isOperationCurrent(key, operation.token)
+        ) {
+          return state;
+        }
+        begunItems = draft.items;
+        return {
+          drafts: replaceDraft(state.drafts, key, publishedDraft("uploading", draft.items)),
+        };
+      });
+      if (begunItems === null) {
+        endOperation(key, operation.token);
+        return null;
+      }
+      return operationSnapshot(key, operation.token, begunItems);
     },
 
     markUploaded: (key, token, mappings) => {
@@ -410,34 +429,34 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
 
     failOperation: (key, token, error) => {
       const current = get().drafts[key];
-      if (
-        current === undefined ||
-        !isOperationCurrent(key, token) ||
-        !isBusy(current)
-      ) {
-        return false;
-      }
-      endOperation(key, token);
-      set((state) => ({
-        drafts: replaceDraft(
-          state.drafts,
-          key,
-          publishedDraft("error", current.items, error),
-        ),
-      }));
+      if (current === undefined || !isBusy(current)) return false;
+      // endOperation is the compare-and-swap gate: a stale token must not
+      // write an error draft over a newer operation's composer state.
+      if (!endOperation(key, token)) return false;
+      set((state) => {
+        const draft = state.drafts[key];
+        if (draft === undefined || !isBusy(draft)) return state;
+        return {
+          drafts: replaceDraft(
+            state.drafts,
+            key,
+            publishedDraft("error", draft.items, error),
+          ),
+        };
+      });
       return true;
     },
 
-    completeSuccess: (key, token) => {
+    completeSuccess: (key, token, settlement) => {
       const current = get().drafts[key];
-      if (
-        current === undefined ||
-        !isOperationCurrent(key, token) ||
-        current.status !== "sending"
-      ) {
+      if (current === undefined || current.status !== "sending") return false;
+      // settleOperation is the single atomic gate: it CAS-validates the
+      // token, releases the scope, and publishes the completion event in one
+      // store update. A stale send bails before the draft delete and before
+      // any caller-side effect on captured text storage.
+      if (!useComposerOperationStore.getState().settleOperation(key, token, settlement)) {
         return false;
       }
-      endOperation(key, token);
       set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
       revokeUrls(current.items);
       return true;

@@ -9,6 +9,7 @@ import {
   attachmentDraftKey,
   useAttachmentDraftStore,
 } from "../../hooks/use-attachment-draft-store";
+import { useComposerOperationStore } from "../../hooks/use-composer-operation-store";
 import { InputArea } from "./input-area";
 import { QUICK_SESSION_DRAG_MIME } from "../../lib/quick-session-ref";
 import { parseMessageBody } from "../../lib/message-parser";
@@ -1047,6 +1048,83 @@ describe("InputArea attachments", () => {
     expect(textarea.value).toBe("");
     expect(textarea.disabled).toBe(false);
     expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
+  });
+
+  it("ignores a stale attachment settlement after disposeAll and a newer same-key send", async () => {
+    const oldFile = new File(["old"], "old.txt", { type: "text/plain" });
+    const newFile = new File(["new"], "new.txt", { type: "text/plain" });
+    const oldAsset = uploadedAsset(oldFile);
+    const newAsset = uploadedAsset(newFile);
+    const sendA = deferred<{ ok: true }>();
+    const sendB = deferred<{ ok: true }>();
+    const onSend = vi.fn()
+      .mockImplementationOnce(() => sendA.promise)
+      .mockImplementationOnce(() => sendB.promise);
+    uploadAssetsMock
+      .mockResolvedValueOnce({ ok: true, data: { assets: [oldAsset] } })
+      .mockResolvedValueOnce({ ok: true, data: { assets: [newAsset] } });
+    const completionsBefore = useComposerOperationStore.getState().completions.length;
+
+    await renderInput(<InputArea {...defaultInputProps} onSend={onSend} />);
+    await act(async () => {
+      pasteFiles(container.querySelector("textarea")!, [oldFile]);
+      setTextareaValue(container.querySelector("textarea")!, "same caption");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledWith(`same caption\n${oldAsset.ref}`, 0);
+
+    // Dispose and start a newer send with the same caption while the first
+    // send is still in flight.
+    await act(async () => {
+      useAttachmentDraftStore.getState().disposeAll();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pasteFiles(container.querySelector("textarea")!, [newFile]);
+      setTextareaValue(container.querySelector("textarea")!, "same caption");
+      await Promise.resolve();
+    });
+    await act(async () => {
+      pressEnter(container.querySelector("textarea")!);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onSend).toHaveBeenCalledWith(`same caption\n${newAsset.ref}`, 0);
+
+    // The stale first send succeeds: its settlement must be rejected, so the
+    // newer send's strip, caption, and busy mark survive and no completion
+    // event is published.
+    await act(async () => {
+      sendA.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea")!;
+    expect(textarea.value).toBe("same caption");
+    expect(textarea.disabled).toBe(true);
+    expect(container.querySelector("[data-attachment-draft-strip]")?.textContent)
+      .toContain("new.txt");
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBe("same caption");
+    expect(useComposerOperationStore.getState().completions.length)
+      .toBe(completionsBefore);
+
+    // The newer send still settles normally.
+    await act(async () => {
+      sendB.resolve({ ok: true });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(textarea.value).toBe("");
+    expect(textarea.disabled).toBe(false);
+    expect(container.querySelector("[data-attachment-draft-strip]")).toBeNull();
+    expect(localStorage.getItem("gitim:draft:ws:general")).toBeNull();
+    expect(useComposerOperationStore.getState().completions.length)
+      .toBe(completionsBefore + 1);
   });
 
   it("ignores a stale text failure after disposeAll and a newer same-key send", async () => {

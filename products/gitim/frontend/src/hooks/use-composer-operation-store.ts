@@ -7,14 +7,14 @@ import { create } from "zustand";
  *
  * One operation per composer scope (an attachmentDraftKey) may be active at a
  * time. beginOperation mints a fresh, never-reused token and marks the scope
- * busy; the token is invalidated when the operation settles (settleOperation /
- * endOperation), when its workspace is disposed (invalidateWorkspace /
- * invalidateAll), or when a newer operation could claim the scope. Every late
- * effect of an async operation — attachment write-backs in
- * use-attachment-draft-store, and text clearing / reply clearing / busy
- * release in InputArea — is admitted through this store: synchronously via
- * isOperationCurrent for in-flight write-backs, or via settleOperation for
- * successful settlement.
+ * busy; it refuses (null) while another operation is active, so a newer begin
+ * can never invalidate a live token. A token dies only when its operation
+ * finishes (settleOperation / endOperation) or when its scope is invalidated
+ * (invalidateWorkspace / invalidateAll). Every late effect of an async
+ * operation — attachment write-backs in use-attachment-draft-store, and text
+ * clearing / reply clearing / busy release in InputArea — is admitted through
+ * this store: synchronously via isOperationCurrent for in-flight write-backs,
+ * or via settleOperation for successful settlement.
  *
  * settleOperation CAS-validates the token, releases the scope, and publishes
  * a completion event carrying the token plus the captured text/reply
@@ -55,28 +55,28 @@ interface ComposerOperationStore {
   /**
    * Mint a token and mark the scope busy with an operation of `kind`.
    * Returns null when the scope already has an active operation — a scope
-   * runs at most one composer operation at a time.
+   * runs at most one composer operation at a time, and an active operation
+   * is never replaced. The busy check runs inside the store update, so a
+   * subscriber racing the mint cannot make two callers both win.
    */
   beginOperation: (key: string, kind: ComposerOperationKind) => ComposerOperation | null;
   /** The unified stale-effect check: true iff (key, token) is the scope's active operation. */
   isOperationCurrent: (key: string, token: number) => boolean;
-  /** Release the scope's busy mark iff (key, token) is still current. */
+  /**
+   * Release the scope's busy mark iff (key, token) is still current. The
+   * token is re-validated inside the store update (compare-and-swap), and
+   * the boolean result is the caller's gate for every other late effect.
+   */
   endOperation: (key: string, token: number) => boolean;
   /**
    * Settle a successful operation atomically: CAS-validate (key, token),
-   * release the scope, and publish the completion event. Returns false —
-   * publishing nothing and touching no newer operation — when the token is
-   * no longer current (disposed or replaced while the request was in
-   * flight), so callers can skip every other late effect of the stale path.
+   * release the scope, and publish the completion event in the same store
+   * update. Returns false — publishing nothing and touching no newer
+   * operation — when the token is no longer current (disposed or
+   * invalidated while the request was in flight), so callers can skip
+   * every other late effect of the stale path.
    */
   settleOperation: (key: string, token: number, settlement: ComposerSettlement) => boolean;
-  /** Publish a settlement event for an already-settled operation. */
-  publishCompletion: (
-    key: string,
-    token: number,
-    text: string,
-    replyLine: number | null,
-  ) => void;
   /**
    * Invalidate every active operation whose scope key encodes `workspaceKey`
    * — regardless of whether the scope has an attachment draft, so text-only
@@ -128,23 +128,35 @@ export const useComposerOperationStore = create<ComposerOperationStore>((set, ge
     completions: [],
 
     beginOperation: (key, kind) => {
-      if (get().operations[key] !== undefined) return null;
-      const operation: ComposerOperation = Object.freeze({ token: nextToken++, kind });
-      set((state) => ({ operations: replaceOperation(state.operations, key, operation) }));
-      return operation;
+      // Mint inside the update so the busy check and the write are atomic
+      // with respect to subscriber callbacks; a busy scope returns the state
+      // unchanged (no notification) and yields null.
+      let minted: ComposerOperation | null = null;
+      set((state) => {
+        if (state.operations[key] !== undefined) return state;
+        minted = Object.freeze({ token: nextToken++, kind });
+        return { operations: replaceOperation(state.operations, key, minted) };
+      });
+      return minted;
     },
 
     isOperationCurrent: (key, token) => get().operations[key]?.token === token,
 
     endOperation: (key, token) => {
-      if (!get().isOperationCurrent(key, token)) return false;
-      set((state) => ({ operations: replaceOperation(state.operations, key) }));
-      return true;
+      let ended = false;
+      set((state) => {
+        if (state.operations[key]?.token !== token) return state;
+        ended = true;
+        return { operations: replaceOperation(state.operations, key) };
+      });
+      return ended;
     },
 
     settleOperation: (key, token, settlement) => {
-      if (!get().isOperationCurrent(key, token)) return false;
+      let settled = false;
       set((state) => {
+        if (state.operations[key]?.token !== token) return state;
+        settled = true;
         const sequence = state.completionSequence + 1;
         return {
           operations: replaceOperation(state.operations, key),
@@ -161,20 +173,7 @@ export const useComposerOperationStore = create<ComposerOperationStore>((set, ge
           ].slice(-MAX_COMPLETION_EVENTS),
         };
       });
-      return true;
-    },
-
-    publishCompletion: (key, token, text, replyLine) => {
-      set((state) => {
-        const sequence = state.completionSequence + 1;
-        return {
-          completionSequence: sequence,
-          completions: [
-            ...state.completions,
-            Object.freeze({ sequence, key, token, text, replyLine }),
-          ].slice(-MAX_COMPLETION_EVENTS),
-        };
-      });
+      return settled;
     },
 
     invalidateWorkspace: (workspaceKey) => {

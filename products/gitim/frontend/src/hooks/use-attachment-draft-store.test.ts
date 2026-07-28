@@ -506,7 +506,7 @@ describe("attachment preview lifecycle", () => {
       asset: uploaded("success.png"),
     }])).toBe(true);
     expect(store().markSending(successKey, operation.token)).toBe(true);
-    expect(store().completeSuccess(successKey, operation.token)).toBe(true);
+    expect(store().completeSuccess(successKey, operation.token, { text: "sent", replyLine: null })).toBe(true);
     store().disposeAll();
     store().disposeAll();
 
@@ -528,7 +528,7 @@ describe("attachment preview lifecycle", () => {
     store().disposeWorkspace("workspace");
     store().addFiles(key, [png("new.png", { lastModified: 2 })]);
 
-    expect(store().completeSuccess(key, operation.token)).toBe(false);
+    expect(store().completeSuccess(key, operation.token, { text: "sent", replyLine: null })).toBe(false);
     expect(store().failOperation(key, operation.token, "late failure")).toBe(false);
     expect(store().drafts[key].items[0].file.name).toBe("new.png");
     expect(URL.revokeObjectURL).toHaveBeenCalledWith(first.accepted[0].previewUrl);
@@ -563,7 +563,7 @@ describe("attachment preview lifecycle", () => {
       asset: uploaded(item.file.name),
     })))).toBe(true);
     expect(store().markSending(successKey, operation.token)).toBe(true);
-    expect(store().completeSuccess(successKey, operation.token)).toBe(true);
+    expect(store().completeSuccess(successKey, operation.token, { text: "sent", replyLine: null })).toBe(true);
     expect(store().drafts[successKey]).toBeUndefined();
 
     store().disposeAll();
@@ -576,6 +576,34 @@ describe("attachment preview lifecycle", () => {
       "blob:dispose-fail.png",
       "blob:dispose-ok.png",
     ]);
+  });
+
+  it("rejects a begin whose token dies before the draft write wins", () => {
+    const key = attachmentDraftKey("workspace", "raced");
+    store().addFiles(key, [png("first.png")]);
+    // A disposal landing between the operation mint and the draft write must
+    // not mark a fresh draft busy under the already-dead token — that would
+    // wedge the composer (every later settle with the token is rejected, and
+    // busy drafts block new begins).
+    const unsubscribe = useComposerOperationStore.subscribe((state, previous) => {
+      if (state.operations[key] !== undefined && previous.operations[key] === undefined) {
+        store().disposeAll();
+        store().addFiles(key, [png("second.png", { lastModified: 2 })]);
+      }
+    });
+    try {
+      expect(store().beginOperation(key)).toBeNull();
+    } finally {
+      unsubscribe();
+    }
+    expect(store().drafts[key].status).toBe("idle");
+    expect(store().drafts[key].items[0].file.name).toBe("second.png");
+    expect(useComposerOperationStore.getState().operations[key]).toBeUndefined();
+
+    // The composer recovers: a later begin under a live token succeeds.
+    const retry = store().beginOperation(key);
+    expect(retry).not.toBeNull();
+    expect(store().drafts[key].status).toBe("uploading");
   });
 });
 
