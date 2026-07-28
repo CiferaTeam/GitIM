@@ -883,6 +883,7 @@ name = "gitim-client"
 version = "0.9.3"
 dependencies = [
  "chrono",
+ "fs2",
  "gitim-core",
  "libc",
  "pretty_assertions",
@@ -923,6 +924,7 @@ dependencies = [
  "async-stream",
  "axum",
  "chrono",
+ "fs2",
  "futures",
  "gitim-core",
  "gitim-sync",

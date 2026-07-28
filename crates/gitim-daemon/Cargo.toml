@@ -24,6 +24,7 @@ futures = "0.3"
 async-stream = "0.3"
 rand = "0.9"
 tempfile = "3"
+fs2 = "0.4"
 
 [dev-dependencies]
 serde_yaml = "0.9"

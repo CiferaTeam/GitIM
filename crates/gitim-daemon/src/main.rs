@@ -39,11 +39,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let repo_root = std::env::current_dir()?;
     let lifecycle = lifecycle::DaemonLifecycle::new(&repo_root);
-
-    if let Some(pid) = lifecycle.is_running() {
-        eprintln!("daemon already running (pid: {})", pid);
-        std::process::exit(1);
-    }
+    let _lease = lifecycle.acquire()?;
 
     // Load config, creating default if missing
     let gitim_dir = repo_root.join(".gitim");
@@ -119,9 +115,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         tracing::info!("daemon identity: admin mode (from me.json)");
     }
-
-    lifecycle.ensure_run_dir()?;
-    lifecycle.write_pid()?;
 
     let lc = lifecycle::DaemonLifecycle::new(&repo_root);
     tokio::spawn(async move {
