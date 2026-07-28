@@ -1,4 +1,11 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useParams } from "react-router";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 
@@ -49,17 +56,22 @@ export function RunDetail() {
   const [error, setError] = useState<string | null>(null);
   const [flowTemplate, setFlowTemplate] = useState<FlowDocument | null>(null);
   const [stepsPage, setStepsPage] = useState(0);
+  const loadRequestRef = useRef(0);
 
   const loadRun = useCallback(
     async (slug: string, id: string) => {
+      const requestId = loadRequestRef.current + 1;
+      loadRequestRef.current = requestId;
       setLoading(true);
       setError(null);
       setFlowTemplate(null);
       try {
         const res = await apiGetFlowRun(slug, id);
+        if (loadRequestRef.current !== requestId) return;
         if (res.ok && res.data) {
           setSelectedRun(res.data);
           const flowRes = await apiGetFlow(slug, res.data.flow_slug);
+          if (loadRequestRef.current !== requestId) return;
           if (flowRes.ok && flowRes.data) {
             setFlowTemplate(flowRes.data);
           }
@@ -67,9 +79,12 @@ export function RunDetail() {
           setError(res.error ?? "Failed to load run");
         }
       } catch (e: unknown) {
+        if (loadRequestRef.current !== requestId) return;
         setError(String(e));
       } finally {
-        setLoading(false);
+        if (loadRequestRef.current === requestId) {
+          setLoading(false);
+        }
       }
     },
     [setSelectedRun],
@@ -80,6 +95,7 @@ export function RunDetail() {
       void loadRun(activeSlug, runId);
     }
     return () => {
+      loadRequestRef.current += 1;
       setSelectedRun(null);
       setFlowTemplate(null);
     };
@@ -91,15 +107,20 @@ export function RunDetail() {
 
   const handleCancel = useCallback(async () => {
     if (!activeSlug || !selectedRun) return;
-    if (!confirm(`Cancel run ${selectedRun.run_id}?`)) return;
+    const requestId = loadRequestRef.current;
+    const requestSlug = activeSlug;
+    const requestRunId = selectedRun.run_id;
+    if (!confirm(`Cancel run ${requestRunId}?`)) return;
     try {
-      const res = await apiCancelFlowRun(activeSlug, selectedRun.run_id);
+      const res = await apiCancelFlowRun(requestSlug, requestRunId);
+      if (loadRequestRef.current !== requestId) return;
       if (res.ok) {
-        void loadRun(activeSlug, selectedRun.run_id);
+        void loadRun(requestSlug, requestRunId);
       } else {
         setError(res.error ?? "Cancel failed");
       }
     } catch (e: unknown) {
+      if (loadRequestRef.current !== requestId) return;
       setError(String(e));
     }
   }, [activeSlug, selectedRun, loadRun]);

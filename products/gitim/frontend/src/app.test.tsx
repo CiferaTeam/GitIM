@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter, useLocation, useNavigate } from "react-router";
 import type { Message } from "./lib/types";
@@ -464,6 +464,49 @@ describe("App card thread toasts", () => {
     expect(mocks.client.listAgents).not.toHaveBeenCalled();
     expect(mocks.client.listFleetAgents).not.toHaveBeenCalled();
     expect(mocks.client.listFleetStatus).not.toHaveBeenCalled();
+  });
+
+  it("does not restart workspace bootstrap after unrelated store rerenders", async () => {
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(
+        <StrictMode>
+          <MemoryRouter initialEntries={["/chat"]}>
+            <App />
+          </MemoryRouter>
+        </StrictMode>,
+      );
+      await flushPromises();
+    });
+
+    mocks.client.me.mockClear();
+    mocks.client.channels.mockClear();
+    mocks.client.users.mockClear();
+    mocks.client.listCards.mockClear();
+    mocks.client.listBoards.mockClear();
+
+    await act(async () => {
+      const state = useWorkspaceStore.getState();
+      useWorkspaceStore.setState({ workspaces: [...state.workspaces] });
+      await flushPromises();
+    });
+
+    expect(mocks.client.me).not.toHaveBeenCalled();
+    expect(mocks.client.channels).not.toHaveBeenCalled();
+    expect(mocks.client.users).not.toHaveBeenCalled();
+    expect(mocks.client.listCards).not.toHaveBeenCalled();
+    expect(mocks.client.listBoards).not.toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(3000);
+      await flushPromises();
+    });
+
+    expect(mocks.client.poll).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(1);
   });
 
   it("refreshes local and fleet agents when entering management", async () => {

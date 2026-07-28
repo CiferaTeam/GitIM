@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Sidebar } from "./sidebar";
 import { DisplayNameDirectoryProvider } from "../../hooks/display-name-directory-provider";
@@ -10,6 +10,7 @@ import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import { useProjectStore } from "../../hooks/use-project-store";
 import type { Channel, Project } from "../../lib/types";
+import * as client from "../../lib/client";
 
 const testEnv = vi.hoisted(() => {
   function createMemoryStorage(): Storage {
@@ -112,6 +113,18 @@ function visibleChannelNames(container: HTMLElement): string[] {
   });
 }
 
+function buttonWithText(container: HTMLElement, text: string) {
+  return Array.from(container.querySelectorAll("button")).find(
+    (button) => button.textContent?.trim() === text,
+  );
+}
+
+async function flushPromises(times = 4) {
+  for (let i = 0; i < times; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 describe("Sidebar channel ordering", () => {
   let root: Root | null = null;
   let container: HTMLDivElement;
@@ -175,6 +188,68 @@ describe("Sidebar channel ordering", () => {
       "infra",
       "random",
     ]);
+  });
+
+  it("performs one archived-channel fetch for each open-view invalidation", async () => {
+    const listArchivedChannels = vi.mocked(client.listArchivedChannels);
+    listArchivedChannels.mockResolvedValue({
+      ok: true,
+      data: { channels: [], hasMore: false },
+    });
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await act(async () => {
+      root?.render(
+        <StrictMode>
+          <Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />
+        </StrictMode>,
+      );
+    });
+
+    await act(async () => {
+      buttonWithText(container, "Archived")?.click();
+      await flushPromises();
+    });
+    expect(listArchivedChannels).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      useChatStore.getState().invalidateArchivedChannelsView();
+      await flushPromises();
+    });
+    expect(listArchivedChannels).toHaveBeenCalledTimes(2);
+    expect(
+      consoleError.mock.calls.some((call) =>
+        call.some((value) => String(value).includes("Maximum update depth")),
+      ),
+    ).toBe(false);
+  });
+
+  it("performs one archived-DM fetch for each open-view invalidation", async () => {
+    const listArchivedDms = vi.mocked(client.listArchivedDms);
+    listArchivedDms.mockResolvedValue({
+      ok: true,
+      data: { dms: [], hasMore: false },
+    });
+
+    await act(async () => {
+      root?.render(
+        <StrictMode>
+          <Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />
+        </StrictMode>,
+      );
+    });
+
+    await act(async () => {
+      buttonWithText(container, "Archived DMs")?.click();
+      await flushPromises();
+    });
+    expect(listArchivedDms).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      useChatStore.getState().markDmArchived("alice--lewis");
+      await flushPromises();
+    });
+    expect(listArchivedDms).toHaveBeenCalledTimes(2);
   });
 
   it("pins float above unread non-pinned channels", () => {

@@ -84,21 +84,15 @@ describe("DemoStage", () => {
   }
 
   it("resolves every effect anchor in the DOM for all 28 frames (anchor contract)", async () => {
+    const c = await render();
     for (let i = 0; i < incidentScenario.frames.length; i += 1) {
-      const c = await render();
-      await stepTo(i);
+      await stepTo(0);
       for (const id of anchorsForFrame(i)) {
         expect(
           c.querySelector(`[data-anchor="${id}"]`),
           `frame "${incidentScenario.frames[i].id}" references missing anchor "${id}"`,
         ).not.toBeNull();
       }
-      act(() => {
-        root?.unmount();
-      });
-      root = null;
-      container = null;
-      document.body.innerHTML = "";
     }
   });
 

@@ -2,7 +2,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter, Route, Routes } from "react-router";
+import {
+  MemoryRouter,
+  Route,
+  Routes,
+  useNavigate,
+  type NavigateFunction,
+} from "react-router";
 
 import type { FlowDocument, FlowRunDetail } from "@/lib/types";
 
@@ -67,6 +73,14 @@ async function flushPromises(times = 6) {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
 const runDetail: FlowRunDetail = {
   run_id: "20260702T141906-e4dc17",
   flow_slug: "multi-agent-sop-dev",
@@ -122,13 +136,26 @@ const flowDocument: FlowDocument = {
   raw_markdown: "",
 };
 
-function renderRunDetail() {
+function NavigationProbe({
+  onNavigate,
+}: {
+  onNavigate: (navigate: NavigateFunction) => void;
+}) {
+  onNavigate(useNavigate());
+  return null;
+}
+
+function renderRunDetail(
+  initialEntry = "/runs/20260702T141906-e4dc17",
+  onNavigate?: (navigate: NavigateFunction) => void,
+) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
     root.render(
-      <MemoryRouter initialEntries={["/runs/20260702T141906-e4dc17"]}>
+      <MemoryRouter initialEntries={[initialEntry]}>
+        {onNavigate ? <NavigationProbe onNavigate={onNavigate} /> : null}
         <Routes>
           <Route path="/runs/:runId" element={<RunDetail />} />
         </Routes>
@@ -182,6 +209,7 @@ describe("RunDetail", () => {
     }
     root = null;
     document.body.innerHTML = "";
+    vi.unstubAllGlobals();
   });
 
   it("renders the run DAG with dependencies from the flow template", async () => {
@@ -275,5 +303,108 @@ describe("RunDetail", () => {
     expect(stepsSection!.textContent).not.toContain("step-1");
     expect(stepsSection!.textContent).toContain("step-7");
     expect(stepsSection!.textContent).toContain("step-8");
+  });
+
+  it("keeps the newest route selected when an older run request resolves last", async () => {
+    const oldRequest = deferred<{ ok: true; data: FlowRunDetail }>();
+    const newRequest = deferred<{ ok: true; data: FlowRunDetail }>();
+    const newerRun = {
+      ...runDetail,
+      run_id: "20260702T150000-new001",
+      flow_slug: "newer-flow",
+    };
+    mocks.client.getFlowRun.mockImplementation(
+      (_slug: string, id: string) =>
+        id === runDetail.run_id ? oldRequest.promise : newRequest.promise,
+    );
+
+    let navigate: NavigateFunction = () => {};
+    const rendered = renderRunDetail(
+      `/runs/${runDetail.run_id}`,
+      (nextNavigate) => {
+        navigate = nextNavigate;
+      },
+    );
+    root = rendered.root;
+
+    await act(async () => {
+      navigate(`/runs/${newerRun.run_id}`);
+      await flushPromises();
+    });
+
+    await act(async () => {
+      newRequest.resolve({ ok: true, data: newerRun });
+      await flushPromises();
+    });
+    expect(useFlowRunStore.getState().selectedRun?.run_id).toBe(
+      newerRun.run_id,
+    );
+
+    await act(async () => {
+      oldRequest.resolve({ ok: true, data: runDetail });
+      await flushPromises();
+    });
+
+    expect(useFlowRunStore.getState().selectedRun?.run_id).toBe(
+      newerRun.run_id,
+    );
+    expect(rendered.container.textContent).toContain(newerRun.run_id);
+  });
+
+  it("ignores a completed cancel after the user switches to another run", async () => {
+    const cancelRequest = deferred<{ ok: true }>();
+    const newerRun = {
+      ...runDetail,
+      run_id: "20260702T160000-new002",
+      flow_slug: "newer-flow",
+    };
+    mocks.client.cancelFlowRun.mockReturnValue(cancelRequest.promise);
+    mocks.client.getFlowRun.mockImplementation(
+      (_slug: string, id: string) =>
+        Promise.resolve({
+          ok: true,
+          data: id === newerRun.run_id ? newerRun : runDetail,
+        }),
+    );
+    vi.stubGlobal("confirm", vi.fn(() => true));
+
+    let navigate: NavigateFunction = () => {};
+    const rendered = renderRunDetail(
+      `/runs/${runDetail.run_id}`,
+      (nextNavigate) => {
+        navigate = nextNavigate;
+      },
+    );
+    root = rendered.root;
+    await act(async () => {
+      await flushPromises();
+    });
+
+    await act(async () => {
+      Array.from(rendered.container.querySelectorAll("button"))
+        .find((button) => button.textContent?.trim() === "Cancel run")
+        ?.click();
+      await flushPromises();
+    });
+
+    await act(async () => {
+      navigate(`/runs/${newerRun.run_id}`);
+      await flushPromises();
+    });
+    expect(useFlowRunStore.getState().selectedRun?.run_id).toBe(
+      newerRun.run_id,
+    );
+
+    mocks.client.getFlowRun.mockClear();
+    await act(async () => {
+      cancelRequest.resolve({ ok: true });
+      await flushPromises();
+    });
+
+    expect(mocks.client.getFlowRun).not.toHaveBeenCalled();
+    expect(useFlowRunStore.getState().selectedRun?.run_id).toBe(
+      newerRun.run_id,
+    );
+    expect(rendered.container.textContent).toContain(newerRun.run_id);
   });
 });
