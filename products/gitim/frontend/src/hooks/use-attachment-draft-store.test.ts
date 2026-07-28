@@ -269,19 +269,19 @@ describe("attachment draft operations", () => {
     expect(store().removeItem(key, added.accepted[0].id)).toBe(false);
 
     expect(
-      store().markUploaded(key, operation.generation, [
+      store().markUploaded(key, operation.token, [
         { id: operation.items[0].id, asset: uploaded("first.txt") },
       ]),
     ).toBe(true);
-    expect(store().markSending(key, operation.generation)).toBe(true);
+    expect(store().markSending(key, operation.token)).toBe(true);
     expect(store().addFiles(key, [file("third.txt")]).rejected).toMatchObject([
       { code: "busy" },
     ]);
     expect(store().removeItem(key, added.accepted[0].id)).toBe(false);
   });
 
-  it("captures an immutable operation snapshot and never reuses generations", () => {
-    const key = attachmentDraftKey("workspace", "generation");
+  it("captures an immutable operation snapshot and never reuses tokens", () => {
+    const key = attachmentDraftKey("workspace", "token");
     store().addFiles(key, [file("old.txt")]);
     const first = store().beginOperation(key)!;
 
@@ -293,7 +293,7 @@ describe("attachment draft operations", () => {
 
     store().addFiles(key, [file("new.txt", { lastModified: 2 })]);
     const second = store().beginOperation(key)!;
-    expect(second.generation).toBeGreaterThan(first.generation);
+    expect(second.token).toBeGreaterThan(first.token);
     expect(first.items[0].file.name).toBe("old.txt");
   });
 
@@ -303,10 +303,10 @@ describe("attachment draft operations", () => {
     const first = store().beginOperation(key)!;
     const firstAsset = uploaded("first.txt");
     expect(
-      store().markUploaded(key, first.generation, [{ id: first.items[0].id, asset: firstAsset }]),
+      store().markUploaded(key, first.token, [{ id: first.items[0].id, asset: firstAsset }]),
     ).toBe(true);
-    expect(store().markSending(key, first.generation)).toBe(true);
-    expect(store().failOperation(key, first.generation, "send failed")).toBe(true);
+    expect(store().markSending(key, first.token)).toBe(true);
+    expect(store().failOperation(key, first.token, "send failed")).toBe(true);
 
     const added = store().addFiles(key, [file("second.txt", { lastModified: 2 })]);
     expect(store().drafts[key].status).toBe("idle");
@@ -315,11 +315,11 @@ describe("attachment draft operations", () => {
 
     const retry = store().beginOperation(key)!;
     expect(
-      store().markUploaded(key, retry.generation, [
+      store().markUploaded(key, retry.token, [
         { id: added.accepted[0].id, asset: uploaded("second.txt") },
       ]),
     ).toBe(true);
-    expect(store().markSending(key, retry.generation)).toBe(true);
+    expect(store().markSending(key, retry.token)).toBe(true);
   });
 
   it("applies upload mappings atomically in selection order", () => {
@@ -335,28 +335,28 @@ describe("attachment draft operations", () => {
     const bAsset = uploaded("b.txt");
     const cAsset = uploaded("c.txt");
 
-    expect(store().markUploaded(key, operation.generation + 1, [
+    expect(store().markUploaded(key, operation.token + 1, [
       { id: a.id, asset: aAsset },
       { id: b.id, asset: bAsset },
       { id: c.id, asset: cAsset },
     ])).toBe(false);
-    expect(store().markUploaded(key, operation.generation, [
+    expect(store().markUploaded(key, operation.token, [
       { id: a.id, asset: aAsset },
       { id: "unknown", asset: bAsset },
       { id: c.id, asset: cAsset },
     ])).toBe(false);
-    expect(store().markUploaded(key, operation.generation, [
+    expect(store().markUploaded(key, operation.token, [
       { id: a.id, asset: aAsset },
       { id: a.id, asset: bAsset },
       { id: c.id, asset: cAsset },
     ])).toBe(false);
-    expect(store().markUploaded(key, operation.generation, [
+    expect(store().markUploaded(key, operation.token, [
       { id: a.id, asset: aAsset },
       { id: b.id, asset: bAsset },
     ])).toBe(false);
     expect(store().drafts[key].items.every((item) => item.uploaded === undefined)).toBe(true);
 
-    expect(store().markUploaded(key, operation.generation, [
+    expect(store().markUploaded(key, operation.token, [
       { id: c.id, asset: cAsset },
       { id: a.id, asset: aAsset },
       { id: b.id, asset: bAsset },
@@ -382,7 +382,7 @@ describe("attachment draft operations", () => {
     const operation = store().beginOperation(key)!;
     const [a, b] = operation.items;
 
-    expect(store().markUploaded(key, operation.generation, [
+    expect(store().markUploaded(key, operation.token, [
       { id: a.id, asset: uploaded("b.txt", 7) },
       { id: b.id, asset: uploaded("a.txt", 3) },
     ])).toBe(false);
@@ -398,7 +398,7 @@ describe("attachment draft operations", () => {
     const operation = store().beginOperation(key)!;
     const [current, sibling] = operation.items;
 
-    expect(store().markUploaded(key, operation.generation, [
+    expect(store().markUploaded(key, operation.token, [
       { id: current.id, asset: uploaded("old.txt", 3) },
       { id: sibling.id, asset: uploaded("sibling.txt", 8) },
     ])).toBe(false);
@@ -410,12 +410,12 @@ describe("attachment draft operations", () => {
     store().addFiles(key, [file("a.txt"), file("b.txt", { lastModified: 2 })]);
     const operation = store().beginOperation(key)!;
 
-    expect(store().markSending(key, operation.generation)).toBe(false);
-    expect(store().markUploaded(key, operation.generation, operation.items.map((item) => ({
+    expect(store().markSending(key, operation.token)).toBe(false);
+    expect(store().markUploaded(key, operation.token, operation.items.map((item) => ({
       id: item.id,
       asset: uploaded(item.file.name),
     })))).toBe(true);
-    expect(store().markSending(key, operation.generation)).toBe(true);
+    expect(store().markSending(key, operation.token)).toBe(true);
     expect(store().drafts[key].status).toBe("sending");
   });
 
@@ -426,7 +426,7 @@ describe("attachment draft operations", () => {
     store().addFiles(dm, [file("dm.txt")]);
     const operation = store().beginOperation(channel)!;
 
-    expect(store().markUploaded(channel, operation.generation, [
+    expect(store().markUploaded(channel, operation.token, [
       { id: operation.items[0].id, asset: uploaded("channel.txt") },
     ])).toBe(true);
     expect(store().drafts[channel].items[0].uploaded).toBeDefined();
@@ -445,12 +445,12 @@ describe("attachment preview lifecycle", () => {
     store().addFiles(failedKey, [png("uploaded.png")]);
     store().addFiles(otherKey, [png("other.png")]);
     const operation = store().beginOperation(failedKey)!;
-    expect(store().markUploaded(failedKey, operation.generation, [{
+    expect(store().markUploaded(failedKey, operation.token, [{
       id: operation.items[0].id,
       asset: { ...uploaded("uploaded.png"), mediaType: "image/png" },
     }])).toBe(true);
-    expect(store().markSending(failedKey, operation.generation)).toBe(true);
-    expect(store().failOperation(failedKey, operation.generation, "send failed")).toBe(true);
+    expect(store().markSending(failedKey, operation.token)).toBe(true);
+    expect(store().failOperation(failedKey, operation.token, "send failed")).toBe(true);
 
     const disposeWorkspace = (
       store() as unknown as { disposeWorkspace: (workspaceKey: string) => void }
@@ -463,11 +463,11 @@ describe("attachment preview lifecycle", () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:idle.png");
     expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:uploaded.png");
     expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:other.png");
-    expect(store().failOperation(failedKey, operation.generation, "late")).toBe(false);
+    expect(store().failOperation(failedKey, operation.token, "late")).toBe(false);
 
     store().addFiles(failedKey, [png("replacement.png", { lastModified: 2 })]);
     const replacement = store().beginOperation(failedKey)!;
-    expect(replacement.generation).toBeGreaterThan(operation.generation);
+    expect(replacement.token).toBeGreaterThan(operation.token);
   });
 
   it("revokes previews exactly once across removal, success, and disposal", () => {
@@ -481,12 +481,12 @@ describe("attachment preview lifecycle", () => {
     expect(store().removeItem(removeKey, removed.id)).toBe(true);
     expect(store().drafts[removeKey]).toBeUndefined();
     const operation = store().beginOperation(successKey)!;
-    expect(store().markUploaded(successKey, operation.generation, [{
+    expect(store().markUploaded(successKey, operation.token, [{
       id: operation.items[0].id,
       asset: uploaded("success.png"),
     }])).toBe(true);
-    expect(store().markSending(successKey, operation.generation)).toBe(true);
-    expect(store().completeSuccess(successKey, operation.generation)).toBe(true);
+    expect(store().markSending(successKey, operation.token)).toBe(true);
+    expect(store().completeSuccess(successKey, operation.token)).toBe(true);
     store().disposeAll();
     store().disposeAll();
 
@@ -508,8 +508,8 @@ describe("attachment preview lifecycle", () => {
     store().disposeWorkspace("workspace");
     store().addFiles(key, [png("new.png", { lastModified: 2 })]);
 
-    expect(store().completeSuccess(key, operation.generation)).toBe(false);
-    expect(store().failOperation(key, operation.generation, "late failure")).toBe(false);
+    expect(store().completeSuccess(key, operation.token)).toBe(false);
+    expect(store().failOperation(key, operation.token, "late failure")).toBe(false);
     expect(store().drafts[key].items[0].file.name).toBe("new.png");
     expect(URL.revokeObjectURL).toHaveBeenCalledWith(first.accepted[0].previewUrl);
     expect(URL.revokeObjectURL).not.toHaveBeenCalledWith("blob:new.png");
@@ -538,12 +538,12 @@ describe("attachment preview lifecycle", () => {
     expect(store().drafts[removeKey]).toBeUndefined();
 
     const operation = store().beginOperation(successKey)!;
-    expect(store().markUploaded(successKey, operation.generation, operation.items.map((item) => ({
+    expect(store().markUploaded(successKey, operation.token, operation.items.map((item) => ({
       id: item.id,
       asset: uploaded(item.file.name),
     })))).toBe(true);
-    expect(store().markSending(successKey, operation.generation)).toBe(true);
-    expect(store().completeSuccess(successKey, operation.generation)).toBe(true);
+    expect(store().markSending(successKey, operation.token)).toBe(true);
+    expect(store().completeSuccess(successKey, operation.token)).toBe(true);
     expect(store().drafts[successKey]).toBeUndefined();
 
     store().disposeAll();

@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { formatAssetRef } from "@/lib/asset-ref";
 import { normalizedFilename } from "@/lib/asset-utils";
 import type { UploadedAsset } from "@/lib/client";
+import { useComposerOperationStore } from "@/hooks/use-composer-operation-store";
 
 export type AttachmentDraftStatus = "idle" | "uploading" | "sending" | "error";
 
@@ -14,7 +15,6 @@ export interface PendingAttachment {
 }
 
 export interface AttachmentDraft {
-  readonly generation: number;
   readonly status: AttachmentDraftStatus;
   readonly items: readonly PendingAttachment[];
   readonly error?: string;
@@ -48,7 +48,7 @@ export interface UploadedAttachmentMapping {
 
 export interface AttachmentOperationSnapshot {
   readonly key: string;
-  readonly generation: number;
+  readonly token: number;
   readonly items: readonly Readonly<PendingAttachment>[];
 }
 
@@ -59,12 +59,12 @@ interface AttachmentDraftStore {
   beginOperation: (key: string) => AttachmentOperationSnapshot | null;
   markUploaded: (
     key: string,
-    generation: number,
+    token: number,
     mappings: readonly UploadedAttachmentMapping[],
   ) => boolean;
-  markSending: (key: string, generation: number) => boolean;
-  failOperation: (key: string, generation: number, error: string) => boolean;
-  completeSuccess: (key: string, generation: number) => boolean;
+  markSending: (key: string, token: number) => boolean;
+  failOperation: (key: string, token: number, error: string) => boolean;
+  completeSuccess: (key: string, token: number) => boolean;
   disposeWorkspace: (workspaceKey: string) => void;
   disposeAll: () => void;
 }
@@ -142,13 +142,11 @@ function addFilesResult(
 }
 
 function publishedDraft(
-  generation: number,
   status: AttachmentDraftStatus,
   items: readonly PendingAttachment[],
   error?: string,
 ): AttachmentDraft {
   return Object.freeze({
-    generation,
     status,
     items: Object.freeze([...items]),
     ...(error !== undefined && { error }),
@@ -200,7 +198,7 @@ function frozenAsset(asset: UploadedAsset): UploadedAsset {
 
 function operationSnapshot(
   key: string,
-  generation: number,
+  token: number,
   items: readonly PendingAttachment[],
 ): AttachmentOperationSnapshot {
   const snapshotItems = items.map((item) =>
@@ -211,7 +209,7 @@ function operationSnapshot(
   );
   return Object.freeze({
     key,
-    generation,
+    token,
     items: Object.freeze(snapshotItems),
   });
 }
@@ -232,8 +230,11 @@ function draftWorkspaceKey(key: string): string | undefined {
 }
 
 export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) => {
-  let nextGeneration = 1;
-  const allocateGeneration = (): number => nextGeneration++;
+  const isOperationCurrent = (key: string, token: number): boolean =>
+    useComposerOperationStore.getState().isOperationCurrent(key, token);
+  const endOperation = (key: string, token: number): void => {
+    useComposerOperationStore.getState().endOperation(key, token);
+  };
 
   return {
     drafts: EMPTY_DRAFTS,
@@ -301,14 +302,12 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       }
 
       if (accepted.length > 0 || rejected.length > 0) {
-        const generation = current?.generation ?? allocateGeneration();
         const validationError = rejected[0]?.message;
         set((state) => ({
           drafts: replaceDraft(
             state.drafts,
             key,
             publishedDraft(
-              generation,
               validationError === undefined ? "idle" : "error",
               items,
               validationError,
@@ -328,10 +327,7 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
 
       const removed = current.items[index];
       const items = current.items.filter((_, itemIndex) => itemIndex !== index);
-      const draft =
-        items.length === 0
-          ? undefined
-          : publishedDraft(current.generation, "idle", items);
+      const draft = items.length === 0 ? undefined : publishedDraft("idle", items);
       set((state) => ({ drafts: replaceDraft(state.drafts, key, draft) }));
       revokeUrls([removed]);
       return true;
@@ -341,22 +337,25 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       const current = get().drafts[key];
       if (current === undefined || current.items.length === 0 || isBusy(current)) return null;
 
-      const generation = allocateGeneration();
+      const operation = useComposerOperationStore
+        .getState()
+        .beginOperation(key, "attachments");
+      if (operation === null) return null;
       set((state) => ({
         drafts: replaceDraft(
           state.drafts,
           key,
-          publishedDraft(generation, "uploading", current.items),
+          publishedDraft("uploading", current.items),
         ),
       }));
-      return operationSnapshot(key, generation, current.items);
+      return operationSnapshot(key, operation.token, current.items);
     },
 
-    markUploaded: (key, generation, mappings) => {
+    markUploaded: (key, token, mappings) => {
       const current = get().drafts[key];
       if (
         current === undefined ||
-        current.generation !== generation ||
+        !isOperationCurrent(key, token) ||
         current.status !== "uploading"
       ) {
         return false;
@@ -391,17 +390,17 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         drafts: replaceDraft(
           state.drafts,
           key,
-          publishedDraft(current.generation, current.status, items, current.error),
+          publishedDraft(current.status, items, current.error),
         ),
       }));
       return true;
     },
 
-    markSending: (key, generation) => {
+    markSending: (key, token) => {
       const current = get().drafts[key];
       if (
         current === undefined ||
-        current.generation !== generation ||
+        !isOperationCurrent(key, token) ||
         current.status !== "uploading" ||
         current.items.some((item) => item.uploaded === undefined)
       ) {
@@ -411,40 +410,42 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         drafts: replaceDraft(
           state.drafts,
           key,
-          publishedDraft(current.generation, "sending", current.items),
+          publishedDraft("sending", current.items),
         ),
       }));
       return true;
     },
 
-    failOperation: (key, generation, error) => {
+    failOperation: (key, token, error) => {
       const current = get().drafts[key];
       if (
         current === undefined ||
-        current.generation !== generation ||
+        !isOperationCurrent(key, token) ||
         !isBusy(current)
       ) {
         return false;
       }
+      endOperation(key, token);
       set((state) => ({
         drafts: replaceDraft(
           state.drafts,
           key,
-          publishedDraft(current.generation, "error", current.items, error),
+          publishedDraft("error", current.items, error),
         ),
       }));
       return true;
     },
 
-    completeSuccess: (key, generation) => {
+    completeSuccess: (key, token) => {
       const current = get().drafts[key];
       if (
         current === undefined ||
-        current.generation !== generation ||
+        !isOperationCurrent(key, token) ||
         current.status !== "sending"
       ) {
         return false;
       }
+      endOperation(key, token);
       set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
       revokeUrls(current.items);
       return true;
@@ -456,6 +457,9 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
         ([key]) => draftWorkspaceKey(key) === workspaceKey,
       );
       if (disposed.length === 0) return;
+      useComposerOperationStore
+        .getState()
+        .invalidateScopes(disposed.map(([key]) => key));
       const next = Object.fromEntries(
         Object.entries(drafts).filter(([key]) => draftWorkspaceKey(key) !== workspaceKey),
       );
@@ -465,6 +469,7 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
 
     disposeAll: () => {
       const drafts = get().drafts;
+      useComposerOperationStore.getState().invalidateAll();
       set({ drafts: EMPTY_DRAFTS });
       revokeUrls(Object.values(drafts).flatMap((draft) => draft.items));
     },
