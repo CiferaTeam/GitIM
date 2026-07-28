@@ -81,6 +81,7 @@ import { useAttachmentDraftStore } from "@/hooks/use-attachment-draft-store";
 import { DEFAULT_GIT_CORS_PROXY } from "./git-cors-proxy";
 import { localNetworkFetch } from "./local-network-fetch";
 import { parseAssetRef, type AssetRef } from "./asset-ref";
+import { normalizedFilename } from "./asset-utils";
 import {
   generateQuickSessionId,
   generateQuickSessionRequestId,
@@ -320,7 +321,7 @@ function validateUploadFiles(files: File[]): ApiResponse<never> | null {
     if (!Number.isSafeInteger(file.size) || file.size < 0 || file.size > MAX_ASSET_FILE_BYTES) {
       return invalidUpload("Each asset must be no larger than 50 MiB.");
     }
-    const filenameBytes = ASSET_UTF8.encode(sanitizedAssetName(file.name)).length;
+    const filenameBytes = ASSET_UTF8.encode(normalizedFilename(file.name)).length;
     if (filenameBytes > MAX_ASSET_FILENAME_BYTES) {
       return invalidUpload("Asset filenames must be no longer than 255 UTF-8 bytes.");
     }
@@ -381,7 +382,6 @@ function isAbortError(error: unknown): error is Error | DOMException {
 export async function uploadAssets(
   slug: string,
   files: File[],
-  signal?: AbortSignal,
 ): Promise<ApiResponse<{ assets: UploadedAsset[] }>> {
   if (isLocalMode()) return ASSET_LOCAL_UNAVAILABLE;
   const validationError = validateUploadFiles(files);
@@ -395,7 +395,6 @@ export async function uploadAssets(
     response = await localNetworkFetch(`${wsBase(slug)}/assets`, {
       method: "POST",
       body: form,
-      ...(signal && { signal }),
     });
   } catch (error) {
     if (isAbortError(error)) throw error;
@@ -436,14 +435,6 @@ export async function uploadAssets(
   return { ok: true, data: { assets } };
 }
 
-function sanitizedAssetName(name: string): string {
-  const basename = name.split(/[\\/]/).at(-1) ?? "";
-  const cleaned = Array.from(basename)
-    .filter((character) => !/\p{Cc}/u.test(character))
-    .join("");
-  return cleaned || "attachment";
-}
-
 function encodeAssetUrlComponent(value: string): string {
   return encodeURIComponent(value).replace(/[!'()*]/g, (character) =>
     `%${character.charCodeAt(0).toString(16).toUpperCase()}`,
@@ -455,7 +446,7 @@ export function assetResolveUrl(
   asset: AssetRef,
   options: { download?: boolean } = {},
 ): string {
-  const name = encodeAssetUrlComponent(sanitizedAssetName(asset.name));
+  const name = encodeAssetUrlComponent(normalizedFilename(asset.name));
   const path = `${wsBase(slug)}/assets/resolve/${encodeURIComponent(asset.originRuntimeId)}/${encodeURIComponent(asset.sha256)}`;
   return `${path}?name=${name}${options.download ? "&download=1" : ""}`;
 }

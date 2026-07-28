@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 import { formatAssetRef } from "@/lib/asset-ref";
+import { normalizedFilename } from "@/lib/asset-utils";
 import type { UploadedAsset } from "@/lib/client";
 
 export type AttachmentDraftStatus = "idle" | "uploading" | "sending" | "error";
@@ -64,7 +65,6 @@ interface AttachmentDraftStore {
   markSending: (key: string, generation: number) => boolean;
   failOperation: (key: string, generation: number, error: string) => boolean;
   completeSuccess: (key: string, generation: number) => boolean;
-  resetDraft: (key: string) => boolean;
   disposeWorkspace: (workspaceKey: string) => void;
   disposeAll: () => void;
 }
@@ -103,14 +103,6 @@ export function attachmentDraftKey(workspaceKey: string, scopeKey: string): stri
 
 function selectionId(file: File): string {
   return JSON.stringify([file.name, file.size, file.lastModified, file.type]);
-}
-
-function normalizedFilename(name: string): string {
-  const basename = name.split(/[\\/]/).at(-1) ?? "";
-  const cleaned = Array.from(basename)
-    .filter((character) => !/\p{Cc}/u.test(character))
-    .join("");
-  return cleaned || "attachment";
 }
 
 function canFormatRuntimeReference(name: string, size: number): boolean {
@@ -453,14 +445,6 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       ) {
         return false;
       }
-      set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
-      revokeUrls(current.items);
-      return true;
-    },
-
-    resetDraft: (key) => {
-      const current = get().drafts[key];
-      if (current === undefined) return false;
       set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
       revokeUrls(current.items);
       return true;

@@ -4,6 +4,7 @@ import { Download, FileText, RefreshCw, X } from "lucide-react";
 import { useConnectionStore } from "../../hooks/use-connection-store";
 import { useWorkspaceStore } from "../../hooks/use-workspace-store";
 import type { AssetRef } from "../../lib/asset-ref";
+import { formatBinarySize } from "../../lib/asset-utils";
 import { assetResolveUrl } from "../../lib/client";
 import {
   Dialog,
@@ -24,6 +25,10 @@ const INLINE_IMAGE_TYPES = new Set([
 
 const MAX_DIMENSION_HINT = 4096;
 const MAX_FRAME_SIZE = 440;
+// Inline-image safety ceilings. Source of truth is the Rust asset module
+// (crates/gitim-runtime/src/assets/mod.rs: MAX_INLINE_IMAGE_AXIS /
+// MAX_INLINE_IMAGE_PIXELS), which enforces the same limits at upload
+// inspection and resolve time; keep these values in sync manually.
 const MAX_INLINE_IMAGE_AXIS = 32_768;
 const MAX_INLINE_IMAGE_PIXELS = 100_000_000;
 const MAX_ASPECT_RATIO = 4;
@@ -64,14 +69,6 @@ function imageGeometry(width?: number, height?: number): ImageGeometry | undefin
     width: Math.max(1, Math.round(width * scale)),
     height: Math.max(1, Math.round(height * scale)),
   };
-}
-
-function formatBinarySize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) {
-    return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KiB`;
-  }
-  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MiB`;
 }
 
 function shortOrigin(originRuntimeId: string): string {
@@ -226,18 +223,20 @@ function ImageCard({
   downloadUrl: string;
   url: string;
 }) {
-  const [state, setState] = useState<"loading" | "loaded" | "unavailable">("loading");
+  const [loaded, setLoaded] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
   const [attempt, setAttempt] = useState(0);
   const geometry = imageGeometry(asset.width, asset.height);
 
-  if (state === "unavailable") {
+  if (unavailable) {
     return (
       <UnavailableCard
         asset={asset}
         downloadUrl={downloadUrl}
         onRetry={() => {
           setAttempt((current) => current + 1);
-          setState("loading");
+          setLoaded(false);
+          setUnavailable(false);
         }}
       />
     );
@@ -270,11 +269,11 @@ function ImageCard({
               loading="lazy"
               alt={asset.name}
               {...(geometry && { width: geometry.width, height: geometry.height })}
-              onLoad={() => setState("loaded")}
-              onError={() => setState("unavailable")}
+              onLoad={() => setLoaded(true)}
+              onError={() => setUnavailable(true)}
               className="block h-full max-h-[440px] w-full max-w-full object-contain"
             />
-            {state === "loading" && (
+            {!loaded && (
               <span
                 role="status"
                 className="absolute inset-0 flex items-center justify-center bg-background/70 text-xs text-text-muted"
@@ -324,7 +323,7 @@ function ImageCard({
             src={url}
             crossOrigin="anonymous"
             alt={asset.name}
-            onError={() => setState("unavailable")}
+            onError={() => setUnavailable(true)}
             className="max-h-full max-w-full object-contain"
           />
         </div>

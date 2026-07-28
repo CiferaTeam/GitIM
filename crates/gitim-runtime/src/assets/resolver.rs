@@ -36,14 +36,6 @@ pub struct ResolvedReplica {
     pub locality: AssetLocality,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HeadAvailability {
-    pub size: u64,
-    pub media_type: String,
-    pub peer: AssetPeer,
-    pub locality: AssetLocality,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssetLocality {
     Local,
@@ -81,7 +73,6 @@ impl Default for ResolverBudgets {
 struct ValidatedPeerResponse {
     response: reqwest::Response,
     size: u64,
-    media_type: String,
 }
 
 #[derive(Default)]
@@ -301,71 +292,6 @@ async fn resolve_get_with_budgets(
     }
 }
 
-pub async fn resolve_head(
-    state: &SharedRuntimeState,
-    service: &Arc<AssetService>,
-    store: &AssetStore,
-    workspace_slug: &str,
-    workspace_identity: &str,
-    origin: &str,
-    hash: &str,
-) -> Result<HeadAvailability, AssetError> {
-    let budgets = ResolverBudgets::default();
-    let mut summary = AttemptSummary::default();
-    let recorder = ResolutionRecorder::new(service, workspace_slug, hash, origin);
-    let network_attempted = AtomicBool::new(false);
-    let whole_timed_out = AtomicBool::new(false);
-    let result = match tokio::time::timeout(budgets.whole, async {
-        if let Some(metadata) = local_metadata_owned(store, hash, &recorder).await? {
-            return Ok(HeadAvailability {
-                size: metadata.size,
-                media_type: metadata.media_type,
-                peer: AssetPeer {
-                    node_id: "local".to_string(),
-                    runtime_id: None,
-                    base_url: String::new(),
-                    remote_workspace_slug: workspace_slug.to_string(),
-                },
-                locality: AssetLocality::Local,
-            });
-        }
-        if workspace_identity.is_empty() {
-            return Err(AssetError::Missing);
-        }
-        network_attempted.store(true, Ordering::Release);
-        let client = peer_client()?;
-        probe_candidates(
-            state,
-            service,
-            &client,
-            workspace_slug,
-            workspace_identity,
-            origin,
-            hash,
-            service.limits.max_file_bytes,
-            budgets,
-            &mut summary,
-        )
-        .await
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(_) => {
-            whole_timed_out.store(true, Ordering::Release);
-            summary.observe(AssetError::OriginUnavailable)?;
-            Err(summary.final_error())
-        }
-    };
-    if let Err(error) = &result {
-        recorder.record_store(error);
-        if network_attempted.load(Ordering::Acquire) || whole_timed_out.load(Ordering::Acquire) {
-            recorder.record(error);
-        }
-    }
-    result
-}
-
 async fn local_metadata_owned(
     store: &AssetStore,
     hash: &str,
@@ -535,63 +461,6 @@ async fn fetch_candidates(
     Err(summary.final_error())
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn probe_candidates(
-    state: &SharedRuntimeState,
-    service: &Arc<AssetService>,
-    client: &reqwest::Client,
-    workspace_slug: &str,
-    workspace_identity: &str,
-    origin: &str,
-    hash: &str,
-    max_file_bytes: u64,
-    budgets: ResolverBudgets,
-    summary: &mut AttemptSummary,
-) -> Result<HeadAvailability, AssetError> {
-    let peers = snapshot_peers(state, workspace_slug, workspace_identity, origin);
-    let mut attempted = HashSet::new();
-    if peers.iter().any(|peer| peer.runtime_id.is_none()) {
-        start_legacy_discovery(state, service, workspace_slug, workspace_identity);
-    }
-    let exact: Vec<_> = peers
-        .iter()
-        .filter(|peer| peer.runtime_id.as_deref() == Some(origin))
-        .cloned()
-        .collect();
-    for peer in exact {
-        attempted.insert(peer_key(&peer));
-        match probe_candidate(client, &peer, hash, max_file_bytes, budgets).await {
-            Ok(availability) => return Ok(availability),
-            Err(error) => {
-                record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                summary.observe(error)?;
-            }
-        }
-    }
-    let fallbacks: Vec<_> = peers
-        .into_iter()
-        .filter(|peer| {
-            peer.runtime_id.as_deref() != Some(origin) && attempted.insert(peer_key(peer))
-        })
-        .collect();
-    if let Some(availability) = probe_fallback_windows(
-        service,
-        client,
-        fallbacks,
-        hash,
-        max_file_bytes,
-        budgets,
-        summary,
-        workspace_slug,
-        origin,
-    )
-    .await?
-    {
-        return Ok(availability);
-    }
-    Err(summary.final_error())
-}
-
 fn snapshot_peers(
     state: &SharedRuntimeState,
     workspace_slug: &str,
@@ -688,59 +557,16 @@ async fn fetch_fallbacks(
     Ok(None)
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn probe_fallback_windows(
-    service: &Arc<AssetService>,
-    client: &reqwest::Client,
-    peers: Vec<AssetPeer>,
-    hash: &str,
-    max_file_bytes: u64,
-    budgets: ResolverBudgets,
-    summary: &mut AttemptSummary,
-    workspace_slug: &str,
-    origin: &str,
-) -> Result<Option<HeadAvailability>, AssetError> {
-    for window in peers.chunks(HEAD_CONCURRENCY) {
-        let mut probes = futures::stream::iter(window.iter().cloned().enumerate().map(
-            |(index, peer)| async move {
-                let result = probe_candidate(client, &peer, hash, max_file_bytes, budgets).await;
-                (index, peer, result)
-            },
-        ))
-        .buffer_unordered(HEAD_CONCURRENCY);
-        let mut available = Vec::new();
-        while let Some((index, peer, result)) = probes.next().await {
-            match result {
-                Ok(availability) => available.push((index, availability)),
-                Err(error) => {
-                    record_candidate_failure(service, workspace_slug, hash, origin, &peer, &error);
-                    summary.observe(error)?;
-                }
-            }
-        }
-        available.sort_by_key(|(index, _)| *index);
-        if let Some((_, availability)) = available.into_iter().next() {
-            return Ok(Some(availability));
-        }
-    }
-    Ok(None)
-}
-
 async fn probe_candidate(
     client: &reqwest::Client,
     peer: &AssetPeer,
     hash: &str,
     max_file_bytes: u64,
     budgets: ResolverBudgets,
-) -> Result<HeadAvailability, AssetError> {
+) -> Result<(), AssetError> {
     let response = send_peer_request(client, peer, hash, reqwest::Method::HEAD, budgets).await?;
-    let validated = validate_peer_response(response, hash, max_file_bytes)?;
-    Ok(HeadAvailability {
-        size: validated.size,
-        media_type: validated.media_type,
-        peer: peer.clone(),
-        locality: AssetLocality::Remote,
-    })
+    validate_peer_response(response, hash, max_file_bytes)?;
+    Ok(())
 }
 
 async fn download_candidate(
@@ -874,7 +700,7 @@ fn validate_peer_response(
     }
     let media_type = singleton_header(headers, header::CONTENT_TYPE)?
         .ok_or_else(|| AssetError::PeerInvalid("peer omitted content-type".to_string()))?;
-    let media_type = media_type
+    media_type
         .parse::<mime::Mime>()
         .map_err(|_| AssetError::PeerInvalid("peer content-type is invalid".to_string()))?;
     let expected_etag = format!("\"sha256-{hash}\"");
@@ -912,11 +738,7 @@ fn validate_peer_response(
             "peer returned partial or ambiguous framing metadata".to_string(),
         ));
     }
-    Ok(ValidatedPeerResponse {
-        response,
-        size,
-        media_type: media_type.to_string(),
-    })
+    Ok(ValidatedPeerResponse { response, size })
 }
 
 fn singleton_header(

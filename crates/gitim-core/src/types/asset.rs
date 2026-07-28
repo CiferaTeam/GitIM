@@ -13,7 +13,14 @@ pub const MAX_ASSET_FILENAME_BYTES: usize = 255;
 pub const MAX_ASSET_MEDIA_TYPE_BYTES: usize = 127;
 pub const MAX_ASSET_REF_BYTES: usize = 1024;
 
-const ASSET_COMPONENT_ENCODE_SET: &AsciiSet = &CONTROLS
+/// Percent-encode set for canonical asset reference components (`name` and
+/// `type` query values inside the `<^...>` reference). Also used for the
+/// `name` query value of `/assets/resolve/...` URLs so the runtime CLI emits
+/// byte-identical encodings; single definition lives here in gitim-core.
+///
+/// Note: the Content-Disposition `filename*` parameter uses a different set
+/// (RFC 5987 attr-char), defined where it is served in gitim-runtime.
+pub const ASSET_COMPONENT_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'!')
     .add(b'"')

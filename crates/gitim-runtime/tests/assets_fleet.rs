@@ -1355,7 +1355,7 @@ async fn exact_origin_success_starts_bounded_legacy_backfill_without_delay() {
 
 #[tokio::test(start_paused = true)]
 #[serial(home_env)]
-async fn concurrent_legacy_only_get_and_head_share_one_health_wave() {
+async fn concurrent_legacy_only_gets_share_one_health_wave() {
     let _home = HomeGuard::install();
     let stalled = StalledHealthPeer::spawn().await;
     let fixture = fixture();
@@ -1369,30 +1369,30 @@ async fn concurrent_legacy_only_get_and_head_share_one_health_wave() {
             &format!("legacy-room-{index:03}"),
         );
     }
-    let get_app = fixture.app.clone();
-    let get = tokio::spawn(async move {
-        get_app
+    let first_app = fixture.app.clone();
+    let first = tokio::spawn(async move {
+        first_app
             .oneshot(resolve_request(
                 Method::GET,
                 ORIGIN_RUNTIME_ID,
-                &sha256(b"get-missing"),
+                &sha256(b"first-missing"),
             ))
             .await
             .unwrap()
     });
-    let head_app = fixture.app.clone();
-    let head = tokio::spawn(async move {
-        head_app
+    let second_app = fixture.app.clone();
+    let second = tokio::spawn(async move {
+        second_app
             .oneshot(resolve_request(
-                Method::HEAD,
+                Method::GET,
                 ORIGIN_RUNTIME_ID,
-                &sha256(b"head-missing"),
+                &sha256(b"second-missing"),
             ))
             .await
             .unwrap()
     });
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while (!get.is_finished() || !head.is_finished())
+    while (!first.is_finished() || !second.is_finished())
         && stalled.requests() <= 8
         && std::time::Instant::now() < deadline
     {
@@ -1404,12 +1404,12 @@ async fn concurrent_legacy_only_get_and_head_share_one_health_wave() {
     }
     assert!(stalled.requests() > 0);
     assert!(stalled.requests() <= 8, "requests={}", stalled.requests());
-    assert!(get.is_finished());
-    assert!(head.is_finished());
-    let get = get.await.unwrap();
-    let head = head.await.unwrap();
-    assert_eq!(get.status(), StatusCode::NOT_FOUND);
-    assert_eq!(head.status(), StatusCode::NOT_FOUND);
+    assert!(first.is_finished());
+    assert!(second.is_finished());
+    let first = first.await.unwrap();
+    let second = second.await.unwrap();
+    assert_eq!(first.status(), StatusCode::NOT_FOUND);
+    assert_eq!(second.status(), StatusCode::NOT_FOUND);
     assert_eq!(
         fixture.service.available_peer_permits(),
         limits().peer_slots
@@ -1469,93 +1469,6 @@ async fn legacy_object_missing_wins_after_background_health_timeout() {
 
 #[tokio::test(start_paused = true)]
 #[serial(home_env)]
-async fn repeated_verified_fallback_heads_coalesce_legacy_backfill() {
-    let _home = HomeGuard::install();
-    let stalled = StalledHealthPeer::spawn().await;
-    let verified =
-        MockPeer::spawn(FALLBACK_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
-    let fixture = fixture();
-    add_peer(
-        &fixture,
-        "verified",
-        &verified,
-        Some(FALLBACK_RUNTIME_ID),
-        WORKSPACE_IDENTITY,
-    );
-    for index in 0..32 {
-        add_peer_mapping_url(
-            &fixture,
-            &format!("legacy-{index:03}"),
-            &stalled.base_url,
-            None,
-            WORKSPACE_IDENTITY,
-            &format!("legacy-room-{index:03}"),
-        );
-    }
-    let hash = sha256(PNG_1X1);
-    let requests: Vec<_> = (0..16)
-        .map(|_| {
-            let app = fixture.app.clone();
-            let hash = hash.clone();
-            tokio::spawn(async move {
-                app.oneshot(resolve_request(Method::HEAD, ORIGIN_RUNTIME_ID, &hash))
-                    .await
-                    .unwrap()
-            })
-        })
-        .collect();
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while requests.iter().any(|request| !request.is_finished())
-        && std::time::Instant::now() < deadline
-    {
-        tokio::task::yield_now().await;
-    }
-    assert!(requests.iter().all(tokio::task::JoinHandle::is_finished));
-    let responses = futures::future::join_all(requests)
-        .await
-        .into_iter()
-        .map(Result::unwrap)
-        .collect::<Vec<_>>();
-    assert!(responses
-        .iter()
-        .all(|response| response.status() == StatusCode::OK));
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while stalled.requests() == 0 && std::time::Instant::now() < deadline {
-        tokio::task::yield_now().await;
-    }
-    assert!(stalled.requests() > 0);
-    assert!(stalled.requests() <= 8, "requests={}", stalled.requests());
-    stalled.release();
-    stalled.wait_until_idle().await;
-    for _ in 0..100 {
-        tokio::task::yield_now().await;
-    }
-
-    let first_run_requests = stalled.requests();
-    let app = fixture.app.clone();
-    let request = tokio::spawn(async move {
-        app.oneshot(resolve_request(Method::HEAD, ORIGIN_RUNTIME_ID, &hash))
-            .await
-            .unwrap()
-    });
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while !request.is_finished() && std::time::Instant::now() < deadline {
-        tokio::task::yield_now().await;
-    }
-    assert!(request.is_finished());
-    let response = request.await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while stalled.requests() == first_run_requests && std::time::Instant::now() < deadline {
-        tokio::task::yield_now().await;
-    }
-    assert!(stalled.requests() > first_run_requests);
-    stalled.release();
-    stalled.wait_until_idle().await;
-}
-
-#[tokio::test(start_paused = true)]
-#[serial(home_env)]
 async fn legacy_only_resolution_does_not_wait_for_discovery_budget() {
     let _home = HomeGuard::install();
     let stalled = StalledHealthPeer::spawn().await;
@@ -1606,21 +1519,12 @@ async fn legacy_only_resolution_does_not_wait_for_discovery_budget() {
 
 #[tokio::test]
 #[serial(home_env)]
-async fn unresolved_legacy_peer_remains_a_get_and_head_fallback() {
+async fn unresolved_legacy_peer_remains_a_get_fallback() {
     let _home = HomeGuard::install();
     let peer = MockPeer::spawn_unresolved(PeerBehavior::Object(PNG_1X1.to_vec())).await;
     let fixture = fixture();
     add_peer(&fixture, "legacy", &peer, None, WORKSPACE_IDENTITY);
     let hash = sha256(PNG_1X1);
-
-    let head = fixture
-        .app
-        .clone()
-        .oneshot(resolve_request(Method::HEAD, ORIGIN_RUNTIME_ID, &hash))
-        .await
-        .unwrap();
-    assert_eq!(head.status(), StatusCode::OK);
-    assert!(response_bytes(head).await.is_empty());
 
     let get = fixture
         .app
@@ -1629,7 +1533,7 @@ async fn unresolved_legacy_peer_remains_a_get_and_head_fallback() {
         .unwrap();
     assert_eq!(get.status(), StatusCode::OK);
     assert_eq!(response_bytes(get).await.as_ref(), PNG_1X1);
-    assert_eq!(peer.object_heads(), 2);
+    assert_eq!(peer.object_heads(), 1);
     assert_eq!(peer.object_gets(), 1);
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     while peer.health_requests() == 0 && std::time::Instant::now() < deadline {
@@ -2098,187 +2002,6 @@ async fn resolve_route_bounds_initial_local_verification() {
 }
 
 #[tokio::test]
-async fn head_remote_availability_never_persists_or_sends_browser_headers() {
-    let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
-    let fixture = fixture();
-    add_peer(
-        &fixture,
-        "origin",
-        &peer,
-        Some(ORIGIN_RUNTIME_ID),
-        WORKSPACE_IDENTITY,
-    );
-
-    let response = fixture
-        .app
-        .oneshot(resolve_request(
-            Method::HEAD,
-            ORIGIN_RUNTIME_ID,
-            &sha256(PNG_1X1),
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers().get(header::CONTENT_TYPE).unwrap(),
-        "image/png"
-    );
-    assert_eq!(peer.object_gets(), 0);
-    assert_eq!(peer.object_heads(), 1);
-    assert!(object_files(fixture.workspace.path()).is_empty());
-    assert!(!peer.browser_headers_seen());
-}
-
-#[tokio::test]
-async fn remote_alias_named_local_remains_remote_head_availability() {
-    let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
-    let fixture = fixture();
-    add_peer(
-        &fixture,
-        "local",
-        &peer,
-        Some(ORIGIN_RUNTIME_ID),
-        WORKSPACE_IDENTITY,
-    );
-
-    let response = fixture
-        .app
-        .oneshot(resolve_request(
-            Method::HEAD,
-            ORIGIN_RUNTIME_ID,
-            &sha256(PNG_1X1),
-        ))
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(peer.object_heads(), 1);
-    assert_eq!(peer.object_gets(), 0);
-    assert!(object_files(fixture.workspace.path()).is_empty());
-}
-
-#[tokio::test]
-async fn remote_head_honors_exact_strong_validator_and_browser_no_store() {
-    let peer = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
-    let fixture = fixture();
-    add_peer(
-        &fixture,
-        "origin",
-        &peer,
-        Some(ORIGIN_RUNTIME_ID),
-        WORKSPACE_IDENTITY,
-    );
-    let hash = sha256(PNG_1X1);
-    let etag = format!("\"sha256-{hash}\"");
-    let uri = format!("/workspaces/room/assets/resolve/{ORIGIN_RUNTIME_ID}/{hash}?name=pixel.png");
-
-    let ok = fixture
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::HEAD)
-                .uri(&uri)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(ok.status(), StatusCode::OK);
-    assert_eq!(ok.headers()[header::ETAG], etag);
-    assert_eq!(ok.headers()[header::CACHE_CONTROL], "private, no-store");
-    assert_eq!(ok.headers()[header::ACCEPT_RANGES], "bytes");
-    assert_eq!(ok.headers()["x-content-type-options"], "nosniff");
-    assert!(response_bytes(ok).await.is_empty());
-
-    let not_modified = fixture
-        .app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::HEAD)
-                .uri(&uri)
-                .header(header::IF_NONE_MATCH, &etag)
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
-    assert_eq!(not_modified.headers()[header::ETAG], etag);
-    assert_eq!(
-        not_modified.headers()[header::CACHE_CONTROL],
-        "private, no-store"
-    );
-    assert_eq!(not_modified.headers()[header::ACCEPT_RANGES], "bytes");
-    assert_eq!(not_modified.headers()["x-content-type-options"], "nosniff");
-    assert!(response_bytes(not_modified).await.is_empty());
-
-    let mut conditional_range = Request::builder()
-        .method(Method::HEAD)
-        .uri(&uri)
-        .header(header::IF_NONE_MATCH, &etag)
-        .body(Body::empty())
-        .unwrap();
-    conditional_range
-        .headers_mut()
-        .append(header::RANGE, "bytes=0-1".parse().unwrap());
-    conditional_range
-        .headers_mut()
-        .append(header::RANGE, "bytes=2-3".parse().unwrap());
-    let conditional_range = fixture
-        .app
-        .clone()
-        .oneshot(conditional_range)
-        .await
-        .unwrap();
-    assert_eq!(conditional_range.status(), StatusCode::NOT_MODIFIED);
-    assert_eq!(
-        conditional_range.headers()[header::CACHE_CONTROL],
-        "private, no-store"
-    );
-    assert!(response_bytes(conditional_range).await.is_empty());
-
-    let mut duplicate_range = Request::builder()
-        .method(Method::HEAD)
-        .uri(&uri)
-        .body(Body::empty())
-        .unwrap();
-    duplicate_range
-        .headers_mut()
-        .append(header::RANGE, "bytes=0-1".parse().unwrap());
-    duplicate_range
-        .headers_mut()
-        .append(header::RANGE, "bytes=2-3".parse().unwrap());
-    let duplicate_range = fixture.app.clone().oneshot(duplicate_range).await.unwrap();
-    assert_eq!(duplicate_range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-    assert_eq!(
-        duplicate_range.headers()[header::CACHE_CONTROL],
-        "private, no-store"
-    );
-    assert!(response_bytes(duplicate_range).await.is_empty());
-
-    let weak = fixture
-        .app
-        .oneshot(
-            Request::builder()
-                .method(Method::HEAD)
-                .uri(&uri)
-                .header(header::IF_NONE_MATCH, format!("W/{etag}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(weak.status(), StatusCode::OK);
-    assert_eq!(weak.headers()[header::CACHE_CONTROL], "private, no-store");
-    assert_eq!(peer.object_heads(), 5);
-    assert_eq!(peer.object_gets(), 0);
-    assert!(object_files(fixture.workspace.path()).is_empty());
-}
-
-#[tokio::test]
 async fn workspace_identity_filters_candidates_before_network_access() {
     let wrong_identity =
         MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Object(PNG_1X1.to_vec())).await;
@@ -2311,7 +2034,7 @@ async fn workspace_identity_filters_candidates_before_network_access() {
 }
 
 #[tokio::test]
-async fn no_eligible_peer_mapping_is_unavailable_for_get_and_head() {
+async fn no_eligible_peer_mapping_is_unavailable_for_get() {
     let fixture = fixture();
     let hash = sha256(PNG_1X1);
 
@@ -2326,16 +2049,9 @@ async fn no_eligible_peer_mapping_is_unavailable_for_get_and_head() {
         response_json(get).await["error_code"],
         "asset_origin_unavailable"
     );
-
-    let head = fixture
-        .app
-        .oneshot(resolve_request(Method::HEAD, ORIGIN_RUNTIME_ID, &hash))
-        .await
-        .unwrap();
-    assert_eq!(head.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         fixture.service.fleet_fetch_failures.load(Ordering::Acquire),
-        2
+        1
     );
 }
 
@@ -2588,50 +2304,6 @@ async fn unreachable_exact_origin_falls_back_to_workspace_replica() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(fallback.object_heads(), 1);
     assert_eq!(fallback.object_gets(), 1);
-}
-
-#[tokio::test]
-async fn head_distinguishes_reachable_missing_from_unavailable() {
-    let missing = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Missing).await;
-    let missing_fixture = fixture();
-    add_peer(
-        &missing_fixture,
-        "missing",
-        &missing,
-        Some(ORIGIN_RUNTIME_ID),
-        WORKSPACE_IDENTITY,
-    );
-    let response = missing_fixture
-        .app
-        .oneshot(resolve_request(
-            Method::HEAD,
-            ORIGIN_RUNTIME_ID,
-            &sha256(PNG_1X1),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-    let unavailable = MockPeer::spawn(ORIGIN_RUNTIME_ID, PeerBehavior::Missing).await;
-    let unavailable_fixture = fixture();
-    add_peer(
-        &unavailable_fixture,
-        "unavailable",
-        &unavailable,
-        Some(ORIGIN_RUNTIME_ID),
-        WORKSPACE_IDENTITY,
-    );
-    unavailable.shutdown();
-    let response = unavailable_fixture
-        .app
-        .oneshot(resolve_request(
-            Method::HEAD,
-            ORIGIN_RUNTIME_ID,
-            &sha256(PNG_1X1),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
 #[tokio::test]
@@ -3471,7 +3143,7 @@ async fn response_header_timeout_is_ten_seconds() {
 }
 
 #[tokio::test]
-async fn fallback_head_fanout_caps_at_eight_and_full_gets_remain_sequential() {
+async fn fallback_probe_fanout_caps_at_eight_and_full_gets_remain_sequential() {
     let peer = MockPeer::spawn(
         FALLBACK_RUNTIME_ID,
         PeerBehavior::HeaderDelay {
@@ -3493,15 +3165,6 @@ async fn fallback_head_fanout_caps_at_eight_and_full_gets_remain_sequential() {
         );
     }
     let origin = "ffffffff-ffff-4fff-8fff-ffffffffffff";
-    let head = fixture
-        .app
-        .clone()
-        .oneshot(resolve_request(Method::HEAD, origin, &sha256(PNG_1X1)))
-        .await
-        .unwrap();
-    assert_eq!(head.status(), StatusCode::OK);
-    assert_eq!(peer.max_inflight_heads(), 8);
-
     let get = fixture
         .app
         .oneshot(resolve_request(Method::GET, origin, &sha256(b"different")))
@@ -3512,5 +3175,6 @@ async fn fallback_head_fanout_caps_at_eight_and_full_gets_remain_sequential() {
         response_json(get).await["error_code"],
         "asset_hash_mismatch"
     );
+    assert_eq!(peer.max_inflight_heads(), 8);
     assert_eq!(peer.max_inflight_gets(), 1);
 }

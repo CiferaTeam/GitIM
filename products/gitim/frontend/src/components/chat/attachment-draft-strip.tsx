@@ -1,25 +1,12 @@
 import { FileText, X } from "lucide-react";
 
 import type { AttachmentDraft } from "../../hooks/use-attachment-draft-store";
+import { formatBinarySize, normalizedFilename } from "../../lib/asset-utils";
 
 interface AttachmentDraftStripProps {
   draft: AttachmentDraft;
   error?: string;
   onRemove: (id: string) => void;
-}
-
-function displayBasename(name: string): string {
-  const basename = name.split(/[\\/]/).at(-1) ?? "";
-  const cleaned = Array.from(basename)
-    .filter((character) => !/\p{Cc}/u.test(character))
-    .join("");
-  return cleaned || "attachment";
-}
-
-function formatBinarySize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10 * 1024 ? 1 : 0)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(bytes < 10 * 1024 * 1024 ? 1 : 0)} MiB`;
 }
 
 function fileType(name: string, mediaType: string): string {
@@ -43,7 +30,7 @@ export function AttachmentDraftStrip({ draft, error, onRemove }: AttachmentDraft
         className="flex min-w-0 flex-nowrap gap-2 overflow-x-auto pb-1 sm:flex-wrap sm:overflow-x-visible sm:pb-0"
       >
         {draft.items.map((item) => {
-          const name = displayBasename(item.file.name);
+          const name = normalizedFilename(item.file.name);
           return (
             <div
               key={item.id}

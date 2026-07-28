@@ -554,6 +554,8 @@ async fn only_resolve_get_accepts_exact_user_navigation_tuple() {
             .status(),
         StatusCode::OK
     );
+    // Browser navigations are rejected by the guard before method routing,
+    // independent of which methods the resolve route serves.
     assert_eq!(
         fixture
             .app
@@ -958,7 +960,7 @@ async fn asset_body_override_does_not_change_the_non_asset_body_limit() {
 }
 
 #[tokio::test]
-async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
+async fn local_get_range_and_exact_strong_etag_use_verified_metadata() {
     let fixture = fixture();
     let asset = upload_one(&fixture.app, PNG_1X1, "pixel.png").await;
     let uri = resolve_uri(&asset, "?name=pixel.png");
@@ -981,6 +983,7 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         .starts_with("inline;"));
     assert_eq!(response_bytes(get).await.as_ref(), PNG_1X1);
 
+    // The public resolve route no longer answers HEAD.
     let head = fixture
         .app
         .clone()
@@ -993,60 +996,7 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         )
         .await
         .unwrap();
-    assert_eq!(head.status(), StatusCode::OK);
-    assert_eq!(head.headers()[header::CACHE_CONTROL], "private, no-store");
-    assert_eq!(
-        head.headers()[header::CONTENT_LENGTH],
-        PNG_1X1.len().to_string()
-    );
-    assert!(head.headers()[header::CONTENT_DISPOSITION]
-        .to_str()
-        .unwrap()
-        .starts_with("inline;"));
-    assert!(response_bytes(head).await.is_empty());
-
-    for (range, expected_status, expected_content_range) in [
-        (
-            "bytes=0-7",
-            StatusCode::PARTIAL_CONTENT,
-            format!("bytes 0-7/{}", PNG_1X1.len()),
-        ),
-        (
-            "garbage",
-            StatusCode::RANGE_NOT_SATISFIABLE,
-            format!("bytes */{}", PNG_1X1.len()),
-        ),
-    ] {
-        let response = fixture
-            .app
-            .clone()
-            .oneshot(
-                Request::builder()
-                    .method(Method::HEAD)
-                    .uri(&uri)
-                    .header(header::RANGE, range)
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), expected_status, "{range}");
-        assert_eq!(
-            response.headers()[header::CACHE_CONTROL],
-            "private, no-store",
-            "{range}"
-        );
-        assert_eq!(
-            response.headers()[header::CONTENT_RANGE],
-            expected_content_range,
-            "{range}"
-        );
-        assert!(response.headers()[header::CONTENT_DISPOSITION]
-            .to_str()
-            .unwrap()
-            .starts_with("inline;"));
-        assert!(response_bytes(response).await.is_empty());
-    }
+    assert_eq!(head.status(), StatusCode::METHOD_NOT_ALLOWED);
 
     for (range, expected_status, expected_len) in [
         ("bytes=0-7", StatusCode::PARTIAL_CONTENT, Some(8)),
@@ -1096,53 +1046,31 @@ async fn local_get_head_range_and_exact_strong_etag_use_verified_metadata() {
         }
     }
 
-    for method in [Method::GET, Method::HEAD] {
-        let mut request = Request::builder()
-            .method(method.clone())
-            .uri(&uri)
-            .body(Body::empty())
-            .unwrap();
-        request
-            .headers_mut()
-            .append(header::RANGE, "bytes=0-1".parse().unwrap());
-        request
-            .headers_mut()
-            .append(header::RANGE, "bytes=2-3".parse().unwrap());
-        let response = fixture.app.clone().oneshot(request).await.unwrap();
-        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-        assert_eq!(
-            response.headers()[header::CONTENT_RANGE],
-            format!("bytes */{}", PNG_1X1.len())
-        );
-        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
-        assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-        assert_eq!(
-            response.headers()[header::CACHE_CONTROL],
-            "private, no-store"
-        );
-        assert_eq!(response.headers()[header::ETAG], etag);
-        assert!(response_bytes(response).await.is_empty());
-    }
-
-    let mut conditional_head = Request::builder()
-        .method(Method::HEAD)
+    let mut request = Request::builder()
+        .method(Method::GET)
         .uri(&uri)
-        .header(header::IF_NONE_MATCH, &etag)
         .body(Body::empty())
         .unwrap();
-    conditional_head
+    request
         .headers_mut()
         .append(header::RANGE, "bytes=0-1".parse().unwrap());
-    conditional_head
+    request
         .headers_mut()
         .append(header::RANGE, "bytes=2-3".parse().unwrap());
-    let conditional_head = fixture.app.clone().oneshot(conditional_head).await.unwrap();
-    assert_eq!(conditional_head.status(), StatusCode::NOT_MODIFIED);
+    let response = fixture.app.clone().oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(
-        conditional_head.headers()[header::CACHE_CONTROL],
+        response.headers()[header::CONTENT_RANGE],
+        format!("bytes */{}", PNG_1X1.len())
+    );
+    assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    assert_eq!(
+        response.headers()[header::CACHE_CONTROL],
         "private, no-store"
     );
-    assert!(response_bytes(conditional_head).await.is_empty());
+    assert_eq!(response.headers()[header::ETAG], etag);
+    assert!(response_bytes(response).await.is_empty());
 
     let not_modified = fixture
         .app
@@ -1933,11 +1861,6 @@ async fn asset_event_observer_captures_handler_outcomes_without_sensitive_paths(
     for request in [
         Request::builder().uri(&uri).body(Body::empty()).unwrap(),
         Request::builder()
-            .method(Method::HEAD)
-            .uri(&uri)
-            .body(Body::empty())
-            .unwrap(),
-        Request::builder()
             .uri(&uri)
             .header(header::IF_NONE_MATCH, &etag)
             .body(Body::empty())
@@ -1986,7 +1909,7 @@ async fn asset_event_observer_captures_handler_outcomes_without_sensitive_paths(
             .iter()
             .filter(|event| event.event == "asset_local_hit")
             .count(),
-        4
+        3
     );
     assert_eq!(
         events

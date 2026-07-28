@@ -1,9 +1,7 @@
-use super::AssetError;
+use super::{AssetError, MAX_INLINE_IMAGE_AXIS, MAX_INLINE_IMAGE_PIXELS};
 use serde::{Deserialize, Serialize};
 
 const MAX_INSPECTION_BYTES: usize = 64 * 1024;
-const MAX_INLINE_IMAGE_AXIS: u32 = 32_768;
-const MAX_INLINE_IMAGE_PIXELS: u64 = 100_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssetInspection {
