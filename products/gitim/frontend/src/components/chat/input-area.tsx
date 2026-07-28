@@ -470,10 +470,10 @@ export function InputArea({
           );
           return;
         }
-        // completeSuccess applies the same atomic settle contract as the
-        // text path: it CAS-validates the token, publishes the completion
-        // event, and replaces the draft behind one gate, so a stale send
-        // bails without touching the newer operation's captured text.
+        // completeSuccess settles through the operation-store CAS (token
+        // check + completion publish). The draft clear is identity-gated on
+        // the settled items so a sync re-begin cannot lose its newer draft;
+        // a stale send still bails without clearing captured text storage.
         if (
           !completeSuccess(capturedAttachmentKey, operation.token, {
             text: capturedText,

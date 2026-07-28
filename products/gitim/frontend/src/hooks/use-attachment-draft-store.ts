@@ -433,9 +433,17 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       // endOperation is the compare-and-swap gate: a stale token must not
       // write an error draft over a newer operation's composer state.
       if (!endOperation(key, token)) return false;
+      // endOperation notifies subscribers synchronously; a dispose + re-begin
+      // there can replace the draft under a new token. Only stamp error when
+      // the draft is still the one we ended — otherwise return false so
+      // callers do not focus / treat the newer op as failed.
+      let applied = false;
       set((state) => {
         const draft = state.drafts[key];
-        if (draft === undefined || !isBusy(draft)) return state;
+        if (draft === undefined || draft.items !== current.items || !isBusy(draft)) {
+          return state;
+        }
+        applied = true;
         return {
           drafts: replaceDraft(
             state.drafts,
@@ -444,7 +452,7 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
           ),
         };
       });
-      return true;
+      return applied;
     },
 
     completeSuccess: (key, token, settlement) => {
@@ -457,8 +465,18 @@ export const useAttachmentDraftStore = create<AttachmentDraftStore>((set, get) =
       if (!useComposerOperationStore.getState().settleOperation(key, token, settlement)) {
         return false;
       }
-      set((state) => ({ drafts: replaceDraft(state.drafts, key) }));
-      revokeUrls(current.items);
+      // settle notifies subscribers synchronously; a dispose + re-begin can
+      // install a newer draft before this write. Delete only when the draft
+      // is still the settled one (items identity); settle already published,
+      // so callers may clear captured storage either way.
+      let cleared = false;
+      set((state) => {
+        const draft = state.drafts[key];
+        if (draft === undefined || draft.items !== current.items) return state;
+        cleared = true;
+        return { drafts: replaceDraft(state.drafts, key) };
+      });
+      if (cleared) revokeUrls(current.items);
       return true;
     },
 

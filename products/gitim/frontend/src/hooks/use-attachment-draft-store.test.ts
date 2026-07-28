@@ -605,6 +605,64 @@ describe("attachment preview lifecycle", () => {
     expect(retry).not.toBeNull();
     expect(store().drafts[key].status).toBe("uploading");
   });
+
+  it("does not delete a newer draft when completeSuccess settles under a sync re-begin", () => {
+    const key = attachmentDraftKey("workspace", "settle-race");
+    store().addFiles(key, [png("old.png")]);
+    const operation = store().beginOperation(key)!;
+    expect(
+      store().markUploaded(key, operation.token, [
+        { id: operation.items[0].id, asset: uploaded("old.png") },
+      ]),
+    ).toBe(true);
+    expect(store().markSending(key, operation.token)).toBe(true);
+
+    // settleOperation notifies subscribers while releasing the token. The
+    // sending draft is still present, so a sync re-begin must dispose first;
+    // the stale success path must not then delete that fresh uploading draft.
+    const unsubscribe = useComposerOperationStore.subscribe((state, previous) => {
+      if (state.operations[key] === undefined && previous.operations[key] !== undefined) {
+        store().disposeAll();
+        store().addFiles(key, [png("new.png", { lastModified: 2 })]);
+        expect(store().beginOperation(key)).not.toBeNull();
+      }
+    });
+    try {
+      expect(
+        store().completeSuccess(key, operation.token, { text: "sent", replyLine: null }),
+      ).toBe(true);
+    } finally {
+      unsubscribe();
+    }
+
+    expect(store().drafts[key].status).toBe("uploading");
+    expect(store().drafts[key].items[0].file.name).toBe("new.png");
+    expect(useComposerOperationStore.getState().operations[key]).toBeDefined();
+  });
+
+  it("does not stamp error onto a newer draft when failOperation ends under a sync re-begin", () => {
+    const key = attachmentDraftKey("workspace", "fail-race");
+    store().addFiles(key, [png("old.png")]);
+    const operation = store().beginOperation(key)!;
+
+    const unsubscribe = useComposerOperationStore.subscribe((state, previous) => {
+      if (state.operations[key] === undefined && previous.operations[key] !== undefined) {
+        store().disposeAll();
+        store().addFiles(key, [png("new.png", { lastModified: 2 })]);
+        expect(store().beginOperation(key)).not.toBeNull();
+      }
+    });
+    try {
+      expect(store().failOperation(key, operation.token, "late failure")).toBe(false);
+    } finally {
+      unsubscribe();
+    }
+
+    expect(store().drafts[key].status).toBe("uploading");
+    expect(store().drafts[key].items[0].file.name).toBe("new.png");
+    expect(store().drafts[key].error).toBeUndefined();
+    expect(useComposerOperationStore.getState().operations[key]).toBeDefined();
+  });
 });
 
 beforeEach(() => {
