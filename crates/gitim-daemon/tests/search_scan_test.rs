@@ -132,3 +132,32 @@ async fn search_only_reads_direct_messages_visible_to_current_user() {
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0]["channel"], "alice--bob");
 }
+
+#[tokio::test]
+async fn search_matches_message_bodies_without_case_sensitivity() {
+    let (tmp, state) = common::setup_repo_alice().await;
+    write_thread(
+        &tmp.path().join("channels/general.thread"),
+        &[(1, "alice", "20260728T100000Z", "Needle in mixed case")],
+    );
+
+    let response = handle_request(search_request("needle"), state).await;
+
+    assert!(response.ok, "{:?}", response.error);
+    let hits = messages(&response);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["line_number"], 1);
+}
+
+#[tokio::test]
+async fn search_rejects_whitespace_only_queries() {
+    let (_tmp, state) = common::setup_repo_alice().await;
+
+    let response = handle_request(search_request(" \t\n"), state).await;
+
+    assert!(!response.ok);
+    assert_eq!(
+        response.error.as_deref(),
+        Some("search requires a non-empty query")
+    );
+}

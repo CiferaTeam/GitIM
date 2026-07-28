@@ -119,6 +119,28 @@ fn setup() -> (axum::Router, FakeDaemon, TempDir) {
 }
 
 #[tokio::test]
+async fn search_forwards_query() {
+    let (router, mut daemon, _tmp) = setup();
+    let (status, body) = send(
+        router,
+        "GET",
+        "/workspaces/test-ws/im/search?query=Needle%20text",
+        Value::Null,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({"ok": true, "data": {"accepted": true}}));
+    assert_eq!(
+        daemon.next_request().await,
+        json!({
+            "method": "search",
+            "query": "Needle text",
+        })
+    );
+}
+
+#[tokio::test]
 async fn create_channel_forwards_invitees() {
     let (router, mut daemon, _tmp) = setup();
     let (status, body) = send(

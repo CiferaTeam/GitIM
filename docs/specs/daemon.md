@@ -114,7 +114,7 @@ Unix socket 上使用行分隔 JSON。
 | `join_channel` | 频道加人 / 自加入 |
 | `leave_channel` | 频道移除 / 自离开 |
 | `create_channel` | 创建新频道 |
-| `search` | 搜索消息 |
+| `search` | 对 active channel、可见 DM 和 card discussion 的正文做大小写不敏感搜索，返回最新 10 条 |
 
 ### HTTP 调试模式
 

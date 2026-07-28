@@ -354,8 +354,9 @@ fn gitim_api_exposes_message_search() {
 
     let api = provider.prompt_gitim_api(&ctx);
     assert!(api.contains("`gitim search \"<query>\"`"));
-    assert!(api.contains("消息正文中匹配"));
+    assert!(api.contains("消息正文中做"));
     assert!(api.contains("最新 10 条消息"));
+    assert!(api.contains("大小写不敏感"));
 }
 
 #[test]

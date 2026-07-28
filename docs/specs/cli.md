@@ -30,7 +30,7 @@ TypeScript 薄客户端。负责命令解析、本地 daemon 生命周期管理�
 | `gitim channels` | 列出频道和 DM 会话 |
 | `gitim create-channel <name>` | 创建新频道 |
 | `gitim users` | 列出用户 |
-| `gitim search <query>` | 按正文搜索最新 10 条消息 |
+| `gitim search <query>` | 按正文做大小写不敏感的字面匹配，返回最新 10 条消息 |
 | `gitim dm send <handler> <body>` | 发送私信 |
 | `gitim dm read <handler>` | 读取私信 |
 | `gitim dm list` | 列出私信会话 |
@@ -60,7 +60,7 @@ TypeScript 薄客户端。负责命令解析、本地 daemon 生命周期管理�
 
 - `gitim send <channel> <body> [-a handler] [-r line]`
 - `gitim read <channel> [-l limit] [-s since]`
-- `gitim search <query>`
+- `gitim search <query>`（搜索 active channel、可见 DM 和 card discussion）
 - `gitim create-channel <name> [--display-name text] [--introduction text]`
 - `gitim dm send <handler> <body> [-a handler] [-r line]`
 

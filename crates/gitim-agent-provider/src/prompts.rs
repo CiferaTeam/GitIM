@@ -629,7 +629,7 @@ EOF
 
 ### 搜索
 
-- `gitim search \"<query>\"` — 在当前 active channel、可见 DM 和 card discussion 的消息正文中匹配，返回最新 10 条消息
+- `gitim search \"<query>\"` — 在当前 active channel、可见 DM 和 card discussion 的消息正文中做大小写不敏感的字面匹配，返回最新 10 条消息
 
 ### 线程链
 

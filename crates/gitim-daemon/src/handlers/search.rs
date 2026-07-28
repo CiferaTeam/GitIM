@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::path::Path;
 
 use gitim_core::dm::parse_dm_filename;
@@ -11,7 +12,7 @@ use crate::state::SharedState;
 const SEARCH_RESULT_LIMIT: usize = 10;
 
 pub async fn handle_search(state: SharedState, query: String) -> Response {
-    if query.is_empty() {
+    if query.trim().is_empty() {
         return Response::error("search requires a non-empty query");
     }
     let repo_root = state.repo_root.clone();
@@ -33,11 +34,12 @@ fn search_messages(
     query: &str,
 ) -> Vec<SearchMessage> {
     let mut matches = Vec::new();
+    let normalized_query = query.to_lowercase();
 
     scan_flat_threads(
         &repo_root.join("channels"),
         "channel",
-        query,
+        &normalized_query,
         &mut matches,
         |path| {
             path.file_stem()
@@ -46,25 +48,37 @@ fn search_messages(
         },
     );
 
-    scan_card_threads(repo_root, query, &mut matches);
+    scan_card_threads(repo_root, &normalized_query, &mut matches);
 
     if let Some(current_user) = current_user {
-        scan_flat_threads(&repo_root.join("dm"), "dm", query, &mut matches, |path| {
-            let channel = path.file_stem()?.to_str()?;
-            let (first, second) = parse_dm_filename(channel)?;
-            (first == current_user || second == current_user).then(|| channel.to_string())
-        });
+        scan_flat_threads(
+            &repo_root.join("dm"),
+            "dm",
+            &normalized_query,
+            &mut matches,
+            |path| {
+                let channel = path.file_stem()?.to_str()?;
+                let (first, second) = parse_dm_filename(channel)?;
+                (first == current_user || second == current_user).then(|| channel.to_string())
+            },
+        );
     }
 
-    matches.sort_by(|left, right| {
-        right
-            .timestamp
-            .cmp(&left.timestamp)
-            .then_with(|| left.channel.cmp(&right.channel))
-            .then_with(|| right.line_number.cmp(&left.line_number))
-    });
-    matches.truncate(SEARCH_RESULT_LIMIT);
     matches
+}
+
+fn newest_first(left: &SearchMessage, right: &SearchMessage) -> Ordering {
+    right
+        .timestamp
+        .cmp(&left.timestamp)
+        .then_with(|| left.channel.cmp(&right.channel))
+        .then_with(|| right.line_number.cmp(&left.line_number))
+}
+
+fn insert_latest_match(matches: &mut Vec<SearchMessage>, message: SearchMessage) {
+    matches.push(message);
+    matches.sort_by(newest_first);
+    matches.truncate(SEARCH_RESULT_LIMIT);
 }
 
 fn scan_flat_threads(
@@ -162,19 +176,53 @@ fn scan_thread(
         }
     };
 
-    matches.extend(
-        thread
-            .messages()
-            .into_iter()
-            .filter(|message| message.body.contains(query))
-            .map(|message| SearchMessage {
-                channel: channel.to_string(),
-                channel_type: channel_type.to_string(),
-                line_number: message.line_number,
-                parent_line: message.point_to,
-                author: message.author.to_string(),
-                timestamp: message.timestamp.clone(),
-                body: message.body.clone(),
-            }),
-    );
+    for message in thread.messages() {
+        if message.body.to_lowercase().contains(query) {
+            insert_latest_match(
+                matches,
+                SearchMessage {
+                    channel: channel.to_string(),
+                    channel_type: channel_type.to_string(),
+                    line_number: message.line_number,
+                    parent_line: message.point_to,
+                    author: message.author.to_string(),
+                    timestamp: message.timestamp.clone(),
+                    body: message.body.clone(),
+                },
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(line_number: u64) -> SearchMessage {
+        SearchMessage {
+            channel: "general".to_string(),
+            channel_type: "channel".to_string(),
+            line_number,
+            parent_line: 0,
+            author: "alice".to_string(),
+            timestamp: format!("20260728T{line_number:06}Z"),
+            body: format!("message {line_number}"),
+        }
+    }
+
+    #[test]
+    fn latest_match_collection_never_exceeds_result_limit() {
+        let mut matches = Vec::new();
+
+        for line_number in 1..=100 {
+            insert_latest_match(&mut matches, message(line_number));
+            assert!(matches.len() <= SEARCH_RESULT_LIMIT);
+        }
+
+        let lines = matches
+            .iter()
+            .map(|message| message.line_number)
+            .collect::<Vec<_>>();
+        assert_eq!(lines, (91..=100).rev().collect::<Vec<_>>());
+    }
 }

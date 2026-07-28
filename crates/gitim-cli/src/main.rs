@@ -159,7 +159,7 @@ enum Commands {
 
     /// Search messages
     Search {
-        /// Search query
+        /// Case-insensitive message body query
         query: String,
     },
 
