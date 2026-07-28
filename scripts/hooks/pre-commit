@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Pre-commit hook: enforce cargo fmt + cargo clippy on the whole workspace.
+# Pre-commit hook: enforce cargo fmt + warning-free cargo clippy on the whole workspace.
 # Install via: scripts/install-hooks.sh
-# Bypass (emergency only): git commit --no-verify
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel)"
@@ -14,10 +13,10 @@ if ! cargo fmt --all -- --check; then
   exit 1
 fi
 
-echo "==> cargo clippy --workspace --all-targets --no-deps --locked"
-if ! cargo clippy --workspace --all-targets --no-deps --locked; then
+echo "==> cargo clippy --workspace --all-targets --no-deps --locked -- -D warnings"
+if ! cargo clippy --workspace --all-targets --no-deps --locked -- -D warnings; then
   echo
-  echo "ERROR: cargo clippy failed. Fix the errors above (or use --no-verify in emergencies)."
+  echo "ERROR: cargo clippy found an error or warning. Fix the diagnostics above."
   echo "       If the error mentions Cargo.lock, run 'cargo update' first."
   exit 1
 fi

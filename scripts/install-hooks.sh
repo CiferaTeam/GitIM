@@ -49,4 +49,3 @@ DST="$HOOKS_DIR/pre-commit"
 ln -sf "$SRC" "$DST"
 
 echo "Installed: $DST -> $SRC"
-echo "Bypass an emergency commit with: git commit --no-verify"

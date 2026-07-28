@@ -8,6 +8,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.lints.rust]
+warnings = { level = "deny", priority = -2 }
 unused = { level = "deny", priority = -1 }
 deprecated = "deny"
 nonstandard_style = { level = "deny", priority = -1 }
@@ -22,10 +23,10 @@ print_stderr = "deny"
 todo = "deny"
 unimplemented = "deny"
 
-# 纪律 lint(warn — 测试中合理,生产代码 review;后续逐步 deny)
-unwrap_used = "warn"
-expect_used = "warn"
-panic = "warn"
+# 纪律 lint
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
