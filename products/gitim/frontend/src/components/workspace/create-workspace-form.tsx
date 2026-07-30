@@ -1,9 +1,13 @@
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
+import { FolderOpen, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
-import { toSlug, validateSlug } from "@/lib/client";
+import {
+  pickWorkspaceDirectory,
+  toSlug,
+  validateSlug,
+} from "@/lib/client";
 import type {
   CreateWorkspaceRequest,
   WorkspaceProvider,
@@ -74,12 +78,34 @@ export function CreateWorkspaceForm({
   const [remoteUrl, setRemoteUrl] = useState("");
   const [token, setToken] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
   function mapError(code: string | null, fallback: string | null): string | null {
     if (!code) return fallback;
     return ERROR_MESSAGES[code] ?? fallback;
+  }
+
+  async function handleChooseFolder() {
+    setLocalError(null);
+    clearError();
+    setPicking(true);
+    const result = await pickWorkspaceDirectory();
+    setPicking(false);
+
+    if (!result.ok) {
+      setLocalError(result.error ?? "Could not open the folder picker.");
+      return;
+    }
+    const selectedPath = result.data?.path;
+    if (!selectedPath) return;
+
+    setPath(selectedPath);
+    if (!slugManuallyEdited) {
+      const basename = selectedPath.split(/[\\/]/).filter(Boolean).pop() ?? "";
+      setSlug(toSlug(basename));
+    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -135,7 +161,6 @@ export function CreateWorkspaceForm({
     setSubmitting(false);
 
     if (!created) {
-      // Store error was populated; useEffect above will sync it.
       const s = useWorkspaceStore.getState();
       setLocalError(mapError(s.errorCode, s.error));
       return;
@@ -151,25 +176,38 @@ export function CreateWorkspaceForm({
           htmlFor="ws-path"
           className="text-xs font-medium text-text-secondary"
         >
-          Workspace path
+          Workspace folder
         </label>
-        <Input
-          id="ws-path"
-          data-testid="ws-path"
-          value={path}
-          onChange={(e) => {
-            const next = e.target.value;
-            setPath(next);
-            if (!slugManuallyEdited) {
-              const basename = next.split(/[\\/]/).pop() ?? "";
-              setSlug(toSlug(basename));
-            }
-          }}
-          placeholder="/path/to/workspace"
-          className="font-mono text-sm"
-          disabled={submitting}
-          autoFocus
-        />
+        <div className="flex gap-2">
+          <Input
+            id="ws-path"
+            data-testid="ws-path"
+            value={path}
+            readOnly
+            placeholder="No folder selected"
+            className="font-mono text-sm"
+            disabled={submitting || picking}
+          />
+          <Button
+            type="button"
+            data-testid="ws-folder-picker"
+            variant="outline"
+            onClick={() => void handleChooseFolder()}
+            disabled={submitting || picking}
+            autoFocus
+          >
+            {picking ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <FolderOpen className="size-3.5" />
+            )}
+            {picking ? "Choosing..." : path ? "Change folder" : "Choose folder"}
+          </Button>
+        </div>
+        <p className="text-[11px] leading-relaxed text-text-muted">
+          On macOS, use New Folder in the picker to create and select an empty
+          workspace folder.
+        </p>
       </div>
 
       <div className="space-y-1.5">
@@ -346,6 +384,7 @@ export function CreateWorkspaceForm({
           data-testid="ws-create-submit"
           disabled={
             submitting ||
+            picking ||
             !path.trim() ||
             (provider === "github" && !acknowledged)
           }

@@ -29,6 +29,7 @@ use crate::github::{
 };
 use crate::gitignore::ensure_defaults_gitignored;
 use crate::slug::RESERVED;
+use crate::workspace_picker::{PickerError, PickerOutcome};
 use gitim_client::{ensure_daemon_with_log, ClientError, GitimClient};
 use gitim_core::me_json::MeJson;
 use gitim_core::types::{UserMeta, MAX_INTRODUCTION_LEN};
@@ -252,6 +253,11 @@ struct WorkspaceCreateResponse {
     workspace_name: String,
     path: String,
     provider: GitProvider,
+}
+
+#[derive(Serialize)]
+struct WorkspaceDirectoryPickerResponse {
+    path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -6938,6 +6944,61 @@ async fn workspaces_create(
     }
 }
 
+async fn workspace_directory_pick() -> axum::response::Response {
+    workspace_directory_pick_with(crate::workspace_picker::pick_workspace_directory).await
+}
+
+async fn workspace_directory_pick_with<F>(picker: F) -> axum::response::Response
+where
+    F: FnOnce() -> Result<PickerOutcome, PickerError> + Send + 'static,
+{
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    match tokio::task::spawn_blocking(picker).await {
+        Ok(Ok(PickerOutcome::Selected(path))) => (
+            StatusCode::OK,
+            Json(WorkspaceDirectoryPickerResponse { path: Some(path) }),
+        )
+            .into_response(),
+        Ok(Ok(PickerOutcome::Cancelled)) => (
+            StatusCode::OK,
+            Json(WorkspaceDirectoryPickerResponse { path: None }),
+        )
+            .into_response(),
+        Ok(Err(PickerError::Unavailable)) => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorBody::with_code(
+                "Native folder selection is available on macOS.",
+                "directory_picker_unavailable",
+            )),
+        )
+            .into_response(),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "native workspace folder picker failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    "Could not open the macOS folder picker.",
+                    "directory_picker_failed",
+                )),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "workspace folder picker task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    "Could not open the macOS folder picker.",
+                    "directory_picker_failed",
+                )),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// HTTP handler for `GET /hermes/llm/providers`.
 ///
 /// Resolves the hermes home directory from `HERMES_HOME` (or `~/.hermes`),
@@ -7203,6 +7264,10 @@ fn build_router_with_asset_router(
         .route("/health", get(health))
         .route("/workspaces", get(workspaces_list).post(workspaces_create))
         .route(
+            "/runtime/workspace-directory",
+            post(workspace_directory_pick),
+        )
+        .route(
             "/workspaces/{slug}",
             get(workspaces_get).delete(workspaces_delete),
         )
@@ -7370,6 +7435,55 @@ mod tests {
             Some("https://github.com/org/repo")
         );
         assert_eq!(req.git.token.as_deref(), Some("ghp_x"));
+    }
+
+    #[tokio::test]
+    async fn workspace_directory_picker_returns_selected_path() {
+        use http_body_util::BodyExt;
+
+        let response = workspace_directory_pick_with(|| {
+            Ok(crate::workspace_picker::PickerOutcome::Selected(
+                "/Users/dev/Workspaces/team-alpha".to_string(),
+            ))
+        })
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "path": "/Users/dev/Workspaces/team-alpha" })
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_directory_picker_returns_null_when_cancelled() {
+        use http_body_util::BodyExt;
+
+        let response =
+            workspace_directory_pick_with(|| Ok(crate::workspace_picker::PickerOutcome::Cancelled))
+                .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body, serde_json::json!({ "path": null }));
+    }
+
+    #[tokio::test]
+    async fn workspace_directory_picker_reports_unsupported_platforms() {
+        use http_body_util::BodyExt;
+
+        let response = workspace_directory_pick_with(|| {
+            Err(crate::workspace_picker::PickerError::Unavailable)
+        })
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_IMPLEMENTED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_code"], "directory_picker_unavailable");
     }
 
     #[test]

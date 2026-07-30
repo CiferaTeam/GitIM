@@ -556,6 +556,35 @@ export async function listWorkspaces(): Promise<
   }
 }
 
+export async function pickWorkspaceDirectory(): Promise<
+  ApiResponse<{ path: string | null }>
+> {
+  if (isLocalMode()) {
+    return {
+      ok: false,
+      error: "Native folder selection requires the local GitIM runtime.",
+      error_code: "runtime_required",
+    };
+  }
+  try {
+    const res = await localNetworkFetch(
+      `${baseUrl()}/runtime/workspace-directory`,
+      { method: "POST" },
+    );
+    const data = await res.json();
+    if (!res.ok) {
+      return {
+        ok: false,
+        error: data.error ?? `HTTP ${res.status}`,
+        error_code: data.error_code,
+      };
+    }
+    return { ok: true, data };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 export async function createWorkspace(
   req: CreateWorkspaceRequest,
 ): Promise<ApiResponse<{ slug: string; workspace_name: string; path: string; provider: string }>> {

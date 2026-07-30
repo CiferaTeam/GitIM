@@ -35,6 +35,7 @@ mod usage_accounting;
 pub mod usage_log;
 pub mod user_config;
 pub mod workspace;
+pub mod workspace_picker;
 
 pub use agent::{provision_agent, AgentConfig, AgentHandle};
 pub use agent_loop::{detect_steering_trigger, format_changes_as_prompt, AgentLoop};
