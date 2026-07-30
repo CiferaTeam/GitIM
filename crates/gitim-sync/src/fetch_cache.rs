@@ -631,6 +631,21 @@ mod tests {
     }
 
     #[test]
+    fn discovery_rejects_an_explicit_empty_fetch_refspec() {
+        let fixture = WorkspaceFixture::human();
+        fixture.add_fetch_refspec("");
+
+        assert_eq!(
+            fixture
+                .storage()
+                .origin_fetch_refspecs()
+                .expect("read fetch refspecs"),
+            vec![STANDARD_FETCH_REFSPEC.to_string(), String::new()]
+        );
+        assert!(discover(&fixture.storage()).is_none());
+    }
+
+    #[test]
     fn state_future_success_timestamp_is_stale() {
         let revision = ConfigRevision {
             modified_unix_nanos: 11,

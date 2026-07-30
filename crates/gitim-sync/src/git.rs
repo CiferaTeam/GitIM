@@ -311,12 +311,7 @@ impl GitStorage {
         let value = String::from_utf8(output.stdout).map_err(|_| {
             GitError::CommandFailed("origin fetch refspecs are not UTF-8".to_string())
         })?;
-        Ok(value
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .map(str::to_string)
-            .collect())
+        Ok(value.lines().map(|line| line.trim().to_string()).collect())
     }
 
     pub fn fetch(&self) -> Result<(), GitError> {
