@@ -348,7 +348,13 @@ fn is_valid_bare_cache(path: &Path, expected_object_format: GitObjectFormat) -> 
         return false;
     }
     let marker = run_git_command(
-        &["config", "--null", "--get-all", CACHE_SCHEMA_MARKER_KEY],
+        &[
+            "config",
+            "--local",
+            "--null",
+            "--get-all",
+            CACHE_SCHEMA_MARKER_KEY,
+        ],
         path,
     )
     .ok()
@@ -357,9 +363,12 @@ fn is_valid_bare_cache(path: &Path, expected_object_format: GitObjectFormat) -> 
     if !marker {
         return false;
     }
-    run_git_command(&["config", "--get-regexp", "^(remote\\.|url\\.)"], path)
-        .ok()
-        .is_some_and(|output| output.status.code() == Some(1) && output.stdout.is_empty())
+    run_git_command(
+        &["config", "--local", "--get-regexp", "^(remote\\.|url\\.)"],
+        path,
+    )
+    .ok()
+    .is_some_and(|output| output.status.code() == Some(1) && output.stdout.is_empty())
 }
 
 fn validate_cache_generation(generation: u64) -> Result<(), GitError> {
@@ -619,7 +628,12 @@ impl GitStorage {
             return Err(error);
         }
         if let Err(error) = run_git(
-            &["config", CACHE_SCHEMA_MARKER_KEY, CACHE_SCHEMA_MARKER_VALUE],
+            &[
+                "config",
+                "--local",
+                CACHE_SCHEMA_MARKER_KEY,
+                CACHE_SCHEMA_MARKER_VALUE,
+            ],
             &temporary,
         ) {
             let _ = remove_cache_path(&temporary);
@@ -1535,6 +1549,31 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
+    fn enter_isolated_global_config_test(test_name: &str, config: &str) -> bool {
+        const CHILD_TEST_ENV: &str = "GITIM_CACHE_GLOBAL_CONFIG_TEST";
+        if std::env::var(CHILD_TEST_ENV).as_deref() == Ok(test_name) {
+            return true;
+        }
+
+        let isolated = tempfile::TempDir::new().unwrap();
+        let global_config = isolated.path().join("global.gitconfig");
+        std::fs::write(&global_config, config).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD_TEST_ENV, test_name)
+            .env("GIT_CONFIG_GLOBAL", &global_config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated test {test_name} failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
     fn cache_test_refs(root: &Path, prefix: &str) -> BTreeMap<String, String> {
         let format_arg = "--format=%(refname)%00%(objectname)";
         let output = git_test_output(root, &["for-each-ref", format_arg, prefix]);
@@ -1676,12 +1715,129 @@ mod tests {
         );
         assert!(!cache_path.join("corrupt").exists());
         let remote_config = std::process::Command::new("git")
-            .args(["config", "--get-regexp", "^remote\\."])
+            .args(["config", "--local", "--get-regexp", "^remote\\."])
             .current_dir(&cache_path)
             .output()
             .unwrap();
         assert!(!remote_config.status.success());
         assert!(remote_config.stdout.is_empty());
+    }
+
+    #[test]
+    fn cache_global_url_rewrite_does_not_invalidate_owned_repository() {
+        const TEST_NAME: &str =
+            "git::tests::cache_global_url_rewrite_does_not_invalidate_owned_repository";
+        if !enter_isolated_global_config_test(
+            TEST_NAME,
+            "[url \"file:///tmp/cache-global-rewrite\"]\n\tinsteadOf = cache-source:\n",
+        ) {
+            return;
+        }
+
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &["init", "--bare", cache_path.to_str().unwrap()],
+        );
+        git_test_ok(
+            &cache_path,
+            &[
+                "config",
+                "--local",
+                CACHE_SCHEMA_MARKER_KEY,
+                CACHE_SCHEMA_MARKER_VALUE,
+            ],
+        );
+        git_test_ok(
+            &cache_path,
+            &["config", "--local", "cache.test-marker", "present"],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", "cache.test-marker"]
+            ),
+            "present"
+        );
+    }
+
+    #[test]
+    fn cache_global_marker_does_not_authenticate_arbitrary_bare() {
+        const TEST_NAME: &str =
+            "git::tests::cache_global_marker_does_not_authenticate_arbitrary_bare";
+        if !enter_isolated_global_config_test(TEST_NAME, "[gitim]\n\tfetch-cache-schema = 1\n") {
+            return;
+        }
+
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &["init", "--bare", cache_path.to_str().unwrap()],
+        );
+        git_test_ok(
+            &cache_path,
+            &["config", "--local", "cache.unowned-marker", "present"],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", CACHE_SCHEMA_MARKER_KEY]
+            ),
+            CACHE_SCHEMA_MARKER_VALUE
+        );
+        let unowned_marker = std::process::Command::new("git")
+            .args(["config", "--local", "--get", "cache.unowned-marker"])
+            .current_dir(&cache_path)
+            .output()
+            .unwrap();
+        assert_eq!(unowned_marker.status.code(), Some(1));
+    }
+
+    #[test]
+    fn cache_global_and_local_markers_do_not_create_multivalue_mismatch() {
+        const TEST_NAME: &str =
+            "git::tests::cache_global_and_local_markers_do_not_create_multivalue_mismatch";
+        if !enter_isolated_global_config_test(TEST_NAME, "[gitim]\n\tfetch-cache-schema = 1\n") {
+            return;
+        }
+
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &["init", "--bare", cache_path.to_str().unwrap()],
+        );
+        git_test_ok(
+            &cache_path,
+            &[
+                "config",
+                "--local",
+                CACHE_SCHEMA_MARKER_KEY,
+                CACHE_SCHEMA_MARKER_VALUE,
+            ],
+        );
+        git_test_ok(
+            &cache_path,
+            &["config", "--local", "cache.test-marker", "present"],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", "cache.test-marker"]
+            ),
+            "present"
+        );
     }
 
     #[cfg(unix)]
@@ -1710,7 +1866,10 @@ mod tests {
             .file_type()
             .is_dir());
         assert_eq!(
-            git_test_output(&cache_path, &["config", "--get", CACHE_SCHEMA_MARKER_KEY]),
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", CACHE_SCHEMA_MARKER_KEY]
+            ),
             CACHE_SCHEMA_MARKER_VALUE
         );
         assert_eq!(
@@ -1747,7 +1906,10 @@ mod tests {
         GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
 
         assert_eq!(
-            git_test_output(&cache_path, &["config", "--get", CACHE_SCHEMA_MARKER_KEY]),
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", CACHE_SCHEMA_MARKER_KEY]
+            ),
             CACHE_SCHEMA_MARKER_VALUE
         );
         assert_eq!(
@@ -1755,7 +1917,7 @@ mod tests {
             "sha1"
         );
         let unsafe_config = std::process::Command::new("git")
-            .args(["config", "--get-regexp", "^(remote\\.|url\\.)"])
+            .args(["config", "--local", "--get-regexp", "^(remote\\.|url\\.)"])
             .current_dir(&cache_path)
             .output()
             .unwrap();

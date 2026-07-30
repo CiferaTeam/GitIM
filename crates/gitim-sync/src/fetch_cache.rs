@@ -454,6 +454,10 @@ fn log_cache_outcome(context: &CacheContext, outcome: &'static str, generation: 
 }
 
 fn cleanup_inactive_generations(context: &CacheContext, generation: u64) {
+    if !GitStorage::cache_repository_is_valid(&context.cache_repository, context.object_format) {
+        log_cache_outcome(context, "cleanup_invalid_cache", Some(generation));
+        return;
+    }
     if let Err(error) = GitStorage::cleanup_cache_generations(&context.cache_repository, generation)
     {
         tracing::debug!(
@@ -720,7 +724,7 @@ where
             generation
         }
     };
-    if needs_publication && !manifest.is_empty() {
+    if needs_publication {
         if let Err(error) =
             GitStorage::ensure_bare_cache(&context.cache_repository, context.object_format)
         {
@@ -734,16 +738,19 @@ where
             );
             return direct_fallback(repo, progress, trustworthy_previous_generation);
         }
-        if let Err(error) = repo.publish_cache_generation(&context.cache_repository, generation) {
-            tracing::debug!(
-                workspace = %context.workspace.display(),
-                outcome = "fallback",
-                reason = "publication_failed",
-                generation,
-                error = %error,
-                "shared pull-fetch cache"
-            );
-            return direct_fallback(repo, progress, trustworthy_previous_generation);
+        if !manifest.is_empty() {
+            if let Err(error) = repo.publish_cache_generation(&context.cache_repository, generation)
+            {
+                tracing::debug!(
+                    workspace = %context.workspace.display(),
+                    outcome = "fallback",
+                    reason = "publication_failed",
+                    generation,
+                    error = %error,
+                    "shared pull-fetch cache"
+                );
+                return direct_fallback(repo, progress, trustworthy_previous_generation);
+            }
         }
     }
     let completed_at = clock();
@@ -2324,6 +2331,149 @@ mod tests {
             assert_eq!(
                 git_stdout(&fixture.seed, &["rev-parse", "refs/heads/main"]),
                 git_stdout(follower.root(), &["rev-parse", "refs/remotes/origin/main"])
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn orchestration_empty_snapshot_replaces_cache_symlink_without_touching_target() {
+            use std::os::unix::fs::symlink;
+
+            let fixture = OrchestrationFixture::new();
+            let leader = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &leader,
+                &mut progress,
+                now,
+                PublicationHooks::default(),
+            ));
+
+            let external = fixture.workspace.root.path().join("external-cache.git");
+            git_ok(
+                fixture.workspace.root.path(),
+                &["init", "--bare", path_arg(&external)],
+            );
+            git_ok(
+                &external,
+                &[
+                    "config",
+                    "--local",
+                    "remote.origin.url",
+                    "https://external.invalid/cache.git",
+                ],
+            );
+            git_ok(
+                &external,
+                &["config", "--local", "cache.external-marker", "preserve"],
+            );
+            git_ok(
+                &external,
+                &[
+                    "fetch",
+                    path_arg(&fixture.seed),
+                    "+refs/heads/main:refs/gitim-fetch-cache/generations/7/heads/main",
+                ],
+            );
+            let external_refs_before = cache_refs(&external, "refs/gitim-fetch-cache/generations/");
+            let external_config_before = git_stdout(&external, &["config", "--local", "--list"]);
+
+            std::fs::rename(
+                &context.cache_repository,
+                context.runtime_dir.join("fetch-cache-owned-backup.git"),
+            )
+            .expect("move owned cache");
+            symlink(&external, &context.cache_repository).expect("link external cache");
+            git_ok(
+                &fixture.origin,
+                &["config", "receive.denyDeleteCurrent", "ignore"],
+            );
+            git_ok(&fixture.seed, &["push", "origin", "--delete", "main"]);
+
+            assert_ready(fetch_for_pull_at(
+                &leader,
+                &mut progress,
+                now + Duration::from_secs(30),
+                PublicationHooks::default(),
+            ));
+
+            let empty = read_state(&context.state_file)
+                .expect("read empty state")
+                .expect("empty state");
+            assert_eq!(empty.generation, 2);
+            assert!(empty.manifest.is_empty());
+            assert!(std::fs::symlink_metadata(&context.cache_repository)
+                .expect("inspect rebuilt cache")
+                .file_type()
+                .is_dir());
+            assert!(GitStorage::cache_repository_is_valid(
+                &context.cache_repository,
+                context.object_format
+            ));
+            assert_eq!(
+                cache_refs(&external, "refs/gitim-fetch-cache/generations/",),
+                external_refs_before
+            );
+            assert_eq!(
+                git_stdout(&external, &["config", "--local", "--list"]),
+                external_config_before
+            );
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn orchestration_cleanup_rejects_invalid_cache_symlink() {
+            use std::os::unix::fs::symlink;
+
+            let fixture = OrchestrationFixture::new();
+            let leader = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &leader,
+                &mut progress,
+                now,
+                PublicationHooks::default(),
+            ));
+
+            let external = fixture.workspace.root.path().join("cleanup-external.git");
+            git_ok(
+                fixture.workspace.root.path(),
+                &["init", "--bare", path_arg(&external)],
+            );
+            git_ok(
+                &external,
+                &["config", "--local", "cache.external-marker", "preserve"],
+            );
+            git_ok(
+                &external,
+                &[
+                    "fetch",
+                    path_arg(&fixture.seed),
+                    "+refs/heads/main:refs/gitim-fetch-cache/generations/7/heads/main",
+                ],
+            );
+            let external_refs_before = cache_refs(&external, "refs/gitim-fetch-cache/generations/");
+            let external_config_before = git_stdout(&external, &["config", "--local", "--list"]);
+            std::fs::rename(
+                &context.cache_repository,
+                context.runtime_dir.join("fetch-cache-cleanup-backup.git"),
+            )
+            .expect("move owned cache");
+            symlink(&external, &context.cache_repository).expect("link external cache");
+
+            cleanup_inactive_generations(&context, 1);
+
+            assert_eq!(
+                cache_refs(&external, "refs/gitim-fetch-cache/generations/",),
+                external_refs_before
+            );
+            assert_eq!(
+                git_stdout(&external, &["config", "--local", "--list"]),
+                external_config_before
             );
         }
 

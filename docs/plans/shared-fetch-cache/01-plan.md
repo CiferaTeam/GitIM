@@ -1037,7 +1037,7 @@ Co-authored-by: Codex <codex@openai.com>
   generations through an immutable `N+1` publication, and cleans inactive refs
   after empty snapshots.
 - Scoped verification passed:
-  `cargo test -p gitim-sync` ran 213 tests,
+  `cargo test -p gitim-sync` ran 218 tests,
   `cargo fmt --all -- --check`,
   `cargo clippy -p gitim-sync --all-targets --no-deps --locked`, and
   `git diff --check`.

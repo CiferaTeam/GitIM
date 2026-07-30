@@ -164,12 +164,13 @@ The leader uses its verified clone `origin` for remote access. The remote fetch
 writes only to a private shadow namespace in that clone. The shared bare
 repository imports the shadow refs and objects through a local filesystem path.
 
-The shared repository is a direct directory, carries the private
+The shared repository is a direct directory, carries the private local
 `gitim.fetch-cache-schema=1` marker, uses the same `sha1` or `sha256` object
-format reported by the clone, and has no `remote.*` or `url.*` configuration.
-Missing or invalid markers, object-format mismatches, arbitrary bare
-repositories, and symlinks are quarantined and replaced without following the
-old path.
+format reported by the clone, and has no local `remote.*` or `url.*`
+configuration. Global Git configuration does not authenticate or invalidate a
+cache repository. Missing or invalid local markers, object-format mismatches,
+arbitrary bare repositories, and symlinks are quarantined and replaced without
+following the old path.
 
 Every published generation stores the credential-free `git.remote_url` from
 the workspace configuration as its remote identity. The lock holder validates
@@ -411,6 +412,9 @@ The reviewed 16 new-path groups have implemented coverage:
 - Eligibility and state:
   `discovery_accepts_exact_human_layout`,
   `discovery_accepts_exact_agent_layout_with_matching_handler`,
+  `discovery_rejects_runtime_directory_symlink`,
+  `discovery_rejects_multiple_origin_urls_in_any_order`,
+  `discovery_rejects_empty_or_whitespace_padded_origin_url`,
   `discovery_requires_one_standard_fetch_refspec`,
   `discovery_falls_back_for_origin_repository_identity_mismatch`,
   `discovery_falls_back_for_origin_token_mismatch`,
@@ -419,8 +423,12 @@ The reviewed 16 new-path groups have implemented coverage:
 - Git parsing and snapshots:
   `cache_manifest_parser_rejects_malformed_records`,
   `cache_generation_manifest_parser_rejects_malformed_records`,
-  `cache_shadow_fetch_force_updates_and_prunes_deleted_branches`, and
-  `cache_generation_publish_and_import_preserve_follower_only_refs_and_head`.
+  `cache_shadow_fetch_force_updates_and_prunes_deleted_branches`,
+  `cache_generation_publish_and_import_preserve_follower_only_refs_and_head`,
+  `cache_global_url_rewrite_does_not_invalidate_owned_repository`,
+  `cache_global_marker_does_not_authenticate_arbitrary_bare`,
+  `cache_global_and_local_markers_do_not_create_multivalue_mismatch`, and
+  `cache_sha256_generation_publishes_and_imports`.
 - Locking, refresh, and cooldowns:
   `orchestration_lock_contention_is_bounded_and_neutral`,
   `orchestration_lock_open_failure_uses_direct_fetch`,
@@ -432,7 +440,11 @@ The reviewed 16 new-path groups have implemented coverage:
   `orchestration_transient_failure_uses_interval_with_three_second_floor`.
 - Recovery and publication:
   `orchestration_corrupt_state_falls_back_and_disables_cache_for_process`,
-  `orchestration_active_generation_manifest_mismatch_uses_direct_fetch`,
+  `orchestration_fresh_follower_repairs_invalid_active_generation`,
+  `orchestration_stale_leader_repairs_invalid_applied_generation`,
+  `orchestration_active_repair_preserves_remote_error_classification`,
+  `orchestration_empty_snapshot_replaces_cache_symlink_without_touching_target`,
+  `orchestration_cleanup_rejects_invalid_cache_symlink`,
   `orchestration_publication_failure_keeps_old_generation_active`,
   `orchestration_state_replacement_selects_only_complete_generation`, and
   `orchestration_cache_artifacts_exclude_credentials`.
@@ -569,7 +581,7 @@ finding above.
 
 ## Final verification
 
-- `cargo test -p gitim-sync` — pass, 213 tests across unit and integration
+- `cargo test -p gitim-sync` — pass, 218 tests across unit and integration
   targets.
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy -p gitim-sync --all-targets --no-deps --locked` — pass.
