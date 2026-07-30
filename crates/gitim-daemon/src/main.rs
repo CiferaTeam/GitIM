@@ -156,6 +156,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let storage = gitim_sync::git::GitStorage::new(&app_state.repo_root);
         if storage.has_remote() {
+            match gitim_sync::skill::guard::SkillSyncGuard::new(&app_state.repo_root) {
+                Ok(guard) => {
+                    if let Err(e) =
+                        guard.resume_pending_recoveries(&storage, &app_state.commit_lock)
+                    {
+                        tracing::warn!("boot: pending rotation recovery failed: {}", e);
+                    }
+                }
+                Err(e) => tracing::warn!("boot: initialize rotation recovery guard failed: {}", e),
+            }
             if let Ok(branch) = storage.current_branch() {
                 let _ = storage.fetch();
                 let origin_redirected = matches!(

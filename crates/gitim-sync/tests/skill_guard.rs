@@ -3735,6 +3735,139 @@ fn stale_user_archive_is_quarantined_while_its_descendant_message_remains_publis
 }
 
 #[test]
+fn stale_user_archive_journal_resumes_on_the_remote_winners_epoch() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+
+    fs::create_dir_all(local_root.join("archive/users")).unwrap();
+    git(
+        local_root,
+        &[
+            "mv",
+            "users/alice.meta.yaml",
+            "archive/users/alice.meta.yaml",
+        ],
+    );
+    commit_all(
+        local_root,
+        "archive: depart user @alice\n\nGitim-Skills-Tree: absent",
+        ALICE,
+    );
+    let archive_commit = git_output(local_root, &["rev-parse", "HEAD"]);
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260730T235000Z] cross epoch descendant\n",
+    )
+    .unwrap();
+    commit_all(local_root, "message after stale archive", ALICE);
+    let stale_head = git_output(local_root, &["rev-parse", "HEAD"]);
+
+    let before = SkillRepositorySnapshot {
+        active_users: BTreeSet::from([ALICE.to_owned()]),
+        ..Default::default()
+    };
+    let bootstrap = bootstrap_plan(&before, 'T');
+    apply_plan(fixture.writer_root(), &bootstrap);
+    commit_all(fixture.writer_root(), &bootstrap.commit_message, ALICE);
+    git(fixture.writer_root(), &["push", "origin", "HEAD:main"]);
+    let journal_upstream = git_output(fixture.writer_root(), &["rev-parse", "HEAD"]);
+
+    let writer_storage = GitStorage::new(fixture.writer_root());
+    let archive = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        try_fire_rotation_impl(
+            &writer_storage,
+            &Mutex::new(()),
+            "main",
+            1,
+            archive.path(),
+            ("winner", "winner@example.com"),
+            "2026-07-30T23:55:00Z",
+        )
+        .unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+
+    let audit_ref = format!("refs/gitim/quarantine/user-archive-{stale_head}");
+    git(local_root, &["update-ref", &audit_ref, &stale_head]);
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    fs::write(
+        local_root.join(".gitim/skill-quarantine.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": stale_head,
+            "branch": "main",
+            "upstream_oid": journal_upstream,
+            "original_head": stale_head,
+            "quarantine_ref": audit_ref,
+            "phase": "prepared",
+            "branch_head": stale_head,
+            "kind": "user_archive",
+            "excluded_commits": [archive_commit],
+            "semantic_error_code": "skill_tree_changed"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let first = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap_err();
+    assert!(matches!(
+        first,
+        gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::PushConflict)
+    ));
+    assert_eq!(
+        git_output(local_root, &["symbolic-ref", "--short", "HEAD"]),
+        "main-epoch-2"
+    );
+    assert_eq!(
+        git_output(
+            local_root,
+            &["rev-parse", "--abbrev-ref", "main-epoch-2@{upstream}"]
+        ),
+        "origin/main-epoch-2"
+    );
+    assert!(local_root.join("users/alice.meta.yaml").exists());
+    assert!(!local_root.join("archive/users/alice.meta.yaml").exists());
+    assert!(local_root.join("channels/general.thread").exists());
+    assert!(!local_root.join(".gitim/skill-quarantine.json").exists());
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+    assert!(matches!(outcome, GuardedPushOutcome::Pushed));
+    let published = git_output(
+        local_root,
+        &[
+            "show",
+            "refs/remotes/origin/main-epoch-2:channels/general.thread",
+        ],
+    );
+    assert_eq!(published.matches("cross epoch descendant").count(), 1);
+    assert!(git_status(
+        local_root,
+        &[
+            "cat-file",
+            "-e",
+            "refs/remotes/origin/main-epoch-2:users/alice.meta.yaml"
+        ]
+    )
+    .is_some());
+    assert!(git_status(
+        local_root,
+        &[
+            "cat-file",
+            "-e",
+            "refs/remotes/origin/main-epoch-2:archive/users/alice.meta.yaml"
+        ]
+    )
+    .is_none());
+}
+
+#[test]
 fn sync_initial_push_publishes_ordinary_work_through_quarantine_replay() {
     let fixture = RemoteRepository::new();
     let storage = GitStorage::new(fixture.clone_root());

@@ -67,6 +67,29 @@ fn unchecked_working_branch_push_is_private_to_the_guard_implementation() {
     );
 }
 
+#[test]
+fn daemon_boot_resumes_rotation_journals_before_epoch_cleanup_or_follow() {
+    let main_source = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("main.rs"),
+    )
+    .unwrap();
+    let resume = main_source
+        .find("resume_pending_recoveries(&storage, &app_state.commit_lock)")
+        .unwrap();
+    let cleanup = main_source
+        .find("gitim_sync::rotate::cleanup_failed_fire(")
+        .unwrap();
+    let follow = main_source
+        .find("IntegrationOperation::FollowEpochRedirect")
+        .unwrap();
+    assert!(
+        resume < cleanup && resume < follow,
+        "durable recovery must run before normal epoch cleanup or follow"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_writer_categories_publish_through_real_production_paths() {
     for case in WriterCase::ALL {
