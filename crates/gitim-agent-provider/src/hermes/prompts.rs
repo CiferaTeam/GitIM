@@ -1,12 +1,12 @@
 //! Hermes-tailored system-prompt sections.
 //!
 //! The defaults in `crate::prompts` were written for Claude / Codex agents
-//! that rely on the runtime-managed `AGENTS.md` + `notes/` filesystem memory
+//! that rely on the runtime-managed `AGENTS.md` + `workspace/` filesystem memory
 //! model (cold-start re-injection, `[[RESET]]`-driven handoff). Hermes has
 //! its own memory mechanism (frozen system-prompt snapshot, `memory` tool
 //! against `MEMORY.md` / `USER.md`, in-loop compression that auto-reloads
 //! identity files), so any prompt that tells the agent to read or write
-//! `AGENTS.md` / `notes/` is either dead text or actively misleading.
+//! `AGENTS.md` / `workspace/` is either dead text or actively misleading.
 //!
 //! These hermes-only versions drop the filesystem-memory references but
 //! preserve every other operating principle (channel discipline, container
@@ -19,7 +19,7 @@ use crate::PromptContext;
 
 /// Hermes-flavored identity. Same role definition, same IM-event posture,
 /// same `gitim` CLI discipline as `default_identity` — but the
-/// `AGENTS.md` / `notes/` carve-out is removed because hermes routes
+/// `AGENTS.md` / `workspace/` carve-out is removed because hermes routes
 /// persistent memory through its own files, not through the workspace clone.
 pub fn identity(ctx: &PromptContext) -> String {
     format!(
@@ -90,7 +90,7 @@ pub fn gitim_api(ctx: &PromptContext) -> String {
 }
 
 /// Hermes-flavored collaboration norms. Identical to `default_collaboration`
-/// in spirit, but the "用你的记忆 / `notes/` 跟踪每条线" line is rewritten
+/// in spirit, but the "用你的记忆 / `workspace/` 跟踪每条线" line is rewritten
 /// to drop the filesystem-memory channel suggestion — the local-cost
 /// argument for keeping channels separate stands on its own without
 /// recommending a specific storage medium (hermes has its own).
@@ -188,8 +188,8 @@ mod tests {
             "AGENTS.md must not appear — hermes uses its own memory mechanism"
         );
         assert!(
-            !s.contains("notes/"),
-            "notes/ must not appear — hermes uses its own memory mechanism"
+            !s.contains("workspace/"),
+            "workspace/ must not appear — hermes uses its own memory mechanism"
         );
     }
 
@@ -211,7 +211,7 @@ mod tests {
     fn collaboration_drops_filesystem_memory_refs() {
         let s = collaboration(&ctx());
         assert!(
-            !s.contains("notes/"),
+            !s.contains("workspace/"),
             "filesystem memory channel suggestion removed"
         );
         assert!(
@@ -247,7 +247,7 @@ mod tests {
         use crate::{create, ProviderConfig};
         let provider = create("hermes", ProviderConfig::default()).unwrap();
         let prompt = provider.build_system_prompt(&ctx());
-        for needle in ["AGENTS.md", "notes/", "[[RESET]]"] {
+        for needle in ["AGENTS.md", "workspace/", "[[RESET]]"] {
             assert!(
                 !prompt.contains(needle),
                 "hermes system_prompt must not contain `{needle}`: found in output"

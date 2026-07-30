@@ -118,6 +118,31 @@ fn default_memory_uses_agents_md() {
 }
 
 #[test]
+fn default_prompt_uses_one_private_workspace_directory() {
+    let provider = gitim_agent_provider::create("mock", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+    let prompt = provider.build_system_prompt(&ctx);
+
+    assert!(
+        prompt.contains("workspace/"),
+        "default prompt must expose the private workspace"
+    );
+    assert!(
+        !prompt.contains("notes/"),
+        "default prompt must not teach a second private directory"
+    );
+
+    let cold_start = provider.prompt_cold_start(&ctx);
+    assert!(
+        cold_start.contains("workspace/"),
+        "cold start must initialize the private workspace"
+    );
+}
+
+#[test]
 fn claude_provider_uses_claude_md() {
     // Claude provider rewrites the default file name back to CLAUDE.md so the
     // agent reads/writes the conventional Claude memory file.

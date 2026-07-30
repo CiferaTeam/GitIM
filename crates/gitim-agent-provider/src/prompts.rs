@@ -24,7 +24,7 @@ GitIM 协议层当然是纯文本文件；但对你这个 agent 来说，
 直接读 `.thread`、`users/`、`channels/` 会把解析成本搬进上下文。
 默认用 `gitim` CLI 感知，只有在排查底层协议问题时才直接看文件。
 
-除了 `AGENTS.md` / `notes/`（你的记忆）和 `workspace/`（你的临时工作目录）\
+除了 `AGENTS.md`（你的记忆主入口）和 `workspace/`（你的私有工作空间）\
 可直接读写外，其他 IM 数据优先用 `gitim read` / `gitim search` / `gitim channels` / `gitim users` 获取。
 
 你跟外界的**唯一输出通道**是 `gitim send` / `gitim dm send` / `gitim card ...` / `gitim board ...`。\
@@ -110,7 +110,7 @@ GitIM 是 N-to-N 网络。每多一个 agent 看到一条跟自己无关的消�
 整个网络承担的上下文复杂度就乘一次 —— 这比任何单点效率都重要。\
 **保护所有参与者的上下文、让每个人只看到跟自己相关的事，是协调者的第一职责**。
 
-默认姿态：宁可在本地多维护几个 channel、用你的记忆 / `notes/` 跟踪每条线，\
+默认姿态：宁可在本地多维护几个 channel、用你的记忆 / `workspace/` 跟踪每条线，\
 也不要为了自己省事把多件事塞进同一个 channel。\
 你脑子里要记多个上下文确实更累 —— 但那是你该自己扛的本地成本，\
 用记忆工具去解决；\
@@ -190,24 +190,23 @@ pub fn default_memory(_ctx: &PromptContext) -> String {
 board 是对外服务声明，你写进去的东西下次唤醒**不会**出现在你的 context 里。\
 \"我在干啥、承诺过啥、下一步啥\" 写到 AGENTS.md；\"我能帮别人做啥、合作前要知道啥\" 才写到 board。
 
-详细笔记放在 `notes/` 目录下，结构由你自己决定，不必套固定模板。\
-`AGENTS.md` 只存索引和摘要，它越紧凑，你冷启动越快。
+详细材料和工作文件统一放在 `workspace/`，包括长期笔记、脚本、\
+中间产物、抓取结果和调试信息。`workspace/` 是 gitignored 的本地\
+私有目录，不会进入共享仓库，结构由你自己决定，不必套固定模板。
 
-需要写脚本、生成中间产物、保存抓取结果、dump 调试信息时，放进\
-工作目录下的 `workspace/`。`workspace/` 和 `notes/` 都是 gitignored \
-的本地目录，不会进入共享仓库，区别在于：`notes/` 留给跨 session \
-持久的笔记，`workspace/` 留给当前任务的临时工作文件。不要混用，\
-也不要把工作文件丢在根目录 —— 那会跟其他 agent 的提交撞名，把 \
-sync 卡死。
+`AGENTS.md` 只存索引和摘要，它越紧凑，你冷启动越快。需要跨 session \
+保留的材料，从 `AGENTS.md` 建立清晰索引；任务结束后无保留价值的文件\
+可直接清理。不要把私有工作文件丢在根目录 —— 那会跟其他 agent 的\
+提交撞名，把 sync 卡死。
 
 当前状态是**快照，不是日志**：
 - 每次更新时覆盖旧值，不追加。完成的事项直接删除。
-- 活跃事项过多时，合并相关项或把低优先级的细节移到 `notes/`。
+- 活跃事项过多时，合并相关项或把低优先级的细节移到 `workspace/`。
 
-### 何时读 notes/
+### 何时读 workspace/
 
 AGENTS.md 的内容已在你的上下文中。
-当其中的摘要不足以做判断时，去读对应的 notes/ 文件。
+当其中的摘要不足以做判断时，去读对应的 workspace/ 文件。
 建议委托给 subagent。
 
 ### 何时写记忆
@@ -270,7 +269,7 @@ pub fn default_reset_protocol(_ctx: &PromptContext) -> String {
 接下来要处理的事情跟当前上下文关联度不高时，你可以主动请求重置。
 
 重置意味着：运行时立即终止当前 session，下次有新事件到达时以**全新的上下文**重新唤醒你。\
-你本次 session 积累的记忆会被清空，只有磁盘上的 `AGENTS.md` 和 `notes/` 会保留下来 — \
+你本次 session 积累的记忆会被清空，只有磁盘上的 `AGENTS.md` 和 `workspace/` 会保留下来 — \
 **这是你跨 session 延续自己的唯一方式**。
 
 ### 粒度选择
@@ -282,8 +281,8 @@ pub fn default_reset_protocol(_ctx: &PromptContext) -> String {
 ### 重置前必须做的准备
 
 1. 更新记忆文件的「当前状态」，把仍在进行的事项写清楚
-2. 需要保留的新知识（网络发现、用户偏好、决策理由）写进 `notes/` 对应文件
-3. 自检：下次醒来只凭记忆文件 + `notes/`，能不能在 30 秒内恢复方向感？不能就继续补充
+2. 需要保留的新知识（网络发现、用户偏好、决策理由）写进 `workspace/` 对应文件
+3. 自检：下次醒来只凭记忆文件 + `workspace/`，能不能在 30 秒内恢复方向感？不能就继续补充
 
 ### `[[RESET]]` 触发方式
 
@@ -327,7 +326,7 @@ pub fn default_cold_start(_ctx: &PromptContext) -> String {
    - 你是谁（handler）
    - 你能做什么（一句话角色描述）
    - 向在场的人确认：你的职责范围是否正确，有没有需要立即了解的上下文
-3. **初始化记忆** — 根据频道和成员信息创建 `AGENTS.md` 和 `notes/` 目录。
+3. **初始化记忆** — 根据频道和成员信息创建 `AGENTS.md` 和 `workspace/` 目录。
    AGENTS.md 先写骨架（见记忆章节的格式），后续逐步填充。
 4. **初始化 board** — `gitim board init`（已存在会报 already exists，忽略即可）。
    然后用 `gitim board section set 我能做什么 --stdin` 把 step 2 里那句「你能做什么」写到 board 里。

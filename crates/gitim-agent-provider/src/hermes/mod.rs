@@ -51,7 +51,7 @@ impl Provider for HermesProvider {
         true
     }
 
-    /// Drop sections that assume the Claude-style `AGENTS.md` + `notes/`
+    /// Drop sections that assume the Claude-style `AGENTS.md` + `workspace/`
     /// filesystem-memory model. Hermes manages identity / memory through
     /// SOUL.md + MEMORY.md / USER.md inside the profile directory, and
     /// re-loads them after every in-loop compression, so re-injecting any
@@ -67,17 +67,17 @@ impl Provider for HermesProvider {
         String::new()
     }
     fn prompt_cold_start(&self, _ctx: &PromptContext) -> String {
-        // No bootstrap of AGENTS.md / notes/ for hermes — memory files live
+        // No bootstrap of AGENTS.md / workspace/ for hermes — memory files live
         // inside the hermes profile and are seeded by `hermes_profile`.
         String::new()
     }
 
-    /// Hermes-flavored identity (drops the `AGENTS.md` / `notes/` carve-out).
+    /// Hermes-flavored identity (drops the `AGENTS.md` / `workspace/` carve-out).
     fn prompt_identity(&self, ctx: &PromptContext) -> String {
         prompts::identity(ctx)
     }
     /// Hermes-flavored collaboration norms (drops the
-    /// "用你的记忆 / `notes/` 跟踪每条线" filesystem-memory suggestion).
+    /// "用你的记忆 / `workspace/` 跟踪每条线" filesystem-memory suggestion).
     fn prompt_collaboration(&self, ctx: &PromptContext) -> String {
         prompts::collaboration(ctx)
     }
