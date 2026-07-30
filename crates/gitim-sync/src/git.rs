@@ -230,6 +230,39 @@ fn parse_cache_ref_manifest(stdout: &[u8]) -> Result<BTreeMap<String, String>, G
     Ok(manifest)
 }
 
+fn parse_cache_generation_manifest(
+    stdout: &[u8],
+    generation: u64,
+) -> Result<BTreeMap<String, String>, GitError> {
+    let stdout = std::str::from_utf8(stdout)
+        .map_err(|_| GitError::CommandFailed("invalid fetch-cache ref manifest".to_string()))?;
+    let generation_prefix = format!("{CACHE_GENERATIONS}/{generation}/heads/");
+    let shadow_prefix = format!("{CACHE_REMOTE_HEADS}/");
+    let mut manifest = BTreeMap::new();
+    for record in stdout.lines() {
+        let (ref_name, object_id) = record.split_once('\0').ok_or_else(|| {
+            GitError::CommandFailed("invalid fetch-cache ref manifest".to_string())
+        })?;
+        let branch = ref_name
+            .strip_prefix(&generation_prefix)
+            .filter(|branch| !branch.is_empty())
+            .ok_or_else(|| {
+                GitError::CommandFailed("invalid fetch-cache ref manifest".to_string())
+            })?;
+        if object_id.is_empty()
+            || object_id.contains('\0')
+            || manifest
+                .insert(format!("{shadow_prefix}{branch}"), object_id.to_string())
+                .is_some()
+        {
+            return Err(GitError::CommandFailed(
+                "invalid fetch-cache ref manifest".to_string(),
+            ));
+        }
+    }
+    Ok(manifest)
+}
+
 fn cache_path_argument(path: &Path) -> Result<&str, GitError> {
     path.to_str()
         .ok_or_else(|| GitError::CommandFailed("fetch-cache path is not UTF-8".to_string()))
@@ -475,6 +508,18 @@ impl GitStorage {
         let prefix = format!("{CACHE_REMOTE_HEADS}/");
         let output = run_git(&["for-each-ref", format_arg, &prefix], &self.root)?;
         parse_cache_ref_manifest(&output.stdout)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cache_generation_manifest(
+        cache_path: &Path,
+        generation: u64,
+    ) -> Result<BTreeMap<String, String>, GitError> {
+        validate_cache_generation(generation)?;
+        let format_arg = "--format=%(refname)%00%(objectname)";
+        let prefix = format!("{CACHE_GENERATIONS}/{generation}/heads/");
+        let output = run_git(&["for-each-ref", format_arg, &prefix], cache_path)?;
+        parse_cache_generation_manifest(&output.stdout, generation)
     }
 
     #[allow(dead_code)]
