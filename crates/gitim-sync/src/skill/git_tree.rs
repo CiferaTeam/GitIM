@@ -321,17 +321,18 @@ fn normalize_private_index(repo: &GitStorage, private_index: &Path) -> Result<Pa
     }
 
     for protected in protected_index_paths(repo)? {
-        if normalized_private == protected.logical || normalized_private == protected.resolved {
+        if paths_match_protected_index(&normalized_private, &protected.logical)
+            || paths_match_protected_index(&normalized_private, &protected.resolved)
+        {
             return Err(invalid_input(
                 "private index path resolves to a protected Git index",
             ));
         }
-        if let (Some(private_metadata), Some(protected_metadata)) =
-            (private_metadata.as_ref(), protected.metadata.as_ref())
+        if private_metadata.is_some()
+            && protected.exists
+            && paths_refer_to_same_file(&normalized_private, &protected.logical)?
         {
-            if same_file(private_metadata, protected_metadata) {
-                return Err(invalid_input("private index aliases a protected Git index"));
-            }
+            return Err(invalid_input("private index aliases a protected Git index"));
         }
     }
     Ok(normalized_private)
@@ -340,7 +341,7 @@ fn normalize_private_index(repo: &GitStorage, private_index: &Path) -> Result<Pa
 struct ProtectedIndex {
     logical: PathBuf,
     resolved: PathBuf,
-    metadata: Option<fs::Metadata>,
+    exists: bool,
 }
 
 fn protected_index_paths(repo: &GitStorage) -> Result<Vec<ProtectedIndex>, GitError> {
@@ -402,15 +403,11 @@ fn normalize_protected_index(path: PathBuf) -> Result<ProtectedIndex, GitError> 
     } else {
         logical_parent.canonicalize()?.join(file_name)
     };
-    let metadata = if metadata.is_some() {
-        Some(fs::metadata(&logical)?)
-    } else {
-        None
-    };
+    let exists = metadata.is_some();
     Ok(ProtectedIndex {
         logical,
         resolved,
-        metadata,
+        exists,
     })
 }
 
@@ -422,16 +419,20 @@ fn symlink_metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>, GitEr
     }
 }
 
-#[cfg(unix)]
-fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    left.dev() == right.dev() && left.ino() == right.ino()
+fn paths_match_protected_index(candidate: &Path, protected: &Path) -> bool {
+    if candidate == protected {
+        return true;
+    }
+    candidate.parent() == protected.parent()
+        && protected.file_name().and_then(|name| name.to_str()) == Some("index")
+        && candidate
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("index"))
 }
 
-#[cfg(not(unix))]
-fn same_file(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
-    false
+fn paths_refer_to_same_file(left: &Path, right: &Path) -> Result<bool, GitError> {
+    same_file::is_same_file(left, right).map_err(GitError::from)
 }
 
 fn validate_revision_argument(value: &str) -> Result<(), GitError> {
@@ -536,6 +537,30 @@ fn run_skill_git_command(repo: &GitStorage, args: &[&str]) -> Result<Output, Git
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portable_same_file_check_detects_hardlinks() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempfile::tempdir()?;
+        let original = directory.path().join("original");
+        let hardlink = directory.path().join("hardlink");
+        fs::write(&original, b"same file\n")?;
+        fs::hard_link(&original, &hardlink)?;
+
+        assert!(paths_refer_to_same_file(&original, &hardlink)?);
+        Ok(())
+    }
+
+    #[test]
+    fn index_case_fold_requires_the_same_exact_parent() {
+        assert!(!paths_match_protected_index(
+            Path::new("Parent/INDEX"),
+            Path::new("parent/index")
+        ));
+        assert!(!paths_match_protected_index(
+            Path::new("parent/CONFIG"),
+            Path::new("parent/config")
+        ));
+    }
 
     #[test]
     fn skill_git_command_timeout_is_60_seconds() {

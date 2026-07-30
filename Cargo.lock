@@ -1000,6 +1000,7 @@ dependencies = [
  "notify",
  "rand 0.9.5",
  "regex",
+ "same-file",
  "serde",
  "serde_json",
  "serde_yaml",

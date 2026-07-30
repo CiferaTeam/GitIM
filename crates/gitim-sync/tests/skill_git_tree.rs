@@ -825,6 +825,37 @@ fn missing_linked_worktree_index_path_remains_protected() {
     assert!(result.is_err(), "missing protected index path was accepted");
 }
 
+#[test]
+fn missing_linked_worktree_index_case_variant_remains_protected() {
+    let fixture = three_worktrees();
+    fs::remove_file(&fixture.linked_b_index).unwrap();
+    let uppercase_index = fixture.linked_b_index.with_file_name("INDEX");
+    assert!(!fixture.linked_b_index.exists());
+    assert!(!uppercase_index.exists());
+
+    let result = build_private_index_commit(
+        &GitStorage::new(&fixture.main),
+        &request(
+            &fixture.base,
+            &uppercase_index,
+            "missing-linked-index-case-variant",
+        ),
+    );
+
+    assert!(
+        !fixture.linked_b_index.exists(),
+        "lowercase protected index path was created"
+    );
+    assert!(
+        !uppercase_index.exists(),
+        "case-variant private index path was created"
+    );
+    assert!(
+        result.is_err(),
+        "case-variant protected index path was accepted"
+    );
+}
+
 #[cfg(unix)]
 struct SymlinkedAdminWorktree {
     worktrees: ThreeWorktrees,
