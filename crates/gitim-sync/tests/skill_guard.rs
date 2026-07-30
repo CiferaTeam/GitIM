@@ -3084,6 +3084,91 @@ fn quarantine_resume_clears_a_moved_journal_after_its_exact_push_succeeded() {
 }
 
 #[test]
+fn completed_quarantine_with_a_deleted_inflight_tail_ref_converges() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+    let upstream = git_output(local_root, &["rev-parse", "origin/main"]);
+
+    fs::create_dir_all(local_root.join("skills/poison")).unwrap();
+    fs::write(local_root.join("skills/poison/SKILL.md"), "# invalid\n").unwrap();
+    fs::write(local_root.join("ordinary.txt"), "sanitized original\n").unwrap();
+    commit_all(local_root, "mixed bypass", ALICE);
+    let original = git_output(local_root, &["rev-parse", "HEAD"]);
+    let quarantine_ref = format!("refs/gitim/quarantine/skill-{original}");
+    git(local_root, &["update-ref", &quarantine_ref, &original]);
+
+    git(local_root, &["reset", "--hard", &upstream]);
+    fs::write(local_root.join("ordinary.txt"), "sanitized original\n").unwrap();
+    commit_all(local_root, "sanitized replay", ALICE);
+    fs::write(local_root.join("handler-tail.txt"), "in-flight tail\n").unwrap();
+    commit_all(local_root, "handler tail", ALICE);
+    let tail_head = git_output(local_root, &["rev-parse", "HEAD"]);
+    git(local_root, &["reset", "--hard", &upstream]);
+    fs::write(local_root.join("ordinary.txt"), "sanitized original\n").unwrap();
+    fs::write(local_root.join("handler-tail.txt"), "in-flight tail\n").unwrap();
+    commit_all(local_root, "repaired tail replay", ALICE);
+    let repaired = git_output(local_root, &["rev-parse", "HEAD"]);
+    let tail_ref = format!("refs/gitim/quarantine/tail-{original}-{tail_head}");
+    git(local_root, &["update-ref", &tail_ref, &tail_head]);
+    git(local_root, &["push", "origin", &format!("{repaired}:main")]);
+
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    let journal_path = local_root.join(".gitim/skill-quarantine.json");
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": original,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "original_head": original,
+            "quarantine_ref": quarantine_ref,
+            "phase": "completed",
+            "repaired_head": repaired,
+            "branch_head": original,
+            "tail_ref": tail_ref,
+            "tail_base": upstream,
+            "tail_head": tail_head,
+            "completion_head": repaired
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    git(local_root, &["update-ref", "-d", &tail_ref, &tail_head]);
+    git(local_root, &["reflog", "expire", "--expire=now", "--all"]);
+    git(local_root, &["gc", "--prune=now"]);
+    assert!(git_status(local_root, &["show-ref", "--verify", &tail_ref]).is_none());
+    assert!(git_status(
+        local_root,
+        &["cat-file", "-e", &format!("{tail_head}^{{commit}}")]
+    )
+    .is_none());
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        GuardedPushOutcome::RepairedAndPushed { .. }
+    ));
+    assert!(!journal_path.exists());
+    assert_eq!(
+        git_output(local_root, &["rev-parse", &quarantine_ref]),
+        original
+    );
+    assert_eq!(
+        git_output(
+            local_root,
+            &["show", "refs/remotes/origin/main:handler-tail.txt"],
+        ),
+        "in-flight tail"
+    );
+}
+
+#[test]
 fn quarantine_resume_replays_the_original_ref_after_remote_advance_and_thread_conflict() {
     let fixture = RemoteRepository::new();
     let storage = GitStorage::new(fixture.clone_root());
@@ -4442,6 +4527,439 @@ fn prepared_user_archive_replays_an_unpushed_active_epoch_tail() {
         ],
     );
     assert_eq!(published.matches("semantic descendant").count(), 1);
+}
+
+#[test]
+fn semantic_recovery_rejects_an_unpushed_active_tail_that_changes_epoch_metadata() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+
+    fs::create_dir_all(local_root.join("archive/users")).unwrap();
+    git(
+        local_root,
+        &[
+            "mv",
+            "users/alice.meta.yaml",
+            "archive/users/alice.meta.yaml",
+        ],
+    );
+    commit_all(
+        local_root,
+        "archive: depart user @alice\n\nGitim-Skills-Tree: absent",
+        ALICE,
+    );
+    let archive_commit = git_output(local_root, &["rev-parse", "HEAD"]);
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260731T030000Z] semantic descendant\n",
+    )
+    .unwrap();
+    commit_all(local_root, "message after stale archive", ALICE);
+    let stale_head = git_output(local_root, &["rev-parse", "HEAD"]);
+
+    let before = SkillRepositorySnapshot {
+        active_users: BTreeSet::from([ALICE.to_owned()]),
+        ..Default::default()
+    };
+    let bootstrap = bootstrap_plan(&before, 'Z');
+    apply_plan(fixture.writer_root(), &bootstrap);
+    commit_all(fixture.writer_root(), &bootstrap.commit_message, ALICE);
+    git(fixture.writer_root(), &["push", "origin", "HEAD:main"]);
+    let journal_upstream = git_output(fixture.writer_root(), &["rev-parse", "HEAD"]);
+
+    let writer_storage = GitStorage::new(fixture.writer_root());
+    let archive = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        try_fire_rotation(
+            &writer_storage,
+            "main",
+            1,
+            archive.path(),
+            ("winner", "winner@example.com"),
+            "2026-07-31T03:01:00Z",
+        )
+        .unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+
+    storage.fetch().unwrap();
+    let accepted_epoch = git_output(
+        local_root,
+        &["show", "origin/main-epoch-2:gitim.epoch.yaml"],
+    );
+    git(
+        local_root,
+        &["checkout", "-b", "main-epoch-2", "origin/main-epoch-2"],
+    );
+    fs::write(
+        local_root.join("gitim.epoch.yaml"),
+        accepted_epoch.replace("epoch: 2", "epoch: 999"),
+    )
+    .unwrap();
+    fs::write(
+        local_root.join("channels/active-tail.thread"),
+        "[L000001][P000000][@alice][20260731T030100Z] malicious epoch tail\n",
+    )
+    .unwrap();
+    commit_all(local_root, "malicious active epoch tail", ALICE);
+    let malicious_head = git_output(local_root, &["rev-parse", "HEAD"]);
+    git(local_root, &["checkout", "main"]);
+
+    let audit_ref = format!("refs/gitim/quarantine/user-archive-{stale_head}");
+    git(local_root, &["update-ref", &audit_ref, &stale_head]);
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    let journal_path = local_root.join(".gitim/skill-quarantine.json");
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": stale_head,
+            "branch": "main",
+            "upstream_oid": journal_upstream,
+            "original_head": stale_head,
+            "quarantine_ref": audit_ref,
+            "phase": "prepared",
+            "branch_head": stale_head,
+            "kind": "user_archive",
+            "excluded_commits": [archive_commit],
+            "semantic_error_code": "skill_tree_changed"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let journal_bytes = fs::read(&journal_path).unwrap();
+
+    let blocked = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap_err();
+
+    assert!(matches!(
+        blocked,
+        gitim_sync::skill::checkpoint::SkillSyncError::LocalQuarantineBlocked(_)
+    ));
+    assert_eq!(git_output(local_root, &["rev-parse", "HEAD"]), stale_head);
+    assert_eq!(
+        git_output(local_root, &["rev-parse", "main-epoch-2"]),
+        malicious_head
+    );
+    assert_eq!(fs::read(&journal_path).unwrap(), journal_bytes);
+    assert_eq!(
+        git_output(
+            local_root,
+            &["show", "origin/main-epoch-2:gitim.epoch.yaml"],
+        ),
+        accepted_epoch
+    );
+}
+
+#[test]
+fn semantic_recovery_rejects_reloaded_active_tail_epoch_metadata() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+
+    fs::create_dir_all(local_root.join("archive/users")).unwrap();
+    git(
+        local_root,
+        &[
+            "mv",
+            "users/alice.meta.yaml",
+            "archive/users/alice.meta.yaml",
+        ],
+    );
+    commit_all(
+        local_root,
+        "archive: depart user @alice\n\nGitim-Skills-Tree: absent",
+        ALICE,
+    );
+    let archive_commit = git_output(local_root, &["rev-parse", "HEAD"]);
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260731T031000Z] reload descendant\n",
+    )
+    .unwrap();
+    commit_all(local_root, "message after stale archive", ALICE);
+    let stale_head = git_output(local_root, &["rev-parse", "HEAD"]);
+
+    let before = SkillRepositorySnapshot {
+        active_users: BTreeSet::from([ALICE.to_owned()]),
+        ..Default::default()
+    };
+    let bootstrap = bootstrap_plan(&before, 'A');
+    apply_plan(fixture.writer_root(), &bootstrap);
+    commit_all(fixture.writer_root(), &bootstrap.commit_message, ALICE);
+    git(fixture.writer_root(), &["push", "origin", "HEAD:main"]);
+    storage.fetch().unwrap();
+    let journal_upstream = git_output(local_root, &["rev-parse", "origin/main"]);
+    let replay_base = git_output(local_root, &["merge-base", &journal_upstream, &stale_head]);
+
+    let writer_storage = GitStorage::new(fixture.writer_root());
+    let archive = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        try_fire_rotation(
+            &writer_storage,
+            "main",
+            1,
+            archive.path(),
+            ("winner", "winner@example.com"),
+            "2026-07-31T03:11:00Z",
+        )
+        .unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+
+    storage.fetch().unwrap();
+    let active_remote = git_output(local_root, &["rev-parse", "origin/main-epoch-2"]);
+    let accepted_epoch = git_output(
+        local_root,
+        &["show", "origin/main-epoch-2:gitim.epoch.yaml"],
+    );
+    git(
+        local_root,
+        &["checkout", "-b", "main-epoch-2", "origin/main-epoch-2"],
+    );
+    fs::write(
+        local_root.join("gitim.epoch.yaml"),
+        accepted_epoch.replace("epoch: 2", "epoch: 998"),
+    )
+    .unwrap();
+    commit_all(local_root, "transient malicious epoch metadata", ALICE);
+    fs::write(local_root.join("gitim.epoch.yaml"), &accepted_epoch).unwrap();
+    fs::write(
+        local_root.join("channels/active-tail.thread"),
+        "[L000001][P000000][@alice][20260731T031100Z] reloaded malicious tail\n",
+    )
+    .unwrap();
+    commit_all(local_root, "restore epoch metadata with active tail", ALICE);
+    let malicious_head = git_output(local_root, &["rev-parse", "HEAD"]);
+    let tail_ref = format!("refs/gitim/quarantine/tail-{stale_head}-active-{malicious_head}");
+    git(local_root, &["update-ref", &tail_ref, &malicious_head]);
+    git(local_root, &["checkout", "main"]);
+
+    let audit_ref = format!("refs/gitim/quarantine/user-archive-{stale_head}");
+    git(local_root, &["update-ref", &audit_ref, &stale_head]);
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    let journal_path = local_root.join(".gitim/skill-quarantine.json");
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": stale_head,
+            "branch": "main",
+            "upstream_oid": active_remote,
+            "original_head": stale_head,
+            "quarantine_ref": audit_ref,
+            "phase": "prepared",
+            "branch_head": stale_head,
+            "kind": "user_archive",
+            "excluded_commits": [archive_commit],
+            "semantic_error_code": "skill_tree_changed",
+            "replay_base": replay_base,
+            "active_branch": "main-epoch-2",
+            "active_branch_head": malicious_head,
+            "active_tail_ref": tail_ref,
+            "active_tail_base": active_remote,
+            "active_tail_head": malicious_head
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let journal_bytes = fs::read(&journal_path).unwrap();
+
+    let blocked = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap_err();
+
+    assert!(matches!(
+        blocked,
+        gitim_sync::skill::checkpoint::SkillSyncError::LocalQuarantineBlocked(_)
+    ));
+    assert_eq!(git_output(local_root, &["rev-parse", "HEAD"]), stale_head);
+    assert_eq!(
+        git_output(local_root, &["rev-parse", "main-epoch-2"]),
+        malicious_head
+    );
+    assert_eq!(fs::read(&journal_path).unwrap(), journal_bytes);
+    assert_eq!(
+        git_output(
+            local_root,
+            &["show", "origin/main-epoch-2:gitim.epoch.yaml"],
+        ),
+        accepted_epoch
+    );
+}
+
+#[test]
+fn completed_semantic_quarantine_with_a_deleted_active_tail_ref_converges() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+
+    fs::create_dir_all(local_root.join("archive/users")).unwrap();
+    git(
+        local_root,
+        &[
+            "mv",
+            "users/alice.meta.yaml",
+            "archive/users/alice.meta.yaml",
+        ],
+    );
+    commit_all(
+        local_root,
+        "archive: depart user @alice\n\nGitim-Skills-Tree: absent",
+        ALICE,
+    );
+    let archive_commit = git_output(local_root, &["rev-parse", "HEAD"]);
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260731T025000Z] completed semantic descendant\n",
+    )
+    .unwrap();
+    commit_all(local_root, "message after stale archive", ALICE);
+    let stale_head = git_output(local_root, &["rev-parse", "HEAD"]);
+    let audit_ref = format!("refs/gitim/quarantine/user-archive-{stale_head}");
+    git(local_root, &["update-ref", &audit_ref, &stale_head]);
+
+    let before = SkillRepositorySnapshot {
+        active_users: BTreeSet::from([ALICE.to_owned()]),
+        ..Default::default()
+    };
+    let bootstrap = bootstrap_plan(&before, 'Y');
+    apply_plan(fixture.writer_root(), &bootstrap);
+    commit_all(fixture.writer_root(), &bootstrap.commit_message, ALICE);
+    git(fixture.writer_root(), &["push", "origin", "HEAD:main"]);
+    storage.fetch().unwrap();
+    let journal_upstream = git_output(local_root, &["rev-parse", "origin/main"]);
+    let replay_base = git_output(local_root, &["merge-base", &journal_upstream, &stale_head]);
+
+    let writer_storage = GitStorage::new(fixture.writer_root());
+    let archive = tempfile::tempdir().unwrap();
+    assert!(matches!(
+        try_fire_rotation(
+            &writer_storage,
+            "main",
+            1,
+            archive.path(),
+            ("winner", "winner@example.com"),
+            "2026-07-31T02:51:00Z",
+        )
+        .unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+
+    storage.fetch().unwrap();
+    let active_remote = git_output(local_root, &["rev-parse", "origin/main-epoch-2"]);
+    git(
+        local_root,
+        &["checkout", "-b", "main-epoch-2", "origin/main-epoch-2"],
+    );
+    fs::write(
+        local_root.join("channels/active-tail.thread"),
+        "[L000001][P000000][@alice][20260731T025100Z] completed active tail\n",
+    )
+    .unwrap();
+    commit_all(local_root, "active epoch ordinary tail", ALICE);
+    let active_tail_head = git_output(local_root, &["rev-parse", "HEAD"]);
+    git(local_root, &["reset", "--hard", &active_remote]);
+    fs::write(
+        local_root.join("channels/active-tail.thread"),
+        "[L000001][P000000][@alice][20260731T025100Z] completed active tail\n",
+    )
+    .unwrap();
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260731T025000Z] completed semantic descendant\n",
+    )
+    .unwrap();
+    commit_all(local_root, "sanitized semantic replay", ALICE);
+    let repaired = git_output(local_root, &["rev-parse", "HEAD"]);
+    git(
+        local_root,
+        &[
+            "update-ref",
+            "refs/heads/main",
+            "refs/remotes/origin/main",
+            &stale_head,
+        ],
+    );
+
+    let tail_ref = format!("refs/gitim/quarantine/tail-{stale_head}-active-{active_tail_head}");
+    git(local_root, &["update-ref", &tail_ref, &active_tail_head]);
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    let journal_path = local_root.join(".gitim/skill-quarantine.json");
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": stale_head,
+            "branch": "main",
+            "upstream_oid": active_remote,
+            "original_head": stale_head,
+            "quarantine_ref": audit_ref,
+            "phase": "completed",
+            "repaired_head": repaired,
+            "branch_head": stale_head,
+            "kind": "user_archive",
+            "excluded_commits": [archive_commit],
+            "semantic_error_code": "skill_tree_changed",
+            "replay_base": replay_base,
+            "active_branch": "main-epoch-2",
+            "active_branch_head": active_tail_head,
+            "active_tail_ref": tail_ref,
+            "active_tail_base": active_remote,
+            "active_tail_head": active_tail_head,
+            "completion_head": repaired
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    git(
+        local_root,
+        &["update-ref", "-d", &tail_ref, &active_tail_head],
+    );
+    git(local_root, &["reflog", "expire", "--expire=now", "--all"]);
+    git(local_root, &["gc", "--prune=now"]);
+    assert!(git_status(
+        local_root,
+        &["cat-file", "-e", &format!("{active_tail_head}^{{commit}}")]
+    )
+    .is_none());
+
+    let recovered = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap_err();
+
+    assert!(matches!(
+        recovered,
+        gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::PushConflict)
+    ));
+    assert!(!journal_path.exists());
+    assert_eq!(
+        git_output(local_root, &["rev-parse", &audit_ref]),
+        stale_head
+    );
+    assert!(local_root.join("channels/active-tail.thread").exists());
+    assert!(local_root.join("channels/general.thread").exists());
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+    assert!(matches!(outcome, GuardedPushOutcome::Pushed));
+    for path in ["channels/active-tail.thread", "channels/general.thread"] {
+        assert!(git_status(
+            local_root,
+            &[
+                "cat-file",
+                "-e",
+                &format!("refs/remotes/origin/main-epoch-2:{path}"),
+            ],
+        )
+        .is_some());
+    }
 }
 
 #[test]
