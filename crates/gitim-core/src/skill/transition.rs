@@ -6,10 +6,11 @@ use sha2::{Digest, Sha256};
 use crate::{formatter::format_event, types::Handler};
 
 use super::{
-    ProposalId, ProposalStatus, RequestId, RevisionId, SkillError, SkillMeta, SkillMutationRequest,
-    SkillMutationResult, SkillOperation, SkillProposalMeta, SkillPublicationMeta, SkillReceipt,
-    SkillReceiptRequest, SkillReceiptScope, SkillRepairScope, SkillRevisionMeta, SkillSlug,
-    ValidatedPackage, WorkspaceSkillMeta, SKILL_SCHEMA_VERSION,
+    portable_path::valid_portable_relative_paths, ProposalId, ProposalStatus, RequestId,
+    RevisionId, SkillError, SkillMeta, SkillMutationRequest, SkillMutationResult, SkillOperation,
+    SkillProposalMeta, SkillPublicationMeta, SkillReceipt, SkillReceiptRequest, SkillReceiptScope,
+    SkillRepairScope, SkillRevisionMeta, SkillSlug, ValidatedPackage, WorkspaceSkillMeta,
+    SKILL_SCHEMA_VERSION,
 };
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -20,6 +21,7 @@ pub struct SkillRepositorySnapshot {
     pub receipts: BTreeMap<RequestId, SkillReceipt>,
     pub active_users: BTreeSet<String>,
     pub conflict_checkpoint: Option<SkillConflictCheckpoint>,
+    pub repository_files: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,8 +121,9 @@ pub fn plan_skill_mutation(
 
     let actor = Handler::new(&context.actor).map_err(|_| SkillError::RoleTargetInvalid)?;
     let receipt = receipt_for_request(before, context, request, actor)?;
-    let (after, final_receipt) = execute_transition(before, receipt, context.package.as_ref())?;
+    let (mut after, final_receipt) = execute_transition(before, receipt, context.package.as_ref())?;
     let edits = expected_edits(before, &after, &final_receipt)?;
+    after.repository_files = apply_tree_edits(&before.repository_files, &edits);
     let changed_paths = edit_paths(&edits);
     let commit_evidence = SkillCommitEvidence {
         commit_author: context.actor.clone(),
@@ -307,13 +310,13 @@ pub fn validate_skill_commit(
     }
 
     let package = transition_package(after, &evidence.receipt)?;
-    let (expected_after, expected_receipt) =
+    let (mut expected_after, expected_receipt) =
         execute_transition(before, evidence.receipt.clone(), package)?;
+    let expected_edits = expected_edits(before, &expected_after, &evidence.receipt)?;
+    expected_after.repository_files = apply_tree_edits(&before.repository_files, &expected_edits);
     if expected_receipt != evidence.receipt || expected_after != *after {
         return Err(SkillError::SyncConflict);
     }
-
-    let expected_edits = expected_edits(before, after, &evidence.receipt)?;
     if edit_paths(&expected_edits) != evidence.changed_paths {
         return Err(SkillError::SyncConflict);
     }
@@ -501,7 +504,7 @@ fn execute_transition(
     };
     receipt.result = result;
     after.receipts.insert(receipt.id.clone(), receipt.clone());
-    validate_snapshot(&after)?;
+    validate_typed_snapshot(&after)?;
     Ok((after, receipt))
 }
 
@@ -521,11 +524,24 @@ fn validate_repair_pre_state(
     match &checkpoint.accepted_state {
         SkillRepairAcceptedState::Workspace(workspace) => {
             unaffected.workspace = Some(workspace.clone());
+            let accepted_bytes = checkpoint
+                .accepted_files
+                .get("skills/workspace.meta.yaml")
+                .ok_or(SkillError::SyncConflict)?;
+            unaffected.repository_files.insert(
+                "skills/workspace.meta.yaml".to_owned(),
+                accepted_bytes.clone(),
+            );
         }
         SkillRepairAcceptedState::ActiveSkill { slug, .. }
         | SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
             unaffected.active_skills.remove(slug);
             unaffected.archived_skills.remove(slug);
+            let active_prefix = format!("skills/{}/", slug.as_str());
+            let archived_prefix = format!("archive/skills/{}/", slug.as_str());
+            unaffected.repository_files.retain(|path, _| {
+                !path.starts_with(&active_prefix) && !path.starts_with(&archived_prefix)
+            });
         }
     }
     validate_snapshot(&unaffected)
@@ -940,6 +956,11 @@ fn apply_repair(
 }
 
 fn validate_snapshot(snapshot: &SkillRepositorySnapshot) -> Result<(), SkillError> {
+    validate_typed_snapshot(snapshot)?;
+    validate_repository_files(snapshot)
+}
+
+fn validate_typed_snapshot(snapshot: &SkillRepositorySnapshot) -> Result<(), SkillError> {
     if let Some(workspace) = &snapshot.workspace {
         if workspace.schema_version != SKILL_SCHEMA_VERSION
             || workspace.administrators.is_empty()
@@ -978,6 +999,68 @@ fn validate_snapshot(snapshot: &SkillRepositorySnapshot) -> Result<(), SkillErro
         }
     }
     Ok(())
+}
+
+fn validate_repository_files(snapshot: &SkillRepositorySnapshot) -> Result<(), SkillError> {
+    let mut expected_paths = BTreeSet::new();
+    if let Some(workspace) = &snapshot.workspace {
+        let path = "skills/workspace.meta.yaml";
+        let bytes = snapshot
+            .repository_files
+            .get(path)
+            .ok_or(SkillError::SyncConflict)?;
+        if !yaml_matches(bytes, workspace) {
+            return Err(SkillError::SyncConflict);
+        }
+        expected_paths.insert(path.to_owned());
+    }
+    for (slug, skill) in &snapshot.active_skills {
+        let root = format!("skills/{}", slug.as_str());
+        let skill_paths = skill_object_paths(&root, skill);
+        if !skill_paths
+            .iter()
+            .all(|path| snapshot.repository_files.contains_key(path))
+            || !accepted_object_bytes_match(&root, skill, &snapshot.repository_files)
+        {
+            return Err(SkillError::SyncConflict);
+        }
+        expected_paths.extend(skill_paths);
+    }
+    for (slug, skill) in &snapshot.archived_skills {
+        let root = format!("archive/skills/{}", slug.as_str());
+        let skill_paths = skill_object_paths(&root, skill);
+        if !skill_paths
+            .iter()
+            .all(|path| snapshot.repository_files.contains_key(path))
+            || !accepted_object_bytes_match(&root, skill, &snapshot.repository_files)
+        {
+            return Err(SkillError::SyncConflict);
+        }
+        expected_paths.extend(skill_paths);
+    }
+    for (request_id, receipt) in &snapshot.receipts {
+        let path = receipt_path(request_id);
+        let bytes = snapshot
+            .repository_files
+            .get(&path)
+            .ok_or(SkillError::SyncConflict)?;
+        if !yaml_matches(bytes, receipt) {
+            return Err(SkillError::SyncConflict);
+        }
+        expected_paths.insert(path);
+    }
+    if snapshot
+        .repository_files
+        .keys()
+        .any(|path| managed_skill_path(path) && !expected_paths.contains(path))
+    {
+        return Err(SkillError::SyncConflict);
+    }
+    Ok(())
+}
+
+fn managed_skill_path(path: &str) -> bool {
+    path.starts_with("skills/") || path.starts_with("archive/skills/")
 }
 
 fn validate_skill_object(
@@ -1380,10 +1463,7 @@ fn valid_repair_checkpoint(
         || checkpoint.accepted_tree.is_empty()
         || checkpoint.accepted_files.is_empty()
         || checkpoint.changed_paths.is_empty()
-        || checkpoint
-            .changed_paths
-            .iter()
-            .any(|path| !valid_portable_repository_path(path))
+        || !valid_portable_relative_paths(checkpoint.changed_paths.iter().map(String::as_str))
     {
         return false;
     }
@@ -1402,10 +1482,7 @@ fn valid_repair_checkpoint(
     if accepted_paths != expected_paths {
         return false;
     }
-    let Some(current_files) = current_repository_files(before) else {
-        return false;
-    };
-    if !repair_edits_materialize_accepted_state(checkpoint, &current_files) {
+    if !repair_edits_materialize_accepted_state(checkpoint, &before.repository_files) {
         return false;
     }
     let paths_in_scope = match &checkpoint.accepted_state {
@@ -1425,8 +1502,7 @@ fn valid_repair_checkpoint(
             checkpoint.changed_paths.iter().all(|path| {
                 path.starts_with(&accepted_prefix) || path.starts_with(&opposite_prefix)
             }) && opposite_repair_paths_match(
-                before.archived_skills.get(slug),
-                &format!("archive/skills/{}", slug.as_str()),
+                &before.repository_files,
                 &opposite_prefix,
                 &checkpoint.changed_paths,
             )
@@ -1437,8 +1513,7 @@ fn valid_repair_checkpoint(
             checkpoint.changed_paths.iter().all(|path| {
                 path.starts_with(&accepted_prefix) || path.starts_with(&opposite_prefix)
             }) && opposite_repair_paths_match(
-                before.active_skills.get(slug),
-                &format!("skills/{}", slug.as_str()),
+                &before.repository_files,
                 &opposite_prefix,
                 &checkpoint.changed_paths,
             )
@@ -1458,19 +1533,6 @@ fn valid_repair_checkpoint(
                 &checkpoint.accepted_files,
             ),
         }
-}
-
-fn valid_portable_repository_path(path: &str) -> bool {
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.contains('\\')
-        || path.chars().any(char::is_control)
-        || path.as_bytes().get(1) == Some(&b':')
-    {
-        return false;
-    }
-    path.split('/')
-        .all(|component| !component.is_empty() && component != "." && component != "..")
 }
 
 fn repair_edits_materialize_accepted_state(
@@ -1499,89 +1561,8 @@ fn repair_edits_materialize_accepted_state(
     })
 }
 
-fn current_repository_files(
-    snapshot: &SkillRepositorySnapshot,
-) -> Option<BTreeMap<String, Vec<u8>>> {
-    let mut files = BTreeMap::new();
-    if let Some(workspace) = &snapshot.workspace {
-        files.insert(
-            "skills/workspace.meta.yaml".to_owned(),
-            serde_yaml::to_string(workspace).ok()?.into_bytes(),
-        );
-    }
-    for (slug, skill) in &snapshot.active_skills {
-        insert_skill_object_files(&mut files, &format!("skills/{}", slug.as_str()), skill)?;
-    }
-    for (slug, skill) in &snapshot.archived_skills {
-        insert_skill_object_files(
-            &mut files,
-            &format!("archive/skills/{}", slug.as_str()),
-            skill,
-        )?;
-    }
-    Some(files)
-}
-
-fn insert_skill_object_files(
-    files: &mut BTreeMap<String, Vec<u8>>,
-    root: &str,
-    skill: &SkillObjectSnapshot,
-) -> Option<()> {
-    files.insert(
-        format!("{root}/skill.meta.yaml"),
-        serde_yaml::to_string(&skill.meta).ok()?.into_bytes(),
-    );
-    files.insert(
-        format!("{root}/history.thread"),
-        skill.history.as_bytes().to_vec(),
-    );
-    for (revision_id, revision) in &skill.revisions {
-        files.insert(
-            format!(
-                "{root}/revisions/{}/revision.meta.yaml",
-                revision_id.as_str()
-            ),
-            serde_yaml::to_string(&revision.meta).ok()?.into_bytes(),
-        );
-        for entry in &revision.package.entries {
-            files.insert(
-                format!(
-                    "{root}/revisions/{}/package/{}",
-                    revision_id.as_str(),
-                    entry.path
-                ),
-                entry.bytes.clone(),
-            );
-        }
-    }
-    for (revision_id, publication) in &skill.publications {
-        files.insert(
-            format!("{root}/publications/{}.meta.yaml", revision_id.as_str()),
-            serde_yaml::to_string(publication).ok()?.into_bytes(),
-        );
-    }
-    for (proposal_id, proposal) in &skill.proposals {
-        files.insert(
-            format!(
-                "{root}/proposals/{}/proposal.meta.yaml",
-                proposal_id.as_str()
-            ),
-            serde_yaml::to_string(&proposal.meta).ok()?.into_bytes(),
-        );
-        files.insert(
-            format!(
-                "{root}/proposals/{}/discussion.thread",
-                proposal_id.as_str()
-            ),
-            proposal.discussion.as_bytes().to_vec(),
-        );
-    }
-    Some(())
-}
-
 fn opposite_repair_paths_match(
-    rejected: Option<&SkillObjectSnapshot>,
-    rejected_root: &str,
+    repository_files: &BTreeMap<String, Vec<u8>>,
     rejected_prefix: &str,
     changed_paths: &BTreeSet<String>,
 ) -> bool {
@@ -1590,10 +1571,12 @@ fn opposite_repair_paths_match(
         .filter(|path| path.starts_with(rejected_prefix))
         .cloned()
         .collect();
-    rejected.map_or_else(
-        || rejected_changed_paths.is_empty(),
-        |skill| rejected_changed_paths == skill_object_paths(rejected_root, skill),
-    )
+    let rejected_repository_paths: BTreeSet<_> = repository_files
+        .keys()
+        .filter(|path| path.starts_with(rejected_prefix))
+        .cloned()
+        .collect();
+    rejected_changed_paths == rejected_repository_paths
 }
 
 fn skill_object_paths(root: &str, skill: &SkillObjectSnapshot) -> BTreeSet<String> {
@@ -1777,6 +1760,24 @@ fn edit_paths(edits: &[SkillTreeEdit]) -> BTreeSet<String> {
         .iter()
         .map(|edit| edit_path(edit).to_owned())
         .collect()
+}
+
+fn apply_tree_edits(
+    before: &BTreeMap<String, Vec<u8>>,
+    edits: &[SkillTreeEdit],
+) -> BTreeMap<String, Vec<u8>> {
+    let mut after = before.clone();
+    for edit in edits {
+        match edit {
+            SkillTreeEdit::Upsert { path, bytes } => {
+                after.insert(path.clone(), bytes.clone());
+            }
+            SkillTreeEdit::Delete { path } => {
+                after.remove(path);
+            }
+        }
+    }
+    after
 }
 
 fn edit_path(edit: &SkillTreeEdit) -> &str {

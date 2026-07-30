@@ -98,6 +98,13 @@ fn rejects_structurally_invalid_entries() -> Result<(), SkillError> {
             PackageEntry::new(".gitim/config", Vec::new()),
         ),
         ("reserved windows", PackageEntry::new("CON.md", Vec::new())),
+        (
+            "reserved windows extension",
+            PackageEntry::new("con.txt", Vec::new()),
+        ),
+        ("colon", PackageEntry::new("file:name", Vec::new())),
+        ("trailing dot", PackageEntry::new("name.", Vec::new())),
+        ("trailing space", PackageEntry::new("name ", Vec::new())),
         ("nul", PackageEntry::new("a\0.md", Vec::new())),
         ("control", PackageEntry::new("a\n.md", Vec::new())),
         (

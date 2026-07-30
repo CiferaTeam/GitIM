@@ -1,8 +1,8 @@
-use std::collections::BTreeSet;
-
 use sha2::{Digest, Sha256};
 
-use super::{ResourceDescriptor, SkillError, SkillSlug};
+use super::{
+    portable_path::valid_portable_relative_paths, ResourceDescriptor, SkillError, SkillSlug,
+};
 
 pub const MAX_SKILL_MD_BYTES: usize = 64 * 1024;
 pub const MAX_PACKAGE_FILE_BYTES: usize = 5 * 1024 * 1024;
@@ -126,13 +126,11 @@ fn validate_entries(mut entries: Vec<PackageEntry>) -> Result<Vec<PackageEntry>,
     }
 
     let mut total_bytes = 0_usize;
-    let mut case_folded_paths = BTreeSet::new();
+    if !valid_portable_relative_paths(entries.iter().map(|entry| entry.path.as_str())) {
+        return Err(SkillError::InvalidPackage);
+    }
     for entry in &entries {
         if entry.kind != PackageEntryKind::Regular {
-            return Err(SkillError::InvalidPackage);
-        }
-        validate_path(&entry.path)?;
-        if !case_folded_paths.insert(entry.path.to_ascii_lowercase()) {
             return Err(SkillError::InvalidPackage);
         }
         if entry.bytes.len() > MAX_PACKAGE_FILE_BYTES {
@@ -148,47 +146,6 @@ fn validate_entries(mut entries: Vec<PackageEntry>) -> Result<Vec<PackageEntry>,
 
     entries.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(entries)
-}
-
-fn validate_path(path: &str) -> Result<(), SkillError> {
-    if path.is_empty() || path.len() > 240 || path.starts_with('/') || path.contains('\\') {
-        return Err(SkillError::InvalidPackage);
-    }
-
-    for segment in path.split('/') {
-        if !valid_segment(segment) || is_reserved_segment(segment) {
-            return Err(SkillError::InvalidPackage);
-        }
-    }
-
-    Ok(())
-}
-
-fn valid_segment(segment: &str) -> bool {
-    let bytes = segment.as_bytes();
-    if bytes.is_empty() || bytes.len() > 80 || segment.ends_with('.') {
-        return false;
-    }
-
-    matches!(bytes.first(), Some(b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'))
-        && bytes.iter().all(
-            |byte| matches!(byte, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-'),
-        )
-}
-
-fn is_reserved_segment(segment: &str) -> bool {
-    let stem = segment.split('.').next().unwrap_or_default();
-    let upper = stem.to_ascii_uppercase();
-    matches!(
-        upper.as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | ".GIT" | ".GITIM"
-    ) || matches!(
-        upper.as_str(),
-        "COM1" | "COM2" | "COM3" | "COM4" | "COM5" | "COM6" | "COM7" | "COM8" | "COM9"
-    ) || matches!(
-        upper.as_str(),
-        "LPT1" | "LPT2" | "LPT3" | "LPT4" | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
-    )
 }
 
 fn validate_skill_markdown(slug: &SkillSlug, bytes: &[u8]) -> Result<(), SkillError> {
