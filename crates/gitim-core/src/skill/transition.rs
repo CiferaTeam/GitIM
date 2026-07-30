@@ -110,31 +110,15 @@ pub fn plan_skill_mutation(
     context: &SkillMutationContext,
     request: &SkillMutationRequest,
 ) -> Result<SkillMutationPlan, SkillError> {
-    let actor = Handler::new(&context.actor).map_err(|_| SkillError::RoleTargetInvalid)?;
-    let recorded = before.receipts.get(request.request_id());
-    let receipt = receipt_for_request(before, context, request, actor, recorded)?;
-
-    if let Some(recorded) = recorded {
-        if same_semantic_request(recorded, &receipt) {
-            return Ok(SkillMutationPlan {
-                after: before.clone(),
-                edits: Vec::new(),
-                receipt: recorded.clone(),
-                result: recorded.result.clone(),
-                changed_paths: BTreeSet::new(),
-                commit_message: String::new(),
-                commit_evidence: SkillCommitEvidence {
-                    commit_author: recorded.actor.as_str().to_owned(),
-                    request_trailer: recorded.id.clone(),
-                    parent_count: 1,
-                    receipt: recorded.clone(),
-                    changed_paths: BTreeSet::new(),
-                },
-            });
+    if let Some(recorded) = before.receipts.get(request.request_id()) {
+        if raw_semantic_request_matches(recorded, context, request) {
+            return Ok(duplicate_plan(before, recorded));
         }
         return Err(SkillError::RequestIdConflict);
     }
 
+    let actor = Handler::new(&context.actor).map_err(|_| SkillError::RoleTargetInvalid)?;
+    let receipt = receipt_for_request(before, context, request, actor)?;
     let (after, final_receipt) = execute_transition(before, receipt, context.package.as_ref())?;
     let edits = expected_edits(before, &after, &final_receipt)?;
     let changed_paths = edit_paths(&edits);
@@ -160,6 +144,151 @@ pub fn plan_skill_mutation(
             final_receipt.id.as_str()
         ),
         commit_evidence,
+    })
+}
+
+fn duplicate_plan(before: &SkillRepositorySnapshot, recorded: &SkillReceipt) -> SkillMutationPlan {
+    SkillMutationPlan {
+        after: before.clone(),
+        edits: Vec::new(),
+        receipt: recorded.clone(),
+        result: recorded.result.clone(),
+        changed_paths: BTreeSet::new(),
+        commit_message: String::new(),
+        commit_evidence: SkillCommitEvidence {
+            commit_author: recorded.actor.as_str().to_owned(),
+            request_trailer: recorded.id.clone(),
+            parent_count: 1,
+            receipt: recorded.clone(),
+            changed_paths: BTreeSet::new(),
+        },
+    }
+}
+
+fn raw_semantic_request_matches(
+    recorded: &SkillReceipt,
+    context: &SkillMutationContext,
+    request: &SkillMutationRequest,
+) -> bool {
+    if recorded.schema_version != SKILL_SCHEMA_VERSION
+        || &recorded.id != request.request_id()
+        || recorded.actor.as_str() != context.actor
+    {
+        return false;
+    }
+
+    let fingerprint = match request {
+        SkillMutationRequest::WorkspaceBootstrap(_) => Some((
+            SkillReceiptScope::Workspace,
+            None,
+            SkillOperation::WorkspaceBootstrap,
+            SkillReceiptRequest {
+                payload_sha256: hash_bytes(
+                    operation_name(SkillOperation::WorkspaceBootstrap).as_bytes(),
+                ),
+                target: Some(recorded.actor.clone()),
+                ..SkillReceiptRequest::default()
+            },
+        )),
+        SkillMutationRequest::Create(request) => {
+            let Some(package) = context.package.as_ref() else {
+                return false;
+            };
+            let Ok(revision) = revision_for_request(&request.request_id) else {
+                return false;
+            };
+            Some((
+                SkillReceiptScope::Skill,
+                Some(request.slug.clone()),
+                SkillOperation::SkillCreate,
+                SkillReceiptRequest {
+                    payload_sha256: package.content_sha256.clone(),
+                    slug: Some(request.slug.clone()),
+                    revision: Some(revision),
+                    display_name: Some(request.display_name.clone()),
+                    description: Some(request.description.clone()),
+                    ..SkillReceiptRequest::default()
+                },
+            ))
+        }
+        SkillMutationRequest::Propose(request) => {
+            let Some(package) = context.package.as_ref() else {
+                return false;
+            };
+            let Ok(candidate_revision) = revision_for_request(&request.request_id) else {
+                return false;
+            };
+            let Ok(proposal) = proposal_for_request(&request.request_id) else {
+                return false;
+            };
+            Some((
+                SkillReceiptScope::Skill,
+                Some(request.slug.clone()),
+                SkillOperation::ProposalCreate,
+                SkillReceiptRequest {
+                    payload_sha256: package.content_sha256.clone(),
+                    slug: Some(request.slug.clone()),
+                    base_revision: Some(request.base_revision.clone()),
+                    candidate_revision: Some(candidate_revision),
+                    proposal: Some(proposal),
+                    summary: Some(request.summary.clone()),
+                    ..SkillReceiptRequest::default()
+                },
+            ))
+        }
+        SkillMutationRequest::ProposalTransition(request) => {
+            if !matches!(
+                request.operation,
+                SkillOperation::ProposalPublish
+                    | SkillOperation::ProposalReject
+                    | SkillOperation::ProposalWithdraw
+            ) {
+                return false;
+            }
+            let Some(slug) = recorded.skill.clone() else {
+                return false;
+            };
+            Some((
+                SkillReceiptScope::Skill,
+                Some(slug.clone()),
+                request.operation,
+                SkillReceiptRequest {
+                    payload_sha256: hash_bytes(operation_name(request.operation).as_bytes()),
+                    slug: Some(slug),
+                    proposal: Some(request.proposal_id.clone()),
+                    expected_control_revision: request.expected_control_revision,
+                    expected_proposal_revision: Some(request.expected_state_revision),
+                    ..SkillReceiptRequest::default()
+                },
+            ))
+        }
+        SkillMutationRequest::Repair(request) => {
+            let (scope, skill) = match &request.scope {
+                SkillRepairScope::Workspace => (SkillReceiptScope::Workspace, None),
+                SkillRepairScope::Skill(slug) => (SkillReceiptScope::Skill, Some(slug.clone())),
+            };
+            Some((
+                scope,
+                skill.clone(),
+                SkillOperation::RepairSkillState,
+                SkillReceiptRequest {
+                    payload_sha256: hash_bytes(
+                        operation_name(SkillOperation::RepairSkillState).as_bytes(),
+                    ),
+                    slug: skill,
+                    conflict_tip: Some(request.conflict_tip.clone()),
+                    accepted_tree: Some(request.accepted_tree.clone()),
+                    ..SkillReceiptRequest::default()
+                },
+            ))
+        }
+    };
+
+    fingerprint.is_some_and(|(scope, skill, operation, typed_request)| {
+        recorded.scope == scope
+            && recorded.skill == skill
+            && recorded.operation == operation
+            && recorded.request == typed_request
     })
 }
 
@@ -217,7 +346,6 @@ fn receipt_for_request(
     context: &SkillMutationContext,
     request: &SkillMutationRequest,
     actor: Handler,
-    recorded: Option<&SkillReceipt>,
 ) -> Result<SkillReceipt, SkillError> {
     let (scope, skill, operation, mut typed_request) = match request {
         SkillMutationRequest::WorkspaceBootstrap(_) => (
@@ -277,7 +405,6 @@ fn receipt_for_request(
             }
             let slug = find_proposal(before, &request.proposal_id)
                 .map(|(slug, _, _)| slug.clone())
-                .or_else(|| recorded.and_then(|receipt| receipt.skill.clone()))
                 .ok_or(SkillError::ProposalNotFound)?;
             (
                 SkillReceiptScope::Skill,
@@ -354,7 +481,11 @@ fn execute_transition(
     mut receipt: SkillReceipt,
     package: Option<&ValidatedPackage>,
 ) -> Result<(SkillRepositorySnapshot, SkillReceipt), SkillError> {
-    validate_snapshot(before)?;
+    if receipt.operation == SkillOperation::RepairSkillState {
+        validate_repair_pre_state(before, &receipt)?;
+    } else {
+        validate_snapshot(before)?;
+    }
     authorize_and_check_preconditions(before, &receipt)?;
 
     let mut after = before.clone();
@@ -372,6 +503,32 @@ fn execute_transition(
     after.receipts.insert(receipt.id.clone(), receipt.clone());
     validate_snapshot(&after)?;
     Ok((after, receipt))
+}
+
+fn validate_repair_pre_state(
+    before: &SkillRepositorySnapshot,
+    receipt: &SkillReceipt,
+) -> Result<(), SkillError> {
+    let checkpoint = before
+        .conflict_checkpoint
+        .as_ref()
+        .ok_or(SkillError::SyncConflict)?;
+    if !repair_scope_matches(receipt, &checkpoint.accepted_state) {
+        return Err(SkillError::SyncConflict);
+    }
+
+    let mut unaffected = before.clone();
+    match &checkpoint.accepted_state {
+        SkillRepairAcceptedState::Workspace(workspace) => {
+            unaffected.workspace = Some(workspace.clone());
+        }
+        SkillRepairAcceptedState::ActiveSkill { slug, .. }
+        | SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
+            unaffected.active_skills.remove(slug);
+            unaffected.archived_skills.remove(slug);
+        }
+    }
+    validate_snapshot(&unaffected)
 }
 
 fn authorize_and_check_preconditions(
@@ -452,13 +609,6 @@ fn authorize_and_check_preconditions(
             }
         }
         SkillOperation::RepairSkillState => {
-            let workspace = before
-                .workspace
-                .as_ref()
-                .ok_or(SkillError::AdminUninitialized)?;
-            if !contains_handler(&workspace.administrators, &receipt.actor) {
-                return Err(SkillError::AdminRequired);
-            }
             let checkpoint = before
                 .conflict_checkpoint
                 .as_ref()
@@ -466,9 +616,20 @@ fn authorize_and_check_preconditions(
             if receipt.request.conflict_tip.as_deref() != Some(&checkpoint.conflict_tip)
                 || receipt.request.accepted_tree.as_deref() != Some(&checkpoint.accepted_tree)
                 || !repair_scope_matches(receipt, &checkpoint.accepted_state)
-                || !valid_repair_checkpoint(checkpoint)
+                || !valid_repair_checkpoint(before, checkpoint)
             {
                 return Err(SkillError::SyncConflict);
+            }
+            let workspace = match &checkpoint.accepted_state {
+                SkillRepairAcceptedState::Workspace(workspace) => workspace,
+                SkillRepairAcceptedState::ActiveSkill { .. }
+                | SkillRepairAcceptedState::ArchivedSkill { .. } => before
+                    .workspace
+                    .as_ref()
+                    .ok_or(SkillError::AdminUninitialized)?,
+            };
+            if !contains_handler(&workspace.administrators, &receipt.actor) {
+                return Err(SkillError::AdminRequired);
             }
         }
         _ => return Err(SkillError::SyncConflict),
@@ -1133,14 +1294,6 @@ fn transition_package<'a>(
     ))
 }
 
-fn same_semantic_request(recorded: &SkillReceipt, requested: &SkillReceipt) -> bool {
-    recorded.scope == requested.scope
-        && recorded.skill == requested.skill
-        && recorded.actor == requested.actor
-        && recorded.operation == requested.operation
-        && recorded.request == requested.request
-}
-
 fn append_history(skill: &mut SkillObjectSnapshot, receipt: &SkillReceipt) {
     let line_number = skill
         .history
@@ -1219,7 +1372,10 @@ fn repair_scope_matches(receipt: &SkillReceipt, accepted: &SkillRepairAcceptedSt
     }
 }
 
-fn valid_repair_checkpoint(checkpoint: &SkillConflictCheckpoint) -> bool {
+fn valid_repair_checkpoint(
+    before: &SkillRepositorySnapshot,
+    checkpoint: &SkillConflictCheckpoint,
+) -> bool {
     if checkpoint.conflict_tip.is_empty()
         || checkpoint.accepted_tree.is_empty()
         || checkpoint.accepted_files.is_empty()
@@ -1254,18 +1410,28 @@ fn valid_repair_checkpoint(checkpoint: &SkillConflictCheckpoint) -> bool {
                 )
         }
         SkillRepairAcceptedState::ActiveSkill { slug, .. } => {
-            let prefix = format!("skills/{}/", slug.as_str());
-            checkpoint
-                .changed_paths
-                .iter()
-                .all(|path| path.starts_with(&prefix))
+            let accepted_prefix = format!("skills/{}/", slug.as_str());
+            let opposite_prefix = format!("archive/skills/{}/", slug.as_str());
+            checkpoint.changed_paths.iter().all(|path| {
+                path.starts_with(&accepted_prefix) || path.starts_with(&opposite_prefix)
+            }) && opposite_repair_paths_match(
+                before.archived_skills.get(slug),
+                &format!("archive/skills/{}", slug.as_str()),
+                &opposite_prefix,
+                &checkpoint.changed_paths,
+            )
         }
         SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
-            let prefix = format!("archive/skills/{}/", slug.as_str());
-            checkpoint
-                .changed_paths
-                .iter()
-                .all(|path| path.starts_with(&prefix))
+            let accepted_prefix = format!("archive/skills/{}/", slug.as_str());
+            let opposite_prefix = format!("skills/{}/", slug.as_str());
+            checkpoint.changed_paths.iter().all(|path| {
+                path.starts_with(&accepted_prefix) || path.starts_with(&opposite_prefix)
+            }) && opposite_repair_paths_match(
+                before.active_skills.get(slug),
+                &format!("skills/{}", slug.as_str()),
+                &opposite_prefix,
+                &checkpoint.changed_paths,
+            )
         }
     };
     paths_in_scope
@@ -1282,6 +1448,23 @@ fn valid_repair_checkpoint(checkpoint: &SkillConflictCheckpoint) -> bool {
                 &checkpoint.accepted_files,
             ),
         }
+}
+
+fn opposite_repair_paths_match(
+    rejected: Option<&SkillObjectSnapshot>,
+    rejected_root: &str,
+    rejected_prefix: &str,
+    changed_paths: &BTreeSet<String>,
+) -> bool {
+    let rejected_changed_paths: BTreeSet<_> = changed_paths
+        .iter()
+        .filter(|path| path.starts_with(rejected_prefix))
+        .cloned()
+        .collect();
+    rejected.map_or_else(
+        || rejected_changed_paths.is_empty(),
+        |skill| rejected_changed_paths == skill_object_paths(rejected_root, skill),
+    )
 }
 
 fn skill_object_paths(root: &str, skill: &SkillObjectSnapshot) -> BTreeSet<String> {
