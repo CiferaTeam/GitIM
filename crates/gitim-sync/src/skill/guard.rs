@@ -592,16 +592,17 @@ impl SkillSyncGuard {
         fetched_tip: &str,
         active_epoch: &str,
     ) -> Result<IncomingSkillValidation, SkillSyncError> {
-        let previous = self
-            .checkpoint
-            .load()?
-            .unwrap_or_else(|| SkillValidationCheckpoint::empty(active_epoch));
-        let validation = validate_incoming_skill_history(repo, &previous, fetched_tip)?;
-        self.checkpoint.save(&validation.checkpoint)?;
-        if !validation.checkpoint.conflicts.is_empty() {
-            return Err(SkillSyncError::Domain(SkillError::SyncConflict));
-        }
-        Ok(validation)
+        self.checkpoint.with_lock(|checkpoint| {
+            let previous = checkpoint
+                .load()?
+                .unwrap_or_else(|| SkillValidationCheckpoint::empty(active_epoch));
+            let validation = validate_incoming_skill_history(repo, &previous, fetched_tip)?;
+            checkpoint.save(&validation.checkpoint)?;
+            if !validation.checkpoint.conflicts.is_empty() {
+                return Err(SkillSyncError::Domain(SkillError::SyncConflict));
+            }
+            Ok(validation)
+        })
     }
 
     fn prepare_quarantine_locked(

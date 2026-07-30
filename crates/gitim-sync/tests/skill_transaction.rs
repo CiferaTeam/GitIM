@@ -675,6 +675,137 @@ fn workspace_repair_uses_one_checkpoint_snapshot_per_attempt() {
 }
 
 #[test]
+fn concurrent_repairs_serialize_final_checkpoint_authority_through_publication() {
+    let fixture = Fixture::new();
+    let slug = SkillSlug::new("repair-final-cas").unwrap();
+    fixture.bootstrap_and_create(&slug);
+    let (_store, conflict) = install_conflict(&fixture, "skills/workspace.meta.yaml", |value| {
+        value.replace("administrators:\n- alice", "administrators: []")
+    });
+    let first_id = RequestId::generate();
+    let second_id = RequestId::generate();
+    let first_request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: first_id.clone(),
+        scope: SkillRepairScope::Workspace,
+        conflict_tip: conflict.rejected_commit.clone(),
+        accepted_tree: conflict.accepted_tree_oid.clone().unwrap(),
+    });
+    let second_request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: second_id.clone(),
+        scope: SkillRepairScope::Workspace,
+        conflict_tip: conflict.rejected_commit,
+        accepted_tree: conflict.accepted_tree_oid.unwrap(),
+    });
+    let (waiting_sender, waiting_receiver) = std::sync::mpsc::sync_channel(1);
+    let waiting_receiver = Arc::new(Mutex::new(waiting_receiver));
+    let (progress_sender, progress_receiver) = std::sync::mpsc::sync_channel(1);
+    let progress_receiver = Arc::new(Mutex::new(progress_receiver));
+    let second_progressed_in_pause = Arc::new(AtomicBool::new(false));
+    let second_handle = Arc::new(Mutex::new(None));
+    let launched = Arc::new(AtomicBool::new(false));
+
+    let second_root = fixture.first.path().to_path_buf();
+    let second_progressed_in_pause_for_hook = Arc::clone(&second_progressed_in_pause);
+    let second_handle_for_hook = Arc::clone(&second_handle);
+    let waiting_receiver_for_hook = Arc::clone(&waiting_receiver);
+    let progress_receiver_for_hook = Arc::clone(&progress_receiver);
+    let launched_for_hook = Arc::clone(&launched);
+    let first_repo = GitStorage::new(fixture.first.path());
+    let first_guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let first_result = execute_remote_skill_transaction_with_test_config(
+        &first_repo,
+        &first_guard,
+        transaction_request(first_request, None),
+        SkillTransactionTestConfig {
+            after_repair_compare: Some(Arc::new(move || {
+                if launched_for_hook.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let root = second_root.clone();
+                let request = second_request.clone();
+                let ready = waiting_sender.clone();
+                let progressed = progress_sender.clone();
+                let handle = std::thread::spawn(move || {
+                    let repo = GitStorage::new(&root);
+                    let guard = SkillSyncGuard::new(&root).unwrap();
+                    execute_remote_skill_transaction_with_test_config(
+                        &repo,
+                        &guard,
+                        transaction_request(request, None),
+                        SkillTransactionTestConfig {
+                            before_repair_checkpoint_load: Some(Arc::new(move || {
+                                let _ = ready.try_send(());
+                            })),
+                            after_repair_snapshot: Some(Arc::new(move || {
+                                let _ = progressed.try_send(());
+                            })),
+                            ..SkillTransactionTestConfig::default()
+                        },
+                    )
+                });
+                *second_handle_for_hook.lock().unwrap() = Some(handle);
+                waiting_receiver_for_hook
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(2))
+                    .unwrap();
+                second_progressed_in_pause_for_hook.store(
+                    progress_receiver_for_hook
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(2))
+                        .is_ok(),
+                    Ordering::SeqCst,
+                );
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+    let second_result = second_handle
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap()
+        .join()
+        .unwrap()
+        .unwrap_err();
+
+    assert!(!second_progressed_in_pause.load(Ordering::SeqCst));
+    assert_eq!(second_result.code(), "skill_sync_conflict");
+    git(fixture.first.path(), ["fetch", "origin"]);
+    let first_receipt = format!(
+        "origin/main:skills/receipts/{}.meta.yaml",
+        first_id.as_str()
+    );
+    assert!(Command::new("git")
+        .args(["show", &first_receipt])
+        .current_dir(fixture.first.path())
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let second_receipt = format!(
+        "origin/main:skills/receipts/{}.meta.yaml",
+        second_id.as_str()
+    );
+    assert!(!Command::new("git")
+        .args(["show", &second_receipt])
+        .current_dir(fixture.first.path())
+        .output()
+        .unwrap()
+        .status
+        .success());
+    let checkpoint = SkillCheckpointStore::new(fixture.first.path())
+        .unwrap()
+        .load()
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.last_scanned_tip, first_result.commit_id);
+    assert!(checkpoint.conflicts.is_empty());
+}
+
+#[test]
 fn skill_repair_rejects_when_another_clone_restores_the_remote_tree_first() {
     let fixture = Fixture::new();
     let slug = SkillSlug::new("remote-repair-race").unwrap();

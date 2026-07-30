@@ -93,6 +93,10 @@ pub struct SkillCheckpointStore {
     pub lock_path: PathBuf,
 }
 
+pub(crate) struct LockedSkillCheckpoint<'a> {
+    store: &'a SkillCheckpointStore,
+}
+
 #[derive(Debug, Error)]
 pub enum SkillSyncError {
     #[error("git: {0}")]
@@ -161,16 +165,20 @@ impl SkillCheckpointStore {
     }
 
     pub fn load(&self) -> Result<Option<SkillValidationCheckpoint>, SkillSyncError> {
-        let lock = self.lock()?;
-        let result = self.load_locked();
-        FileExt::unlock(&lock).map_err(|error| checkpoint_error("unlock checkpoint", error))?;
-        result
+        self.with_lock(|locked| locked.load())
     }
 
     pub fn save(&self, checkpoint: &SkillValidationCheckpoint) -> Result<(), SkillSyncError> {
-        validate_checkpoint(checkpoint)?;
+        self.with_lock(|locked| locked.save(checkpoint))
+    }
+
+    pub(crate) fn with_lock<T>(
+        &self,
+        operation: impl FnOnce(&LockedSkillCheckpoint<'_>) -> Result<T, SkillSyncError>,
+    ) -> Result<T, SkillSyncError> {
         let lock = self.lock()?;
-        let result = self.save_locked(checkpoint);
+        let locked = LockedSkillCheckpoint { store: self };
+        let result = operation(&locked);
         FileExt::unlock(&lock).map_err(|error| checkpoint_error("unlock checkpoint", error))?;
         result
     }
@@ -272,6 +280,20 @@ impl SkillCheckpointStore {
             ));
         }
         Ok(())
+    }
+}
+
+impl LockedSkillCheckpoint<'_> {
+    pub(crate) fn load(&self) -> Result<Option<SkillValidationCheckpoint>, SkillSyncError> {
+        self.store.load_locked()
+    }
+
+    pub(crate) fn save(
+        &self,
+        checkpoint: &SkillValidationCheckpoint,
+    ) -> Result<(), SkillSyncError> {
+        validate_checkpoint(checkpoint)?;
+        self.store.save_locked(checkpoint)
     }
 }
 

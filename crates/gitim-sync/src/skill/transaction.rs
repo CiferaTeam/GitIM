@@ -20,8 +20,8 @@ use gitim_core::skill::{
 use serde::{Deserialize, Serialize};
 
 use super::checkpoint::{
-    validate_incoming_skill_history, AcceptedSkillState, AcceptedTree, SkillCheckpointStore,
-    SkillSyncError, SkillValidationCheckpoint,
+    validate_incoming_skill_history, AcceptedSkillState, AcceptedTree, LockedSkillCheckpoint,
+    SkillCheckpointStore, SkillSyncError, SkillValidationCheckpoint,
 };
 use super::guard::SkillSyncGuard;
 use crate::git::{classify_remote_error, GitError, GitStorage, GIT_HTTP_TIMEOUT_ARGS};
@@ -87,8 +87,10 @@ pub struct SkillTransactionTestConfig {
     pub max_concurrency: usize,
     pub git_program: Option<PathBuf>,
     pub crash_after: Option<SkillTransactionCrashPoint>,
+    pub before_repair_checkpoint_load: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_repair_snapshot: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_built: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub after_repair_compare: Option<Arc<dyn Fn() + Send + Sync>>,
     pub simulate_process_group_kill_failure: bool,
 }
 
@@ -100,8 +102,10 @@ impl Default for SkillTransactionTestConfig {
             max_concurrency: SKILL_GIT_MAX_CONCURRENCY,
             git_program: None,
             crash_after: None,
+            before_repair_checkpoint_load: None,
             after_repair_snapshot: None,
             after_built: None,
+            after_repair_compare: None,
             simulate_process_group_kill_failure: false,
         }
     }
@@ -180,8 +184,10 @@ struct TransactionContext {
     max_concurrency: usize,
     git_program: PathBuf,
     crash_after: Option<SkillTransactionCrashPoint>,
+    before_repair_checkpoint_load: Option<Arc<dyn Fn() + Send + Sync>>,
     after_repair_snapshot: Option<Arc<dyn Fn() + Send + Sync>>,
     after_built: Option<Arc<dyn Fn() + Send + Sync>>,
+    after_repair_compare: Option<Arc<dyn Fn() + Send + Sync>>,
     simulate_process_group_kill_failure: bool,
 }
 
@@ -226,8 +232,10 @@ pub fn recover_remote_skill_transactions(
         max_concurrency: config.max_concurrency,
         git_program: config.git_program.unwrap_or_else(|| PathBuf::from("git")),
         crash_after: None,
+        before_repair_checkpoint_load: None,
         after_repair_snapshot: None,
         after_built: None,
+        after_repair_compare: None,
         simulate_process_group_kill_failure: false,
     };
     let result = recover_transaction_journals(repo, guard, &context);
@@ -279,8 +287,10 @@ fn execute_remote_skill_transaction_with_config(
         max_concurrency: config.max_concurrency,
         git_program: config.git_program.unwrap_or_else(|| PathBuf::from("git")),
         crash_after: config.crash_after,
+        before_repair_checkpoint_load: config.before_repair_checkpoint_load,
         after_repair_snapshot: config.after_repair_snapshot,
         after_built: config.after_built,
+        after_repair_compare: config.after_repair_compare,
         simulate_process_group_kill_failure: config.simulate_process_group_kill_failure,
     };
     let result = execute_transaction(repo, guard, request, &context);
@@ -314,6 +324,11 @@ fn execute_transaction(
         fetch(repo, context)?;
         let start_branch = current_branch(repo, context)?;
         let (remote_branch, remote_tip) = resolve_active_remote(repo, &start_branch, context)?;
+        if matches!(journal.request, SkillMutationRequest::Repair(_)) {
+            if let Some(before_repair_checkpoint_load) = &context.before_repair_checkpoint_load {
+                before_repair_checkpoint_load();
+            }
+        }
         let repair_checkpoint = load_repair_checkpoint(repo, &journal.request)?;
         let mut snapshot = load_snapshot_for_request(
             repo,
@@ -387,15 +402,34 @@ fn execute_transaction(
             after_built();
         }
         maybe_crash(context, SkillTransactionCrashPoint::AfterBuilt)?;
-        ensure_repair_checkpoint_unchanged(repo, &journal.request, &captured_semantic_oids)?;
+        let publish_result = if matches!(journal.request, SkillMutationRequest::Repair(_)) {
+            SkillCheckpointStore::new(repo.root())?.with_lock(|checkpoint| {
+                push_and_record_candidate(
+                    repo,
+                    &mut journal,
+                    &candidate,
+                    &remote_branch,
+                    &remote_tip,
+                    &captured_semantic_oids,
+                    Some(checkpoint),
+                    context,
+                )
+            })
+        } else {
+            push_and_record_candidate(
+                repo,
+                &mut journal,
+                &candidate,
+                &remote_branch,
+                &remote_tip,
+                &captured_semantic_oids,
+                None,
+                context,
+            )
+        };
 
-        match push_candidate(repo, &candidate, &remote_branch, context) {
-            Ok(()) => {
-                journal.phase = SkillTransactionPhase::Pushed;
-                save_journal(&journal)?;
-                maybe_crash(context, SkillTransactionCrashPoint::AfterPushed)?;
-                let local_state =
-                    record_published_view(repo, &remote_branch, &remote_tip, &candidate, context)?;
+        match publish_result {
+            Ok(local_state) => {
                 complete_journal(&mut journal)?;
                 return Ok(RemoteSkillTransactionResult {
                     commit_id: candidate,
@@ -1333,6 +1367,44 @@ fn validate_candidate(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn push_and_record_candidate(
+    repo: &GitStorage,
+    journal: &mut TransactionJournal,
+    candidate: &str,
+    remote_branch: &str,
+    remote_tip: &str,
+    captured_semantic_oids: &BTreeMap<String, String>,
+    checkpoint: Option<&LockedSkillCheckpoint<'_>>,
+    context: &TransactionContext,
+) -> Result<SkillLocalState, SkillSyncError> {
+    if let Some(checkpoint) = checkpoint {
+        ensure_repair_checkpoint_unchanged_locked(
+            checkpoint,
+            &journal.request,
+            captured_semantic_oids,
+        )?;
+        if let Some(after_repair_compare) = &context.after_repair_compare {
+            after_repair_compare();
+        }
+    }
+    push_candidate(repo, candidate, remote_branch, context)?;
+    journal.phase = SkillTransactionPhase::Pushed;
+    save_journal(journal)?;
+    maybe_crash(context, SkillTransactionCrashPoint::AfterPushed)?;
+    match checkpoint {
+        Some(checkpoint) => record_published_view_locked(
+            repo,
+            remote_branch,
+            remote_tip,
+            candidate,
+            checkpoint,
+            context,
+        ),
+        None => record_published_view(repo, remote_branch, remote_tip, candidate, context),
+    }
+}
+
 fn push_candidate(
     repo: &GitStorage,
     candidate: &str,
@@ -1365,6 +1437,19 @@ fn record_accepted_view(
     commit: &str,
     context: &TransactionContext,
 ) -> Result<SkillLocalState, SkillSyncError> {
+    SkillCheckpointStore::new(repo.root())?.with_lock(|checkpoint| {
+        record_accepted_view_locked(repo, branch, prior_tip, commit, checkpoint, context)
+    })
+}
+
+fn record_accepted_view_locked(
+    repo: &GitStorage,
+    branch: &str,
+    prior_tip: &str,
+    commit: &str,
+    checkpoint: &LockedSkillCheckpoint<'_>,
+    context: &TransactionContext,
+) -> Result<SkillLocalState, SkillSyncError> {
     let remote_ref = format!("refs/remotes/origin/{branch}");
     let updated = run_git_output(
         repo,
@@ -1375,8 +1460,7 @@ fn record_accepted_view(
     if !updated.status.success() {
         fetch(repo, context)?;
     }
-    let store = SkillCheckpointStore::new(repo.root())?;
-    let previous = store
+    let previous = checkpoint
         .load()?
         .unwrap_or_else(|| SkillValidationCheckpoint::empty(branch));
     let validation = validate_incoming_skill_history(repo, &previous, commit)?;
@@ -1388,7 +1472,7 @@ fn record_accepted_view(
     } else {
         SkillLocalState::PendingSync
     };
-    store.save(&validation.checkpoint)?;
+    checkpoint.save(&validation.checkpoint)?;
     Ok(local_state)
 }
 
@@ -1400,6 +1484,21 @@ fn record_published_view(
     context: &TransactionContext,
 ) -> Result<SkillLocalState, SkillSyncError> {
     match record_accepted_view(repo, branch, prior_tip, commit, context) {
+        Ok(local_state) => Ok(local_state),
+        Err(error) if skill_transaction_error_is_retryable(&error) => Err(error),
+        Err(_) => Ok(SkillLocalState::PendingSync),
+    }
+}
+
+fn record_published_view_locked(
+    repo: &GitStorage,
+    branch: &str,
+    prior_tip: &str,
+    commit: &str,
+    checkpoint: &LockedSkillCheckpoint<'_>,
+    context: &TransactionContext,
+) -> Result<SkillLocalState, SkillSyncError> {
+    match record_accepted_view_locked(repo, branch, prior_tip, commit, checkpoint, context) {
         Ok(local_state) => Ok(local_state),
         Err(error) if skill_transaction_error_is_retryable(&error) => Err(error),
         Err(_) => Ok(SkillLocalState::PendingSync),
@@ -1649,16 +1748,16 @@ fn repair_checkpoint_fingerprint(
     .map_err(|error| checkpoint_error(format!("serialize repair checkpoint: {error}")))
 }
 
-fn ensure_repair_checkpoint_unchanged(
-    repo: &GitStorage,
+fn ensure_repair_checkpoint_unchanged_locked(
+    checkpoint: &LockedSkillCheckpoint<'_>,
     request: &SkillMutationRequest,
     semantic_oids: &BTreeMap<String, String>,
 ) -> Result<(), SkillSyncError> {
     let Some(expected) = semantic_oids.get("$checkpoint") else {
         return Ok(());
     };
-    let checkpoint = load_repair_checkpoint(repo, request)?;
-    if repair_checkpoint_fingerprint(request, checkpoint.as_ref())?.as_ref() != Some(expected) {
+    let current = checkpoint.load()?.ok_or(SkillError::SyncConflict)?;
+    if repair_checkpoint_fingerprint(request, Some(&current))?.as_ref() != Some(expected) {
         return Err(SkillError::SyncConflict.into());
     }
     Ok(())
