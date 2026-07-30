@@ -896,11 +896,13 @@ fn tracked_administrator_can_repair_only_the_named_skill_scope() {
 fn repair_moves_a_rejected_active_skill_to_the_accepted_archive_location() {
     let mut before = create_active_skill();
     let accepted = before.active_skills[&slug()].clone();
+    let rejected_files = object_files("skills/release-check", &accepted);
     let accepted_state = SkillRepairAcceptedState::ArchivedSkill {
         slug: slug(),
         skill: accepted.clone(),
     };
     let accepted_files = accepted_state_files(&accepted_state);
+    let expected_upserts = accepted_files.clone();
     let mut checkpoint = SkillConflictCheckpoint {
         conflict_tip: "bad-commit-oid".to_owned(),
         accepted_tree: "accepted-tree-oid".to_owned(),
@@ -929,6 +931,12 @@ fn repair_moves_a_rejected_active_skill_to_the_accepted_archive_location() {
     assert!(plan.edits.contains(&SkillTreeEdit::Delete {
         path: "skills/release-check/skill.meta.yaml".to_owned(),
     }));
+    for (path, bytes) in expected_upserts {
+        assert!(plan.edits.contains(&SkillTreeEdit::Upsert { path, bytes }));
+    }
+    for path in rejected_files.into_keys() {
+        assert!(plan.edits.contains(&SkillTreeEdit::Delete { path }));
+    }
     validate_skill_commit(&before, &plan.after, &plan.commit_evidence).unwrap();
 }
 
@@ -942,6 +950,8 @@ fn repair_moves_a_rejected_archived_skill_to_the_accepted_active_location() {
         skill: accepted.clone(),
     };
     let accepted_files = accepted_state_files(&accepted_state);
+    let expected_upserts = accepted_files.clone();
+    let rejected_files = object_files("archive/skills/release-check", &accepted);
     let mut checkpoint = SkillConflictCheckpoint {
         conflict_tip: "bad-commit-oid".to_owned(),
         accepted_tree: "accepted-tree-oid".to_owned(),
@@ -974,7 +984,76 @@ fn repair_moves_a_rejected_archived_skill_to_the_accepted_active_location() {
     assert!(plan.edits.contains(&SkillTreeEdit::Delete {
         path: "archive/skills/release-check/skill.meta.yaml".to_owned(),
     }));
+    for (path, bytes) in expected_upserts {
+        assert!(plan.edits.contains(&SkillTreeEdit::Upsert { path, bytes }));
+    }
+    for path in rejected_files.into_keys() {
+        assert!(plan.edits.contains(&SkillTreeEdit::Delete { path }));
+    }
     validate_skill_commit(&before, &plan.after, &plan.commit_evidence).unwrap();
+}
+
+#[test]
+fn repair_relocation_requires_materializing_every_missing_accepted_file() {
+    let mut before = create_active_skill();
+    let accepted = before.active_skills[&slug()].clone();
+    let accepted_state = SkillRepairAcceptedState::ArchivedSkill {
+        slug: slug(),
+        skill: accepted,
+    };
+    let accepted_files = accepted_state_files(&accepted_state);
+    let changed_paths = object_files("skills/release-check", &before.active_skills[&slug()])
+        .into_keys()
+        .collect();
+    before.conflict_checkpoint = Some(SkillConflictCheckpoint {
+        conflict_tip: "bad-commit-oid".to_owned(),
+        accepted_tree: "accepted-tree-oid".to_owned(),
+        accepted_state,
+        accepted_files,
+        changed_paths,
+    });
+    let request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: request_id('F'),
+        scope: SkillRepairScope::Skill(slug()),
+        conflict_tip: "bad-commit-oid".to_owned(),
+        accepted_tree: "accepted-tree-oid".to_owned(),
+    });
+
+    assert_eq!(
+        plan_skill_mutation(&before, &context(ALICE, None), &request),
+        Err(SkillError::SyncConflict)
+    );
+}
+
+#[test]
+fn repair_requires_an_upsert_when_accepted_bytes_differ_at_the_current_path() {
+    let mut before = create_active_skill();
+    let accepted = before.active_skills[&slug()].clone();
+    let mut accepted_bytes = serde_yaml::to_string(&accepted.meta).unwrap().into_bytes();
+    accepted_bytes.extend_from_slice(b"# accepted raw bytes\n");
+    let mut checkpoint = repair_checkpoint(
+        SkillRepairAcceptedState::ActiveSkill {
+            slug: slug(),
+            skill: accepted,
+        },
+        "skills/release-check/skill.meta.yaml",
+        &accepted_bytes,
+    );
+    checkpoint
+        .changed_paths
+        .remove("skills/release-check/skill.meta.yaml");
+    before.conflict_checkpoint = Some(checkpoint);
+    let request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: request_id('G'),
+        scope: SkillRepairScope::Skill(slug()),
+        conflict_tip: "bad-commit-oid".to_owned(),
+        accepted_tree: "accepted-tree-oid".to_owned(),
+    });
+
+    assert_eq!(
+        plan_skill_mutation(&before, &context(ALICE, None), &request),
+        Err(SkillError::SyncConflict)
+    );
 }
 
 #[test]
@@ -1008,6 +1087,50 @@ fn repair_rejects_unrelated_paths_inside_the_opposite_skill_location() {
         plan_skill_mutation(&before, &context(ALICE, None), &request),
         Err(SkillError::SyncConflict)
     );
+}
+
+#[test]
+fn repair_rejects_non_normalized_changed_paths_before_planning_deletes() {
+    let before = create_active_skill();
+    let accepted = before.active_skills[&slug()].clone();
+    let accepted_state = SkillRepairAcceptedState::ActiveSkill {
+        slug: slug(),
+        skill: accepted,
+    };
+    let accepted_files = accepted_state_files(&accepted_state);
+    let request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: request_id('H'),
+        scope: SkillRepairScope::Skill(slug()),
+        conflict_tip: "bad-commit-oid".to_owned(),
+        accepted_tree: "accepted-tree-oid".to_owned(),
+    });
+
+    for malicious_path in [
+        "skills/release-check/../../channels/general.thread",
+        "skills/release-check/./outside.meta.yaml",
+        "skills/release-check//outside.meta.yaml",
+        "skills/release-check/trailing/",
+        "skills/release-check/\0outside.meta.yaml",
+        "skills/release-check/\u{001f}outside.meta.yaml",
+        "skills\\release-check\\outside.meta.yaml",
+        "/skills/release-check/outside.meta.yaml",
+        "C:/skills/release-check/outside.meta.yaml",
+    ] {
+        let mut attempt = before.clone();
+        attempt.conflict_checkpoint = Some(SkillConflictCheckpoint {
+            conflict_tip: "bad-commit-oid".to_owned(),
+            accepted_tree: "accepted-tree-oid".to_owned(),
+            accepted_state: accepted_state.clone(),
+            accepted_files: accepted_files.clone(),
+            changed_paths: BTreeSet::from([malicious_path.to_owned()]),
+        });
+
+        assert_eq!(
+            plan_skill_mutation(&attempt, &context(ALICE, None), &request),
+            Err(SkillError::SyncConflict),
+            "unsafe changed path must be rejected: {malicious_path:?}"
+        );
+    }
 }
 
 #[test]

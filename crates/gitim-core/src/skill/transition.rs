@@ -1380,6 +1380,10 @@ fn valid_repair_checkpoint(
         || checkpoint.accepted_tree.is_empty()
         || checkpoint.accepted_files.is_empty()
         || checkpoint.changed_paths.is_empty()
+        || checkpoint
+            .changed_paths
+            .iter()
+            .any(|path| !valid_portable_repository_path(path))
     {
         return false;
     }
@@ -1396,6 +1400,12 @@ fn valid_repair_checkpoint(
     };
     let accepted_paths: BTreeSet<_> = checkpoint.accepted_files.keys().cloned().collect();
     if accepted_paths != expected_paths {
+        return false;
+    }
+    let Some(current_files) = current_repository_files(before) else {
+        return false;
+    };
+    if !repair_edits_materialize_accepted_state(checkpoint, &current_files) {
         return false;
     }
     let paths_in_scope = match &checkpoint.accepted_state {
@@ -1448,6 +1458,125 @@ fn valid_repair_checkpoint(
                 &checkpoint.accepted_files,
             ),
         }
+}
+
+fn valid_portable_repository_path(path: &str) -> bool {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains('\\')
+        || path.chars().any(char::is_control)
+        || path.as_bytes().get(1) == Some(&b':')
+    {
+        return false;
+    }
+    path.split('/')
+        .all(|component| !component.is_empty() && component != "." && component != "..")
+}
+
+fn repair_edits_materialize_accepted_state(
+    checkpoint: &SkillConflictCheckpoint,
+    current_files: &BTreeMap<String, Vec<u8>>,
+) -> bool {
+    if checkpoint.accepted_files.iter().any(|(path, bytes)| {
+        !checkpoint.changed_paths.contains(path) && current_files.get(path) != Some(bytes)
+    }) {
+        return false;
+    }
+
+    let accepted_prefix = match &checkpoint.accepted_state {
+        SkillRepairAcceptedState::Workspace(_) => return true,
+        SkillRepairAcceptedState::ActiveSkill { slug, .. } => {
+            format!("skills/{}/", slug.as_str())
+        }
+        SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
+            format!("archive/skills/{}/", slug.as_str())
+        }
+    };
+    current_files.keys().all(|path| {
+        !path.starts_with(&accepted_prefix)
+            || checkpoint.accepted_files.contains_key(path)
+            || checkpoint.changed_paths.contains(path)
+    })
+}
+
+fn current_repository_files(
+    snapshot: &SkillRepositorySnapshot,
+) -> Option<BTreeMap<String, Vec<u8>>> {
+    let mut files = BTreeMap::new();
+    if let Some(workspace) = &snapshot.workspace {
+        files.insert(
+            "skills/workspace.meta.yaml".to_owned(),
+            serde_yaml::to_string(workspace).ok()?.into_bytes(),
+        );
+    }
+    for (slug, skill) in &snapshot.active_skills {
+        insert_skill_object_files(&mut files, &format!("skills/{}", slug.as_str()), skill)?;
+    }
+    for (slug, skill) in &snapshot.archived_skills {
+        insert_skill_object_files(
+            &mut files,
+            &format!("archive/skills/{}", slug.as_str()),
+            skill,
+        )?;
+    }
+    Some(files)
+}
+
+fn insert_skill_object_files(
+    files: &mut BTreeMap<String, Vec<u8>>,
+    root: &str,
+    skill: &SkillObjectSnapshot,
+) -> Option<()> {
+    files.insert(
+        format!("{root}/skill.meta.yaml"),
+        serde_yaml::to_string(&skill.meta).ok()?.into_bytes(),
+    );
+    files.insert(
+        format!("{root}/history.thread"),
+        skill.history.as_bytes().to_vec(),
+    );
+    for (revision_id, revision) in &skill.revisions {
+        files.insert(
+            format!(
+                "{root}/revisions/{}/revision.meta.yaml",
+                revision_id.as_str()
+            ),
+            serde_yaml::to_string(&revision.meta).ok()?.into_bytes(),
+        );
+        for entry in &revision.package.entries {
+            files.insert(
+                format!(
+                    "{root}/revisions/{}/package/{}",
+                    revision_id.as_str(),
+                    entry.path
+                ),
+                entry.bytes.clone(),
+            );
+        }
+    }
+    for (revision_id, publication) in &skill.publications {
+        files.insert(
+            format!("{root}/publications/{}.meta.yaml", revision_id.as_str()),
+            serde_yaml::to_string(publication).ok()?.into_bytes(),
+        );
+    }
+    for (proposal_id, proposal) in &skill.proposals {
+        files.insert(
+            format!(
+                "{root}/proposals/{}/proposal.meta.yaml",
+                proposal_id.as_str()
+            ),
+            serde_yaml::to_string(&proposal.meta).ok()?.into_bytes(),
+        );
+        files.insert(
+            format!(
+                "{root}/proposals/{}/discussion.thread",
+                proposal_id.as_str()
+            ),
+            proposal.discussion.as_bytes().to_vec(),
+        );
+    }
+    Some(())
 }
 
 fn opposite_repair_paths_match(
