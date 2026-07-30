@@ -33,6 +33,10 @@ export function parseChannelMeta(yaml: string): any;
 
 export function parseQuickSessionMeta(yaml: string): any;
 
+export function parseSkillMeta(yaml: string): any;
+
+export function parseSkillReference(value: string): any;
+
 export function parseThread(text: string): any;
 
 export function parseUserMeta(yaml: string): any;
@@ -41,11 +45,15 @@ export function renumberBatch(batch: string, max_existing: bigint): string;
 
 export function resolveContentPure(additions_json: string, remote_json: string): any;
 
+export function scanSkillReferences(value: string): any;
+
 export function serializeQuickSessionMeta(meta: any): string;
 
 export function setBoardField(board: any, field: string, value: string): any;
 
 export function setBoardSection(board: any, section: string, value: string): any;
+
+export function skillMediaType(path: string): string;
 
 export function stringifyBoardMarkdown(board: any): string;
 
@@ -89,6 +97,10 @@ export interface InitOutput {
     readonly applyQuickSessionTransition: (a: any, b: any) => [number, number, number];
     readonly parseChannelMeta: (a: number, b: number) => [number, number, number];
     readonly parseUserMeta: (a: number, b: number) => [number, number, number];
+    readonly parseSkillReference: (a: number, b: number) => [number, number, number];
+    readonly scanSkillReferences: (a: number, b: number) => [number, number, number];
+    readonly parseSkillMeta: (a: number, b: number) => [number, number, number];
+    readonly skillMediaType: (a: number, b: number) => [number, number];
     readonly validateUserMeta: (a: number, b: number) => [number, number, number];
     readonly validateChannelMeta: (a: number, b: number) => [number, number, number];
     readonly parseCardMeta: (a: number, b: number) => [number, number, number];

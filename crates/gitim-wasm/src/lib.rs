@@ -197,6 +197,35 @@ pub fn parse_user_meta(yaml: &str) -> Result<JsValue, JsError> {
     serde_wasm_bindgen::to_value(&meta).map_err(|e| JsError::new(&e.to_string()))
 }
 
+// --- skills ---
+
+const SKILL_INVALID_METADATA: &str = "skill_invalid_metadata";
+
+#[wasm_bindgen(js_name = "parseSkillReference")]
+pub fn parse_skill_reference_wasm(value: &str) -> Result<JsValue, JsError> {
+    let reference = gitim_core::skill::parse_skill_reference(value)
+        .map_err(|error| JsError::new(error.code()))?;
+    serde_wasm_bindgen::to_value(&reference).map_err(|error| JsError::new(&error.to_string()))
+}
+
+#[wasm_bindgen(js_name = "scanSkillReferences")]
+pub fn scan_skill_references_wasm(value: &str) -> Result<JsValue, JsError> {
+    let references = gitim_core::skill::scan_skill_references(value);
+    serde_wasm_bindgen::to_value(&references).map_err(|error| JsError::new(&error.to_string()))
+}
+
+#[wasm_bindgen(js_name = "parseSkillMeta")]
+pub fn parse_skill_meta_wasm(yaml: &str) -> Result<JsValue, JsError> {
+    let meta: gitim_core::skill::SkillMeta =
+        serde_yaml::from_str(yaml).map_err(|_| JsError::new(SKILL_INVALID_METADATA))?;
+    serde_wasm_bindgen::to_value(&meta).map_err(|_| JsError::new(SKILL_INVALID_METADATA))
+}
+
+#[wasm_bindgen(js_name = "skillMediaType")]
+pub fn skill_media_type_wasm(path: &str) -> String {
+    gitim_core::skill::media_type_for_path(path).to_owned()
+}
+
 #[wasm_bindgen(js_name = "validateUserMeta")]
 pub fn validate_user_meta(yaml: &str) -> Result<JsValue, JsError> {
     let meta = gitim_core::validator::validate_user_meta(yaml)
@@ -400,9 +429,23 @@ pub fn merge_quick_session_meta_wasm(
 
 #[cfg(all(test, target_arch = "wasm32"))]
 mod wasm_tests {
+    use wasm_bindgen::{prelude::wasm_bindgen, JsValue};
     use wasm_bindgen_test::wasm_bindgen_test;
 
     const ASSET_REF: &str = "<^v1/3c6a295e-744a-41dc-ba60-5c21bb94e5a2/sha256:8f2c4d7d7e931a62c18f6f24c8e388d72524d4c4cd6f88e9538f7d4a66c72a88?name=asset.txt&type=text%2Fplain&size=42>";
+    const SKILL_META: &str = "schema_version: 1\nslug: release-check\ndisplay_name: Release Check\ndescription: Verify release candidates.\ncreated_by: alice\nowners:\n  - alice\nmaintainers:\n  - alice\ncurrent_revision: r-01K1D8QG2S8RX4T9M9BDKQ9Z7N\nopen_proposal_count: 0\ncontrol_revision: 1\nevent_revision: 1\ncreated_at: '2026-07-30T04:00:00Z'\nupdated_at: '2026-07-30T04:00:00Z'\n";
+
+    #[wasm_bindgen(
+        inline_js = "export function skillErrorMessage(error) { return error.message; }"
+    )]
+    extern "C" {
+        #[wasm_bindgen(js_name = skillErrorMessage)]
+        fn skill_error_message(error: &JsValue) -> String;
+    }
+
+    fn error_message(error: wasm_bindgen::JsError) -> String {
+        skill_error_message(&JsValue::from(error))
+    }
 
     #[wasm_bindgen_test]
     fn extract_links_preserves_nested_asset_wire_shape() -> Result<(), String> {
@@ -417,5 +460,59 @@ mod wasm_tests {
         );
         assert_eq!(value[0]["raw"], ASSET_REF);
         Ok(())
+    }
+
+    #[wasm_bindgen_test]
+    fn skill_reference_wrappers_serialize_core_values() -> Result<(), String> {
+        let reference =
+            super::parse_skill_reference_wasm("skill:release-check@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N")
+                .map_err(|error| format!("{error:?}"))?;
+        let reference: serde_json::Value =
+            serde_wasm_bindgen::from_value(reference).map_err(|error| error.to_string())?;
+        assert_eq!(reference["slug"], "release-check");
+        assert_eq!(reference["revision"], "r-01K1D8QG2S8RX4T9M9BDKQ9Z7N");
+
+        let references = super::scan_skill_references_wasm(
+            "skill:release-check and skill:deploy@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N",
+        )
+        .map_err(|error| format!("{error:?}"))?;
+        let references: serde_json::Value =
+            serde_wasm_bindgen::from_value(references).map_err(|error| error.to_string())?;
+        assert_eq!(references[0]["slug"], "release-check");
+        assert_eq!(references[1]["slug"], "deploy");
+        Ok(())
+    }
+
+    #[wasm_bindgen_test]
+    fn parse_skill_meta_wrapper_serializes_core_schema() -> Result<(), String> {
+        let meta =
+            super::parse_skill_meta_wasm(SKILL_META).map_err(|error| format!("{error:?}"))?;
+        let meta: serde_json::Value =
+            serde_wasm_bindgen::from_value(meta).map_err(|error| error.to_string())?;
+        assert_eq!(meta["slug"], "release-check");
+        assert_eq!(meta["current_revision"], "r-01K1D8QG2S8RX4T9M9BDKQ9Z7N");
+        assert_eq!(meta["owners"][0], "alice");
+        Ok(())
+    }
+
+    #[wasm_bindgen_test]
+    fn skill_wrappers_expose_stable_error_codes() -> Result<(), String> {
+        let reference_error = super::parse_skill_reference_wasm("skill:Release-Check")
+            .expect_err("invalid reference must fail");
+        assert_eq!(error_message(reference_error), "skill_invalid_slug");
+
+        let metadata_error = super::parse_skill_meta_wasm("slug: release-check")
+            .expect_err("incomplete metadata must fail");
+        assert_eq!(error_message(metadata_error), "skill_invalid_metadata");
+        Ok(())
+    }
+
+    #[wasm_bindgen_test]
+    fn skill_media_type_wrapper_delegates_to_core() {
+        assert_eq!(super::skill_media_type_wasm("guide.SVG"), "image/svg+xml");
+        assert_eq!(
+            super::skill_media_type_wasm("resource.unknown"),
+            "application/octet-stream"
+        );
     }
 }
