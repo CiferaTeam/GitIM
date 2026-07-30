@@ -1562,6 +1562,170 @@ fn rejected_receipt_cleanup_is_owned_by_its_declared_skill_in_both_repair_orders
 }
 
 #[test]
+fn rejected_commits_prune_stale_receipt_cleanup_authority_across_scopes() {
+    let repository = Repository::new();
+    let initial = repository.snapshot();
+    let bootstrap = bootstrap_plan(
+        &SkillRepositorySnapshot {
+            active_users: BTreeSet::from([ALICE.to_owned()]),
+            ..Default::default()
+        },
+        'A',
+    );
+    let bootstrap_tip = repository.commit_plan(&bootstrap);
+    let accepted = validate_incoming_skill_history(&repository.storage, &initial, &bootstrap_tip)
+        .unwrap()
+        .checkpoint;
+    let create = create_plan(&bootstrap.after, 'B');
+    let rejected_receipt_path = format!("skills/receipts/{}.meta.yaml", create.receipt.id.as_str());
+    apply_plan(repository.root(), &create);
+    let meta_path = "skills/release-check/skill.meta.yaml";
+    let malformed_meta = fs::read_to_string(repository.root().join(meta_path))
+        .unwrap()
+        .replace("Verify releases.", "Rejected bytes.");
+    fs::write(repository.root().join(meta_path), &malformed_meta).unwrap();
+    commit_all(repository.root(), &create.commit_message, ALICE);
+    let first_rejected_tip = repository.tip();
+    let mut checkpoint =
+        validate_incoming_skill_history(&repository.storage, &accepted, &first_rejected_tip)
+            .unwrap()
+            .checkpoint;
+    assert_eq!(
+        checkpoint.conflicts["release-check"].rejected_receipt_paths,
+        BTreeSet::from([rejected_receipt_path.clone()])
+    );
+
+    fs::remove_file(repository.root().join(&rejected_receipt_path)).unwrap();
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"first B collision\n",
+    )
+    .unwrap();
+    commit_all(
+        repository.root(),
+        "delete A receipt while corrupting B",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert!(checkpoint.conflicts["release-check"]
+        .rejected_receipt_paths
+        .is_empty());
+    assert!(checkpoint.conflicts.contains_key("release-notes"));
+
+    fs::write(
+        repository.root().join(&rejected_receipt_path),
+        b"not: [valid\n",
+    )
+    .unwrap();
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"second B collision\n",
+    )
+    .unwrap();
+    commit_all(
+        repository.root(),
+        "malformed A receipt reappears while corrupting B",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert!(checkpoint.conflicts["release-check"]
+        .rejected_receipt_paths
+        .is_empty());
+
+    fs::remove_file(repository.root().join(&rejected_receipt_path)).unwrap();
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"third B collision\n",
+    )
+    .unwrap();
+    commit_all(
+        repository.root(),
+        "remove malformed A receipt while corrupting B",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert!(checkpoint.conflicts["release-check"]
+        .rejected_receipt_paths
+        .is_empty());
+
+    fs::write(
+        repository.root().join(&rejected_receipt_path),
+        serde_yaml::to_string(&create.receipt).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"fourth B collision\n",
+    )
+    .unwrap();
+    commit_all(
+        repository.root(),
+        "valid A receipt explicitly reappears while corrupting B",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert_eq!(
+        checkpoint.conflicts["release-check"].rejected_receipt_paths,
+        BTreeSet::from([rejected_receipt_path.clone()])
+    );
+
+    fs::remove_file(repository.root().join(&rejected_receipt_path)).unwrap();
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"fifth B collision\n",
+    )
+    .unwrap();
+    commit_all(
+        repository.root(),
+        "delete reintroduced A receipt while corrupting B",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert!(checkpoint.conflicts["release-check"]
+        .rejected_receipt_paths
+        .is_empty());
+
+    let b_conflict = checkpoint.conflicts["release-notes"].clone();
+    let mut actual_a_files = skill_scope_files(&create.after, "release-check");
+    actual_a_files.insert(meta_path.to_owned(), malformed_meta.into_bytes());
+    let repair = plan_repair_for_skill(
+        &bootstrap.after,
+        &checkpoint.conflicts["release-check"],
+        "release-check",
+        actual_a_files,
+        BTreeSet::new(),
+        std::slice::from_ref(&create.receipt),
+        'C',
+    );
+    let repair_tip = commit_plan_with_private_index(&repository, &repair);
+    let repaired =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repair_tip).unwrap();
+
+    assert!(!repaired.checkpoint.conflicts.contains_key("release-check"));
+    assert_eq!(repaired.checkpoint.conflicts["release-notes"], b_conflict);
+    assert!(
+        tree_oid_at(&repository.storage, &repair_tip, &rejected_receipt_path)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn malformed_first_bootstrap_has_no_repository_visible_repair_authority() {
     let repository = Repository::new();
     fs::write(repository.root().join("ordinary.txt"), "preserve\n").unwrap();

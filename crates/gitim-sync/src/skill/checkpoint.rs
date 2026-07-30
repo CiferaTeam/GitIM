@@ -630,6 +630,11 @@ impl<'a> Replay<'a> {
                     .map_or_else(BTreeMap::new, |parent| {
                         introduced_receipt_owners(&paths, &parent, &actual_after)
                     });
+                for (scope, conflict) in &mut self.checkpoint.conflicts {
+                    conflict.rejected_receipt_paths.retain(|path| {
+                        receipt_owner_at(&actual_after, path).as_ref() == Some(scope)
+                    });
+                }
                 affected.extend(introduced_receipts.values().cloned());
                 let needs_absent_tree = affected.iter().any(|key| {
                     key != WORKSPACE_CONFLICT_KEY && !self.checkpoint.skills.contains_key(key)
@@ -665,9 +670,6 @@ impl<'a> Replay<'a> {
                         .and_modify(|conflict| {
                             conflict.rejected_commit = commit.to_owned();
                             conflict.code = error.code().to_owned();
-                            conflict.rejected_receipt_paths.retain(|path| {
-                                receipt_owner_at(&actual_after, path).as_ref() == Some(&key)
-                            });
                             conflict
                                 .rejected_receipt_paths
                                 .extend(rejected_receipt_paths.iter().cloned());
