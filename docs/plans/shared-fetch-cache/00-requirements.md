@@ -219,14 +219,18 @@ namespace, then compares it with the last published manifest.
 - Unchanged manifest: advance the freshness timestamp without incrementing the
   generation.
 
-Before import, a follower validates the cache repository, requires the active
-generation to match the state manifest exactly, and verifies that every unique
-manifest tip resolves to a readable commit object. The same validation runs
-for empty manifests when state names a generation greater than zero. A stale
-leader performs this validation even when it already applied that generation.
-If the active repository, generation, or tip object is invalid, the lock
-holder refreshes the remote and publishes a repaired `N+1` generation,
-including when the remote manifest is unchanged.
+Before import, a follower validates the cache repository and requires the
+active generation to match the state manifest exactly. It deduplicates manifest
+object IDs and sends them through one
+`git cat-file --batch-check=%(objectname) %(objecttype)` subprocess. Input is
+written while output is drained, and every response must correspond to its
+input object ID and report type `commit`. Missing, malformed, short, extra, or
+nonzero results fail with a credential-free generic error. The same validation
+runs for empty manifests when state names a generation greater than zero. A
+stale leader performs this validation even when it already applied that
+generation. If the active repository, generation, or tip object is invalid,
+the lock holder refreshes the remote and publishes a repaired `N+1`
+generation, including when the remote manifest is unchanged.
 
 Published refs live under
 `refs/gitim-fetch-cache/generations/<generation>/heads/*`. State is the commit
@@ -446,8 +450,13 @@ The reviewed 16 new-path groups have implemented coverage:
   `cache_generation_publish_and_import_preserve_follower_only_refs_and_head`,
   `cache_global_url_rewrite_does_not_invalidate_owned_repository`,
   `cache_global_marker_does_not_authenticate_arbitrary_bare`,
-  `cache_global_and_local_markers_do_not_create_multivalue_mismatch`, and
-  `cache_sha256_generation_publishes_and_imports`.
+  `cache_global_and_local_markers_do_not_create_multivalue_mismatch`,
+  `cache_sha256_generation_publishes_and_imports`,
+  `cache_tip_batch_parser_rejects_non_commit_and_malformed_output`,
+  `cache_tip_batch_validates_multiple_branches_with_one_invocation`,
+  `cache_tip_batch_rejects_missing_object_with_one_invocation`,
+  `cache_tip_batch_maps_nonzero_exit_to_generic_error`, and
+  `cache_tip_batch_drains_large_output_while_writing_input`.
 - Locking, refresh, and cooldowns:
   `orchestration_lock_contention_is_bounded_and_neutral`,
   `orchestration_lock_open_failure_uses_direct_fetch`,
@@ -600,8 +609,9 @@ finding above.
     `d575fd9b321528874b561b6ec7e84cd75de1999d`,
     `a68fe55a552f9646a7101a5741545e4ed01d80c4`,
     `99c9d48e0b4d5adee3277b3962736873c72e6dcb`,
-    `f2f45711a990045c061ede584e1e7a8154d1cb64`.
-  - Current commit title: `fix(sync): repair incomplete cache objects`.
+    `f2f45711a990045c061ede584e1e7a8154d1cb64`,
+    `34833d1882623cfe23a98afedd69ddec376400cd`.
+  - Current commit title: `fix(sync): batch cache tip validation`.
   - Verified by: `cargo test -p gitim-sync`;
     `cargo fmt --all -- --check`;
     `cargo clippy -p gitim-sync --all-targets --no-deps --locked`;
@@ -609,7 +619,7 @@ finding above.
 
 ## Final verification
 
-- `cargo test -p gitim-sync` — pass, 224 tests across unit and integration
+- `cargo test -p gitim-sync` — pass, 229 tests across unit and integration
   targets.
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy -p gitim-sync --all-targets --no-deps --locked` — pass.

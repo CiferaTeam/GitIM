@@ -26,6 +26,22 @@ const CACHE_SCHEMA_MARKER_KEY: &str = "gitim.fetch-cache-schema";
 const CACHE_SCHEMA_MARKER_VALUE: &str = "1";
 static CACHE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
+#[cfg(test)]
+thread_local! {
+    static CACHE_TIP_BATCH_INVOCATION_COUNT: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_cache_tip_batch_invocation_count() {
+    CACHE_TIP_BATCH_INVOCATION_COUNT.set(0);
+}
+
+#[cfg(test)]
+fn cache_tip_batch_invocation_count() -> u64 {
+    CACHE_TIP_BATCH_INVOCATION_COUNT.get()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum GitObjectFormat {
     Sha1,
@@ -81,8 +97,10 @@ pub enum GitError {
 ///
 /// Spawns `git` as a child process and waits up to `GIT_COMMAND_TIMEOUT` for
 /// it to finish. If the deadline expires, the child is killed and
-/// `GitError::Timeout` is returned. On success, stderr is checked for
-/// ENOSPC patterns before returning the output.
+/// `GitError::Timeout` is returned. Input is written concurrently with output
+/// collection so commands with streaming responses cannot fill one pipe while
+/// waiting on the other. On success, stderr is checked for ENOSPC patterns
+/// before returning the output.
 fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
     run_git_command_with_env(args, current_dir, &[])
 }
@@ -121,15 +139,24 @@ fn run_git_command_with_env_and_input(
         cmd.env(k, v);
     }
     let mut child = cmd.spawn()?;
-    if let Some(input) = input {
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Err(error) = stdin.write_all(input) {
+    let input_result = match input {
+        Some(input) => {
+            let Some(mut stdin) = child.stdin.take() else {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(GitError::Io(error));
-            }
+                return Err(GitError::CommandFailed(
+                    "git subprocess stdin is unavailable".to_string(),
+                ));
+            };
+            let input = input.to_vec();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(stdin.write_all(&input));
+            });
+            Some(rx)
         }
-    }
+        None => None,
+    };
 
     // Wait with timeout using a thread + channel.
     // We keep the Child's pid so we can kill it on timeout.
@@ -141,6 +168,17 @@ fn run_git_command_with_env_and_input(
 
     match rx.recv_timeout(GIT_COMMAND_TIMEOUT) {
         Ok(Ok(output)) => {
+            if let Some(input_result) = input_result {
+                match input_result.recv() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => return Err(GitError::Io(error)),
+                    Err(_) => {
+                        return Err(GitError::CommandFailed(
+                            "git subprocess input thread panicked".to_string(),
+                        ));
+                    }
+                }
+            }
             // Check for disk-full even on "success" — git sometimes exits 0
             // with ENOSPC warnings in stderr, and some commands (e.g. fetch)
             // may partially succeed.
@@ -290,6 +328,39 @@ fn parse_cache_generation_manifest(
         }
     }
     Ok(manifest)
+}
+
+fn cache_tip_batch_error() -> GitError {
+    GitError::CommandFailed("fetch-cache commit objects are unavailable".to_string())
+}
+
+fn parse_cache_tip_batch_output(stdout: &[u8], expected: &[&str]) -> Result<(), GitError> {
+    if expected.is_empty() {
+        return if stdout.is_empty() {
+            Ok(())
+        } else {
+            Err(cache_tip_batch_error())
+        };
+    }
+    if !stdout.ends_with(b"\n") {
+        return Err(cache_tip_batch_error());
+    }
+
+    let mut lines = stdout.split(|byte| *byte == b'\n');
+    for expected_object_id in expected {
+        let line = lines.next().ok_or_else(cache_tip_batch_error)?;
+        let mut fields = line.split(|byte| *byte == b' ');
+        if fields.next() != Some(expected_object_id.as_bytes())
+            || fields.next() != Some(b"commit")
+            || fields.next().is_some()
+        {
+            return Err(cache_tip_batch_error());
+        }
+    }
+    if lines.next() != Some(&[][..]) || lines.next().is_some() {
+        return Err(cache_tip_batch_error());
+    }
+    Ok(())
 }
 
 fn cache_path_argument(path: &Path) -> Result<&str, GitError> {
@@ -626,17 +697,31 @@ impl GitStorage {
         cache_path: &Path,
         manifest: &BTreeMap<String, String>,
     ) -> Result<(), GitError> {
-        let object_ids = manifest.values().collect::<std::collections::BTreeSet<_>>();
-        for object_id in object_ids {
-            let commit = format!("{object_id}^{{commit}}");
-            let output = run_git_command(&["cat-file", "-e", &commit], cache_path)?;
-            if !output.status.success() {
-                return Err(GitError::CommandFailed(
-                    "fetch-cache commit object is unavailable".to_string(),
-                ));
-            }
+        let object_ids = manifest
+            .values()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if object_ids.is_empty() {
+            return Ok(());
         }
-        Ok(())
+        let mut input = Vec::new();
+        for object_id in &object_ids {
+            input.extend_from_slice(object_id.as_bytes());
+            input.push(b'\n');
+        }
+
+        #[cfg(test)]
+        CACHE_TIP_BATCH_INVOCATION_COUNT
+            .set(CACHE_TIP_BATCH_INVOCATION_COUNT.get().saturating_add(1));
+        let output = run_git_with_input(
+            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            cache_path,
+            &input,
+        )
+        .map_err(|_| cache_tip_batch_error())?;
+        parse_cache_tip_batch_output(&output.stdout, &object_ids)
     }
 
     #[allow(dead_code)]
@@ -1590,6 +1675,64 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
+    fn create_large_commit_manifest(
+        cache_path: &Path,
+        commit_count: usize,
+    ) -> BTreeMap<String, String> {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let marks_path = cache_path.parent().unwrap().join("cache-tip-batch.marks");
+        let mut stream = b"blob\nmark :1\ndata 1\nx\n".to_vec();
+        for index in 0..commit_count {
+            let message = format!("tip {index}");
+            let commit = format!(
+                "commit refs/heads/cache-tip-load\nmark :{}\ncommitter Cache Test <cache@test> {} +0000\ndata {}\n{}\n{}\n",
+                index + 2,
+                index + 1,
+                message.len(),
+                message,
+                if index == 0 {
+                    "M 100644 :1 cached"
+                } else {
+                    ""
+                }
+            );
+            stream.extend_from_slice(commit.as_bytes());
+        }
+        stream.extend_from_slice(b"done\n");
+
+        let export_marks = format!("--export-marks={}", marks_path.display());
+        let mut child = std::process::Command::new("git")
+            .args(["fast-import", "--quiet", &export_marks])
+            .current_dir(cache_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&stream).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "git fast-import failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let marks = std::fs::read_to_string(marks_path).unwrap();
+        let object_ids = marks
+            .lines()
+            .skip(1)
+            .map(|line| line.split_once(' ').unwrap().1.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(object_ids.len(), commit_count);
+        object_ids
+            .into_iter()
+            .enumerate()
+            .map(|(index, object_id)| (format!("{CACHE_REMOTE_HEADS}/batch-{index:05}"), object_id))
+            .collect()
+    }
+
     fn enter_isolated_global_config_test(test_name: &str, config: &str) -> bool {
         const CHILD_TEST_ENV: &str = "GITIM_CACHE_GLOBAL_CONFIG_TEST";
         if std::env::var(CHILD_TEST_ENV).as_deref() == Ok(test_name) {
@@ -1720,11 +1863,119 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cache_tip_batch_parser_rejects_non_commit_and_malformed_output() {
+        let first = "1111111111111111111111111111111111111111";
+        let second = "2222222222222222222222222222222222222222";
+        let expected = [first, second];
+        let malformed = [
+            format!("{first} commit\n{second} tree\n").into_bytes(),
+            format!("{first} commit\n{second} missing\n").into_bytes(),
+            format!("{first} commit\n").into_bytes(),
+            format!("{first} commit\n{second} commit\n{second} commit\n").into_bytes(),
+            format!("{first} commit\n{first} commit\n").into_bytes(),
+            format!("{first} commit extra\n{second} commit\n").into_bytes(),
+            format!("{first} commit\n{second} commit").into_bytes(),
+            vec![0xff],
+        ];
+
+        for output in malformed {
+            assert_invalid_cache_tip_batch(parse_cache_tip_batch_output(&output, &expected));
+        }
+    }
+
+    #[test]
+    fn cache_tip_batch_validates_multiple_branches_with_one_invocation() {
+        let fixture = CacheGitFixture::new();
+        let storage = fixture.leader_storage();
+        storage.fetch_cache_shadow().unwrap();
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let cache_path = cache_root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        storage.publish_cache_generation(&cache_path, 1).unwrap();
+        let manifest = GitStorage::cache_generation_manifest(&cache_path, 1).unwrap();
+        assert_eq!(
+            manifest
+                .values()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            2
+        );
+
+        reset_cache_tip_batch_invocation_count();
+        GitStorage::cache_commit_tips_are_readable(&cache_path, &manifest).unwrap();
+
+        assert_eq!(cache_tip_batch_invocation_count(), 1);
+    }
+
+    #[test]
+    fn cache_tip_batch_rejects_missing_object_with_one_invocation() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        let manifest = BTreeMap::from([(
+            format!("{CACHE_REMOTE_HEADS}/main"),
+            "1111111111111111111111111111111111111111".to_string(),
+        )]);
+
+        reset_cache_tip_batch_invocation_count();
+        assert_invalid_cache_tip_batch(GitStorage::cache_commit_tips_are_readable(
+            &cache_path,
+            &manifest,
+        ));
+
+        assert_eq!(cache_tip_batch_invocation_count(), 1);
+    }
+
+    #[test]
+    fn cache_tip_batch_maps_nonzero_exit_to_generic_error() {
+        let root = tempfile::TempDir::new().unwrap();
+        let manifest = BTreeMap::from([(
+            format!("{CACHE_REMOTE_HEADS}/main"),
+            "1111111111111111111111111111111111111111".to_string(),
+        )]);
+
+        reset_cache_tip_batch_invocation_count();
+        assert_invalid_cache_tip_batch(GitStorage::cache_commit_tips_are_readable(
+            root.path(),
+            &manifest,
+        ));
+
+        assert_eq!(cache_tip_batch_invocation_count(), 1);
+    }
+
+    #[test]
+    fn cache_tip_batch_drains_large_output_while_writing_input() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        let manifest = create_large_commit_manifest(&cache_path, 30_000);
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let result = GitStorage::cache_commit_tips_are_readable(&cache_path, &manifest);
+            let _ = sender.send(result);
+        });
+
+        receiver
+            .recv_timeout(Duration::from_secs(15))
+            .expect("batch validation must drain output while writing input")
+            .unwrap();
+    }
+
     fn assert_invalid_cache_manifest(result: Result<BTreeMap<String, String>, GitError>) {
         assert!(matches!(
             result,
             Err(GitError::CommandFailed(message))
                 if message == "invalid fetch-cache ref manifest"
+        ));
+    }
+
+    fn assert_invalid_cache_tip_batch(result: Result<(), GitError>) {
+        assert!(matches!(
+            result,
+            Err(GitError::CommandFailed(message))
+                if message == "fetch-cache commit objects are unavailable"
         ));
     }
 

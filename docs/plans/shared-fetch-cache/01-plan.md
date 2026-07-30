@@ -65,12 +65,14 @@ Create the private native module and begin with tests for:
 7. handler or `.gitim/config.yaml` mismatch fallback;
 8. origin repository identity mismatch;
 9. origin token mismatch;
-10. missing, custom, or multiple `remote.origin.fetch` refspecs;
+10. missing, custom, multiple, empty, or whitespace-padded
+    `remote.origin.fetch` refspecs;
 11. future success timestamp is stale;
 12. failure cooldown is reusable only for the same config revision;
-13. state JSON never contains the token or credential-bearing origin URL.
+13. state JSON never contains the token or credential-bearing origin URL;
 14. raw `remote.origin.url` is read without applying URL rewrites;
-15. all `remote.origin.fetch` values are returned in configuration order.
+15. the standard `remote.origin.fetch` value is read exactly from
+    null-delimited output.
 
 Use a focused fixture that writes the production workspace layout beneath a
 `tempfile::TempDir`, initializes a clone, and configures a raw GitHub-looking
@@ -1036,15 +1038,20 @@ Co-authored-by: Codex <codex@openai.com>
   `f2f45711a990045c061ede584e1e7a8154d1cb64`
   (`fix(sync): validate empty cache cleanup`).
 - Task 5 object-readability repair:
-  `fix(sync): repair incomplete cache objects`.
+  `34833d1882623cfe23a98afedd69ddec376400cd`
+  (`fix(sync): repair incomplete cache objects`).
+- Task 5 batch tip validation:
+  `fix(sync): batch cache tip validation`.
 - Whole-branch hardening validates a unique raw origin URL, requires a direct
   canonical runtime directory, matches the source repository's Git object
   format, requires one exact null-delimited fetch refspec, replaces unsafe
-  cache repositories, validates active commit tips, performs one forced repair
-  for deeper import failures, publishes repairs through immutable `N+1`
-  generations, and cleans inactive refs after empty snapshots.
+  cache repositories, validates deduplicated active commit tips through one
+  strict batch subprocess, drains large batch input and output concurrently,
+  performs one forced repair for deeper import failures, publishes repairs
+  through immutable `N+1` generations, and cleans inactive refs after empty
+  snapshots.
 - Scoped verification passed:
-  `cargo test -p gitim-sync` ran 224 tests,
+  `cargo test -p gitim-sync` ran 229 tests,
   `cargo fmt --all -- --check`,
   `cargo clippy -p gitim-sync --all-targets --no-deps --locked`, and
   `git diff --check`.
