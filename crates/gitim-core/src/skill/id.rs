@@ -67,6 +67,11 @@ macro_rules! prefixed_ulid_id {
                 {
                     return Err(SkillError::InvalidPackage);
                 }
+                let parsed = ulid::Ulid::from_string(suffix)
+                    .map_err(|_| SkillError::InvalidPackage)?;
+                if parsed.to_string() != suffix {
+                    return Err(SkillError::InvalidPackage);
+                }
                 Ok(Self(value.to_owned()))
             }
 

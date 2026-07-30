@@ -129,6 +129,7 @@ fn identifier_and_slug_validation_match_the_protocol() {
     assert!(SkillSlug::new("release--check").is_err());
     assert!(RevisionId::new("r-01K1D8QG2S8RX4T9M9BDKQ9Z7N").is_ok());
     assert!(RevisionId::new("r-01k1D8QG2S8RX4T9M9BDKQ9Z7N").is_err());
+    assert!(RevisionId::new("r-Z0000000000000000000000000").is_err());
 }
 
 #[test]
@@ -216,11 +217,21 @@ fn scanner_does_not_open_a_fence_inside_inline_code() {
 #[test]
 fn scanner_treats_escapes_as_literal_inside_code() {
     let refs = scan_skill_references(
-        "`inline \\` skill:inline-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N\n```\n\\```\nskill:fence-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N",
+        "`inline \\` skill:inline-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N\n```\n\\escaped\n```\nskill:fence-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N",
     );
     assert_eq!(refs.len(), 2);
     assert_eq!(refs[0].slug.as_str(), "inline-visible");
     assert_eq!(refs[1].slug.as_str(), "fence-visible");
+}
+
+#[test]
+fn scanner_recognizes_only_line_fences() {
+    let refs = scan_skill_references(
+        "```\nembedded ``` text\nskill:backtick-hidden@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N\n```\nskill:backtick-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N\n~~~\nembedded ~~~ text\nskill:tilde-hidden@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N\n~~~\nskill:tilde-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N",
+    );
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs[0].slug.as_str(), "backtick-visible");
+    assert_eq!(refs[1].slug.as_str(), "tilde-visible");
 }
 
 #[test]

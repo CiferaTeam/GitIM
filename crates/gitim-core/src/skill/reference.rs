@@ -39,7 +39,10 @@ pub fn scan_skill_references(markdown: &str) -> Vec<SkillReference> {
             .count();
 
         if let Some((fence, minimum_length)) = fenced_code_delimiter {
-            if delimiter == fence && run_length >= minimum_length {
+            if delimiter == fence
+                && run_length >= minimum_length
+                && is_fence_closer(markdown, index, run_length)
+            {
                 fenced_code_delimiter = None;
                 index += run_length;
             } else {
@@ -66,7 +69,10 @@ pub fn scan_skill_references(markdown: &str) -> Vec<SkillReference> {
             continue;
         }
 
-        if matches!(delimiter, b'`' | b'~') && run_length >= 3 {
+        if matches!(delimiter, b'`' | b'~')
+            && run_length >= 3
+            && is_fence_opener(markdown, index, delimiter, run_length)
+        {
             fenced_code_delimiter = Some((delimiter, run_length));
             index += run_length;
             continue;
@@ -151,4 +157,34 @@ fn has_valid_right_boundary(value: &str, end: usize) -> bool {
 
 fn is_reference_boundary_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '/' | '\\' | '-')
+}
+
+fn is_fence_opener(markdown: &str, index: usize, delimiter: u8, run_length: usize) -> bool {
+    if !is_fence_line_start(markdown, index) {
+        return false;
+    }
+
+    delimiter != b'`' || !line_remainder(markdown, index + run_length).contains('`')
+}
+
+fn is_fence_closer(markdown: &str, index: usize, run_length: usize) -> bool {
+    is_fence_line_start(markdown, index)
+        && line_remainder(markdown, index + run_length)
+            .chars()
+            .all(|character| matches!(character, ' ' | '\t'))
+}
+
+fn is_fence_line_start(markdown: &str, index: usize) -> bool {
+    let line_start = markdown[..index]
+        .rfind('\n')
+        .map_or(0, |newline| newline + 1);
+    let indentation = &markdown[line_start..index];
+    indentation.len() <= 3 && indentation.bytes().all(|byte| byte == b' ')
+}
+
+fn line_remainder(markdown: &str, index: usize) -> &str {
+    let line_end = markdown[index..]
+        .find('\n')
+        .map_or(markdown.len(), |offset| index + offset);
+    &markdown[index..line_end]
 }
