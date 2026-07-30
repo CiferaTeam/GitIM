@@ -596,6 +596,7 @@ impl SkillSyncGuard {
     ) -> Result<PendingQuarantinePush, SkillSyncError> {
         validate_journal(repo, &journal)?;
         ensure_quarantine_ref(repo, &journal)?;
+        ensure_current_branch(repo, &journal.branch)?;
         let upstream_ref = format!("origin/{}", journal.branch);
         ensure_ref_equals(repo, &upstream_ref, captured_upstream_oid)?;
 
@@ -640,7 +641,7 @@ impl SkillSyncGuard {
             verify_replayed_result(repo, &journal, repaired)?;
             let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
             let expected = journal.expected_branch_head();
-            reconcile_update_ref_only_residue(repo, &current, repaired, expected)?;
+            reconcile_update_ref_only_residue(repo, &journal.branch, &current, repaired, expected)?;
             if current == expected {
                 ensure_clean_tracked_worktree(repo)?;
                 update_working_branch(repo, &journal.branch, repaired, expected)?;
@@ -801,6 +802,7 @@ impl SkillSyncGuard {
         }
         validate_journal(repo, &journal)?;
         ensure_quarantine_ref(repo, &journal)?;
+        ensure_semantic_recovery_branch(repo, &journal.branch, &active_remote.branch)?;
         if journal.phase == QuarantinePhase::Replayed && active_remote.branch == journal.branch {
             let repaired = journal.repaired_head.as_deref().ok_or_else(|| {
                 SkillSyncError::LocalQuarantineBlocked(
@@ -810,6 +812,7 @@ impl SkillSyncGuard {
             let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
             reconcile_update_ref_only_residue(
                 repo,
+                &journal.branch,
                 &current,
                 repaired,
                 journal.expected_branch_head(),
@@ -1076,7 +1079,13 @@ impl SkillSyncGuard {
                     .expected_head
                     .as_deref()
                     .unwrap_or(journal.tail_head.as_str());
-                reconcile_update_ref_only_residue(repo, &current, repaired, expected)?;
+                reconcile_update_ref_only_residue(
+                    repo,
+                    &journal.branch,
+                    &current,
+                    repaired,
+                    expected,
+                )?;
                 ensure_clean_tracked_worktree(repo)?;
                 if current == expected {
                     update_working_branch(repo, &journal.branch, repaired, expected)?;
@@ -2577,6 +2586,27 @@ fn ensure_clean_tracked_worktree(repo: &GitStorage) -> Result<(), SkillSyncError
     Ok(())
 }
 
+fn ensure_current_branch(repo: &GitStorage, expected_branch: &str) -> Result<(), SkillSyncError> {
+    if repo.current_branch()? != expected_branch {
+        return Err(SkillSyncError::Git(GitError::PushConflict));
+    }
+    Ok(())
+}
+
+fn ensure_semantic_recovery_branch(
+    repo: &GitStorage,
+    journal_branch: &str,
+    active_branch: &str,
+) -> Result<(), SkillSyncError> {
+    let current_branch = repo.current_branch()?;
+    if current_branch == journal_branch
+        || (active_branch != journal_branch && current_branch == active_branch)
+    {
+        return Ok(());
+    }
+    Err(SkillSyncError::Git(GitError::PushConflict))
+}
+
 fn tracked_worktree_matches_commit(
     repo: &GitStorage,
     commit: &str,
@@ -2602,10 +2632,12 @@ fn tracked_worktree_matches_commit(
 
 fn reconcile_update_ref_only_residue(
     repo: &GitStorage,
+    expected_branch: &str,
     current: &str,
     repaired: &str,
     expected: &str,
 ) -> Result<(), SkillSyncError> {
+    ensure_current_branch(repo, expected_branch)?;
     if current == repaired
         && repo.has_dirty_tracked_files()?
         && tracked_worktree_matches_commit(repo, expected)?
@@ -2736,6 +2768,7 @@ fn update_working_branch(
     repaired: &str,
     expected_old: &str,
 ) -> Result<(), SkillSyncError> {
+    ensure_current_branch(repo, branch)?;
     let branch_ref = format!("refs/heads/{branch}");
     run_git(
         &["update-ref", &branch_ref, repaired, expected_old],

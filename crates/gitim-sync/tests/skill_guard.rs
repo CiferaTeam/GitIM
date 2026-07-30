@@ -2852,6 +2852,77 @@ fn quarantine_resume_reconciles_an_update_ref_only_crash_residue() {
 }
 
 #[test]
+fn quarantine_resume_preserves_a_switched_symbolic_branch() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+    let upstream = git_output(local_root, &["rev-parse", "origin/main"]);
+
+    fs::create_dir_all(local_root.join("skills/poison")).unwrap();
+    fs::write(local_root.join("skills/poison/SKILL.md"), "# invalid\n").unwrap();
+    fs::write(local_root.join("ordinary.txt"), "preserved\n").unwrap();
+    commit_all(local_root, "mixed bypass", ALICE);
+    let original = git_output(local_root, &["rev-parse", "HEAD"]);
+    let quarantine_ref = format!("refs/gitim/quarantine/skill-{original}");
+    git(local_root, &["update-ref", &quarantine_ref, &original]);
+
+    git(local_root, &["reset", "--hard", &upstream]);
+    fs::write(local_root.join("ordinary.txt"), "preserved\n").unwrap();
+    commit_all(local_root, "sanitized ordinary replay", ALICE);
+    let repaired = git_output(local_root, &["rev-parse", "HEAD"]);
+
+    let unrelated_refspec = format!("{upstream}:refs/heads/unrelated");
+    git(local_root, &["push", "origin", &unrelated_refspec]);
+    git(local_root, &["checkout", "-b", "unrelated", &upstream]);
+    fs::write(local_root.join("unrelated.txt"), "keep unrelated bytes\n").unwrap();
+    commit_all(local_root, "unrelated work", ALICE);
+    let unrelated_head = git_output(local_root, &["rev-parse", "HEAD"]);
+    let unrelated_bytes = fs::read(local_root.join("unrelated.txt")).unwrap();
+
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    let journal_path = local_root.join(".gitim/skill-quarantine.json");
+    fs::write(
+        &journal_path,
+        serde_json::json!({
+            "schema_version": 1,
+            "operation_id": original,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "original_head": original,
+            "quarantine_ref": quarantine_ref,
+            "phase": "replayed",
+            "repaired_head": repaired
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let journal_bytes = fs::read(&journal_path).unwrap();
+
+    let result = guard.guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"));
+
+    assert_eq!(
+        git_output(local_root, &["symbolic-ref", "--short", "HEAD"]),
+        "unrelated"
+    );
+    assert_eq!(
+        git_output(local_root, &["rev-parse", "HEAD"]),
+        unrelated_head
+    );
+    assert_eq!(
+        fs::read(local_root.join("unrelated.txt")).unwrap(),
+        unrelated_bytes
+    );
+    assert_eq!(fs::read(&journal_path).unwrap(), journal_bytes);
+    assert!(matches!(
+        result,
+        Err(gitim_sync::skill::checkpoint::SkillSyncError::Git(
+            gitim_sync::git::GitError::PushConflict
+        ))
+    ));
+}
+
+#[test]
 fn quarantine_resume_clears_a_moved_journal_after_its_exact_push_succeeded() {
     let fixture = RemoteRepository::new();
     let local_root = fixture.clone_root();
@@ -3925,6 +3996,100 @@ fn semantic_archive_resume_reconciles_an_update_ref_only_crash_residue() {
         git_output(local_root, &["rev-parse", &quarantine_ref]),
         original
     );
+}
+
+#[test]
+fn semantic_archive_resume_preserves_a_switched_symbolic_branch() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+    let upstream = git_output(local_root, &["rev-parse", "origin/main"]);
+
+    fs::create_dir_all(local_root.join("archive/users")).unwrap();
+    git(
+        local_root,
+        &[
+            "mv",
+            "users/alice.meta.yaml",
+            "archive/users/alice.meta.yaml",
+        ],
+    );
+    commit_all(
+        local_root,
+        "archive: depart user @alice\n\nGitim-Skills-Tree: absent",
+        ALICE,
+    );
+    let archive_commit = git_output(local_root, &["rev-parse", "HEAD"]);
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260731T014000Z] preserved descendant\n",
+    )
+    .unwrap();
+    commit_all(local_root, "message after stale archive", ALICE);
+    let original = git_output(local_root, &["rev-parse", "HEAD"]);
+    let quarantine_ref = format!("refs/gitim/quarantine/user-archive-{original}");
+    git(local_root, &["update-ref", &quarantine_ref, &original]);
+
+    git(local_root, &["reset", "--hard", &upstream]);
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260731T014000Z] preserved descendant\n",
+    )
+    .unwrap();
+    commit_all(local_root, "sanitized semantic replay", ALICE);
+    let repaired = git_output(local_root, &["rev-parse", "HEAD"]);
+
+    git(local_root, &["checkout", "-b", "unrelated", &upstream]);
+    fs::write(local_root.join("unrelated.txt"), "keep unrelated bytes\n").unwrap();
+    commit_all(local_root, "unrelated work", ALICE);
+    let unrelated_head = git_output(local_root, &["rev-parse", "HEAD"]);
+    let unrelated_bytes = fs::read(local_root.join("unrelated.txt")).unwrap();
+
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    let journal_path = local_root.join(".gitim/skill-quarantine.json");
+    fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": original,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "original_head": original,
+            "quarantine_ref": quarantine_ref,
+            "phase": "replayed",
+            "repaired_head": repaired,
+            "branch_head": original,
+            "kind": "user_archive",
+            "excluded_commits": [archive_commit],
+            "semantic_error_code": "skill_tree_changed"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let journal_bytes = fs::read(&journal_path).unwrap();
+
+    let result = guard.guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"));
+
+    assert_eq!(
+        git_output(local_root, &["symbolic-ref", "--short", "HEAD"]),
+        "unrelated"
+    );
+    assert_eq!(
+        git_output(local_root, &["rev-parse", "HEAD"]),
+        unrelated_head
+    );
+    assert_eq!(
+        fs::read(local_root.join("unrelated.txt")).unwrap(),
+        unrelated_bytes
+    );
+    assert_eq!(fs::read(&journal_path).unwrap(), journal_bytes);
+    assert!(matches!(
+        result,
+        Err(gitim_sync::skill::checkpoint::SkillSyncError::Git(
+            gitim_sync::git::GitError::PushConflict
+        ))
+    ));
 }
 
 #[test]
