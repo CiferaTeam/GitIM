@@ -223,6 +223,66 @@ fn solo_fire_wins_switches_branch_tags_and_bundles() {
 }
 
 #[test]
+fn won_fire_preserves_a_branch_switched_by_the_atomic_push_hook() {
+    let (_bare, clone) = setup_bare_and_clone(5);
+    git(&clone, &["checkout", "-b", "unrelated"]);
+    commit_file(&clone, "unrelated.txt", "keep unrelated bytes");
+    let unrelated_head = GitStorage::new(clone.path()).rev_parse("HEAD").unwrap();
+    let unrelated_bytes = std::fs::read(clone.path().join("unrelated.txt")).unwrap();
+    git(&clone, &["checkout", "main"]);
+
+    let marker = clone.path().join(".git/post-atomic-switch");
+    let hook = clone.path().join(".git/hooks/pre-push");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nif [ ! -f '{}' ]; then\n  touch '{}'\n  git -C '{}' checkout -f unrelated\nfi\n",
+            marker.display(),
+            marker.display(),
+            clone.path().display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let storage = GitStorage::new(clone.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    let outcome = try_fire_rotation(
+        &storage,
+        "main",
+        3,
+        arch.path(),
+        ("d", "d@g"),
+        "2026-07-31T01:50:00Z",
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, RotationOutcome::Won { .. }));
+    assert_eq!(head_branch(&clone), "unrelated");
+    assert_eq!(storage.rev_parse("HEAD").unwrap(), unrelated_head);
+    assert_eq!(
+        std::fs::read(clone.path().join("unrelated.txt")).unwrap(),
+        unrelated_bytes
+    );
+    assert_eq!(
+        storage.rev_parse("main").unwrap(),
+        storage.rev_parse("origin/main").unwrap()
+    );
+    assert_eq!(
+        storage.rev_parse("main-epoch-2").unwrap(),
+        storage.rev_parse("origin/main-epoch-2").unwrap()
+    );
+
+    git(&clone, &["checkout", "main"]);
+    assert!(follow_redirect(&storage, "main").unwrap());
+    assert_eq!(head_branch(&clone), "main-epoch-2");
+}
+
+#[test]
 fn fire_with_unpushed_backlog_returns_not_ready() {
     // Zero-loss guard I3: messages committed between push-success and lock
     // acquisition must defer rotation — a Lost reset would destroy them.
@@ -657,6 +717,95 @@ fn rotation_recovery_resumes_after_moved_phase_save() {
 #[test]
 fn rotation_recovery_resumes_after_completed_phase_save() {
     assert_rotation_recovery_resumes_after_phase_crash("completed", true);
+}
+
+fn assert_rotation_cleanup_preserves_a_switched_branch(phase: &str) {
+    let (_bare, clone) = setup_bare_and_clone(3);
+    let storage = GitStorage::new(clone.path());
+    let upstream = storage.rev_parse("origin/main").unwrap();
+    git(&clone, &["branch", "main-epoch-2", "HEAD"]);
+    let orphan_oid = storage.rev_parse("main-epoch-2").unwrap();
+
+    std::fs::write(
+        clone.path().join("gitim.epoch.yaml"),
+        "epoch: 1\nbranch: main\nstatus: redirected\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "gitim.epoch.yaml"]);
+    git(
+        &clone,
+        &["commit", "-m", "seal: redirect cleanup branch fixture"],
+    );
+    let seal_oid = storage.rev_parse("HEAD").unwrap();
+    commit_file(
+        &clone,
+        "cleanup-branch.thread",
+        "[L000001][P000000][@handler][20260731T015000Z] durable tail\n",
+    );
+    let tail_head = storage.rev_parse("HEAD").unwrap();
+    let tail_ref = format!("refs/gitim/rotation-tail/{seal_oid}");
+    git(&clone, &["update-ref", &tail_ref, &tail_head]);
+    git(&clone, &["reset", "--hard", &upstream]);
+    git(&clone, &["cherry-pick", &tail_head]);
+    let repaired_head = storage.rev_parse("HEAD").unwrap();
+
+    git(&clone, &["checkout", "-b", "unrelated", &upstream]);
+    commit_file(&clone, "unrelated.txt", "keep unrelated bytes");
+    let unrelated_head = storage.rev_parse("HEAD").unwrap();
+    let unrelated_bytes = std::fs::read(clone.path().join("unrelated.txt")).unwrap();
+
+    std::fs::create_dir_all(clone.path().join(".gitim")).unwrap();
+    let journal_path = clone.path().join(".gitim/rotation-recovery.json");
+    std::fs::write(
+        &journal_path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": seal_oid,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "active_branch": "main",
+            "active_oid": upstream,
+            "seal_oid": seal_oid,
+            "tail_ref": tail_ref,
+            "tail_head": tail_head,
+            "orphan_branch": "main-epoch-2",
+            "orphan_oid": orphan_oid,
+            "phase": phase,
+            "repaired_head": repaired_head
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let journal_bytes = std::fs::read(&journal_path).unwrap();
+
+    let guard = gitim_sync::skill::guard::SkillSyncGuard::new(clone.path()).unwrap();
+    let result = guard.resume_pending_recoveries(&storage, &std::sync::Mutex::new(()));
+
+    assert!(matches!(
+        result,
+        Err(gitim_sync::skill::checkpoint::SkillSyncError::Git(
+            gitim_sync::git::GitError::PushConflict
+        ))
+    ));
+    assert_eq!(head_branch(&clone), "unrelated");
+    assert_eq!(storage.rev_parse("HEAD").unwrap(), unrelated_head);
+    assert_eq!(
+        std::fs::read(clone.path().join("unrelated.txt")).unwrap(),
+        unrelated_bytes
+    );
+    assert_eq!(storage.rev_parse(&tail_ref).unwrap(), tail_head);
+    assert_eq!(storage.rev_parse("main-epoch-2").unwrap(), orphan_oid);
+    assert_eq!(std::fs::read(&journal_path).unwrap(), journal_bytes);
+}
+
+#[test]
+fn moved_rotation_cleanup_preserves_a_switched_symbolic_branch() {
+    assert_rotation_cleanup_preserves_a_switched_branch("moved");
+}
+
+#[test]
+fn completed_rotation_cleanup_preserves_a_switched_symbolic_branch() {
+    assert_rotation_cleanup_preserves_a_switched_branch("completed");
 }
 
 #[test]

@@ -248,7 +248,11 @@ pub fn try_fire_rotation(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let local_old_tip = storage.rev_parse(&format!("refs/heads/{current_branch}"))?;
-            if local_old_tip == redirect_commit_sha {
+            let local_head = storage.rev_parse("HEAD")?;
+            if matches!(storage.current_branch(), Ok(branch) if branch == current_branch)
+                && local_head == redirect_commit_sha
+                && local_old_tip == redirect_commit_sha
+            {
                 storage.checkout_branch(&new_branch)?;
             }
             // The orphan branch was born via update-ref and carries no

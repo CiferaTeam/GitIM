@@ -700,6 +700,7 @@ impl SkillSyncGuard {
         }
 
         let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
+        let mut cleanup_head = current.clone();
         if current != repaired && !is_ancestor(repo, repaired, &current)? {
             let expected = journal.expected_branch_head();
             if current != expected {
@@ -707,7 +708,9 @@ impl SkillSyncGuard {
             }
             ensure_clean_tracked_worktree(repo)?;
             update_working_branch(repo, &journal.branch, validated_upstream_oid, expected)?;
+            cleanup_head = validated_upstream_oid.to_owned();
         }
+        ensure_exact_checkout(repo, &journal.branch, &cleanup_head)?;
         cleanup_quarantine_tail_refs(repo, journal, None)?;
         self.remove_journal()?;
         Ok(true)
@@ -724,6 +727,7 @@ impl SkillSyncGuard {
                     && journal.phase == QuarantinePhase::Moved
                     && journal.repaired_head.as_deref() == Some(pending.repaired_head.as_str()) =>
             {
+                ensure_exact_checkout(repo, &journal.branch, &pending.repaired_head)?;
                 cleanup_quarantine_tail_refs(repo, &journal, None)?;
                 self.remove_journal()
             }
@@ -749,6 +753,7 @@ impl SkillSyncGuard {
         {
             return Err(SkillSyncError::Git(GitError::PushConflict));
         }
+        ensure_exact_checkout(repo, &journal.branch, &pending.repaired_head)?;
         cleanup_quarantine_tail_refs(repo, &journal, None)?;
         self.remove_journal()
     }
@@ -771,6 +776,8 @@ impl SkillSyncGuard {
             ));
         }
 
+        let captured_checkout_branch = repo.current_branch()?;
+        let captured_checkout_head = repo.rev_parse("HEAD")?;
         repo.fetch()?;
         let captured_refs = capture_epoch_chain(repo, &captured_journal.branch)?;
         let original_remote = captured_refs.first().ok_or_else(|| {
@@ -800,10 +807,12 @@ impl SkillSyncGuard {
         if journal != captured_journal {
             return Err(SkillSyncError::Git(GitError::PushConflict));
         }
+        ensure_exact_checkout(repo, &captured_checkout_branch, &captured_checkout_head)?;
         validate_journal(repo, &journal)?;
         ensure_quarantine_ref(repo, &journal)?;
         ensure_semantic_recovery_branch(repo, &journal.branch, &active_remote.branch)?;
-        if journal.phase == QuarantinePhase::Replayed && active_remote.branch == journal.branch {
+        if journal.phase == QuarantinePhase::Replayed && captured_checkout_branch == journal.branch
+        {
             let repaired = journal.repaired_head.as_deref().ok_or_else(|| {
                 SkillSyncError::LocalQuarantineBlocked(
                     "semantic archive recovery is missing its repaired head".to_owned(),
@@ -821,7 +830,21 @@ impl SkillSyncGuard {
         ensure_clean_tracked_worktree(repo)?;
 
         if journal.upstream_oid != active_remote.oid {
-            if journal.phase != QuarantinePhase::Prepared {
+            if journal.phase == QuarantinePhase::Replayed {
+                let prior_repaired = journal.repaired_head.as_deref().ok_or_else(|| {
+                    SkillSyncError::LocalQuarantineBlocked(
+                        "semantic archive recovery is missing its repaired head".to_owned(),
+                    )
+                })?;
+                verify_replayed_result(repo, &journal, prior_repaired)?;
+                let branch_head = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
+                if branch_head != journal.expected_branch_head() && branch_head != prior_repaired {
+                    return Err(SkillSyncError::Git(GitError::PushConflict));
+                }
+                journal.branch_head = Some(branch_head);
+                journal.repaired_head = None;
+                journal.phase = QuarantinePhase::Prepared;
+            } else if journal.phase != QuarantinePhase::Prepared {
                 return Err(SkillSyncError::Git(GitError::PushConflict));
             }
             if journal.replay_base.is_none() {
@@ -862,6 +885,7 @@ impl SkillSyncGuard {
                 }
             } else {
                 let active_ref = format!("refs/heads/{}", active_remote.branch);
+                let mut active_ref_changed = false;
                 match revision_oid(repo, &active_ref)? {
                     Some(oid) if oid == repaired => {}
                     Some(oid) if Some(oid.as_str()) == captured_active_local.as_deref() => {
@@ -870,6 +894,7 @@ impl SkillSyncGuard {
                             repaired,
                             Some(&oid),
                         )?;
+                        active_ref_changed = true;
                     }
                     Some(_) => return Err(SkillSyncError::Git(GitError::PushConflict)),
                     None if captured_active_local.is_none() => {
@@ -878,6 +903,7 @@ impl SkillSyncGuard {
                             repaired,
                             None,
                         )?;
+                        active_ref_changed = true;
                     }
                     None => return Err(SkillSyncError::Git(GitError::PushConflict)),
                 }
@@ -886,7 +912,11 @@ impl SkillSyncGuard {
                     branch if branch == journal.branch => {
                         repo.checkout_branch(&active_remote.branch)?;
                     }
-                    branch if branch == active_remote.branch => {}
+                    branch if branch == active_remote.branch => {
+                        if active_ref_changed {
+                            repo.reset_hard_to(repaired)?;
+                        }
+                    }
                     _ => return Err(SkillSyncError::Git(GitError::PushConflict)),
                 }
                 let old_ref = format!("refs/heads/{}", journal.branch);
@@ -902,6 +932,7 @@ impl SkillSyncGuard {
                     _ => return Err(SkillSyncError::Git(GitError::PushConflict)),
                 }
             }
+            ensure_exact_checkout(repo, &active_remote.branch, repaired)?;
             journal.phase = QuarantinePhase::Moved;
             self.save_journal(&journal)?;
         }
@@ -912,11 +943,7 @@ impl SkillSyncGuard {
                     "moved semantic archive recovery is missing its repaired head".to_owned(),
                 )
             })?;
-            if repo.current_branch()? != active_remote.branch
-                || repo.rev_parse(&format!("refs/heads/{}", active_remote.branch))? != repaired
-            {
-                return Err(SkillSyncError::Git(GitError::PushConflict));
-            }
+            ensure_exact_checkout(repo, &active_remote.branch, repaired)?;
             cleanup_quarantine_tail_refs(repo, &journal, None)?;
             self.remove_journal()?;
         }
@@ -1146,6 +1173,12 @@ impl SkillSyncGuard {
         }
 
         if journal.phase == RotationRecoveryPhase::Moved {
+            let repaired = journal.repaired_head.as_deref().ok_or_else(|| {
+                SkillSyncError::LocalQuarantineBlocked(
+                    "moved rotation recovery is missing its repaired head".to_owned(),
+                )
+            })?;
+            ensure_exact_checkout(repo, &journal.active_branch, repaired)?;
             if journal.orphan_branch != journal.active_branch {
                 match revision_oid(repo, &format!("refs/heads/{}", journal.orphan_branch))? {
                     Some(oid) if Some(oid.as_str()) == journal.orphan_oid.as_deref() => {
@@ -1160,6 +1193,12 @@ impl SkillSyncGuard {
         }
 
         if journal.phase == RotationRecoveryPhase::Completed {
+            let repaired = journal.repaired_head.as_deref().ok_or_else(|| {
+                SkillSyncError::LocalQuarantineBlocked(
+                    "completed rotation recovery is missing its repaired head".to_owned(),
+                )
+            })?;
+            ensure_exact_checkout(repo, &journal.active_branch, repaired)?;
             cleanup_rotation_tail_refs(repo, &journal)?;
             self.remove_rotation_journal()?;
         }
@@ -2588,6 +2627,17 @@ fn ensure_clean_tracked_worktree(repo: &GitStorage) -> Result<(), SkillSyncError
 
 fn ensure_current_branch(repo: &GitStorage, expected_branch: &str) -> Result<(), SkillSyncError> {
     if repo.current_branch()? != expected_branch {
+        return Err(SkillSyncError::Git(GitError::PushConflict));
+    }
+    Ok(())
+}
+
+fn ensure_exact_checkout(
+    repo: &GitStorage,
+    expected_branch: &str,
+    expected_head: &str,
+) -> Result<(), SkillSyncError> {
+    if repo.current_branch()? != expected_branch || repo.rev_parse("HEAD")? != expected_head {
         return Err(SkillSyncError::Git(GitError::PushConflict));
     }
     Ok(())
