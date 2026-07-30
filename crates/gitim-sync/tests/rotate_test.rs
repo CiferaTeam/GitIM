@@ -755,6 +755,217 @@ fn prepared_rotation_recovery_replays_again_after_the_active_remote_advances() {
 }
 
 #[test]
+fn prepared_rotation_recovery_captures_a_handler_commit_after_transient_boot_failure() {
+    let (bare, clone) = setup_bare_and_clone(3);
+    let storage = GitStorage::new(clone.path());
+    let upstream = storage.rev_parse("origin/main").unwrap();
+    git(&clone, &["branch", "main-epoch-2", "HEAD"]);
+    let orphan_oid = storage.rev_parse("main-epoch-2").unwrap();
+
+    std::fs::write(
+        clone.path().join("gitim.epoch.yaml"),
+        "epoch: 1\nbranch: main\nstatus: redirected\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "gitim.epoch.yaml"]);
+    git(
+        &clone,
+        &["commit", "-m", "seal: redirect transient boot fixture"],
+    );
+    let seal_oid = storage.rev_parse("HEAD").unwrap();
+    commit_file(
+        &clone,
+        "before-boot.thread",
+        "[L000001][P000000][@handler][20260731T001000Z] durable before boot\n",
+    );
+    let tail_head = storage.rev_parse("HEAD").unwrap();
+    let tail_ref = format!("refs/gitim/rotation-tail/{seal_oid}");
+    git(&clone, &["update-ref", &tail_ref, &tail_head]);
+    std::fs::create_dir_all(clone.path().join(".gitim")).unwrap();
+    std::fs::write(
+        clone.path().join(".gitim/rotation-recovery.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": seal_oid,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "active_branch": "main",
+            "active_oid": upstream,
+            "seal_oid": seal_oid,
+            "tail_ref": tail_ref,
+            "tail_head": tail_head,
+            "orphan_branch": "main-epoch-2",
+            "orphan_oid": orphan_oid,
+            "phase": "prepared"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let remote_url = bare.path().to_str().unwrap();
+    git(
+        &clone,
+        &["remote", "set-url", "origin", "/missing/gitim-origin"],
+    );
+    let guard = gitim_sync::skill::guard::SkillSyncGuard::new(clone.path()).unwrap();
+    assert!(
+        guard
+            .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+            .is_err(),
+        "boot recovery must surface the transient fetch failure"
+    );
+
+    commit_file(
+        &clone,
+        "after-boot.thread",
+        "[L000001][P000000][@handler][20260731T001100Z] committed while boot retry waits\n",
+    );
+    git(&clone, &["remote", "set-url", "origin", remote_url]);
+
+    guard
+        .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+        .unwrap();
+
+    assert!(!clone.path().join(".gitim/rotation-recovery.json").exists());
+    let tail_refs = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            &format!("refs/gitim/rotation-tail/{seal_oid}"),
+        ])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    assert!(tail_refs.status.success());
+    assert!(
+        tail_refs.stdout.is_empty(),
+        "completed recovery must clear every operation tail ref"
+    );
+    assert!(clone.path().join("before-boot.thread").exists());
+    assert!(clone.path().join("after-boot.thread").exists());
+    storage.push().unwrap();
+    git(&clone, &["fetch", "origin"]);
+    for (path, expected) in [
+        ("before-boot.thread", "durable before boot"),
+        ("after-boot.thread", "committed while boot retry waits"),
+    ] {
+        let content = Command::new("git")
+            .args(["show", &format!("origin/main:{path}")])
+            .current_dir(clone.path())
+            .output()
+            .unwrap();
+        assert!(content.status.success(), "{path} must publish");
+        assert_eq!(
+            String::from_utf8(content.stdout)
+                .unwrap()
+                .matches(expected)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn prepared_rotation_recovery_replays_a_handler_commit_above_its_repaired_head() {
+    let (bare, clone) = setup_bare_and_clone(3);
+    let storage = GitStorage::new(clone.path());
+    let upstream = storage.rev_parse("origin/main").unwrap();
+    git(&clone, &["branch", "main-epoch-2", "HEAD"]);
+    let orphan_oid = storage.rev_parse("main-epoch-2").unwrap();
+
+    std::fs::write(
+        clone.path().join("gitim.epoch.yaml"),
+        "epoch: 1\nbranch: main\nstatus: redirected\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "gitim.epoch.yaml"]);
+    git(
+        &clone,
+        &["commit", "-m", "seal: redirect repaired boot fixture"],
+    );
+    let seal_oid = storage.rev_parse("HEAD").unwrap();
+    commit_file(
+        &clone,
+        "repaired-base.thread",
+        "[L000001][P000000][@handler][20260731T002000Z] original durable tail\n",
+    );
+    let tail_head = storage.rev_parse("HEAD").unwrap();
+    let tail_ref = format!("refs/gitim/rotation-tail/{seal_oid}");
+    git(&clone, &["update-ref", &tail_ref, &tail_head]);
+    git(&clone, &["reset", "--hard", &upstream]);
+    git(&clone, &["cherry-pick", &tail_head]);
+    let repaired_head = storage.rev_parse("HEAD").unwrap();
+    std::fs::create_dir_all(clone.path().join(".gitim")).unwrap();
+    std::fs::write(
+        clone.path().join(".gitim/rotation-recovery.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": seal_oid,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "active_branch": "main",
+            "active_oid": upstream,
+            "seal_oid": seal_oid,
+            "tail_ref": tail_ref,
+            "tail_head": tail_head,
+            "orphan_branch": "main-epoch-2",
+            "orphan_oid": orphan_oid,
+            "phase": "prepared",
+            "repaired_head": repaired_head
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let remote_url = bare.path().to_str().unwrap();
+    git(
+        &clone,
+        &["remote", "set-url", "origin", "/missing/gitim-origin"],
+    );
+    let guard = gitim_sync::skill::guard::SkillSyncGuard::new(clone.path()).unwrap();
+    assert!(
+        guard
+            .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+            .is_err(),
+        "boot recovery must surface the transient fetch failure"
+    );
+    commit_file(
+        &clone,
+        "repaired-descendant.thread",
+        "[L000001][P000000][@handler][20260731T002100Z] appended above repaired\n",
+    );
+    git(&clone, &["remote", "set-url", "origin", remote_url]);
+
+    guard
+        .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+        .unwrap();
+
+    assert!(!clone.path().join(".gitim/rotation-recovery.json").exists());
+    assert!(clone.path().join("repaired-base.thread").exists());
+    assert!(clone.path().join("repaired-descendant.thread").exists());
+    storage.push().unwrap();
+    git(&clone, &["fetch", "origin"]);
+    for (path, expected) in [
+        ("repaired-base.thread", "original durable tail"),
+        ("repaired-descendant.thread", "appended above repaired"),
+    ] {
+        let content = Command::new("git")
+            .args(["show", &format!("origin/main:{path}")])
+            .current_dir(clone.path())
+            .output()
+            .unwrap();
+        assert!(content.status.success(), "{path} must publish");
+        assert_eq!(
+            String::from_utf8(content.stdout)
+                .unwrap()
+                .matches(expected)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
 fn cleanup_refuses_when_foreign_commits_ahead() {
     // Zero-loss guard I3: foreign commits ahead of origin → no reset.
     let (_bare, clone) = setup_bare_and_clone(3);

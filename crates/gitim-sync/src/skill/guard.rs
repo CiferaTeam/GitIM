@@ -1134,16 +1134,7 @@ impl SkillSyncGuard {
         }
 
         if journal.phase == RotationRecoveryPhase::Completed {
-            match revision_oid(repo, &journal.tail_ref)? {
-                Some(oid) if oid == journal.tail_head => {
-                    run_git(
-                        &["update-ref", "-d", &journal.tail_ref, &journal.tail_head],
-                        repo.root(),
-                    )?;
-                }
-                Some(_) => return Err(SkillSyncError::Git(GitError::PushConflict)),
-                None => {}
-            }
+            cleanup_rotation_tail_refs(repo, &journal)?;
             self.remove_rotation_journal()?;
         }
         Ok(())
@@ -1185,7 +1176,7 @@ impl SkillSyncGuard {
             return Err(SkillSyncError::Git(GitError::PushConflict));
         }
         validate_rotation_journal(repo, &journal)?;
-        let mut journal = journal;
+        let mut journal = self.capture_rotation_descendant_locked(repo, journal)?;
         if journal.phase == RotationRecoveryPhase::Prepared
             && (journal.upstream_oid != original_remote.oid
                 || journal.active_branch != active_remote.branch
@@ -1213,7 +1204,8 @@ impl SkillSyncGuard {
                 return Err(SkillSyncError::Git(GitError::PushConflict));
             }
             let current_is_safe = current_head == journal.tail_head
-                || journal.repaired_head.as_deref() == Some(current_head.as_str());
+                || journal.repaired_head.as_deref() == Some(current_head.as_str())
+                || journal.expected_head.as_deref() == Some(current_head.as_str());
             if !current_is_safe {
                 return Err(SkillSyncError::LocalQuarantineBlocked(
                     "rotation recovery working branch moved outside its durable tail".to_owned(),
@@ -1223,12 +1215,83 @@ impl SkillSyncGuard {
             journal.active_branch = active_remote.branch.clone();
             journal.active_oid = active_remote.oid.clone();
             journal.expected_head = Some(current_head);
-            journal.prior_repaired_head = journal.repaired_head.clone();
+            if journal.repaired_head.is_some() {
+                journal.prior_repaired_head = journal.repaired_head.clone();
+            }
             journal.repaired_head = None;
             self.save_rotation_journal(&journal)?;
         }
         self.resume_rotation_journal_locked(repo, journal)?;
         Ok(true)
+    }
+
+    fn capture_rotation_descendant_locked(
+        &self,
+        repo: &GitStorage,
+        mut journal: RotationRecoveryJournal,
+    ) -> Result<RotationRecoveryJournal, SkillSyncError> {
+        if !matches!(
+            journal.phase,
+            RotationRecoveryPhase::Prepared | RotationRecoveryPhase::Replayed
+        ) {
+            return Ok(journal);
+        }
+        let current_branch = repo.current_branch()?;
+        if current_branch != journal.branch && current_branch != journal.active_branch {
+            return Err(SkillSyncError::Git(GitError::PushConflict));
+        }
+        let current_head = repo.rev_parse("HEAD")?;
+        if current_head == journal.tail_head
+            || journal.repaired_head.as_deref() == Some(current_head.as_str())
+            || journal.expected_head.as_deref() == Some(current_head.as_str())
+        {
+            return Ok(journal);
+        }
+
+        ensure_clean_tracked_worktree(repo)?;
+        let (combined_head, expected_head, prior_repaired_head) =
+            if is_ancestor(repo, &journal.tail_head, &current_head)? {
+                validate_appended_rotation_range(repo, &journal.tail_head, &current_head)?;
+                (current_head.clone(), None, None)
+            } else {
+                let mut replay_base = None;
+                for candidate in [
+                    journal.repaired_head.as_deref(),
+                    journal.expected_head.as_deref(),
+                    journal.prior_repaired_head.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if is_ancestor(repo, candidate, &current_head)? {
+                        replay_base = Some(candidate.to_owned());
+                        break;
+                    }
+                }
+                let replay_base = replay_base.ok_or_else(|| {
+                    SkillSyncError::LocalQuarantineBlocked(
+                        "rotation recovery working branch diverged from its durable tail"
+                            .to_owned(),
+                    )
+                })?;
+                validate_appended_rotation_range(repo, &replay_base, &current_head)?;
+                let combined = combine_rotation_tail(repo, &journal, &replay_base, &current_head)?;
+                (combined, Some(current_head.clone()), Some(replay_base))
+            };
+
+        let capture_ref = format!(
+            "{ROTATION_TAIL_REF_PREFIX}{}-capture-{combined_head}",
+            journal.operation_id
+        );
+        ensure_exact_ref(repo, &capture_ref, &combined_head)?;
+        journal.tail_ref = capture_ref;
+        journal.tail_head = combined_head;
+        journal.expected_head = expected_head;
+        journal.prior_repaired_head = prior_repaired_head;
+        journal.repaired_head = None;
+        journal.phase = RotationRecoveryPhase::Prepared;
+        self.save_rotation_journal(&journal)?;
+        Ok(journal)
     }
 
     pub(crate) fn resume_rotation_recovery(
@@ -1632,8 +1695,13 @@ fn validate_rotation_journal(
         validate_oid(prior_repaired)?;
         repo.rev_parse(&format!("{prior_repaired}^{{commit}}"))?;
     }
+    let initial_tail_ref = format!("{ROTATION_TAIL_REF_PREFIX}{}", journal.operation_id);
+    let captured_tail_ref = format!(
+        "{ROTATION_TAIL_REF_PREFIX}{}-capture-{}",
+        journal.operation_id, journal.tail_head
+    );
     if journal.operation_id != journal.seal_oid
-        || journal.tail_ref != format!("{ROTATION_TAIL_REF_PREFIX}{}", journal.operation_id)
+        || (journal.tail_ref != initial_tail_ref && journal.tail_ref != captured_tail_ref)
         || !is_ancestor(repo, &journal.seal_oid, &journal.tail_head)?
         || history_touches_managed_skills_between(repo, &journal.seal_oid, &journal.tail_head)?
         || changed_paths(repo, &journal.seal_oid, &journal.tail_head)?
@@ -1755,6 +1823,90 @@ fn replay_rotation_tail(
     }
 }
 
+fn validate_appended_rotation_range(
+    repo: &GitStorage,
+    base: &str,
+    head: &str,
+) -> Result<(), SkillSyncError> {
+    if !is_ancestor(repo, base, head)?
+        || history_touches_managed_skills_between(repo, base, head)?
+        || changed_paths(repo, base, head)?
+            .iter()
+            .any(|path| path == crate::rotate::EPOCH_FILE)
+    {
+        return Err(SkillSyncError::LocalQuarantineBlocked(
+            "rotation recovery descendant is unsafe or unrelated".to_owned(),
+        ));
+    }
+    verify_managed_roots(repo, base, head)?;
+    if repo.show_file_at_ref(base, crate::rotate::EPOCH_FILE)?
+        != repo.show_file_at_ref(head, crate::rotate::EPOCH_FILE)?
+    {
+        return Err(SkillSyncError::LocalQuarantineBlocked(
+            "rotation recovery descendant changed epoch metadata".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn combine_rotation_tail(
+    repo: &GitStorage,
+    journal: &RotationRecoveryJournal,
+    appended_base: &str,
+    appended_head: &str,
+) -> Result<String, SkillSyncError> {
+    let worktrees = repo
+        .root()
+        .join(".gitim")
+        .join("rotation-tail-capture-worktrees");
+    fs::create_dir_all(&worktrees)
+        .map_err(|error| quarantine_error("create rotation tail worktree directory", error))?;
+    let worktree = worktrees.join(&journal.operation_id);
+    cleanup_worktree(repo, &worktree)?;
+    let worktree_string = path_string(&worktree)?;
+    run_git(
+        &[
+            "worktree",
+            "add",
+            "--detach",
+            "--force",
+            &worktree_string,
+            &journal.tail_head,
+        ],
+        repo.root(),
+    )?;
+    let replay_repo = GitStorage::new(&worktree);
+    let result = (|| {
+        let replayed =
+            replay_linear_range(repo, &replay_repo, appended_base, appended_head, &[], None)?;
+        if replayed == 0
+            && changed_paths(repo, appended_base, appended_head)?
+                .iter()
+                .any(|path| !is_managed_skill_path(path) && path != crate::rotate::EPOCH_FILE)
+        {
+            return Err(SkillSyncError::LocalQuarantineBlocked(
+                "rotation recovery omitted an appended ordinary change".to_owned(),
+            ));
+        }
+        let combined = replay_repo.rev_parse("HEAD")?;
+        verify_managed_roots(&replay_repo, &journal.tail_head, &combined)?;
+        if replay_repo.show_file_at_ref(&journal.tail_head, crate::rotate::EPOCH_FILE)?
+            != replay_repo.show_file_at_ref(&combined, crate::rotate::EPOCH_FILE)?
+        {
+            return Err(SkillSyncError::LocalQuarantineBlocked(
+                "combined rotation tail changed epoch metadata".to_owned(),
+            ));
+        }
+        Ok(combined)
+    })();
+    let cleanup = cleanup_worktree(repo, &worktree);
+    match (result, cleanup) {
+        (Ok(combined), Ok(())) => Ok(combined),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 fn ensure_quarantine_ref(
     repo: &GitStorage,
     journal: &QuarantineJournal,
@@ -1835,6 +1987,19 @@ fn cleanup_quarantine_tail_refs(
         if keep == Some(reference) {
             continue;
         }
+        let oid = repo.rev_parse(reference)?;
+        run_git(&["update-ref", "-d", reference, &oid], repo.root())?;
+    }
+    Ok(())
+}
+
+fn cleanup_rotation_tail_refs(
+    repo: &GitStorage,
+    journal: &RotationRecoveryJournal,
+) -> Result<(), SkillSyncError> {
+    let prefix = format!("{ROTATION_TAIL_REF_PREFIX}{}", journal.operation_id);
+    let refs = repo.run_git_capture(&["for-each-ref", "--format=%(refname)", &prefix])?;
+    for reference in refs.lines().filter(|reference| !reference.is_empty()) {
         let oid = repo.rev_parse(reference)?;
         run_git(&["update-ref", "-d", reference, &oid], repo.root())?;
     }
@@ -2312,6 +2477,18 @@ fn ensure_ref_equals(
         return Err(SkillSyncError::Git(GitError::PushConflict));
     }
     Ok(())
+}
+
+fn ensure_exact_ref(repo: &GitStorage, reference: &str, oid: &str) -> Result<(), SkillSyncError> {
+    match revision_oid(repo, reference)? {
+        Some(existing) if existing == oid => Ok(()),
+        Some(_) => Err(SkillSyncError::Git(GitError::PushConflict)),
+        None => {
+            let zero_oid = "0".repeat(oid.len());
+            run_git(&["update-ref", reference, oid, &zero_oid], repo.root())?;
+            Ok(())
+        }
+    }
 }
 
 struct CapturedRemoteRef {
