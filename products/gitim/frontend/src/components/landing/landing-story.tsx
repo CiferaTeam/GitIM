@@ -79,54 +79,59 @@ export function LandingStory({
         onScroll={handleScroll}
         data-testid="landing-story-scroll"
       >
-        <StoryScreen id="intro" className="items-center">
+        <StoryScreen id="intro" className="items-stretch">
           <div className="absolute inset-0 pointer-events-none bg-glow" />
           <div
-            className="relative mx-auto w-full max-w-5xl text-center"
+            className="relative mx-auto flex h-full w-full max-w-7xl flex-col text-center"
             data-testid="landing-hero-stage"
           >
-            <p
-              className="mb-4 text-lg font-semibold tracking-normal text-primary"
-              data-testid="landing-eyebrow"
+            <div
+              className="mx-auto w-full max-w-5xl md:pt-6 lg:pt-[clamp(2rem,6vh,4.5rem)]"
+              data-testid="landing-hero-copy"
             >
-              GIT-NATIVE AGENT COLLABORATION
-            </p>
-            <h1 className="text-4xl font-bold leading-[1.08] tracking-tight sm:text-5xl lg:text-[3.65rem]">
-              You shape the team.
-              <br />
-              <span className="text-primary">Agents run the organization.</span>
-            </h1>
-            <p className="mx-auto mt-5 max-w-2xl text-base leading-relaxed text-text-secondary sm:text-lg">
-              Coordinate agents like a conversation, keep every decision
-              auditable, and own the repository where the work lives.
-            </p>
+              <p
+                className="mb-4 text-lg font-semibold tracking-normal text-primary"
+                data-testid="landing-eyebrow"
+              >
+                GIT-NATIVE AGENT COLLABORATION
+              </p>
+              <h1 className="text-4xl font-bold leading-[1.08] tracking-tight sm:text-5xl lg:text-[3.65rem]">
+                You shape the team.
+                <br />
+                <span className="text-primary">Agents run the organization.</span>
+              </h1>
+              <p className="mx-auto mt-5 max-w-2xl text-base leading-relaxed text-text-secondary sm:text-lg">
+                Coordinate agents like a conversation, keep every decision
+                auditable, and own the repository where the work lives.
+              </p>
 
-            <div className="mt-7 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
-              <Button
-                type="button"
-                size="lg"
-                className="w-full gap-2 sm:w-auto"
-                onClick={onConnectRuntime}
-                data-testid="landing-cta-connect"
-              >
-                <Monitor className="size-4" />
-                Connect your runtime
-              </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="lg"
-                className="w-full gap-2 sm:w-auto"
-                onClick={onWatchDemo}
-                data-testid="landing-cta-demo"
-              >
-                <Play className="size-4" />
-                Watch the demo
-              </Button>
+              <div className="mt-7 flex flex-col items-stretch justify-center gap-3 sm:flex-row sm:items-center">
+                <Button
+                  type="button"
+                  size="lg"
+                  className="w-full gap-2 sm:w-auto"
+                  onClick={onConnectRuntime}
+                  data-testid="landing-cta-connect"
+                >
+                  <Monitor className="size-4" />
+                  Connect your runtime
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="lg"
+                  className="w-full gap-2 sm:w-auto"
+                  onClick={onWatchDemo}
+                  data-testid="landing-cta-demo"
+                >
+                  <Play className="size-4" />
+                  Watch the demo
+                </Button>
+              </div>
             </div>
 
             <div
-              className="mt-10 grid overflow-hidden rounded-xl border border-border bg-card/65 text-left shadow-xl shadow-[var(--color-shadow)] md:grid-cols-3 md:divide-x md:divide-border"
+              className="mt-8 grid overflow-hidden rounded-xl border border-border bg-card/65 text-left shadow-xl shadow-[var(--color-shadow)] md:mt-auto md:mb-12 md:grid-cols-3 md:divide-x md:divide-border lg:mb-16"
               data-testid="landing-process"
             >
               <ValueCard

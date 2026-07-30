@@ -145,6 +145,26 @@ describe("LandingPage PPT demo", () => {
     expect(eyebrow?.className).toContain("tracking-normal");
   });
 
+  it("distributes the intro story across the first viewport", async () => {
+    const container = await render();
+    const stage = container.querySelector<HTMLElement>(
+      '[data-testid="landing-hero-stage"]',
+    );
+    const copy = container.querySelector<HTMLElement>(
+      '[data-testid="landing-hero-copy"]',
+    );
+    const process = container.querySelector<HTMLElement>(
+      '[data-testid="landing-process"]',
+    );
+
+    expect(stage?.className).toContain("h-full");
+    expect(stage?.className).toContain("max-w-7xl");
+    expect(stage?.className).toContain("flex-col");
+    expect(copy?.className).toContain("max-w-5xl");
+    expect(process?.className).toContain("mt-auto");
+    expect(process?.className).toContain("md:mb-12");
+  });
+
   it("renders the six-screen product story", async () => {
     const container = await render();
     const screens = container.querySelectorAll(
