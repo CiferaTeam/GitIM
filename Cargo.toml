@@ -43,3 +43,4 @@ sha2 = "0.10"
 hex = "0.4"
 croner = "3"
 chrono-tz = "0.10"
+ulid = { version = "1", default-features = false }

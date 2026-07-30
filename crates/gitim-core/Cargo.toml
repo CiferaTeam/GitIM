@@ -18,6 +18,7 @@ humantime = "2"
 percent-encoding = "2"
 tempfile = "3"
 tracing.workspace = true
+ulid.workspace = true
 
 # `fs2` is a thin libc wrapper for advisory file locking; no wasm32 backend
 # exists. The timer module that uses it is gated `#[cfg(not(target_arch =
