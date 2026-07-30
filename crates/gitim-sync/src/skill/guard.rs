@@ -1050,7 +1050,6 @@ impl SkillSyncGuard {
         }
 
         if journal.phase == RotationRecoveryPhase::Replayed {
-            ensure_clean_tracked_worktree(repo)?;
             let repaired = journal.repaired_head.as_deref().ok_or_else(|| {
                 SkillSyncError::LocalQuarantineBlocked(
                     "rotation recovery is missing its repaired head".to_owned(),
@@ -1062,6 +1061,13 @@ impl SkillSyncGuard {
                     .expected_head
                     .as_deref()
                     .unwrap_or(journal.tail_head.as_str());
+                if current == repaired
+                    && repo.has_dirty_tracked_files()?
+                    && tracked_worktree_matches_commit(repo, expected)?
+                {
+                    repo.reset_hard_to(repaired)?;
+                }
+                ensure_clean_tracked_worktree(repo)?;
                 if current == expected {
                     update_working_branch(repo, &journal.branch, repaired, expected)?;
                 } else if current == repaired {
@@ -1070,6 +1076,7 @@ impl SkillSyncGuard {
                     return Err(SkillSyncError::Git(GitError::PushConflict));
                 }
             } else {
+                ensure_clean_tracked_worktree(repo)?;
                 let active_ref = format!("refs/heads/{}", journal.active_branch);
                 match revision_oid(repo, &active_ref)? {
                     Some(oid) if oid == repaired => {}
@@ -1680,20 +1687,23 @@ fn validate_rotation_journal(
         validate_oid(oid)?;
         repo.rev_parse(&format!("{oid}^{{commit}}"))?;
     }
-    if let Some(expected_head) = journal.expected_head.as_deref() {
-        validate_oid(expected_head)?;
-        repo.rev_parse(&format!("{expected_head}^{{commit}}"))?;
-        if expected_head != journal.tail_head
-            && journal.prior_repaired_head.as_deref() != Some(expected_head)
-        {
-            return Err(SkillSyncError::LocalQuarantineBlocked(
-                "rotation recovery expected head is not its tail or prior replay".to_owned(),
-            ));
-        }
-    }
     if let Some(prior_repaired) = journal.prior_repaired_head.as_deref() {
         validate_oid(prior_repaired)?;
         repo.rev_parse(&format!("{prior_repaired}^{{commit}}"))?;
+    }
+    if let Some(expected_head) = journal.expected_head.as_deref() {
+        validate_oid(expected_head)?;
+        repo.rev_parse(&format!("{expected_head}^{{commit}}"))?;
+        if expected_head != journal.tail_head {
+            let prior_repaired = journal.prior_repaired_head.as_deref().ok_or_else(|| {
+                SkillSyncError::LocalQuarantineBlocked(
+                    "rotation recovery expected head has no prior replay".to_owned(),
+                )
+            })?;
+            if expected_head != prior_repaired {
+                validate_appended_rotation_range(repo, prior_repaired, expected_head)?;
+            }
+        }
     }
     let initial_tail_ref = format!("{ROTATION_TAIL_REF_PREFIX}{}", journal.operation_id);
     let captured_tail_ref = format!(
@@ -2555,6 +2565,29 @@ fn ensure_clean_tracked_worktree(repo: &GitStorage) -> Result<(), SkillSyncError
         ));
     }
     Ok(())
+}
+
+fn tracked_worktree_matches_commit(
+    repo: &GitStorage,
+    commit: &str,
+) -> Result<bool, SkillSyncError> {
+    let index_tree = repo.run_git_capture(&["write-tree"])?;
+    let commit_tree = repo.rev_parse(&format!("{commit}^{{tree}}"))?;
+    if index_tree.trim() != commit_tree {
+        return Ok(false);
+    }
+    let output = std::process::Command::new("git")
+        .args(["diff", "--quiet", "--exit-code", "--"])
+        .current_dir(repo.root())
+        .output()
+        .map_err(GitError::Io)?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(SkillSyncError::Git(GitError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))),
+    }
 }
 
 fn capture_remote_ref(

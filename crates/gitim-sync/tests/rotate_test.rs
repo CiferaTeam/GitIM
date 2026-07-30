@@ -966,6 +966,218 @@ fn prepared_rotation_recovery_replays_a_handler_commit_above_its_repaired_head()
 }
 
 #[test]
+fn captured_repaired_descendant_survives_journal_reload() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_bare, clone) = setup_bare_and_clone(3);
+    let storage = GitStorage::new(clone.path());
+    let upstream = storage.rev_parse("origin/main").unwrap();
+    git(&clone, &["branch", "main-epoch-2", "HEAD"]);
+    let orphan_oid = storage.rev_parse("main-epoch-2").unwrap();
+
+    std::fs::write(
+        clone.path().join("gitim.epoch.yaml"),
+        "epoch: 1\nbranch: main\nstatus: redirected\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "gitim.epoch.yaml"]);
+    git(&clone, &["commit", "-m", "seal: redirect reload fixture"]);
+    let seal_oid = storage.rev_parse("HEAD").unwrap();
+    commit_file(
+        &clone,
+        "reload-base.thread",
+        "[L000001][P000000][@handler][20260731T011000Z] durable tail\n",
+    );
+    let tail_head = storage.rev_parse("HEAD").unwrap();
+    let tail_ref = format!("refs/gitim/rotation-tail/{seal_oid}");
+    git(&clone, &["update-ref", &tail_ref, &tail_head]);
+    git(&clone, &["reset", "--hard", &upstream]);
+    git(&clone, &["cherry-pick", &tail_head]);
+    let repaired_head = storage.rev_parse("HEAD").unwrap();
+    std::fs::create_dir_all(clone.path().join(".gitim")).unwrap();
+    std::fs::write(
+        clone.path().join(".gitim/rotation-recovery.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": seal_oid,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "active_branch": "main",
+            "active_oid": upstream,
+            "seal_oid": seal_oid,
+            "tail_ref": tail_ref,
+            "tail_head": tail_head,
+            "orphan_branch": "main-epoch-2",
+            "orphan_oid": orphan_oid,
+            "phase": "prepared",
+            "repaired_head": repaired_head
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        clone.path().join("reload-descendant.thread"),
+        "[L000001][P000000][@handler][20260731T011100Z] appended above repaired\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "reload-descendant.thread"]);
+    git(&clone, &["commit", "-m", "reload-descendant.thread"]);
+    let expected_head = storage.rev_parse("HEAD").unwrap();
+
+    let hook = clone.path().join(".git/hooks/post-commit");
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nprintf 'internal replay pause\\n' > '{}'\n",
+            clone.path().join("f0.txt").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let guard = gitim_sync::skill::guard::SkillSyncGuard::new(clone.path()).unwrap();
+    assert!(
+        guard
+            .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+            .is_err(),
+        "the injected tracked change must stop recovery after capture"
+    );
+    let persisted: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(clone.path().join(".gitim/rotation-recovery.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(persisted["expected_head"], expected_head);
+    assert_eq!(persisted["prior_repaired_head"], repaired_head);
+    assert_ne!(persisted["tail_head"], tail_head);
+
+    std::fs::remove_file(hook).unwrap();
+    git(&clone, &["restore", "--", "f0.txt"]);
+    let restarted_guard = gitim_sync::skill::guard::SkillSyncGuard::new(clone.path()).unwrap();
+    restarted_guard
+        .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+        .unwrap();
+
+    assert!(!clone.path().join(".gitim/rotation-recovery.json").exists());
+    let tail_refs = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--format=%(refname)",
+            &format!("refs/gitim/rotation-tail/{seal_oid}"),
+        ])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    assert!(tail_refs.status.success());
+    assert!(tail_refs.stdout.is_empty());
+    assert!(clone.path().join("reload-base.thread").exists());
+    assert!(clone.path().join("reload-descendant.thread").exists());
+    storage.push().unwrap();
+    git(&clone, &["fetch", "origin"]);
+    for (path, expected) in [
+        ("reload-base.thread", "durable tail"),
+        ("reload-descendant.thread", "appended above repaired"),
+    ] {
+        let content = Command::new("git")
+            .args(["show", &format!("origin/main:{path}")])
+            .current_dir(clone.path())
+            .output()
+            .unwrap();
+        assert!(content.status.success(), "{path} must publish after reload");
+        assert_eq!(
+            String::from_utf8(content.stdout)
+                .unwrap()
+                .matches(expected)
+                .count(),
+            1
+        );
+    }
+}
+
+#[test]
+fn replayed_rotation_reconciles_an_update_ref_only_crash_residue() {
+    let (_bare, clone) = setup_bare_and_clone(3);
+    let storage = GitStorage::new(clone.path());
+    let upstream = storage.rev_parse("origin/main").unwrap();
+    git(&clone, &["branch", "main-epoch-2", "HEAD"]);
+    let orphan_oid = storage.rev_parse("main-epoch-2").unwrap();
+
+    std::fs::write(
+        clone.path().join("gitim.epoch.yaml"),
+        "epoch: 1\nbranch: main\nstatus: redirected\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "gitim.epoch.yaml"]);
+    git(
+        &clone,
+        &["commit", "-m", "seal: redirect update-ref residue fixture"],
+    );
+    let seal_oid = storage.rev_parse("HEAD").unwrap();
+    commit_file(
+        &clone,
+        "update-ref-residue.thread",
+        "[L000001][P000000][@handler][20260731T012000Z] durable tail\n",
+    );
+    let tail_head = storage.rev_parse("HEAD").unwrap();
+    let tail_ref = format!("refs/gitim/rotation-tail/{seal_oid}");
+    git(&clone, &["update-ref", &tail_ref, &tail_head]);
+    git(&clone, &["reset", "--hard", &upstream]);
+    git(&clone, &["cherry-pick", &tail_head]);
+    let repaired_head = storage.rev_parse("HEAD").unwrap();
+    git(&clone, &["reset", "--hard", &tail_head]);
+    git(
+        &clone,
+        &["update-ref", "refs/heads/main", &repaired_head, &tail_head],
+    );
+
+    std::fs::create_dir_all(clone.path().join(".gitim")).unwrap();
+    std::fs::write(
+        clone.path().join(".gitim/rotation-recovery.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": seal_oid,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "active_branch": "main",
+            "active_oid": upstream,
+            "seal_oid": seal_oid,
+            "tail_ref": tail_ref,
+            "tail_head": tail_head,
+            "orphan_branch": "main-epoch-2",
+            "orphan_oid": orphan_oid,
+            "phase": "replayed",
+            "repaired_head": repaired_head
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(storage.has_dirty_tracked_files().unwrap());
+
+    let guard = gitim_sync::skill::guard::SkillSyncGuard::new(clone.path()).unwrap();
+    std::fs::write(clone.path().join("f0.txt"), "deferred send\n").unwrap();
+    assert!(
+        guard
+            .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+            .is_err(),
+        "real tracked work must remain protected"
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.path().join("f0.txt")).unwrap(),
+        "deferred send\n"
+    );
+    assert!(clone.path().join(".gitim/rotation-recovery.json").exists());
+    git(&clone, &["restore", "--", "f0.txt"]);
+
+    guard
+        .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+        .unwrap();
+
+    assert_eq!(storage.rev_parse("HEAD").unwrap(), repaired_head);
+    assert!(!storage.has_dirty_tracked_files().unwrap());
+    assert!(!clone.path().join(".gitim/rotation-recovery.json").exists());
+    assert!(clone.path().join("update-ref-residue.thread").exists());
+}
+
+#[test]
 fn cleanup_refuses_when_foreign_commits_ahead() {
     // Zero-loss guard I3: foreign commits ahead of origin → no reset.
     let (_bare, clone) = setup_bare_and_clone(3);
