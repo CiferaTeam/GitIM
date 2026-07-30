@@ -2,7 +2,7 @@
 
 use std::ffi::OsStr;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use gitim_core::skill::{RequestId, SkillTreeEdit};
@@ -640,5 +640,165 @@ fn linked_worktree_active_index_alias_is_rejected() {
     assert_eq!(
         git(&linked, ["diff", "--cached", "--binary", "--"]).stdout,
         staged_before
+    );
+}
+
+struct ThreeWorktrees {
+    _root: TempDir,
+    main: PathBuf,
+    linked_a: PathBuf,
+    linked_b: PathBuf,
+    main_index: PathBuf,
+    linked_a_index: PathBuf,
+    linked_b_index: PathBuf,
+    base: String,
+}
+
+fn three_worktrees() -> ThreeWorktrees {
+    let root = TempDir::new().unwrap();
+    let main = root.path().join("main");
+    fs::create_dir(&main).unwrap();
+    git(&main, ["init", "-b", "main"]);
+    git(&main, ["config", "user.name", "Worktree User"]);
+    git(&main, ["config", "user.email", "worktree@example.com"]);
+    git(&main, ["config", "commit.gpgsign", "false"]);
+    fs::write(main.join("tracked"), b"base\n").unwrap();
+    git(&main, ["add", "--", "tracked"]);
+    git(&main, ["commit", "-m", "base"]);
+    let base = git_stdout(&main, ["rev-parse", "HEAD"]);
+
+    let linked_a = root.path().join("linked-a");
+    git(
+        &main,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-b"),
+            OsStr::new("linked-a"),
+            linked_a.as_os_str(),
+        ],
+    );
+    let linked_b = root.path().join("linked-b");
+    git(
+        &main,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-b"),
+            OsStr::new("linked-b"),
+            linked_b.as_os_str(),
+        ],
+    );
+
+    for (worktree, contents) in [
+        (&main, b"main staged\n".as_slice()),
+        (&linked_a, b"linked-a staged\n".as_slice()),
+        (&linked_b, b"linked-b staged\n".as_slice()),
+    ] {
+        fs::write(worktree.join("tracked"), contents).unwrap();
+        git(worktree, ["add", "--", "tracked"]);
+    }
+
+    let index = |worktree: &Path| {
+        PathBuf::from(git_stdout(worktree, ["rev-parse", "--absolute-git-dir"])).join("index")
+    };
+    ThreeWorktrees {
+        main_index: index(&main),
+        linked_a_index: index(&linked_a),
+        linked_b_index: index(&linked_b),
+        _root: root,
+        main,
+        linked_a,
+        linked_b,
+        base,
+    }
+}
+
+fn assert_private_index_rejected_without_victim_mutation(
+    caller: &Path,
+    base: &str,
+    candidate: &Path,
+    victim_worktree: &Path,
+    victim_index: &Path,
+    marker: &str,
+) {
+    let index_before = fs::read(victim_index).unwrap();
+    let staged_before = git(victim_worktree, ["diff", "--cached", "--binary", "--"]).stdout;
+    let result =
+        build_private_index_commit(&GitStorage::new(caller), &request(base, candidate, marker));
+    let index_after = fs::read(victim_index).unwrap();
+    let staged_after = git(victim_worktree, ["diff", "--cached", "--binary", "--"]).stdout;
+
+    assert_eq!(index_after, index_before, "victim index bytes changed");
+    assert_eq!(staged_after, staged_before, "victim staged diff changed");
+    assert!(result.is_err(), "protected index candidate was accepted");
+}
+
+#[test]
+fn main_caller_protects_linked_worktree_index() {
+    let fixture = three_worktrees();
+    assert_private_index_rejected_without_victim_mutation(
+        &fixture.main,
+        &fixture.base,
+        &fixture.linked_a_index,
+        &fixture.linked_a,
+        &fixture.linked_a_index,
+        "main-to-linked",
+    );
+}
+
+#[test]
+fn linked_caller_protects_main_worktree_index() {
+    let fixture = three_worktrees();
+    assert_private_index_rejected_without_victim_mutation(
+        &fixture.linked_a,
+        &fixture.base,
+        &fixture.main_index,
+        &fixture.main,
+        &fixture.main_index,
+        "linked-to-main",
+    );
+}
+
+#[test]
+fn linked_caller_protects_sibling_worktree_index() {
+    let fixture = three_worktrees();
+    assert_private_index_rejected_without_victim_mutation(
+        &fixture.linked_a,
+        &fixture.base,
+        &fixture.linked_b_index,
+        &fixture.linked_b,
+        &fixture.linked_b_index,
+        "linked-to-linked",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cross_worktree_index_aliases_are_rejected() {
+    let fixture = three_worktrees();
+    let aliases = TempDir::new().unwrap();
+
+    let hardlink = aliases.path().join("hardlink-index");
+    fs::hard_link(&fixture.linked_b_index, &hardlink).unwrap();
+    assert_private_index_rejected_without_victim_mutation(
+        &fixture.linked_a,
+        &fixture.base,
+        &hardlink,
+        &fixture.linked_b,
+        &fixture.linked_b_index,
+        "linked-hardlink",
+    );
+
+    let symlink_target = aliases.path().join("symlink-target-index");
+    fs::rename(&fixture.linked_b_index, &symlink_target).unwrap();
+    std::os::unix::fs::symlink(&symlink_target, &fixture.linked_b_index).unwrap();
+    assert_private_index_rejected_without_victim_mutation(
+        &fixture.linked_a,
+        &fixture.base,
+        &symlink_target,
+        &fixture.linked_b,
+        &fixture.linked_b_index,
+        "linked-symlink-target",
     );
 }

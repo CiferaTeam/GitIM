@@ -320,72 +320,109 @@ fn normalize_private_index(repo: &GitStorage, private_index: &Path) -> Result<Pa
         ));
     }
 
-    let normalized_active = active_index_path(repo)?;
-    if normalized_private == normalized_active {
-        return Err(invalid_input(
-            "private index path resolves to the active Git index",
-        ));
-    }
-    if let Some(private_metadata) = private_metadata {
-        let active_metadata = metadata_if_exists(&normalized_active)?;
-        if active_metadata
-            .as_ref()
-            .is_some_and(|active| same_file(&private_metadata, active))
+    for protected in protected_index_paths(repo)? {
+        if normalized_private == protected.logical || normalized_private == protected.resolved {
+            return Err(invalid_input(
+                "private index path resolves to a protected Git index",
+            ));
+        }
+        if let (Some(private_metadata), Some(protected_metadata)) =
+            (private_metadata.as_ref(), protected.metadata.as_ref())
         {
-            return Err(invalid_input("private index aliases the active Git index"));
+            if same_file(private_metadata, protected_metadata) {
+                return Err(invalid_input("private index aliases a protected Git index"));
+            }
         }
     }
     Ok(normalized_private)
 }
 
-fn active_index_path(repo: &GitStorage) -> Result<PathBuf, GitError> {
+struct ProtectedIndex {
+    logical: PathBuf,
+    resolved: PathBuf,
+    metadata: Option<fs::Metadata>,
+}
+
+fn protected_index_paths(repo: &GitStorage) -> Result<Vec<ProtectedIndex>, GitError> {
     let output = run_skill_git(
         repo,
-        &[
-            "rev-parse",
-            "--path-format=absolute",
-            "--absolute-git-dir",
-            "--git-common-dir",
-        ],
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )?;
-    let paths = std::str::from_utf8(&output.stdout)
+    let common_dir = std::str::from_utf8(&output.stdout)
         .map_err(|error| invalid_input(format!("Git directory path is not UTF-8: {error}")))?;
-    let mut paths = paths.lines();
-    let git_dir = paths
-        .next()
-        .ok_or_else(|| invalid_input("Git did not return an active Git directory"))?;
-    let common_dir = paths
+    let mut common_dir_lines = common_dir.lines();
+    let common_dir = common_dir_lines
         .next()
         .ok_or_else(|| invalid_input("Git did not return a common Git directory"))?;
-    if paths.next().is_some() {
-        return Err(invalid_input("Git returned unexpected directory paths"));
+    if common_dir_lines.next().is_some() {
+        return Err(invalid_input(
+            "Git returned unexpected common directory paths",
+        ));
+    }
+    let common_dir = Path::new(common_dir).canonicalize()?;
+
+    let mut candidates = vec![common_dir.join("index")];
+    let worktrees_dir = common_dir.join("worktrees");
+    let entries = match fs::read_dir(&worktrees_dir) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    if let Some(entries) = entries {
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let candidate = entry.path().join("index");
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => candidates.push(candidate),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
     }
 
-    let normalized_git_dir = Path::new(git_dir).canonicalize()?;
-    let normalized_common_dir = Path::new(common_dir).canonicalize()?;
-    let active_admin_dir = if normalized_git_dir == normalized_common_dir {
-        normalized_common_dir
+    candidates
+        .into_iter()
+        .map(normalize_protected_index)
+        .collect()
+}
+
+fn normalize_protected_index(path: PathBuf) -> Result<ProtectedIndex, GitError> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| invalid_input("protected index path has no parent"))?
+        .canonicalize()?;
+    let file_name = path
+        .file_name()
+        .ok_or_else(|| invalid_input("protected index path has no file name"))?;
+    let logical = parent.join(file_name);
+    let metadata = symlink_metadata_if_exists(&logical)?;
+    let resolved = if metadata.is_some() {
+        logical.canonicalize()?
     } else {
-        normalized_git_dir
+        logical.clone()
     };
-    let active_index = active_admin_dir.join("index");
-    if symlink_metadata_if_exists(&active_index)?.is_some() {
-        active_index.canonicalize().map_err(GitError::from)
+    let metadata = if metadata.is_some() {
+        Some(fs::metadata(&logical)?)
     } else {
-        Ok(active_index)
-    }
+        None
+    };
+    Ok(ProtectedIndex {
+        logical,
+        resolved,
+        metadata,
+    })
 }
 
 fn symlink_metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>, GitError> {
     match fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>, GitError> {
-    match fs::metadata(path) {
         Ok(metadata) => Ok(Some(metadata)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error.into()),
