@@ -15,7 +15,7 @@ use tracing::{info, warn};
 /// Returns the number of cards migrated. When 0, no commit is produced.
 /// This function is idempotent: running it on a clean repo is a no-op.
 ///
-/// **Locking**: holds `state.commit_lock` for the entire function body.  Any
+/// **Locking**: holds `state.commit_lock` through the local commit. Any
 /// operation that mutates the git commit tree must hold this lock first (see
 /// project invariant `project_commit_tree_lock.md`).  The HTTP server may
 /// already be live when this runs at boot, so concurrent handlers could race
@@ -23,7 +23,7 @@ use tracing::{info, warn};
 pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String> {
     // Acquire commit_lock before touching the git tree.  Hold for the full
     // function so no concurrent handler can interleave git operations.
-    let _guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
     let repo_root = &state.repo_root;
     let channels_dir = repo_root.join("channels");
@@ -152,11 +152,9 @@ pub async fn reconcile_orphan_cards(state: SharedState) -> Result<usize, String>
         .add_and_commit_as(&path_refs, commit_msg, Some(("system", "system@gitim")))
         .map_err(|e| format!("reconcile commit failed: {}", e))?;
 
-    // Best-effort push; failure is non-fatal — sync_loop will retry.
-    if state.git_storage.has_remote() {
-        if let Err(e) = state.git_storage.push() {
-            warn!("reconcile push failed (will retry via sync_loop): {}", e);
-        }
+    drop(guard);
+    if let Err(error) = state.push_working_branch_with_retry("reconcile") {
+        warn!("reconcile guarded push failed (will retry via sync_loop): {error}");
     }
 
     info!(

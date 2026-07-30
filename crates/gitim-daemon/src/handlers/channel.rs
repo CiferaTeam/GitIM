@@ -7,7 +7,6 @@ use gitim_core::parser::parse_thread;
 use gitim_core::types::{ChannelMeta, ChannelName, Handler};
 use gitim_core::validator::compliance::validate_append;
 use gitim_core::validator::im_rules;
-use gitim_sync::git::GitError;
 use tracing::{error, info, warn};
 
 pub async fn handle_join_channel(
@@ -38,8 +37,6 @@ fn leave_removes_channel_creator(author: &str, targets: &[String], meta: &Channe
         targets.iter().any(|target| target == &meta.created_by)
     }
 }
-
-const MAX_PUSH_RETRIES: u32 = 3;
 
 pub async fn handle_create_channel(
     state: SharedState,
@@ -153,38 +150,8 @@ pub async fn handle_create_channel(
         return Response::error(format!("create_channel commit failed: {}", e));
     }
 
-    // 9. Push with retry (skip if no remote)
-    if state.git_storage.has_remote() {
-        let mut pushed = false;
-        for attempt in 1..=MAX_PUSH_RETRIES {
-            match state.git_storage.push() {
-                Ok(()) => {
-                    pushed = true;
-                    break;
-                }
-                Err(GitError::PushConflict) => {
-                    warn!(
-                        "create_channel: push conflict (attempt {}/{}), rebasing",
-                        attempt, MAX_PUSH_RETRIES
-                    );
-                    if let Err(e) = state.git_storage.fetch() {
-                        return Response::error(format!("create_channel fetch failed: {}", e));
-                    }
-                    if let Err(e) = state.git_storage.rebase_onto_origin() {
-                        return Response::error(format!("create_channel rebase failed: {}", e));
-                    }
-                }
-                Err(e) => {
-                    return Response::error(format!("create_channel push failed: {}", e));
-                }
-            }
-        }
-        if !pushed {
-            return Response::error(format!(
-                "create_channel: push still conflicting after {} retries",
-                MAX_PUSH_RETRIES
-            ));
-        }
+    if let Err(error) = state.push_working_branch_with_retry("create_channel") {
+        return Response::error(format!("create_channel guarded push failed: {error}"));
     }
 
     info!("channel '{}' created by @{}", name, author);
@@ -475,43 +442,10 @@ pub async fn handle_archive_channel(
         return Response::error(format!("archive commit failed: {}", e));
     }
 
-    // 8. Push with retry
-    if state.git_storage.has_remote() {
-        let mut pushed = false;
-        for attempt in 1..=MAX_PUSH_RETRIES {
-            match state.git_storage.push() {
-                Ok(()) => {
-                    pushed = true;
-                    break;
-                }
-                Err(GitError::PushConflict) => {
-                    warn!(
-                        "archive_channel: push conflict (attempt {}/{}), rebasing",
-                        attempt, MAX_PUSH_RETRIES
-                    );
-                    if let Err(e) = state.git_storage.fetch() {
-                        return Response::error(format!("archive_channel fetch failed: {}", e));
-                    }
-                    if let Err(e) = state.git_storage.rebase_onto_origin() {
-                        return Response::error(format!("archive_channel rebase failed: {}", e));
-                    }
-                }
-                Err(e) => {
-                    return Response::error(format!("archive_channel push failed: {}", e));
-                }
-            }
-        }
-        if !pushed {
-            return Response::error(format!(
-                "archive_channel: push still conflicting after {} retries",
-                MAX_PUSH_RETRIES
-            ));
-        }
-    }
-
-    // Release commit_lock before the thread_cache .await — std::sync::MutexGuard
-    // is !Send and the async fn would otherwise fail Send for axum's Handler bound.
     drop(_write_guard);
+    if let Err(error) = state.push_working_branch_with_retry("archive_channel") {
+        return Response::error(format!("archive_channel guarded push failed: {error}"));
+    }
 
     // 9. Remove channel from thread_cache
     state.thread_cache.write().await.remove(&channel);
@@ -830,43 +764,10 @@ pub async fn handle_unarchive_channel(
         ));
     }
 
-    // 9. Push with retry (mirror archive_channel)
-    if state.git_storage.has_remote() {
-        let mut pushed = false;
-        for attempt in 1..=MAX_PUSH_RETRIES {
-            match state.git_storage.push() {
-                Ok(()) => {
-                    pushed = true;
-                    break;
-                }
-                Err(GitError::PushConflict) => {
-                    warn!(
-                        "unarchive_channel: push conflict (attempt {}/{}), rebasing",
-                        attempt, MAX_PUSH_RETRIES
-                    );
-                    if let Err(e) = state.git_storage.fetch() {
-                        return Response::error(format!("unarchive_channel fetch failed: {}", e));
-                    }
-                    if let Err(e) = state.git_storage.rebase_onto_origin() {
-                        return Response::error(format!("unarchive_channel rebase failed: {}", e));
-                    }
-                }
-                Err(e) => {
-                    return Response::error(format!("unarchive_channel push failed: {}", e));
-                }
-            }
-        }
-        if !pushed {
-            return Response::error(format!(
-                "unarchive_channel: push still conflicting after {} retries",
-                MAX_PUSH_RETRIES
-            ));
-        }
-    }
-
-    // Release commit_lock before the thread_cache .await — std::sync::MutexGuard
-    // is !Send and the async fn would otherwise fail Send for axum's Handler bound.
     drop(_write_guard);
+    if let Err(error) = state.push_working_branch_with_retry("unarchive_channel") {
+        return Response::error(format!("unarchive_channel guarded push failed: {error}"));
+    }
 
     // 10. Remove channel from thread_cache (symmetry with archive_channel)
     state.thread_cache.write().await.remove(&channel);

@@ -1,6 +1,8 @@
 use crate::api::Event;
 use gitim_core::types::{Config, ThreadFile};
 use gitim_sync::git::GitStorage;
+use gitim_sync::skill::checkpoint::SkillSyncError;
+use gitim_sync::skill::guard::{GuardedPushOutcome, IntegrationOperation, SkillSyncGuard};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -207,6 +209,46 @@ impl AppState {
         (handler.to_string(), email)
     }
 
+    pub fn push_working_branch(&self) -> Result<GuardedPushOutcome, SkillSyncError> {
+        let author = self.rotation_author();
+        SkillSyncGuard::new(&self.repo_root)?.guarded_push(
+            &self.git_storage,
+            &self.commit_lock,
+            (author.0.as_str(), author.1.as_str()),
+        )
+    }
+
+    pub fn integrate_working_branch(
+        &self,
+        operation: IntegrationOperation,
+    ) -> Result<gitim_sync::skill::checkpoint::IncomingSkillValidation, SkillSyncError> {
+        SkillSyncGuard::new(&self.repo_root)?.guarded_integrate(&self.git_storage, operation)
+    }
+
+    pub fn push_working_branch_with_retry(&self, operation: &str) -> Result<(), SkillSyncError> {
+        const MAX_ATTEMPTS: usize = 3;
+        for attempt in 1..=MAX_ATTEMPTS {
+            match self.push_working_branch() {
+                Ok(_) => return Ok(()),
+                Err(SkillSyncError::Git(gitim_sync::git::GitError::PushConflict)) => {
+                    tracing::warn!(
+                        "{operation}: guarded push conflict (attempt {attempt}/{MAX_ATTEMPTS})"
+                    );
+                    self.integrate_working_branch(IntegrationOperation::RebaseOntoOrigin)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(SkillSyncError::Git(gitim_sync::git::GitError::PushConflict))
+    }
+
+    pub fn skill_root_precondition(&self) -> Result<String, gitim_sync::git::GitError> {
+        Ok(
+            gitim_sync::skill::git_tree::tree_oid_at(&self.git_storage, "HEAD", "skills")?
+                .unwrap_or_else(|| "absent".to_owned()),
+        )
+    }
+
     /// Rotation commits carry the daemon owner's identity, same as
     /// rebase-resolution commits. Sync context (called from the blocking
     /// pool) — `try_read` on the async lock; contention or pre-onboard
@@ -272,7 +314,8 @@ impl AppState {
         let fired = match outcome {
             gitim_sync::rotate::RotationOutcome::Won { .. } => true,
             gitim_sync::rotate::RotationOutcome::Lost => {
-                gitim_sync::rotate::follow_redirect(&storage, &branch)?;
+                self.integrate_working_branch(IntegrationOperation::FollowEpochRedirect)
+                    .map_err(|error| gitim_sync::rotate::RotationError::Epoch(error.to_string()))?;
                 false
             }
             gitim_sync::rotate::RotationOutcome::NotReady => return Ok(false),
@@ -455,25 +498,17 @@ impl AppState {
                             .commit_lock
                             .lock()
                             .unwrap_or_else(|e| e.into_inner());
-                        let storage = GitStorage::new(&synced_state.repo_root);
-                        match storage.current_branch() {
-                            Ok(branch) => {
-                                match gitim_sync::rotate::follow_redirect(&storage, &branch) {
-                                    Ok(true) => {
-                                        if let Err(e) = synced_state.refresh_epoch_status() {
-                                            tracing::warn!(
-                                                "on_synced: post-follow refresh failed: {}",
-                                                e
-                                            );
-                                        }
-                                    }
-                                    Ok(false) => {}
-                                    Err(e) => {
-                                        tracing::warn!("on_synced: follow_redirect failed: {}", e)
-                                    }
+                        match synced_state
+                            .integrate_working_branch(IntegrationOperation::FollowEpochRedirect)
+                        {
+                            Ok(_) => {
+                                if let Err(e) = synced_state.refresh_epoch_status() {
+                                    tracing::warn!("on_synced: post-follow refresh failed: {}", e);
                                 }
                             }
-                            Err(e) => tracing::warn!("on_synced: current_branch failed: {}", e),
+                            Err(e) => {
+                                tracing::warn!("on_synced: guarded follow failed: {}", e)
+                            }
                         }
                     }
                 },

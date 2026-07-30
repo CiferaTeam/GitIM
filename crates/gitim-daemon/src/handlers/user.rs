@@ -2,10 +2,7 @@ use crate::api::{Event, Response};
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 use gitim_core::types::{Handler, UserMeta, MAX_INTRODUCTION_LEN};
-use gitim_sync::git::GitError;
 use tracing::{info, warn};
-
-const MAX_PUSH_RETRIES: u32 = 3;
 
 pub async fn handle_register_user(
     state: SharedState,
@@ -243,19 +240,28 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
     if !active_path.exists() {
         return Response::error(format!("user @{} not found", handler));
     }
+    if let Err(code) = ensure_no_skill_roles(&state.repo_root, &handler) {
+        return Response::error(code);
+    }
 
     // 5. Ensure archive/users/ directory exists.
     if let Err(e) = std::fs::create_dir_all(&archive_dir) {
         return Response::error(format!("failed to create archive/users dir: {}", e));
     }
 
-    // Commit-tree lock: held across git mv + commit + push so a concurrent
+    // Commit-tree lock: held across git mv + commit so a concurrent
     // `handle_send` (also takes this lock) can't slip a `git add` + `git
     // commit` in between our staged mv and our `add_and_commit_as`, which
     // would bundle the unrelated send into our archive commit. Critical
     // section is all blocking subprocess calls; std::sync::Mutex guard
     // must not cross any `.await`.
     let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+    let skills_tree = match state.skill_root_precondition() {
+        Ok(tree) => tree,
+        Err(error) => {
+            return Response::error(format!("archive_user Skill precondition failed: {error}"))
+        }
+    };
 
     // 6. git mv users/<h>.meta.yaml → archive/users/<h>.meta.yaml
     let from_rel = format!("users/{}.meta.yaml", handler);
@@ -292,7 +298,7 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
     }
 
     // 7. Commit. On failure, reverse all git mv operations to leave the tree clean.
-    let commit_msg = format!("archive: depart user @{}", handler);
+    let commit_msg = format!("archive: depart user @{handler}\n\nGitim-Skills-Tree: {skills_tree}");
     let (author_name, author_email) = state.author_for(&author);
     if let Err(e) = state.git_storage.add_and_commit_as(
         &commit_paths,
@@ -311,45 +317,10 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
         ));
     }
 
-    // 8. Push with retry (skip if no remote).
-    if state.git_storage.has_remote() {
-        let mut pushed = false;
-        for attempt in 1..=MAX_PUSH_RETRIES {
-            match state.git_storage.push() {
-                Ok(()) => {
-                    pushed = true;
-                    break;
-                }
-                Err(GitError::PushConflict) => {
-                    warn!(
-                        "archive_user: push conflict (attempt {}/{}), rebasing",
-                        attempt, MAX_PUSH_RETRIES
-                    );
-                    if let Err(e) = state.git_storage.fetch() {
-                        return Response::error(format!("archive_user fetch failed: {}", e));
-                    }
-                    if let Err(e) = state.git_storage.rebase_onto_origin() {
-                        return Response::error(format!("archive_user rebase failed: {}", e));
-                    }
-                }
-                Err(e) => {
-                    return Response::error(format!("archive_user push failed: {}", e));
-                }
-            }
-        }
-        if !pushed {
-            return Response::error(format!(
-                "archive_user: push still conflicting after {} retries",
-                MAX_PUSH_RETRIES
-            ));
-        }
-    }
-
-    // Commit tree is stable — drop the lock BEFORE any `.await` below.
-    // std::sync::MutexGuard must not cross await points, and everything
-    // from here on (in-memory users update, event broadcast) is non-mutating
-    // for the commit tree.
     drop(_commit_guard);
+    if let Err(error) = state.push_working_branch_with_retry("archive_user") {
+        return Response::error(format!("archive_user guarded push failed: {error}"));
+    }
 
     // 9. Drop archived handler from in-memory users list. The post-sync
     //    refresh in state.rs already does this from disk after the next
@@ -427,7 +398,7 @@ pub async fn handle_unarchive_user(
         return Response::error(format!("failed to create users dir: {}", e));
     }
 
-    // Commit-tree lock: held across git mv + commit + push so a concurrent
+    // Commit-tree lock: held across git mv + commit so a concurrent
     // `handle_send` (also takes this lock) can't slip a `git add` + `git
     // commit` in between our staged mv and our `add_and_commit_as`, which
     // would bundle the unrelated send into our unarchive commit. Critical
@@ -488,45 +459,10 @@ pub async fn handle_unarchive_user(
         ));
     }
 
-    // 8. Push with retry.
-    if state.git_storage.has_remote() {
-        let mut pushed = false;
-        for attempt in 1..=MAX_PUSH_RETRIES {
-            match state.git_storage.push() {
-                Ok(()) => {
-                    pushed = true;
-                    break;
-                }
-                Err(GitError::PushConflict) => {
-                    warn!(
-                        "unarchive_user: push conflict (attempt {}/{}), rebasing",
-                        attempt, MAX_PUSH_RETRIES
-                    );
-                    if let Err(e) = state.git_storage.fetch() {
-                        return Response::error(format!("unarchive_user fetch failed: {}", e));
-                    }
-                    if let Err(e) = state.git_storage.rebase_onto_origin() {
-                        return Response::error(format!("unarchive_user rebase failed: {}", e));
-                    }
-                }
-                Err(e) => {
-                    return Response::error(format!("unarchive_user push failed: {}", e));
-                }
-            }
-        }
-        if !pushed {
-            return Response::error(format!(
-                "unarchive_user: push still conflicting after {} retries",
-                MAX_PUSH_RETRIES
-            ));
-        }
-    }
-
-    // Commit tree is stable — drop the lock BEFORE any `.await` below.
-    // std::sync::MutexGuard must not cross await points, and everything
-    // from here on (in-memory users update, event broadcast) is non-mutating
-    // for the commit tree.
     drop(_commit_guard);
+    if let Err(error) = state.push_working_branch_with_retry("unarchive_user") {
+        return Response::error(format!("unarchive_user guarded push failed: {error}"));
+    }
 
     // 9. Re-add restored handler to in-memory users list (mirror archive's
     //    drop above).
@@ -554,6 +490,69 @@ pub async fn handle_unarchive_user(
         unarchived_by: author,
     };
     Response::json(payload)
+}
+
+pub(crate) fn ensure_no_skill_roles(
+    repo_root: &std::path::Path,
+    handler: &str,
+) -> Result<(), String> {
+    let workspace = repo_root.join("skills/workspace.meta.yaml");
+    if workspace.exists() {
+        let value: serde_yaml::Value = serde_yaml::from_str(
+            &std::fs::read_to_string(&workspace)
+                .map_err(|error| format!("read workspace Skill metadata: {error}"))?,
+        )
+        .map_err(|error| format!("parse workspace Skill metadata: {error}"))?;
+        if yaml_role_contains(&value, "administrators", handler) {
+            return Err("skill_admin_role_present".to_owned());
+        }
+    }
+    for root in [repo_root.join("skills"), repo_root.join("archive/skills")] {
+        let mut files = Vec::new();
+        collect_skill_meta_files(&root, &mut files)?;
+        for path in files {
+            let value: serde_yaml::Value = serde_yaml::from_str(
+                &std::fs::read_to_string(&path)
+                    .map_err(|error| format!("read {}: {error}", path.display()))?,
+            )
+            .map_err(|error| format!("parse {}: {error}", path.display()))?;
+            if yaml_role_contains(&value, "owners", handler)
+                || yaml_role_contains(&value, "maintainers", handler)
+            {
+                return Err("skill_roles_present".to_owned());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_skill_meta_files(
+    directory: &std::path::Path,
+    files: &mut Vec<std::path::PathBuf>,
+) -> Result<(), String> {
+    let entries = match std::fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("read {}: {error}", directory.display())),
+    };
+    for entry in entries {
+        let path = entry
+            .map_err(|error| format!("read {} entry: {error}", directory.display()))?
+            .path();
+        if path.is_dir() {
+            collect_skill_meta_files(&path, files)?;
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("skill.meta.yaml") {
+            files.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn yaml_role_contains(value: &serde_yaml::Value, key: &str, handler: &str) -> bool {
+    value
+        .get(key)
+        .and_then(serde_yaml::Value::as_sequence)
+        .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(handler)))
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@
 //! so the next `has_unpushed_commits` call errored on `@{upstream}`, which the
 //! sync loop swallowed as a warn — messages then silently stopped syncing.
 //!
-//! These tests lock in that `GitStorage::push` establishes upstream on the
+//! These tests lock in that working-branch publication establishes upstream on the
 //! first push and that subsequent `has_unpushed_commits` / `push` operate
 //! normally.
 
@@ -16,6 +16,9 @@ use std::process::Command;
 
 use gitim_sync::git::GitStorage;
 use tempfile::TempDir;
+
+mod support;
+use support::TestWorkingBranchPush;
 
 fn run_git(dir: &Path, args: &[&str]) {
     let output = Command::new("git")

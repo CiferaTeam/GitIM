@@ -7,6 +7,9 @@ use gitim_sync::conflict::resolve_content;
 use gitim_sync::git::GitStorage;
 use tempfile::TempDir;
 
+mod support;
+use support::TestWorkingBranchPush;
+
 fn run_git(dir: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

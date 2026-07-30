@@ -6,6 +6,9 @@ use std::process::Command;
 use gitim_sync::git::{GitError, GitStorage};
 use tempfile::TempDir;
 
+mod support;
+use support::TestWorkingBranchPush;
+
 /// Helper: create a bare repo and clone it, returning (bare_dir, clone_dir, GitStorage).
 /// Both TempDirs are returned so they stay alive for the test's lifetime.
 fn setup_repo_pair() -> (TempDir, TempDir, GitStorage) {

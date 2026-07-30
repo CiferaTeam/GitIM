@@ -5,9 +5,9 @@ use gitim_core::auth_payload::AuthPayload;
 use gitim_core::me_json::MeJson;
 use gitim_core::types::{ChannelMeta, Handler, UserMeta};
 use gitim_sync::git::GitError;
+use gitim_sync::skill::checkpoint::SkillSyncError;
+use gitim_sync::skill::guard::IntegrationOperation;
 use tracing::{info, warn};
-
-const MAX_PUSH_RETRIES: u32 = 3;
 
 /// Full onboard orchestration: identity -> me.json -> ensure_repo -> register_user -> sync loop.
 ///
@@ -323,15 +323,14 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
             .map_err(|e| Response::error(format!("ensure_repo commit failed: {}", e)))?;
 
         if state.git_storage.has_remote() {
-            match state.git_storage.push() {
-                Ok(()) => {}
-                Err(GitError::PushConflict) => {
+            match state.push_working_branch() {
+                Ok(_) => {}
+                Err(SkillSyncError::Git(GitError::PushConflict)) => {
                     // Someone else already initialized — discard our commit and move on
                     warn!("ensure_repo: push conflict — discarding local init (someone else initialized)");
                     state
-                        .git_storage
-                        .discard_unpushed()
-                        .map_err(|e| Response::error(format!("discard_unpushed failed: {}", e)))?;
+                        .integrate_working_branch(IntegrationOperation::HardDivergenceRecovery)
+                        .map_err(|e| Response::error(format!("guarded reset failed: {e}")))?;
                 }
                 Err(e) => return Err(Response::error(format!("ensure_repo push failed: {}", e))),
             }
@@ -393,30 +392,10 @@ fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Resu
         return Ok(true);
     }
 
-    for attempt in 1..=MAX_PUSH_RETRIES {
-        match state.git_storage.push() {
-            Ok(()) => return Ok(true),
-            Err(GitError::PushConflict) => {
-                warn!(
-                    "register_user: push conflict (attempt {}/{}), rebasing",
-                    attempt, MAX_PUSH_RETRIES
-                );
-                state
-                    .git_storage
-                    .fetch()
-                    .map_err(|e| Response::error(format!("fetch failed during retry: {}", e)))?;
-                state.git_storage.rebase_onto_origin().map_err(|e| {
-                    Response::error(format!("rebase failed (real conflict on user file): {}", e))
-                })?;
-            }
-            Err(e) => return Err(Response::error(format!("register_user push failed: {}", e))),
-        }
-    }
-
-    Err(Response::error(format!(
-        "register_user: push still conflicting after {} retries",
-        MAX_PUSH_RETRIES
-    )))
+    state
+        .push_working_branch_with_retry("register_user")
+        .map(|()| true)
+        .map_err(|error| Response::error(format!("register_user guarded push failed: {error}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -919,7 +898,9 @@ mod tests {
         // === Phase 2: Each bot sends a message ===
         // Each bot needs to pull latest state first (simulating sync)
         for state in [&state_a, &state_b, &state_c] {
-            state.git_storage.pull_rebase().unwrap();
+            state
+                .integrate_working_branch(IntegrationOperation::RebaseOntoOrigin)
+                .unwrap();
             // Refresh users list from disk
             let users_dir = state.repo_root.join("users");
             let mut users = state.users.write().await;

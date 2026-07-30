@@ -4,6 +4,9 @@ use gitim_sync::git::GitStorage;
 use gitim_sync::rotate::{check_push_fence, follow_redirect, try_fire_rotation, RotationOutcome};
 use std::process::Command;
 
+mod support;
+use support::TestWorkingBranchPush;
+
 // === helpers (shared by later tasks in this file) ===
 fn git(dir: &tempfile::TempDir, args: &[&str]) {
     assert!(Command::new("git")

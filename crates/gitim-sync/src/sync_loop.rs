@@ -9,6 +9,8 @@ use tracing::{error, info, warn};
 
 use crate::conflict::{self, build_rebase_commit_msg};
 use crate::git::{GitError, GitStorage};
+use crate::skill::checkpoint::SkillSyncError;
+use crate::skill::guard::{GuardedPushOutcome, IntegrationOperation, SkillSyncGuard};
 
 /// Outcome of a single sync cycle, used to determine backoff.
 pub enum SyncOutcome {
@@ -803,7 +805,14 @@ fn enforce_divergence_threshold(
     let _guard = commit_lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Err(e) = repo.discard_unpushed() {
+    let guard = match SkillSyncGuard::new(repo.root()) {
+        Ok(guard) => guard,
+        Err(error) => {
+            error!("sync: divergence guard initialization failed: {error}");
+            return false;
+        }
+    };
+    if let Err(e) = guard.guarded_integrate(repo, IntegrationOperation::HardDivergenceRecovery) {
         error!("sync: divergence safety net hard reset failed: {}", e);
         return false;
     }
@@ -825,6 +834,22 @@ fn observe_auth(circuit: &mut AuthCircuit, result: &Result<(), GitError>) {
         );
     } else if was_tripped && !circuit.is_tripped() {
         info!("sync: auth circuit recovered — remote auth succeeded, resuming normal sync");
+    }
+}
+
+fn observe_guard_auth(
+    circuit: &mut AuthCircuit,
+    result: &Result<GuardedPushOutcome, SkillSyncError>,
+) {
+    match result {
+        Ok(_) => observe_auth(circuit, &Ok(())),
+        Err(SkillSyncError::Git(GitError::AuthFailed(message))) => {
+            observe_auth(circuit, &Err(GitError::AuthFailed(message.clone())));
+        }
+        Err(SkillSyncError::Git(GitError::RateLimited)) => {
+            observe_auth(circuit, &Err(GitError::RateLimited));
+        }
+        Err(_) => {}
     }
 }
 
@@ -890,12 +915,17 @@ fn epoch_fence_and_follow(
         return true; // don't push this cycle either way; next cycle re-evaluates
     }
 
-    match crate::rotate::follow_redirect(repo, &branch) {
-        Ok(acted) => {
-            if acted {
-                info!("epoch fence: followed redirect off sealed branch {branch}");
-            }
-            acted
+    let guard = match SkillSyncGuard::new(repo.root()) {
+        Ok(guard) => guard,
+        Err(error) => {
+            warn!("epoch fence: Skill guard initialization failed: {error}");
+            return true;
+        }
+    };
+    match guard.guarded_integrate(repo, IntegrationOperation::FollowEpochRedirect) {
+        Ok(_) => {
+            info!("epoch fence: followed redirect off sealed branch {branch}");
+            true
         }
         Err(e) => {
             // Most likely a migrate (rebase --onto) conflict: the same
@@ -904,7 +934,7 @@ fn epoch_fence_and_follow(
             // fence would re-follow and re-conflict every cycle, never
             // publishing again (bricked, though lossless).
             warn!("epoch fence: follow_redirect failed ({e}); trying content replay");
-            migrate_via_content_replay(repo, &branch, rebase_author);
+            migrate_via_content_replay(repo, &guard, rebase_author);
             // Whether or not the replay succeeded, never push this cycle;
             // the next cycle re-evaluates from the (possibly new) branch.
             true
@@ -925,11 +955,17 @@ fn epoch_fence_and_follow(
 /// stale line number until the next poll.
 fn migrate_via_content_replay(
     repo: &GitStorage,
-    branch: &str,
+    skill_guard: &SkillSyncGuard,
     rebase_author: Option<&(String, String)>,
 ) {
     let additions = match repo.diff_unpushed("*.thread") {
-        Ok(a) => a,
+        Ok(mut additions) => {
+            additions.retain(|path, _| {
+                let path = path.to_string_lossy();
+                !path.starts_with("skills/") && !path.starts_with("archive/skills/")
+            });
+            additions
+        }
         Err(e) => {
             warn!("epoch migrate replay: capture failed: {e}");
             return;
@@ -947,19 +983,9 @@ fn migrate_via_content_replay(
             return;
         }
     };
-    if let Err(e) = repo.discard_unpushed() {
-        warn!("epoch migrate replay: discard failed: {e}");
-        return;
-    }
-    match crate::rotate::follow_redirect(repo, branch) {
-        Ok(true) => {}
-        Ok(false) => {
-            warn!("epoch migrate replay: follow was a no-op after discard; restoring");
-            if let Err(e) = repo.reset_hard_to(&saved_sha) {
-                warn!("epoch migrate replay: restore failed: {e} (recover via reflog {saved_sha})");
-            }
-            return;
-        }
+    match skill_guard.guarded_integrate(repo, IntegrationOperation::FollowEpochRedirectAfterDiscard)
+    {
+        Ok(_) => {}
         Err(e) => {
             warn!("epoch migrate replay: clean follow failed ({e}); restoring");
             if let Err(e) = repo.reset_hard_to(&saved_sha) {
@@ -1013,6 +1039,16 @@ fn sync_with_push(
     on_renumbered: &dyn Fn(PathBuf, u64, u64),
     rebase_author: Option<&(String, String)>,
 ) -> SyncOutcome {
+    let guard = match SkillSyncGuard::new(repo.root()) {
+        Ok(guard) => guard,
+        Err(error) => {
+            warn!("sync: Skill guard initialization failed: {error}");
+            return SyncOutcome::Normal;
+        }
+    };
+    let push_author = rebase_author
+        .map(|(name, email)| (name.as_str(), email.as_str()))
+        .unwrap_or(("gitim-sync", "gitim-sync@gitim"));
     // Epoch fence, checkpoint (1): R may already sit in the local chain (a
     // prior cycle's pull, or stranded fire residue). Publishing from here
     // would put commits after R on the sealed branch — invariant 1 forbids
@@ -1025,10 +1061,14 @@ fn sync_with_push(
     let mut included_head_before_rewrite: Option<String> = None;
     for attempt in 1..=MAX_SYNC_RETRIES {
         // Try push directly
-        let push_result = repo.push();
-        observe_auth(circuit, &push_result);
+        let push_result = guard.guarded_push(repo, commit_lock, push_author);
+        observe_guard_auth(circuit, &push_result);
         match push_result {
-            Ok(()) => {
+            Ok(
+                GuardedPushOutcome::Pushed
+                | GuardedPushOutcome::NothingToPush
+                | GuardedPushOutcome::RepairedAndPushed { .. },
+            ) => {
                 let pushed_head = match repo.rev_parse("@{upstream}") {
                     Ok(head) => head,
                     Err(error) => {
@@ -1043,18 +1083,18 @@ fn sync_with_push(
                 info!("sync: push complete (attempt {})", attempt);
                 return SyncOutcome::Normal;
             }
-            Err(GitError::RateLimited) => {
+            Err(SkillSyncError::Git(GitError::RateLimited)) => {
                 warn!("sync: push rate limited (attempt {})", attempt);
                 return SyncOutcome::RateLimited;
             }
-            Err(GitError::AuthFailed(_)) => {
+            Err(SkillSyncError::Git(GitError::AuthFailed(_))) => {
                 warn!("sync: push auth failed (attempt {})", attempt);
                 if circuit.is_tripped() {
                     return SyncOutcome::AuthCircuitOpen;
                 }
                 return SyncOutcome::Normal;
             }
-            Err(GitError::PushConflict) => {
+            Err(SkillSyncError::Git(GitError::PushConflict)) => {
                 // Remote has diverged, need to sync
             }
             Err(e) => {
@@ -1165,8 +1205,8 @@ fn sync_with_push(
         }
 
         // Try rebase (fast path: no .thread conflicts)
-        match repo.rebase_onto_origin() {
-            Ok(()) => {
+        match guard.guarded_integrate(repo, IntegrationOperation::RebaseOntoOrigin) {
+            Ok(_) => {
                 included_head_before_rewrite
                     .get_or_insert_with(|| local_head_before_rebase.clone());
                 drop(rebase_guard);
@@ -1176,10 +1216,14 @@ fn sync_with_push(
                 if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
                     return SyncOutcome::Normal;
                 }
-                let push_after_rebase = repo.push();
-                observe_auth(circuit, &push_after_rebase);
+                let push_after_rebase = guard.guarded_push(repo, commit_lock, push_author);
+                observe_guard_auth(circuit, &push_after_rebase);
                 match push_after_rebase {
-                    Ok(()) => {
+                    Ok(
+                        GuardedPushOutcome::Pushed
+                        | GuardedPushOutcome::NothingToPush
+                        | GuardedPushOutcome::RepairedAndPushed { .. },
+                    ) => {
                         let pushed_head = match repo.rev_parse("@{upstream}") {
                             Ok(head) => head,
                             Err(error) => {
@@ -1196,11 +1240,11 @@ fn sync_with_push(
                         info!("sync: push complete after rebase (attempt {})", attempt);
                         return SyncOutcome::Normal;
                     }
-                    Err(GitError::RateLimited) => {
+                    Err(SkillSyncError::Git(GitError::RateLimited)) => {
                         warn!("sync: push rate limited after rebase (attempt {})", attempt);
                         return SyncOutcome::RateLimited;
                     }
-                    Err(GitError::AuthFailed(_)) => {
+                    Err(SkillSyncError::Git(GitError::AuthFailed(_))) => {
                         warn!("sync: push auth failed after rebase (attempt {})", attempt);
                         if circuit.is_tripped() {
                             return SyncOutcome::AuthCircuitOpen;
@@ -1284,7 +1328,9 @@ fn sync_with_push(
                     ConflictReplayRollback::new(repo, local_head_before_rebase.clone());
 
                 // SyncLoop manages git state; resolve_content does pure content transform
-                if let Err(e) = repo.discard_unpushed() {
+                if let Err(e) =
+                    guard.guarded_integrate(repo, IntegrationOperation::HardDivergenceRecovery)
+                {
                     warn!("sync: discard_unpushed failed: {}", e);
                     return SyncOutcome::Normal;
                 }
@@ -1493,10 +1539,14 @@ fn sync_with_push(
                 // back handler writers waiting on commit_lock.
                 drop(rebase_guard);
 
-                let push_after_resolve = repo.push();
-                observe_auth(circuit, &push_after_resolve);
+                let push_after_resolve = guard.guarded_push(repo, commit_lock, push_author);
+                observe_guard_auth(circuit, &push_after_resolve);
                 match push_after_resolve {
-                    Ok(()) => {
+                    Ok(
+                        GuardedPushOutcome::Pushed
+                        | GuardedPushOutcome::NothingToPush
+                        | GuardedPushOutcome::RepairedAndPushed { .. },
+                    ) => {
                         let pushed_head = match repo.rev_parse("@{upstream}") {
                             Ok(head) => head,
                             Err(error) => {
@@ -1516,14 +1566,14 @@ fn sync_with_push(
                         );
                         return SyncOutcome::Normal;
                     }
-                    Err(GitError::RateLimited) => {
+                    Err(SkillSyncError::Git(GitError::RateLimited)) => {
                         warn!(
                             "sync: push rate limited after conflict resolution (attempt {})",
                             attempt
                         );
                         return SyncOutcome::RateLimited;
                     }
-                    Err(GitError::AuthFailed(_)) => {
+                    Err(SkillSyncError::Git(GitError::AuthFailed(_))) => {
                         warn!(
                             "sync: push auth failed after conflict resolution (attempt {})",
                             attempt
@@ -1561,6 +1611,13 @@ fn sync_pull_only(
     circuit: &mut AuthCircuit,
     commit_lock: &Mutex<()>,
 ) -> SyncOutcome {
+    let guard = match SkillSyncGuard::new(repo.root()) {
+        Ok(guard) => guard,
+        Err(error) => {
+            warn!("sync: Skill guard initialization failed: {error}");
+            return SyncOutcome::Normal;
+        }
+    };
     let fetch_result = repo.fetch();
     observe_auth(circuit, &fetch_result);
     match fetch_result {
@@ -1597,7 +1654,7 @@ fn sync_pull_only(
     let _rebase_guard = commit_lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Err(e) = repo.rebase_onto_origin() {
+    if let Err(e) = guard.guarded_integrate(repo, IntegrationOperation::RebaseOntoOrigin) {
         // Emit the error to daemon log so the first failure is always
         // visible, then return RebaseFailed so the loop can throttle
         // subsequent warnings and apply backoff instead of retrying at

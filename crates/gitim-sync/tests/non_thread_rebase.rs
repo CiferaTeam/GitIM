@@ -20,6 +20,9 @@ use gitim_sync::git::GitStorage;
 use gitim_sync::sync_loop::{run_sync_cycle, AuthCircuit};
 use tempfile::TempDir;
 
+mod support;
+use support::TestWorkingBranchPush;
+
 fn run_git(dir: &Path, args: &[&str]) {
     let output = Command::new("git")
         .args(args)

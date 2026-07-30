@@ -3,10 +3,7 @@ use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 use gitim_core::dm::dm_filename;
 use gitim_core::types::Handler;
-use gitim_sync::git::GitError;
 use tracing::{info, warn};
-
-const MAX_PUSH_RETRIES: u32 = 3;
 
 /// Move `dm/<sorted-pair>.thread` → `archive/dm/<sorted-pair>.thread` in
 /// a single commit. Per archive-protocol Contract 1, the archive path
@@ -66,7 +63,7 @@ pub async fn handle_archive_dm(state: SharedState, peer: String, author: String)
         return Response::error(format!("failed to create archive/dm dir: {}", e));
     }
 
-    // Commit-tree lock: held across git mv + commit + push so a concurrent
+    // Commit-tree lock: held across git mv + commit so a concurrent
     // `handle_send` (also takes this lock) can't slip a `git add` + `git
     // commit` in between our staged mv and our `add_and_commit_as`, which
     // would bundle the unrelated send into our archive commit. Critical
@@ -98,44 +95,10 @@ pub async fn handle_archive_dm(state: SharedState, peer: String, author: String)
         ));
     }
 
-    // 7. Push with retry (skip if no remote).
-    if state.git_storage.has_remote() {
-        let mut pushed = false;
-        for attempt in 1..=MAX_PUSH_RETRIES {
-            match state.git_storage.push() {
-                Ok(()) => {
-                    pushed = true;
-                    break;
-                }
-                Err(GitError::PushConflict) => {
-                    warn!(
-                        "archive_dm: push conflict (attempt {}/{}), rebasing",
-                        attempt, MAX_PUSH_RETRIES
-                    );
-                    if let Err(e) = state.git_storage.fetch() {
-                        return Response::error(format!("archive_dm fetch failed: {}", e));
-                    }
-                    if let Err(e) = state.git_storage.rebase_onto_origin() {
-                        return Response::error(format!("archive_dm rebase failed: {}", e));
-                    }
-                }
-                Err(e) => {
-                    return Response::error(format!("archive_dm push failed: {}", e));
-                }
-            }
-        }
-        if !pushed {
-            return Response::error(format!(
-                "archive_dm: push still conflicting after {} retries",
-                MAX_PUSH_RETRIES
-            ));
-        }
-    }
-
-    // Commit tree is stable — drop the lock BEFORE any `.await` below.
-    // std::sync::MutexGuard must not cross await points, and everything
-    // from here on (event broadcast) is non-mutating for the commit tree.
     drop(_commit_guard);
+    if let Err(error) = state.push_working_branch_with_retry("archive_dm") {
+        return Response::error(format!("archive_dm guarded push failed: {error}"));
+    }
 
     // Broadcast SSE event so subscribers (WebUI / runtime) can react without
     // waiting for the next sync cycle. Symmetric with Event::UserArchived.
@@ -226,42 +189,10 @@ pub async fn handle_unarchive_dm(state: SharedState, peer: String, author: Strin
         ));
     }
 
-    // 7. Push with retry.
-    if state.git_storage.has_remote() {
-        let mut pushed = false;
-        for attempt in 1..=MAX_PUSH_RETRIES {
-            match state.git_storage.push() {
-                Ok(()) => {
-                    pushed = true;
-                    break;
-                }
-                Err(GitError::PushConflict) => {
-                    warn!(
-                        "unarchive_dm: push conflict (attempt {}/{}), rebasing",
-                        attempt, MAX_PUSH_RETRIES
-                    );
-                    if let Err(e) = state.git_storage.fetch() {
-                        return Response::error(format!("unarchive_dm fetch failed: {}", e));
-                    }
-                    if let Err(e) = state.git_storage.rebase_onto_origin() {
-                        return Response::error(format!("unarchive_dm rebase failed: {}", e));
-                    }
-                }
-                Err(e) => {
-                    return Response::error(format!("unarchive_dm push failed: {}", e));
-                }
-            }
-        }
-        if !pushed {
-            return Response::error(format!(
-                "unarchive_dm: push still conflicting after {} retries",
-                MAX_PUSH_RETRIES
-            ));
-        }
-    }
-
-    // Commit tree is stable — drop the lock BEFORE any `.await` below.
     drop(_commit_guard);
+    if let Err(error) = state.push_working_branch_with_retry("unarchive_dm") {
+        return Response::error(format!("unarchive_dm guarded push failed: {error}"));
+    }
 
     // Broadcast SSE event so subscribers (WebUI / runtime) can react without
     // waiting for the next sync cycle. Timestamp lives on the event only.

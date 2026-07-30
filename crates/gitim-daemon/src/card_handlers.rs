@@ -5,10 +5,7 @@ use crate::thread_io;
 use gitim_core::types::{
     validate_labels, CardMeta, CardStatus, ChannelName, Handler, CARD_MAX_LABELS,
 };
-use gitim_sync::git::GitError;
 use tracing::{error, info, warn};
-
-const MAX_PUSH_RETRIES: u32 = 3;
 
 fn validate_card_id(card_id: &str) -> Result<(), String> {
     if card_id.is_empty() || card_id.len() > 20 {
@@ -111,30 +108,9 @@ pub(crate) async fn push_with_retry(state: &SharedState, op: &str) -> Result<(),
     if !state.git_storage.has_remote() {
         return Ok(());
     }
-    for attempt in 1..=MAX_PUSH_RETRIES {
-        match state.git_storage.push() {
-            Ok(()) => return Ok(()),
-            Err(GitError::PushConflict) => {
-                warn!(
-                    "{}: push conflict (attempt {}/{}), rebasing",
-                    op, attempt, MAX_PUSH_RETRIES
-                );
-                state
-                    .git_storage
-                    .fetch()
-                    .map_err(|e| format!("{} fetch failed: {}", op, e))?;
-                state
-                    .git_storage
-                    .rebase_onto_origin()
-                    .map_err(|e| format!("{} rebase failed: {}", op, e))?;
-            }
-            Err(e) => return Err(format!("{} push failed: {}", op, e)),
-        }
-    }
-    Err(format!(
-        "{}: push still conflicting after {} retries",
-        op, MAX_PUSH_RETRIES
-    ))
+    state
+        .push_working_branch_with_retry(op)
+        .map_err(|error| format!("{op} guarded push failed: {error}"))
 }
 
 pub async fn handle_create_card(

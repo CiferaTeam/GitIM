@@ -81,6 +81,10 @@ pub fn cleanup_failed_fire(
     old_branch: &str,
     orphan_branch: &str,
 ) -> Result<(), RotationError> {
+    crate::skill::guard::SkillSyncGuard::new(storage.root())
+        .map_err(|error| RotationError::Epoch(error.to_string()))?
+        .quarantine_resolved()
+        .map_err(|error| RotationError::Epoch(error.to_string()))?;
     let ahead = storage.subjects_ahead_of_origin(old_branch)?;
     if ahead.iter().any(|s| !s.starts_with(SEAL_SUBJECT_PREFIX)) {
         tracing::warn!(
@@ -116,6 +120,11 @@ pub fn try_fire_rotation(
     author: (&str, &str),
     created_at: &str,
 ) -> Result<RotationOutcome, RotationError> {
+    let skill_guard = crate::skill::guard::SkillSyncGuard::new(storage.root())
+        .map_err(|error| RotationError::Epoch(error.to_string()))?;
+    skill_guard
+        .quarantine_resolved()
+        .map_err(|error| RotationError::Epoch(error.to_string()))?;
     // Zero-loss guard (review I3): the Lost path resets hard onto origin, so
     // fire may only proceed from a clean local == origin state. Any backlog
     // (messages committed between push-success and our lock acquisition)
@@ -145,9 +154,7 @@ pub fn try_fire_rotation(
         return Ok(RotationOutcome::NotReady);
     }
 
-    // Best-effort fetch so the origin checks below see fresh state. If it
-    // fails (offline) the atomic push will arbitrate anyway.
-    let _ = storage.fetch();
+    storage.fetch()?;
 
     // Invariant 3: read epoch state from origin, not the working tree.
     let origin_ref = format!("origin/{current_branch}");
@@ -156,6 +163,9 @@ pub fn try_fire_rotation(
         // Someone already rotated this branch — we are a follower, not a firer.
         return Ok(RotationOutcome::Lost);
     }
+    skill_guard
+        .rotation_allowed(storage)
+        .map_err(|error| RotationError::Epoch(error.to_string()))?;
     let current_epoch = origin_epoch.as_ref().map(|f| f.epoch).unwrap_or(1);
     let new_epoch = current_epoch + 1;
     let new_branch = format!("main-epoch-{new_epoch}");

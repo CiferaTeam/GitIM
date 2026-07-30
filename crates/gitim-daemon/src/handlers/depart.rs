@@ -1,14 +1,12 @@
 use crate::api::{Event, Response};
+use crate::handlers::user::ensure_no_skill_roles;
 use crate::state::SharedState;
 use gitim_core::dm::parse_dm_filename;
 use gitim_core::formatter::format_event;
 use gitim_core::parser::parse_thread;
 use gitim_core::types::{ChannelMeta, Handler, ThreadEntry};
-use gitim_sync::git::GitError;
 use std::path::Path;
 use tracing::{info, warn};
-
-const MAX_PUSH_RETRIES: u32 = 3;
 
 /// Composite "burn" operation. Idempotent multi-commit:
 ///
@@ -88,6 +86,9 @@ pub async fn handle_depart_user(state: SharedState, handler: String) -> Response
     let active_meta = state.repo_root.join(format!("users/{}.meta.yaml", handler));
     if !active_meta.exists() {
         return Response::error(format!("user @{} not found", handler));
+    }
+    if let Err(code) = ensure_no_skill_roles(&state.repo_root, &handler) {
+        return Response::error(code);
     }
 
     // 4. Run phases. Each phase returns `Result<u64, Response>` where the
@@ -266,7 +267,6 @@ async fn append_leave_event_to_thread(
     // add and git commit. Mirrors handle_send / write_channel_event.
     {
         let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
-
         // Re-read under lock — another writer (or a sync_loop rebase)
         // may have moved the file or appended after our pre-read.
         let cur = std::fs::read_to_string(thread_path).unwrap_or_default();
@@ -616,6 +616,12 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
 
     {
         let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(code) = ensure_no_skill_roles(&state.repo_root, handler) {
+            return Err(Response::error(code));
+        }
+        let skills_tree = state.skill_root_precondition().map_err(|error| {
+            Response::error(format!("phase4 Skill precondition failed: {error}"))
+        })?;
 
         if let Err(e) = state.git_storage.mv(&from_rel, &to_rel) {
             return Err(Response::error(format!("phase4: git mv failed: {}", e)));
@@ -647,7 +653,8 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
             commit_paths.push(&board_to_rel);
         }
 
-        let commit_msg = format!("archive: depart user @{}", handler);
+        let commit_msg =
+            format!("archive: depart user @{handler}\n\nGitim-Skills-Tree: {skills_tree}");
         let (an, ae) = state.author_for(handler);
         if let Err(e) =
             state
@@ -699,30 +706,9 @@ fn push_with_retry(state: &SharedState, phase: &str) -> Result<(), Response> {
     if !state.git_storage.has_remote() {
         return Ok(());
     }
-    for attempt in 1..=MAX_PUSH_RETRIES {
-        match state.git_storage.push() {
-            Ok(()) => return Ok(()),
-            Err(GitError::PushConflict) => {
-                warn!(
-                    "{}: push conflict (attempt {}/{}), rebasing",
-                    phase, attempt, MAX_PUSH_RETRIES
-                );
-                if let Err(e) = state.git_storage.fetch() {
-                    return Err(Response::error(format!("{}: fetch failed: {}", phase, e)));
-                }
-                if let Err(e) = state.git_storage.rebase_onto_origin() {
-                    return Err(Response::error(format!("{}: rebase failed: {}", phase, e)));
-                }
-            }
-            Err(e) => {
-                return Err(Response::error(format!("{}: push failed: {}", phase, e)));
-            }
-        }
-    }
-    Err(Response::error(format!(
-        "{}: push still conflicting after {} retries",
-        phase, MAX_PUSH_RETRIES
-    )))
+    state
+        .push_working_branch_with_retry(phase)
+        .map_err(|error| Response::error(format!("{phase}: guarded push failed: {error}")))
 }
 
 #[cfg(test)]

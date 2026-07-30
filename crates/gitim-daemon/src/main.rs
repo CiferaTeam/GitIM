@@ -187,13 +187,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .commit_lock
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    match gitim_sync::rotate::follow_redirect(&storage, &branch) {
-                        Ok(true) => {
+                    match app_state.integrate_working_branch(
+                        gitim_sync::skill::guard::IntegrationOperation::FollowEpochRedirect,
+                    ) {
+                        Ok(_) => {
                             tracing::info!("boot: followed epoch redirect off {branch}");
                             let _ = app_state.refresh_epoch_status();
                         }
-                        Ok(false) => {}
-                        Err(e) => tracing::warn!("boot: follow_redirect failed: {}", e),
+                        Err(e) => tracing::warn!("boot: guarded follow failed: {}", e),
                     }
                 }
             }
@@ -206,7 +207,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // when there is nothing to do (the common case) it exits immediately.
     //
     // NOTE: the HTTP server is already live at this point (spawned above).
-    // reconcile_orphan_cards holds state.commit_lock for its full execution
+    // reconcile_orphan_cards holds state.commit_lock through its local commit
     // to prevent concurrent incoming handlers from racing on git tree writes.
     if let Err(e) = gitim_daemon::reconcile::reconcile_orphan_cards(app_state.clone()).await {
         tracing::error!("reconcile_orphan_cards failed at boot: {}", e);

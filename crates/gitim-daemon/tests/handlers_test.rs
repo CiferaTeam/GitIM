@@ -8,6 +8,25 @@ use gitim_daemon::state::{AppState, SharedState};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
+trait TestWorkingBranchPush {
+    fn push(&self) -> Result<(), String>;
+}
+
+impl TestWorkingBranchPush for gitim_sync::git::GitStorage {
+    fn push(&self) -> Result<(), String> {
+        let output = std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(self.root())
+            .output()
+            .map_err(|error| error.to_string())?;
+        output
+            .status
+            .success()
+            .then_some(())
+            .ok_or_else(|| String::from_utf8_lossy(&output.stderr).into_owned())
+    }
+}
+
 fn setup_test_state(tmp: &std::path::Path) -> SharedState {
     let remote = tmp.join("remote.git");
     std::fs::create_dir_all(&remote).unwrap();

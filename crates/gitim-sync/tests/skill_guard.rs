@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Mutex;
 
 use gitim_core::epoch::EpochFile;
 use gitim_core::skill::{
@@ -20,6 +21,7 @@ use gitim_sync::skill::checkpoint::{
 use gitim_sync::skill::git_tree::{
     build_private_index_commit, tree_oid_at, PrivateIndexCommitRequest,
 };
+use gitim_sync::skill::guard::{GuardedPushOutcome, IntegrationOperation, SkillSyncGuard};
 use tempfile::TempDir;
 
 const ALICE: &str = "alice";
@@ -2378,4 +2380,377 @@ fn lagging_follower_replays_sealed_predecessor_before_accepting_orphan_snapshot(
     .unwrap_err();
     assert_eq!(unavailable.code(), "skill_epoch_validation_blocked");
     Ok(())
+}
+
+#[test]
+fn guarded_push_quarantines_bypassed_skill_history_and_replays_every_ordinary_delta() {
+    let fixture = RemoteRepository::new();
+    let storage = GitStorage::new(fixture.clone_root());
+    let guard = SkillSyncGuard::new(fixture.clone_root()).unwrap();
+
+    fs::write(
+        fixture.writer_root().join("channels/general.meta.yaml"),
+        "display_name: General\ncreated_by: alice\ncreated_at: 20260730T120000Z\nintroduction: General\nmembers:\n- alice\n- bob\n",
+    )
+    .unwrap();
+    commit_all(fixture.writer_root(), "remote channel membership", "bob");
+    git(fixture.writer_root(), &["push"]);
+
+    fs::create_dir_all(fixture.clone_root().join("skills/poison")).unwrap();
+    fs::write(
+        fixture.clone_root().join("skills/poison/SKILL.md"),
+        "# unvalidated\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.clone_root().join("channels/general.meta.yaml"),
+        "display_name: General\ncreated_by: alice\ncreated_at: 20260730T120000Z\nintroduction: General\nmembers:\n- alice\n- carol\n",
+    )
+    .unwrap();
+    fs::create_dir_all(fixture.clone_root().join("channels")).unwrap();
+    fs::write(
+        fixture.clone_root().join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260730T120000Z] keep message\n",
+    )
+    .unwrap();
+    commit_all(fixture.clone_root(), "bypass skill plus message", ALICE);
+
+    fs::create_dir_all(fixture.clone_root().join("channels/general/cards/C1")).unwrap();
+    fs::write(
+        fixture
+            .clone_root()
+            .join("channels/general/cards/C1/card.meta.yaml"),
+        "title: Keep card\n",
+    )
+    .unwrap();
+    commit_all(fixture.clone_root(), "card after bypass", ALICE);
+    let bypassed_head = git_output(fixture.clone_root(), &["rev-parse", "HEAD"]);
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), ("alice", "alice@example.com"))
+        .unwrap();
+    assert!(
+        matches!(outcome, GuardedPushOutcome::RepairedAndPushed { .. }),
+        "expected repaired push, got {outcome:?}"
+    );
+    let GuardedPushOutcome::RepairedAndPushed { quarantine_ref } = outcome else {
+        return;
+    };
+
+    assert_eq!(
+        git_output(
+            fixture.clone_root(),
+            &["rev-parse", quarantine_ref.as_str()]
+        ),
+        bypassed_head
+    );
+    assert_eq!(
+        git_output(
+            fixture.clone_root(),
+            &["rev-parse", "refs/remotes/origin/main"]
+        ),
+        git_output(fixture.clone_root(), &["rev-parse", "HEAD"])
+    );
+    assert!(
+        git_status(
+            fixture.clone_root(),
+            &[
+                "cat-file",
+                "-e",
+                "refs/remotes/origin/main:skills/poison/SKILL.md"
+            ]
+        )
+        .is_none(),
+        "the bypassed Skill tree must not reach origin"
+    );
+    assert_eq!(
+        git_output(
+            fixture.clone_root(),
+            &["show", "refs/remotes/origin/main:channels/general.thread"]
+        ),
+        "[L000001][P000000][@alice][20260730T120000Z] keep message"
+    );
+    assert_eq!(
+        git_output(
+            fixture.clone_root(),
+            &[
+                "show",
+                "refs/remotes/origin/main:channels/general/cards/C1/card.meta.yaml"
+            ]
+        ),
+        "title: Keep card"
+    );
+    let merged_meta: gitim_core::types::ChannelMeta = serde_yaml::from_str(&git_output(
+        fixture.clone_root(),
+        &[
+            "show",
+            "refs/remotes/origin/main:channels/general.meta.yaml",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(merged_meta.members, vec!["alice", "bob", "carol"]);
+}
+
+#[test]
+fn guarded_push_publishes_first_ordinary_history_to_an_empty_remote() {
+    let directory = tempfile::tempdir().unwrap();
+    let remote = directory.path().join("origin.git");
+    git(
+        directory.path(),
+        &["init", "--bare", remote.to_str().unwrap()],
+    );
+    let clone = directory.path().join("clone");
+    git(
+        directory.path(),
+        &["init", "-b", "main", clone.to_str().unwrap()],
+    );
+    git(&clone, &["config", "user.name", ALICE]);
+    git(&clone, &["config", "user.email", "alice@example.com"]);
+    git(
+        &clone,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    fs::create_dir_all(clone.join("users")).unwrap();
+    fs::write(
+        clone.join("users/alice.meta.yaml"),
+        "display_name: Alice\nrole: human\nintroduction: Owner\n",
+    )
+    .unwrap();
+    commit_all(&clone, "seed", ALICE);
+
+    let guard = SkillSyncGuard::new(&clone).unwrap();
+    let outcome = guard
+        .guarded_push(
+            &GitStorage::new(&clone),
+            &Mutex::new(()),
+            ("alice", "alice@example.com"),
+        )
+        .unwrap();
+
+    assert_eq!(outcome, GuardedPushOutcome::Pushed);
+    assert_eq!(
+        git_output(&clone, &["rev-parse", "HEAD"]),
+        git_output(&remote, &["rev-parse", "refs/heads/main"])
+    );
+}
+
+#[test]
+fn unresolved_quarantine_blocks_destructive_integration_and_rotation() {
+    let fixture = RemoteRepository::new();
+    let storage = GitStorage::new(fixture.clone_root());
+    let guard = SkillSyncGuard::new(fixture.clone_root()).unwrap();
+    let head = git_output(fixture.clone_root(), &["rev-parse", "HEAD"]);
+    let branch = git_output(fixture.clone_root(), &["branch", "--show-current"]);
+    let quarantine_ref = format!("refs/gitim/quarantine/skill-{head}");
+    fs::create_dir_all(fixture.clone_root().join(".gitim")).unwrap();
+    fs::write(
+        fixture.clone_root().join(".gitim/skill-quarantine.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "operation_id": head,
+            "branch": branch,
+            "upstream_oid": head,
+            "original_head": head,
+            "quarantine_ref": quarantine_ref,
+            "phase": "prepared"
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let before = git_output(fixture.clone_root(), &["rev-parse", "HEAD"]);
+    let error = guard
+        .guarded_integrate(&storage, IntegrationOperation::HardDivergenceRecovery)
+        .unwrap_err();
+    assert_eq!(error.code(), "skill_local_quarantine_blocked");
+    assert_eq!(
+        git_output(fixture.clone_root(), &["rev-parse", "HEAD"]),
+        before
+    );
+    assert_eq!(
+        guard.rotation_allowed(&storage).unwrap_err().code(),
+        "skill_local_quarantine_blocked"
+    );
+}
+
+#[test]
+fn guarded_integrate_rejects_invalid_fetched_skill_history_before_branch_movement() {
+    let fixture = RemoteRepository::new();
+    let guard = SkillSyncGuard::new(fixture.clone_root()).unwrap();
+    let local = GitStorage::new(fixture.clone_root());
+    let before = git_output(fixture.clone_root(), &["rev-parse", "HEAD"]);
+
+    fs::create_dir_all(fixture.writer_root().join("skills/invalid")).unwrap();
+    fs::write(
+        fixture.writer_root().join("skills/invalid/SKILL.md"),
+        "# invalid transition without receipt\n",
+    )
+    .unwrap();
+    commit_all(fixture.writer_root(), "invalid remote skill bypass", "bob");
+    git(fixture.writer_root(), &["push", "origin", "HEAD:main"]);
+
+    let error = guard
+        .guarded_integrate(&local, IntegrationOperation::RebaseOntoOrigin)
+        .unwrap_err();
+    assert_eq!(error.code(), "skill_sync_conflict");
+    assert_eq!(
+        git_output(fixture.clone_root(), &["rev-parse", "HEAD"]),
+        before
+    );
+}
+
+#[test]
+fn user_archive_semantic_precondition_rejects_a_concurrent_workspace_admin_bootstrap() {
+    let fixture = RemoteRepository::new();
+    let storage = GitStorage::new(fixture.clone_root());
+    let guard = SkillSyncGuard::new(fixture.clone_root()).unwrap();
+
+    fs::create_dir_all(fixture.clone_root().join("archive/users")).unwrap();
+    git(
+        fixture.clone_root(),
+        &[
+            "mv",
+            "users/alice.meta.yaml",
+            "archive/users/alice.meta.yaml",
+        ],
+    );
+    commit_all(
+        fixture.clone_root(),
+        "archive: depart user @alice\n\nGitim-Skills-Tree: absent",
+        ALICE,
+    );
+    let archive_head = git_output(fixture.clone_root(), &["rev-parse", "HEAD"]);
+
+    let before = SkillRepositorySnapshot {
+        active_users: BTreeSet::from([ALICE.to_owned()]),
+        ..Default::default()
+    };
+    let bootstrap = bootstrap_plan(&before, 'R');
+    apply_plan(fixture.writer_root(), &bootstrap);
+    commit_all(fixture.writer_root(), &bootstrap.commit_message, ALICE);
+    git(fixture.writer_root(), &["push", "origin", "HEAD:main"]);
+
+    let error = guard
+        .guarded_push(&storage, &Mutex::new(()), ("alice", "alice@example.com"))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::PushConflict)
+    ));
+    assert_eq!(
+        git_output(fixture.clone_root(), &["rev-parse", "HEAD"]),
+        archive_head,
+        "the archive branch must remain available for a semantic retry"
+    );
+    assert!(
+        git_status(
+            fixture.clone_root(),
+            &[
+                "cat-file",
+                "-e",
+                "refs/remotes/origin/main:users/alice.meta.yaml"
+            ]
+        )
+        .is_some(),
+        "the winning administrator bootstrap keeps the target user active"
+    );
+}
+
+#[test]
+fn sync_loop_routes_destructive_epoch_fallback_through_the_skill_guard() {
+    let source = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("sync_loop.rs"),
+    )
+    .unwrap();
+    assert!(
+        !source.contains("repo.discard_unpushed()"),
+        "sync loop must not discard unpushed commits outside SkillSyncGuard"
+    );
+    assert!(
+        !source.contains("crate::rotate::follow_redirect(repo"),
+        "sync loop must not follow epoch redirects outside SkillSyncGuard"
+    );
+}
+
+struct RemoteRepository {
+    _directory: TempDir,
+    clone_root: std::path::PathBuf,
+    writer_root: std::path::PathBuf,
+}
+
+impl RemoteRepository {
+    fn new() -> Self {
+        let directory = tempfile::tempdir().unwrap();
+        let remote = directory.path().join("origin.git");
+        git(
+            directory.path(),
+            &["init", "--bare", remote.to_str().unwrap()],
+        );
+        let writer_root = directory.path().join("writer");
+        git(
+            directory.path(),
+            &[
+                "clone",
+                remote.to_str().unwrap(),
+                writer_root.to_str().unwrap(),
+            ],
+        );
+        git(&writer_root, &["config", "user.name", "bob"]);
+        git(&writer_root, &["config", "user.email", "bob@example.com"]);
+        fs::create_dir_all(writer_root.join("users")).unwrap();
+        fs::write(
+            writer_root.join("users/alice.meta.yaml"),
+            "display_name: Alice\nrole: human\nintroduction: Owner\n",
+        )
+        .unwrap();
+        fs::create_dir_all(writer_root.join("channels")).unwrap();
+        fs::write(
+            writer_root.join("channels/general.meta.yaml"),
+            "display_name: General\ncreated_by: alice\ncreated_at: 20260730T120000Z\nintroduction: General\nmembers:\n- alice\n",
+        )
+        .unwrap();
+        commit_all(&writer_root, "seed", "alice");
+        git(&writer_root, &["branch", "-M", "main"]);
+        git(&writer_root, &["push", "-u", "origin", "main"]);
+        git(&remote, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+
+        let clone_root = directory.path().join("clone");
+        git(
+            directory.path(),
+            &[
+                "clone",
+                remote.to_str().unwrap(),
+                clone_root.to_str().unwrap(),
+            ],
+        );
+        git(&clone_root, &["config", "user.name", ALICE]);
+        git(&clone_root, &["config", "user.email", "alice@example.com"]);
+        Self {
+            _directory: directory,
+            clone_root,
+            writer_root,
+        }
+    }
+
+    fn clone_root(&self) -> &Path {
+        &self.clone_root
+    }
+
+    fn writer_root(&self) -> &Path {
+        &self.writer_root
+    }
+}
+
+fn git_status(root: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8(output.stdout).unwrap().trim().to_owned())
 }

@@ -6,6 +6,9 @@ use std::process::Command;
 use gitim_sync::git::{GitError, GitStorage};
 use tempfile::TempDir;
 
+mod support;
+use support::TestWorkingBranchPush;
+
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------

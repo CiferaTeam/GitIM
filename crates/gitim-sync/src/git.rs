@@ -272,22 +272,30 @@ impl GitStorage {
         self.rev_parse("HEAD")
     }
 
-    pub fn push(&self) -> Result<(), GitError> {
+    pub(crate) fn push_working_branch_unchecked(
+        &self,
+        branch: &str,
+        expected_head: &str,
+    ) -> Result<(), GitError> {
+        let refspec = format!("{expected_head}:refs/heads/{branch}");
+        let needs_upstream = self.rev_parse("@{upstream}").is_err();
         let args = [
             GIT_HTTP_TIMEOUT_ARGS[0],
             GIT_HTTP_TIMEOUT_ARGS[1],
             GIT_HTTP_TIMEOUT_ARGS[2],
             GIT_HTTP_TIMEOUT_ARGS[3],
             "push",
-            "-u",
             "origin",
-            "HEAD",
+            &refspec,
         ];
         let output = run_git_command(&args, &self.root)?;
         if !output.status.success() {
             return Err(classify_remote_error(&String::from_utf8_lossy(
                 &output.stderr,
             )));
+        }
+        if needs_upstream {
+            self.set_upstream_to_origin(branch)?;
         }
         Ok(())
     }
@@ -1526,6 +1534,23 @@ mod tests {
         let (_bare, clone_a) = seed_bare_with_clone("A", "a@test.com");
         let repo = GitStorage::new(clone_a.path());
         assert_eq!(repo.divergence_from_upstream().unwrap(), (0, 0));
+    }
+
+    #[test]
+    fn exact_working_branch_push_does_not_publish_a_later_head() {
+        let (_bare, clone) = seed_bare_with_clone("A", "a@test.com");
+        let repo = GitStorage::new(clone.path());
+        commit_file(clone.path(), "first.txt", "first", "first");
+        let validated_head = repo.rev_parse("HEAD").unwrap();
+        commit_file(clone.path(), "later.txt", "later", "later");
+        let later_head = repo.rev_parse("HEAD").unwrap();
+
+        repo.push_working_branch_unchecked("main", &validated_head)
+            .unwrap();
+
+        assert_eq!(repo.rev_parse("origin/main").unwrap(), validated_head);
+        assert_eq!(repo.rev_parse("HEAD").unwrap(), later_head);
+        assert!(repo.has_unpushed_commits().unwrap());
     }
 
     #[test]
