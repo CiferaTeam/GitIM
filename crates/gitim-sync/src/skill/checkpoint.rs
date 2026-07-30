@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 use gitim_core::epoch::{EpochFile, EpochStatus};
@@ -24,6 +24,7 @@ use crate::git::{run_git_with_env_and_timeout, GitError, GitStorage};
 const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
 const SKILL_GIT_TIMEOUT: Duration = Duration::from_secs(60);
 const CHECKPOINT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const CHECKPOINT_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const WORKSPACE_CONFLICT_KEY: &str = "$workspace";
 const EPOCH_PATH: &str = "gitim.epoch.yaml";
 const MAX_EPOCH_DEPTH: usize = 32;
@@ -177,6 +178,24 @@ impl SkillCheckpointStore {
         operation: impl FnOnce(&LockedSkillCheckpoint<'_>) -> Result<T, SkillSyncError>,
     ) -> Result<T, SkillSyncError> {
         let lock = self.lock()?;
+        self.run_locked(lock, operation)
+    }
+
+    pub(crate) fn with_lock_until<T>(
+        &self,
+        deadline: Instant,
+        timeout: Duration,
+        operation: impl FnOnce(&LockedSkillCheckpoint<'_>) -> Result<T, SkillSyncError>,
+    ) -> Result<T, SkillSyncError> {
+        let lock = self.lock_until(deadline, timeout)?;
+        self.run_locked(lock, operation)
+    }
+
+    fn run_locked<T>(
+        &self,
+        lock: File,
+        operation: impl FnOnce(&LockedSkillCheckpoint<'_>) -> Result<T, SkillSyncError>,
+    ) -> Result<T, SkillSyncError> {
         let locked = LockedSkillCheckpoint { store: self };
         let result = operation(&locked);
         FileExt::unlock(&lock).map_err(|error| checkpoint_error("unlock checkpoint", error))?;
@@ -188,6 +207,13 @@ impl SkillCheckpointStore {
         let file = open_regular(&self.lock_path, true)?;
         file.lock_exclusive()
             .map_err(|error| checkpoint_error("lock checkpoint", error))?;
+        Ok(file)
+    }
+
+    fn lock_until(&self, deadline: Instant, timeout: Duration) -> Result<File, SkillSyncError> {
+        self.validate_paths()?;
+        let file = open_regular(&self.lock_path, true)?;
+        lock_exclusive_until(&file, deadline, timeout, "checkpoint")?;
         Ok(file)
     }
 
@@ -280,6 +306,29 @@ impl SkillCheckpointStore {
             ));
         }
         Ok(())
+    }
+}
+
+pub(crate) fn lock_exclusive_until(
+    file: &File,
+    deadline: Instant,
+    timeout: Duration,
+    resource: &str,
+) -> Result<(), SkillSyncError> {
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(GitError::Timeout(timeout).into());
+        }
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                std::thread::sleep(CHECKPOINT_LOCK_POLL_INTERVAL.min(deadline - now));
+            }
+            Err(error) => {
+                return Err(checkpoint_error(&format!("lock {resource}"), error));
+            }
+        }
     }
 }
 

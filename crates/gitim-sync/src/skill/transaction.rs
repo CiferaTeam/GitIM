@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+use fs2::FileExt;
 use gitim_core::epoch::{EpochFile, EpochStatus};
 use gitim_core::skill::{
     plan_skill_mutation, validate_package_entries, validate_skill_commit, PackageEntry,
@@ -20,8 +21,8 @@ use gitim_core::skill::{
 use serde::{Deserialize, Serialize};
 
 use super::checkpoint::{
-    validate_incoming_skill_history, AcceptedSkillState, AcceptedTree, LockedSkillCheckpoint,
-    SkillCheckpointStore, SkillSyncError, SkillValidationCheckpoint,
+    lock_exclusive_until, validate_incoming_skill_history, AcceptedSkillState, AcceptedTree,
+    LockedSkillCheckpoint, SkillCheckpointStore, SkillSyncError, SkillValidationCheckpoint,
 };
 use super::guard::SkillSyncGuard;
 use crate::git::{classify_remote_error, GitError, GitStorage, GIT_HTTP_TIMEOUT_ARGS};
@@ -166,6 +167,26 @@ struct WorkspacePermits {
     _configured: Option<WorkspacePermit>,
 }
 
+struct RequestJournalLock {
+    file: fs::File,
+    request_id: RequestId,
+}
+
+impl Drop for RequestJournalLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+impl RequestJournalLock {
+    fn ensure_owns(&self, request_id: &RequestId) -> Result<(), SkillSyncError> {
+        if &self.request_id != request_id {
+            return Err(checkpoint_error("request journal lock ownership mismatch"));
+        }
+        Ok(())
+    }
+}
+
 impl Drop for WorkspacePermit {
     fn drop(&mut self) {
         let mut available = self
@@ -222,7 +243,28 @@ pub fn recover_remote_skill_transactions(
     repo: &GitStorage,
     guard: &SkillSyncGuard,
 ) -> Result<Vec<RemoteSkillTransactionResult>, SkillSyncError> {
-    let config = SkillTransactionTestConfig::default();
+    recover_remote_skill_transactions_with_config(
+        repo,
+        guard,
+        SkillTransactionTestConfig::default(),
+    )
+}
+
+#[doc(hidden)]
+pub fn recover_remote_skill_transactions_with_test_config(
+    repo: &GitStorage,
+    guard: &SkillSyncGuard,
+    config: SkillTransactionTestConfig,
+) -> Result<Vec<RemoteSkillTransactionResult>, SkillSyncError> {
+    recover_remote_skill_transactions_with_config(repo, guard, config)
+}
+
+fn recover_remote_skill_transactions_with_config(
+    repo: &GitStorage,
+    guard: &SkillSyncGuard,
+    config: SkillTransactionTestConfig,
+) -> Result<Vec<RemoteSkillTransactionResult>, SkillSyncError> {
+    validate_concurrency(config.max_concurrency)?;
     let deadline = Instant::now()
         .checked_add(config.transaction_timeout)
         .ok_or_else(|| checkpoint_error("transaction deadline overflow"))?;
@@ -273,11 +315,7 @@ fn execute_remote_skill_transaction_with_config(
     request: RemoteSkillTransactionRequest,
     config: SkillTransactionTestConfig,
 ) -> Result<RemoteSkillTransactionResult, SkillSyncError> {
-    if config.max_concurrency == 0 || config.max_concurrency > SKILL_GIT_MAX_CONCURRENCY {
-        return Err(checkpoint_error(
-            "transaction concurrency must be between one and four",
-        ));
-    }
+    validate_concurrency(config.max_concurrency)?;
     let deadline = Instant::now()
         .checked_add(config.transaction_timeout)
         .ok_or_else(|| checkpoint_error("transaction deadline overflow"))?;
@@ -308,11 +346,16 @@ fn execute_transaction(
 ) -> Result<RemoteSkillTransactionResult, SkillSyncError> {
     guard.quarantine_resolved()?;
     workspace_identity(repo.root())?;
-    let (mut journal, needs_recovery) = prepare_journal(repo, request)?;
+    let request_lock =
+        acquire_request_journal_lock(repo.root(), request.request.request_id(), context.deadline)?;
+    let (mut journal, needs_recovery) = prepare_journal(repo, request, &request_lock)?;
+    // Transaction lock order is request journal, workspace admission, then checkpoint.
     let _permits =
         acquire_workspace_permits(repo.root(), context.deadline, context.max_concurrency)?;
     if needs_recovery {
-        if let Some(recovered) = recover_current_transaction(repo, &mut journal, context)? {
+        if let Some(recovered) =
+            recover_current_transaction(repo, &mut journal, &request_lock, context)?
+        {
             return Ok(recovered);
         }
     }
@@ -329,7 +372,7 @@ fn execute_transaction(
                 before_repair_checkpoint_load();
             }
         }
-        let repair_checkpoint = load_repair_checkpoint(repo, &journal.request)?;
+        let repair_checkpoint = load_repair_checkpoint(repo, &journal.request, context)?;
         let mut snapshot = load_snapshot_for_request(
             repo,
             &remote_tip,
@@ -355,16 +398,23 @@ fn execute_transaction(
             now: journal.now.clone(),
             package: package.clone(),
         };
-        let plan = plan_skill_mutation(&snapshot, &mutation_context, &journal.request)?;
+        let plan = match plan_skill_mutation(&snapshot, &mutation_context, &journal.request) {
+            Ok(plan) => plan,
+            Err(SkillError::RequestIdConflict) => {
+                discard_unpublished_journal(&journal, &request_lock)?;
+                return Err(SkillError::RequestIdConflict.into());
+            }
+            Err(error) => return Err(error.into()),
+        };
         if plan.edits.is_empty() {
             let commit_id = find_receipt_commit(repo, &remote_tip, &journal.receipt_path, context)?;
             journal.phase = SkillTransactionPhase::Pushed;
             journal.candidate_commit = Some(commit_id.clone());
             journal.result = Some(plan.result.clone());
-            save_journal(&journal)?;
+            save_journal(&journal, &request_lock)?;
             let local_state =
                 record_published_view(repo, &remote_branch, &remote_tip, &remote_tip, context)?;
-            complete_journal(&mut journal)?;
+            complete_journal(&mut journal, &request_lock)?;
             return Ok(RemoteSkillTransactionResult {
                 commit_id,
                 result: plan.result,
@@ -383,7 +433,7 @@ fn execute_transaction(
         journal.remote_tip = Some(remote_tip.clone());
         journal.semantic_oids = captured_semantic_oids.clone();
         journal.phase = SkillTransactionPhase::Prepared;
-        save_journal(&journal)?;
+        save_journal(&journal, &request_lock)?;
 
         let candidate = build_candidate(repo, &journal, &plan, context)?;
         validate_candidate(
@@ -397,24 +447,29 @@ fn execute_transaction(
         journal.candidate_commit = Some(candidate.clone());
         journal.result = Some(plan.result.clone());
         journal.phase = SkillTransactionPhase::Built;
-        save_journal(&journal)?;
+        save_journal(&journal, &request_lock)?;
         if let Some(after_built) = &context.after_built {
             after_built();
         }
         maybe_crash(context, SkillTransactionCrashPoint::AfterBuilt)?;
         let publish_result = if matches!(journal.request, SkillMutationRequest::Repair(_)) {
-            SkillCheckpointStore::new(repo.root())?.with_lock(|checkpoint| {
-                push_and_record_candidate(
-                    repo,
-                    &mut journal,
-                    &candidate,
-                    &remote_branch,
-                    &remote_tip,
-                    &captured_semantic_oids,
-                    Some(checkpoint),
-                    context,
-                )
-            })
+            SkillCheckpointStore::new(repo.root())?.with_lock_until(
+                context.deadline,
+                SKILL_TRANSACTION_TIMEOUT,
+                |checkpoint| {
+                    push_and_record_candidate(
+                        repo,
+                        &mut journal,
+                        &candidate,
+                        &remote_branch,
+                        &remote_tip,
+                        &captured_semantic_oids,
+                        Some(checkpoint),
+                        &request_lock,
+                        context,
+                    )
+                },
+            )
         } else {
             push_and_record_candidate(
                 repo,
@@ -424,13 +479,14 @@ fn execute_transaction(
                 &remote_tip,
                 &captured_semantic_oids,
                 None,
+                &request_lock,
                 context,
             )
         };
 
         match publish_result {
             Ok(local_state) => {
-                complete_journal(&mut journal)?;
+                complete_journal(&mut journal, &request_lock)?;
                 return Ok(RemoteSkillTransactionResult {
                     commit_id: candidate,
                     result: plan.result,
@@ -440,7 +496,8 @@ fn execute_transaction(
             Err(SkillSyncError::Git(GitError::PushConflict)) if attempt < 2 => {
                 fetch(repo, context)?;
                 let (next_branch, next_tip) = resolve_active_remote(repo, &start_branch, context)?;
-                let next_repair_checkpoint = load_repair_checkpoint(repo, &journal.request)?;
+                let next_repair_checkpoint =
+                    load_repair_checkpoint(repo, &journal.request, context)?;
                 let mut next_snapshot = load_snapshot_for_request(
                     repo,
                     &next_tip,
@@ -466,7 +523,7 @@ fn execute_transaction(
                         journal.phase = SkillTransactionPhase::Pushed;
                         journal.candidate_commit = Some(commit_id.clone());
                         journal.result = Some(duplicate.result.clone());
-                        save_journal(&journal)?;
+                        save_journal(&journal, &request_lock)?;
                         let local_state = record_published_view(
                             repo,
                             &next_branch,
@@ -474,7 +531,7 @@ fn execute_transaction(
                             &next_tip,
                             context,
                         )?;
-                        complete_journal(&mut journal)?;
+                        complete_journal(&mut journal, &request_lock)?;
                         return Ok(RemoteSkillTransactionResult {
                             commit_id,
                             result: duplicate.result,
@@ -482,6 +539,7 @@ fn execute_transaction(
                         });
                     }
                     Err(SkillError::RequestIdConflict) => {
+                        discard_unpublished_journal(&journal, &request_lock)?;
                         return Err(SkillError::RequestIdConflict.into());
                     }
                     _ => {}
@@ -508,8 +566,10 @@ fn execute_transaction(
 fn recover_current_transaction(
     repo: &GitStorage,
     journal: &mut TransactionJournal,
+    request_lock: &RequestJournalLock,
     context: &TransactionContext,
 ) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
+    request_lock.ensure_owns(journal.request.request_id())?;
     let root = transaction_root(repo.root(), journal.request.request_id())?;
     if journal.phase == SkillTransactionPhase::Completed {
         fs::remove_dir_all(&root)
@@ -548,10 +608,10 @@ fn recover_current_transaction(
         journal.phase = SkillTransactionPhase::Pushed;
         journal.candidate_commit = Some(commit_id.clone());
         journal.result = Some(duplicate.result.clone());
-        save_journal(journal)?;
+        save_journal(journal, request_lock)?;
         let local_state =
             record_published_view(repo, &remote_branch, &remote_tip, &remote_tip, context)?;
-        complete_journal(journal)?;
+        complete_journal(journal, request_lock)?;
         return Ok(Some(RemoteSkillTransactionResult {
             commit_id,
             result: duplicate.result,
@@ -577,8 +637,6 @@ fn recover_transaction_journals(
 ) -> Result<Vec<RemoteSkillTransactionResult>, SkillSyncError> {
     guard.quarantine_resolved()?;
     workspace_identity(repo.root())?;
-    let _permits =
-        acquire_workspace_permits(repo.root(), context.deadline, context.max_concurrency)?;
     let root = transactions_root(repo.root())?;
     let mut journal_paths = Vec::new();
     for entry in
@@ -609,6 +667,10 @@ fn recover_transaction_journals(
 
     let mut recovered = Vec::new();
     for (request_id, journal_path) in journal_paths {
+        let request_lock =
+            acquire_request_journal_lock(repo.root(), &request_id, context.deadline)?;
+        let _permits =
+            acquire_workspace_permits(repo.root(), context.deadline, context.max_concurrency)?;
         let mut journal = load_journal(&journal_path)?;
         if journal.request.request_id() != &request_id {
             return Err(checkpoint_error(
@@ -620,7 +682,9 @@ fn recover_transaction_journals(
         if journal.request_fingerprint != fingerprint {
             return Err(checkpoint_error("transaction journal fingerprint mismatch"));
         }
-        if let Some(result) = recover_current_transaction(repo, &mut journal, context)? {
+        if let Some(result) =
+            recover_current_transaction(repo, &mut journal, &request_lock, context)?
+        {
             recovered.push(result);
         }
     }
@@ -630,8 +694,10 @@ fn recover_transaction_journals(
 fn prepare_journal(
     repo: &GitStorage,
     request: RemoteSkillTransactionRequest,
+    request_lock: &RequestJournalLock,
 ) -> Result<(TransactionJournal, bool), SkillSyncError> {
     let request_id = request.request.request_id().clone();
+    request_lock.ensure_owns(&request_id)?;
     let root = transaction_root(repo.root(), &request_id)?;
     let journal_path = root.join("transaction.yaml");
     let fingerprint =
@@ -681,7 +747,7 @@ fn prepare_journal(
         candidate_commit: None,
         result: None,
     };
-    save_journal(&journal)?;
+    save_journal(&journal, request_lock)?;
     Ok((journal, false))
 }
 
@@ -725,6 +791,55 @@ fn transactions_root(root: &Path) -> Result<PathBuf, SkillSyncError> {
     let transactions = root.join(".gitim").join("skill-transactions");
     create_real_directory(&transactions)?;
     Ok(transactions)
+}
+
+fn acquire_request_journal_lock(
+    root: &Path,
+    request_id: &RequestId,
+    deadline: Instant,
+) -> Result<RequestJournalLock, SkillSyncError> {
+    let locks = request_locks_root(root)?;
+    let path = locks.join(format!("{}.lock", request_id.as_str()));
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    }
+    let file = options
+        .open(&path)
+        .map_err(|error| checkpoint_io("open request journal lock", error))?;
+    if !file
+        .metadata()
+        .map_err(|error| checkpoint_io("stat request journal lock", error))?
+        .is_file()
+    {
+        return Err(checkpoint_error(
+            "request journal lock path is not a regular file",
+        ));
+    }
+    lock_exclusive_until(
+        &file,
+        deadline,
+        SKILL_TRANSACTION_TIMEOUT,
+        "request journal",
+    )?;
+    Ok(RequestJournalLock {
+        file,
+        request_id: request_id.clone(),
+    })
+}
+
+fn request_locks_root(root: &Path) -> Result<PathBuf, SkillSyncError> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| checkpoint_io("canonicalize repository", error))?;
+    let directory = root.join(".gitim");
+    create_real_directory(&directory)?;
+    let locks = directory.join("skill-transaction-locks");
+    create_real_directory(&locks)?;
+    Ok(locks)
 }
 
 fn create_real_directory(path: &Path) -> Result<(), SkillSyncError> {
@@ -819,7 +934,11 @@ fn request_slug(request: &SkillMutationRequest) -> Option<&SkillSlug> {
     }
 }
 
-fn save_journal(journal: &TransactionJournal) -> Result<(), SkillSyncError> {
+fn save_journal(
+    journal: &TransactionJournal,
+    request_lock: &RequestJournalLock,
+) -> Result<(), SkillSyncError> {
+    request_lock.ensure_owns(journal.request.request_id())?;
     let root = journal
         .source_directory
         .parent()
@@ -840,14 +959,34 @@ fn load_journal(path: &Path) -> Result<TransactionJournal, SkillSyncError> {
     Ok(journal)
 }
 
-fn complete_journal(journal: &mut TransactionJournal) -> Result<(), SkillSyncError> {
+fn complete_journal(
+    journal: &mut TransactionJournal,
+    request_lock: &RequestJournalLock,
+) -> Result<(), SkillSyncError> {
     journal.phase = SkillTransactionPhase::Completed;
-    save_journal(journal)?;
+    save_journal(journal, request_lock)?;
     let root = journal
         .source_directory
         .parent()
         .ok_or_else(|| checkpoint_error("transaction source has no parent"))?;
     fs::remove_dir_all(root).map_err(|error| checkpoint_io("remove transaction journal", error))
+}
+
+fn discard_unpublished_journal(
+    journal: &TransactionJournal,
+    request_lock: &RequestJournalLock,
+) -> Result<(), SkillSyncError> {
+    request_lock.ensure_owns(journal.request.request_id())?;
+    if journal.phase == SkillTransactionPhase::Pushed {
+        return Err(checkpoint_error("cannot discard a pushed transaction"));
+    }
+    remove_recorded_scratch(journal)?;
+    let root = journal
+        .source_directory
+        .parent()
+        .ok_or_else(|| checkpoint_error("transaction source has no parent"))?;
+    fs::remove_dir_all(root)
+        .map_err(|error| checkpoint_io("remove rejected transaction journal", error))
 }
 
 fn remove_recorded_scratch(journal: &TransactionJournal) -> Result<(), SkillSyncError> {
@@ -1376,6 +1515,7 @@ fn push_and_record_candidate(
     remote_tip: &str,
     captured_semantic_oids: &BTreeMap<String, String>,
     checkpoint: Option<&LockedSkillCheckpoint<'_>>,
+    request_lock: &RequestJournalLock,
     context: &TransactionContext,
 ) -> Result<SkillLocalState, SkillSyncError> {
     if let Some(checkpoint) = checkpoint {
@@ -1390,7 +1530,7 @@ fn push_and_record_candidate(
     }
     push_candidate(repo, candidate, remote_branch, context)?;
     journal.phase = SkillTransactionPhase::Pushed;
-    save_journal(journal)?;
+    save_journal(journal, request_lock)?;
     maybe_crash(context, SkillTransactionCrashPoint::AfterPushed)?;
     match checkpoint {
         Some(checkpoint) => record_published_view_locked(
@@ -1437,9 +1577,13 @@ fn record_accepted_view(
     commit: &str,
     context: &TransactionContext,
 ) -> Result<SkillLocalState, SkillSyncError> {
-    SkillCheckpointStore::new(repo.root())?.with_lock(|checkpoint| {
-        record_accepted_view_locked(repo, branch, prior_tip, commit, checkpoint, context)
-    })
+    SkillCheckpointStore::new(repo.root())?.with_lock_until(
+        context.deadline,
+        SKILL_TRANSACTION_TIMEOUT,
+        |checkpoint| {
+            record_accepted_view_locked(repo, branch, prior_tip, commit, checkpoint, context)
+        },
+    )
 }
 
 fn record_accepted_view_locked(
@@ -1706,14 +1850,21 @@ fn scope_contains(path: &str, slug: Option<&SkillSlug>) -> bool {
 fn load_repair_checkpoint(
     repo: &GitStorage,
     request: &SkillMutationRequest,
+    context: &TransactionContext,
 ) -> Result<Option<SkillValidationCheckpoint>, SkillSyncError> {
     if !matches!(request, SkillMutationRequest::Repair(_)) {
         return Ok(None);
     }
-    SkillCheckpointStore::new(repo.root())?
-        .load()?
-        .map(Some)
-        .ok_or_else(|| SkillError::SyncConflict.into())
+    SkillCheckpointStore::new(repo.root())?.with_lock_until(
+        context.deadline,
+        SKILL_TRANSACTION_TIMEOUT,
+        |checkpoint| {
+            checkpoint
+                .load()?
+                .map(Some)
+                .ok_or_else(|| SkillError::SyncConflict.into())
+        },
+    )
 }
 
 fn repair_checkpoint_fingerprint(
@@ -2315,6 +2466,15 @@ fn receipt_id_from_path(path: &str) -> Option<RequestId> {
         return None;
     }
     RequestId::new(file.strip_suffix(".meta.yaml")?).ok()
+}
+
+fn validate_concurrency(max_concurrency: usize) -> Result<(), SkillSyncError> {
+    if max_concurrency == 0 || max_concurrency > SKILL_GIT_MAX_CONCURRENCY {
+        return Err(checkpoint_error(
+            "transaction concurrency must be between one and four",
+        ));
+    }
+    Ok(())
 }
 
 fn ensure_before_deadline(context: &TransactionContext) -> Result<(), SkillSyncError> {
