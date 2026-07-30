@@ -13,13 +13,15 @@ use futures::StreamExt;
 use gitim_core::types::{AssetRef, MAX_ASSET_FILENAME_BYTES, MAX_ASSET_REF_BYTES};
 use percent_encoding::{percent_decode_str, utf8_percent_encode, AsciiSet, CONTROLS};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::OwnedSemaphorePermit;
 use tower::ServiceExt;
 use tower_http::services::ServeFile;
 
+#[cfg(test)]
+use crate::browser_origin::is_canonical_origin;
+use crate::browser_origin::BrowserOriginPolicy;
 use crate::git_config::{GitProvider, WorkspaceConfig};
 use crate::http::{SharedRuntimeState, WorkspaceSlug};
 
@@ -125,46 +127,7 @@ enum BrowserRoute {
     Resolve,
 }
 
-#[derive(Clone)]
-struct AssetHttpPolicy {
-    allowed_web_origins: Arc<HashSet<String>>,
-}
-
-impl AssetHttpPolicy {
-    fn from_environment() -> Self {
-        let configured = std::env::var("GITIM_WEB_ORIGINS").ok();
-        Self::new(
-            configured
-                .as_deref()
-                .into_iter()
-                .flat_map(|origins| origins.split(','))
-                .map(str::trim),
-        )
-    }
-
-    fn new(configured: impl IntoIterator<Item = impl AsRef<str>>) -> Self {
-        let mut allowed_web_origins = [
-            "https://gitim.io",
-            "https://www.gitim.io",
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-            "http://[::1]:5173",
-            "http://localhost:4173",
-            "http://127.0.0.1:4173",
-            "http://[::1]:4173",
-        ]
-        .into_iter()
-        .map(str::to_string)
-        .collect::<HashSet<_>>();
-        allowed_web_origins.extend(configured.into_iter().filter_map(|origin| {
-            let origin = origin.as_ref();
-            is_canonical_origin(origin).then(|| origin.to_string())
-        }));
-        Self {
-            allowed_web_origins: Arc::new(allowed_web_origins),
-        }
-    }
-}
+type AssetHttpPolicy = BrowserOriginPolicy;
 
 #[derive(Default)]
 struct FetchMetadata<'a> {
@@ -387,27 +350,7 @@ fn singleton_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a
 }
 
 fn is_allowed_web_origin(raw: &str, policy: &AssetHttpPolicy) -> bool {
-    is_canonical_origin(raw) && policy.allowed_web_origins.contains(raw)
-}
-
-fn is_canonical_origin(raw: &str) -> bool {
-    if raw == "null" || raw == "*" || raw.contains('@') {
-        return false;
-    }
-    let Ok(url) = reqwest::Url::parse(raw) else {
-        return false;
-    };
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.path() != "/"
-        || url.query().is_some()
-        || url.fragment().is_some()
-        || url.host_str().is_none()
-    {
-        return false;
-    }
-    url.origin().ascii_serialization() == raw
+    policy.allows_origin(raw)
 }
 
 fn forbidden_response() -> Response {

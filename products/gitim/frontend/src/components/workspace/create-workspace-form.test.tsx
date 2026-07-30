@@ -18,6 +18,15 @@ vi.mock("@/lib/client", async () => {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
+function setInputValue(input: HTMLInputElement, value: string) {
+  const valueSetter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )?.set;
+  valueSetter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+}
+
 describe("CreateWorkspaceForm workspace folder picker", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -135,5 +144,88 @@ describe("CreateWorkspaceForm workspace folder picker", () => {
     expect(
       container.querySelector("[data-testid='ws-create-error']")?.textContent,
     ).toBe("Could not open the macOS folder picker.");
+  });
+
+  it("enables manual path entry when the native picker is unavailable", async () => {
+    vi.mocked(client.pickWorkspaceDirectory).mockResolvedValue({
+      ok: false,
+      error: "Native folder selection is available on macOS.",
+      error_code: "directory_picker_unavailable",
+    });
+
+    act(() => {
+      root.render(<CreateWorkspaceForm />);
+    });
+
+    const pathInput = container.querySelector<HTMLInputElement>(
+      "[data-testid='ws-path']",
+    );
+    expect(pathInput?.readOnly).toBe(true);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>("[data-testid='ws-folder-picker']")
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(pathInput?.readOnly).toBe(false);
+    expect(container.querySelector("[data-testid='ws-create-error']")).toBeNull();
+    expect(container.textContent).toContain(
+      "Enter the absolute path to an existing workspace folder.",
+    );
+
+    act(() => {
+      setInputValue(pathInput!, "/srv/workspaces/team-linux");
+    });
+    expect(pathInput?.value).toBe("/srv/workspaces/team-linux");
+    expect(
+      container.querySelector<HTMLInputElement>("[data-testid='ws-slug']"),
+    ).toHaveProperty("value", "team-linux");
+  });
+
+  it("offers manual path entry without opening the picker", () => {
+    act(() => {
+      root.render(<CreateWorkspaceForm />);
+    });
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>("[data-testid='ws-manual-path']")
+        ?.click();
+    });
+
+    expect(client.pickWorkspaceDirectory).not.toHaveBeenCalled();
+    expect(
+      container.querySelector<HTMLInputElement>("[data-testid='ws-path']")
+        ?.readOnly,
+    ).toBe(false);
+  });
+
+  it("recovers from an unexpected picker rejection", async () => {
+    vi.mocked(client.pickWorkspaceDirectory).mockRejectedValue(
+      new Error("picker bridge stopped"),
+    );
+
+    act(() => {
+      root.render(<CreateWorkspaceForm />);
+    });
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>("[data-testid='ws-folder-picker']")
+        ?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const picker = container.querySelector<HTMLButtonElement>(
+      "[data-testid='ws-folder-picker']",
+    );
+    expect(picker?.disabled).toBe(false);
+    expect(picker?.textContent).toContain("Choose folder");
+    expect(
+      container.querySelector("[data-testid='ws-create-error']")?.textContent,
+    ).toBe("picker bridge stopped");
   });
 });

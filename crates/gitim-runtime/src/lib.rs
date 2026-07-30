@@ -7,6 +7,7 @@ pub mod agent;
 pub mod agent_loop;
 pub mod assets;
 pub mod background;
+pub(crate) mod browser_origin;
 pub mod cli;
 pub mod context_window;
 pub mod daemon_log;

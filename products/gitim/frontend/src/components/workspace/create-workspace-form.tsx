@@ -79,6 +79,7 @@ export function CreateWorkspaceForm({
   const [token, setToken] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
   const [picking, setPicking] = useState(false);
+  const [manualPathEntry, setManualPathEntry] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
@@ -87,24 +88,38 @@ export function CreateWorkspaceForm({
     return ERROR_MESSAGES[code] ?? fallback;
   }
 
+  function updatePath(nextPath: string) {
+    setPath(nextPath);
+    if (!slugManuallyEdited) {
+      const basename = nextPath.split(/[\\/]/).filter(Boolean).pop() ?? "";
+      setSlug(toSlug(basename));
+    }
+  }
+
   async function handleChooseFolder() {
     setLocalError(null);
     clearError();
     setPicking(true);
-    const result = await pickWorkspaceDirectory();
-    setPicking(false);
-
-    if (!result.ok) {
-      setLocalError(result.error ?? "Could not open the folder picker.");
-      return;
-    }
-    const selectedPath = result.data?.path;
-    if (!selectedPath) return;
-
-    setPath(selectedPath);
-    if (!slugManuallyEdited) {
-      const basename = selectedPath.split(/[\\/]/).filter(Boolean).pop() ?? "";
-      setSlug(toSlug(basename));
+    try {
+      const result = await pickWorkspaceDirectory();
+      if (!result.ok) {
+        if (result.error_code === "directory_picker_unavailable") {
+          setManualPathEntry(true);
+          return;
+        }
+        setLocalError(result.error ?? "Could not open the folder picker.");
+        return;
+      }
+      const selectedPath = result.data?.path;
+      if (selectedPath) {
+        updatePath(selectedPath);
+      }
+    } catch (error) {
+      setLocalError(
+        error instanceof Error ? error.message : "Could not open the folder picker.",
+      );
+    } finally {
+      setPicking(false);
     }
   }
 
@@ -115,7 +130,7 @@ export function CreateWorkspaceForm({
 
     const trimmedPath = path.trim();
     if (!trimmedPath) {
-      setLocalError("Please enter a workspace path.");
+      setLocalError("Please choose or enter a workspace folder.");
       return;
     }
 
@@ -183,7 +198,8 @@ export function CreateWorkspaceForm({
             id="ws-path"
             data-testid="ws-path"
             value={path}
-            readOnly
+            readOnly={!manualPathEntry}
+            onChange={(event) => updatePath(event.target.value)}
             placeholder="No folder selected"
             className="font-mono text-sm"
             disabled={submitting || picking}
@@ -205,8 +221,23 @@ export function CreateWorkspaceForm({
           </Button>
         </div>
         <p className="text-[11px] leading-relaxed text-text-muted">
-          On macOS, use New Folder in the picker to create and select an empty
-          workspace folder.
+          {manualPathEntry
+            ? "Enter the absolute path to an existing workspace folder."
+            : "Choose an existing folder. On supported systems, the picker can create and select an empty folder."}
+          {!manualPathEntry && (
+            <>
+              {" "}
+              <button
+                type="button"
+                data-testid="ws-manual-path"
+                className="text-primary hover:underline"
+                onClick={() => setManualPathEntry(true)}
+                disabled={submitting || picking}
+              >
+                Enter path manually
+              </button>
+            </>
+          )}
         </p>
       </div>
 

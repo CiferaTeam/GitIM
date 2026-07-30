@@ -1,4 +1,7 @@
 use std::fmt;
+use std::sync::{Mutex, TryLockError};
+
+static WORKSPACE_PICKER_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum PickerOutcome {
@@ -9,6 +12,7 @@ pub enum PickerOutcome {
 #[derive(Debug)]
 pub enum PickerError {
     Unavailable,
+    Busy,
     Launch(std::io::Error),
     Script(String),
     EmptySelection,
@@ -18,6 +22,7 @@ impl fmt::Display for PickerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unavailable => formatter.write_str("native folder picker is unavailable"),
+            Self::Busy => formatter.write_str("folder picker is already open"),
             Self::Launch(error) => write!(formatter, "failed to launch folder picker: {error}"),
             Self::Script(error) => write!(formatter, "folder picker failed: {error}"),
             Self::EmptySelection => formatter.write_str("folder picker returned an empty path"),
@@ -56,33 +61,57 @@ fn interpret_osascript_output(
     Ok(PickerOutcome::Selected(normalized.to_string()))
 }
 
+fn pick_workspace_directory_with_lock<F>(
+    lock: &Mutex<()>,
+    picker: F,
+) -> Result<PickerOutcome, PickerError>
+where
+    F: FnOnce() -> Result<PickerOutcome, PickerError>,
+{
+    let _guard = match lock.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::WouldBlock) => return Err(PickerError::Busy),
+        Err(TryLockError::Poisoned(error)) => error.into_inner(),
+    };
+    picker()
+}
+
 #[cfg(target_os = "macos")]
 pub fn pick_workspace_directory() -> Result<PickerOutcome, PickerError> {
-    let output = std::process::Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(workspace_picker_script())
-        .output()
-        .map_err(PickerError::Launch)?;
+    pick_workspace_directory_with_lock(&WORKSPACE_PICKER_LOCK, || {
+        let output = std::process::Command::new("/usr/bin/osascript")
+            .arg("-e")
+            .arg(workspace_picker_script())
+            .output()
+            .map_err(PickerError::Launch)?;
 
-    interpret_osascript_output(output.status.success(), &output.stdout, &output.stderr).map_err(
-        |error| {
-            if error == "folder picker returned an empty path" {
-                PickerError::EmptySelection
-            } else {
-                PickerError::Script(error)
-            }
-        },
-    )
+        interpret_osascript_output(output.status.success(), &output.stdout, &output.stderr).map_err(
+            |error| {
+                if error == "folder picker returned an empty path" {
+                    PickerError::EmptySelection
+                } else {
+                    PickerError::Script(error)
+                }
+            },
+        )
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
 pub fn pick_workspace_directory() -> Result<PickerOutcome, PickerError> {
-    Err(PickerError::Unavailable)
+    pick_workspace_directory_with_lock(&WORKSPACE_PICKER_LOCK, || Err(PickerError::Unavailable))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{interpret_osascript_output, workspace_picker_script, PickerOutcome};
+    use super::{
+        interpret_osascript_output, pick_workspace_directory_with_lock, workspace_picker_script,
+        PickerError, PickerOutcome,
+    };
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Mutex,
+    };
 
     #[test]
     fn selected_directory_is_returned_without_macos_trailing_slash() {
@@ -131,5 +160,22 @@ mod tests {
         assert!(script.contains("choose folder"));
         assert!(script.contains("New Folder"));
         assert!(script.contains("POSIX path"));
+    }
+
+    #[test]
+    fn concurrent_picker_request_returns_busy_without_opening_another_dialog() {
+        let lock = Mutex::new(());
+        let held = lock.lock().unwrap();
+        let invoked = AtomicBool::new(false);
+
+        let error = pick_workspace_directory_with_lock(&lock, || {
+            invoked.store(true, Ordering::SeqCst);
+            Ok(PickerOutcome::Cancelled)
+        })
+        .expect_err("second picker should be rejected");
+
+        assert!(matches!(error, PickerError::Busy));
+        assert!(!invoked.load(Ordering::SeqCst));
+        drop(held);
     }
 }
