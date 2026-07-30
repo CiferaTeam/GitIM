@@ -527,19 +527,37 @@ impl GitStorage {
     }
 
     pub(crate) fn origin_fetch_refspecs(&self) -> Result<Vec<String>, GitError> {
-        let output = run_git_command(&["config", "--get-all", "remote.origin.fetch"], &self.root)
-            .map_err(|_| {
-            GitError::CommandFailed("failed to read origin fetch refspecs".to_string())
-        })?;
+        let output = run_git_command(
+            &["config", "--null", "--get-all", "remote.origin.fetch"],
+            &self.root,
+        )
+        .map_err(|_| GitError::CommandFailed("failed to read origin fetch refspecs".to_string()))?;
         if !output.status.success() {
             return Err(GitError::CommandFailed(
                 "failed to read origin fetch refspecs".to_string(),
             ));
         }
-        let value = String::from_utf8(output.stdout).map_err(|_| {
+        let values = output.stdout.strip_suffix(b"\0").ok_or_else(|| {
+            GitError::CommandFailed("origin fetch refspec list is malformed".to_string())
+        })?;
+        let mut values = values.split(|byte| *byte == 0);
+        let value = values.next().ok_or_else(|| {
+            GitError::CommandFailed("origin fetch refspec list is empty".to_string())
+        })?;
+        if values.next().is_some() {
+            return Err(GitError::CommandFailed(
+                "origin fetch refspec list must contain exactly one value".to_string(),
+            ));
+        }
+        let value = std::str::from_utf8(value).map_err(|_| {
             GitError::CommandFailed("origin fetch refspecs are not UTF-8".to_string())
         })?;
-        Ok(value.lines().map(|line| line.trim().to_string()).collect())
+        if value.is_empty() || value.trim() != value {
+            return Err(GitError::CommandFailed(
+                "origin fetch refspec is invalid".to_string(),
+            ));
+        }
+        Ok(vec![value.to_string()])
     }
 
     pub fn fetch(&self) -> Result<(), GitError> {
@@ -604,6 +622,23 @@ impl GitStorage {
         parse_cache_generation_manifest(&output.stdout, generation)
     }
 
+    pub(crate) fn cache_commit_tips_are_readable(
+        cache_path: &Path,
+        manifest: &BTreeMap<String, String>,
+    ) -> Result<(), GitError> {
+        let object_ids = manifest.values().collect::<std::collections::BTreeSet<_>>();
+        for object_id in object_ids {
+            let commit = format!("{object_id}^{{commit}}");
+            let output = run_git_command(&["cat-file", "-e", &commit], cache_path)?;
+            if !output.status.success() {
+                return Err(GitError::CommandFailed(
+                    "fetch-cache commit object is unavailable".to_string(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     #[allow(dead_code)]
     pub(crate) fn ensure_bare_cache(
         path: &Path,
@@ -612,7 +647,13 @@ impl GitStorage {
         if is_valid_bare_cache(path, object_format) {
             return Ok(());
         }
+        Self::rebuild_bare_cache(path, object_format)
+    }
 
+    pub(crate) fn rebuild_bare_cache(
+        path: &Path,
+        object_format: GitObjectFormat,
+    ) -> Result<(), GitError> {
         let parent = path.parent().ok_or_else(|| {
             GitError::CommandFailed("fetch-cache path has no parent directory".to_string())
         })?;

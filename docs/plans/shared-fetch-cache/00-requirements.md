@@ -79,8 +79,9 @@ The clone root must canonicalize to one of the Runtime-managed layouts:
 - `<workspace>/<handler>`, with `.gitim/config.yaml` present and the directory
   name equal to the handler in `.gitim/me.json`.
 
-Its `remote.origin.fetch` configuration must contain exactly the standard
-Runtime clone refspec:
+Its `remote.origin.fetch` configuration is read as exact null-delimited bytes
+and must contain exactly one non-empty value without surrounding whitespace:
+the standard Runtime clone refspec.
 
 ```text
 +refs/heads/*:refs/remotes/origin/*
@@ -104,6 +105,11 @@ Discovery uses a private tolerant JSON view of the workspace path, provider,
 remote URL, and token, and ignores unrelated configuration fields. Missing,
 malformed, mismatched, or inaccessible workspace state must preserve the
 current direct-fetch behavior.
+
+Each eligibility check reads live local Git configuration and object format
+through short Git subprocesses. This keeps token rotation, remote changes, and
+clone configuration changes immediately visible without process-shared cache
+invalidation state.
 
 ### R3 — One fetch leader per freshness window
 
@@ -213,12 +219,14 @@ namespace, then compares it with the last published manifest.
 - Unchanged manifest: advance the freshness timestamp without incrementing the
   generation.
 
-Before import, a follower validates the cache repository and requires the
-active generation to match the state manifest exactly. A stale leader performs
-the same validation even when it already applied that generation. If the
-active repository or generation is invalid, the lock holder refreshes the
-remote and publishes a repaired `N+1` generation, including when the remote
-manifest is unchanged.
+Before import, a follower validates the cache repository, requires the active
+generation to match the state manifest exactly, and verifies that every unique
+manifest tip resolves to a readable commit object. The same validation runs
+for empty manifests when state names a generation greater than zero. A stale
+leader performs this validation even when it already applied that generation.
+If the active repository, generation, or tip object is invalid, the lock
+holder refreshes the remote and publishes a repaired `N+1` generation,
+including when the remote manifest is unchanged.
 
 Published refs live under
 `refs/gitim-fetch-cache/generations/<generation>/heads/*`. State is the commit
@@ -242,6 +250,12 @@ and back out of each blocking sync cycle alongside the existing auth circuit;
   `applied_generation`.
 - Generation equals `applied_generation`: skip cache import.
 
+If tip validation succeeds but import discovers missing deeper objects, the
+same lock holder performs one forced remote refresh and disposable-cache
+rebuild, then publishes `N+1` even when branch tips are unchanged. This repair
+is attempted at most once for the pull cycle. A repair remote failure keeps
+the existing typed auth, rate-limit, or transient classification.
+
 After either case, the pull-only path retains its existing divergence and
 rebase checks. A daemon restart initializes `applied_generation` as unknown and
 performs one import. A successful direct fallback records the state generation
@@ -261,10 +275,11 @@ outside the shared lane.
 The cache is an optimization layer and is never a push target.
 
 Failure to open or acquire the lock because of an I/O or operating-system
-error, plus metadata, initialization, publication, or follower-import failure,
-falls back to the direct `git fetch origin` path for that daemon. Contention
-and the bounded wait timeout are neutral skips, not cache failures. A corrupted
-cache is recreated under the workspace lock when possible.
+error, plus metadata, initialization, publication, or a failed forced repair,
+falls back to the direct `git fetch origin` path for that daemon. A first
+follower-import failure attempts the single in-lock repair described in R5.
+Contention and the bounded wait timeout are neutral skips, not cache failures.
+A corrupted cache is recreated under the workspace lock when possible.
 
 The daemon that performs a failed remote fetch retains the existing `GitError`
 classification so its auth circuit and rate-limit backoff behavior remains
@@ -398,7 +413,8 @@ the state/ref publication order is a correctness invariant.
 | State clock | Wall clock moves backward | Yes | Future timestamp treated as stale | One new leader probe |
 | Publication | Process dies before state replacement | Yes | Prior immutable generation remains active | At most one freshness-window delay |
 | Publication | Process dies after state replacement | Yes | New immutable generation is complete | No partial refs |
-| Import | Clone ref update fails | Yes | Direct fetch; mark readable generation applied on success | Existing sync behavior plus warning |
+| Active generation | Ref manifest, repository, or tip commit is unreadable | Yes | Refresh, rebuild, and publish immutable `N+1` | One repair fetch |
+| Import | Deeper object or clone ref update fails | Yes | One forced repair; direct fetch if repair cannot complete | Existing sync behavior plus warning |
 | Integration | Rebase or divergence check fails | Existing regression suite | Existing retry/backoff behavior | Existing warning/backoff |
 | Identity | Config remote changes while cache exists | Yes | Fail closed to direct fetch | Cache remains disabled |
 
@@ -416,6 +432,9 @@ The reviewed 16 new-path groups have implemented coverage:
   `discovery_rejects_multiple_origin_urls_in_any_order`,
   `discovery_rejects_empty_or_whitespace_padded_origin_url`,
   `discovery_requires_one_standard_fetch_refspec`,
+  `discovery_origin_fetch_refspecs_reject_multiple_values`,
+  `discovery_rejects_an_explicit_empty_fetch_refspec`,
+  `discovery_rejects_whitespace_padded_fetch_refspec`,
   `discovery_falls_back_for_origin_repository_identity_mismatch`,
   `discovery_falls_back_for_origin_token_mismatch`,
   `state_future_success_timestamp_is_stale`, and
@@ -443,7 +462,12 @@ The reviewed 16 new-path groups have implemented coverage:
   `orchestration_fresh_follower_repairs_invalid_active_generation`,
   `orchestration_stale_leader_repairs_invalid_applied_generation`,
   `orchestration_active_repair_preserves_remote_error_classification`,
+  `orchestration_fresh_follower_repairs_missing_active_tip_objects`,
+  `orchestration_stale_leader_repairs_missing_applied_tip_objects`,
+  `orchestration_import_failure_forces_single_repair_generation`,
+  `orchestration_forced_repair_preserves_remote_error_classification`,
   `orchestration_empty_snapshot_replaces_cache_symlink_without_touching_target`,
+  `orchestration_stale_empty_generation_rebuilds_cache_symlink`,
   `orchestration_cleanup_rejects_invalid_cache_symlink`,
   `orchestration_publication_failure_keeps_old_generation_active`,
   `orchestration_state_replacement_selects_only_complete_generation`, and
@@ -488,8 +512,9 @@ clocks for freshness decisions and production retry hints for later cadence.
    unchanged.
 5. Concurrent daemons either acquire the shared lock within one second or
    neutrally skip without starting direct fetches. Lock I/O, metadata, state,
-   or import failures retain the direct-fetch fallback; an invalid active
-   cache is rebuilt and published as the next immutable generation.
+   or repair failures retain the direct-fetch fallback; an invalid active
+   cache, unreadable tip, or incomplete imported object graph is rebuilt and
+   published as the next immutable generation.
 6. A credential scan of `.gitim-runtime/` cache artifacts finds no PAT or
    credential-bearing URL added by this feature.
 7. A workspace identity, origin identity, token, agent-handler, or fetch-refspec
@@ -573,7 +598,10 @@ finding above.
     `docs/plans/shared-fetch-cache/01-plan.md`.
   - Commits: `675f35612983d85b56dca336d9eda30ed6cfca00`,
     `d575fd9b321528874b561b6ec7e84cd75de1999d`,
-    `a68fe55a552f9646a7101a5741545e4ed01d80c4`.
+    `a68fe55a552f9646a7101a5741545e4ed01d80c4`,
+    `99c9d48e0b4d5adee3277b3962736873c72e6dcb`,
+    `f2f45711a990045c061ede584e1e7a8154d1cb64`.
+  - Current commit title: `fix(sync): repair incomplete cache objects`.
   - Verified by: `cargo test -p gitim-sync`;
     `cargo fmt --all -- --check`;
     `cargo clippy -p gitim-sync --all-targets --no-deps --locked`;
@@ -581,10 +609,9 @@ finding above.
 
 ## Final verification
 
-- `cargo test -p gitim-sync` — pass, 218 tests across unit and integration
+- `cargo test -p gitim-sync` — pass, 224 tests across unit and integration
   targets.
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy -p gitim-sync --all-targets --no-deps --locked` — pass.
 - `git diff --check` — pass.
-- `git status --short` — only the intended `gitim-sync` tests and
-  shared-fetch-cache plan documents are present.
+- `git status --short` — tracked worktree clean after commit.

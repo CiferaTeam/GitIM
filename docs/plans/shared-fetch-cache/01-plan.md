@@ -234,12 +234,11 @@ impl GitStorage {
 }
 ```
 
-The URL read uses exact null-delimited
-`git config --null --get-all remote.origin.url` output and accepts exactly one
-non-empty value without surrounding whitespace. Fetch refspec discovery uses
-`git config --get-all remote.origin.fetch` and requires exactly one standard
-value. Both return only generic, credential-free error messages when a command
-fails.
+The URL and fetch-refspec reads use exact null-delimited
+`git config --null --get-all` output. Each accepts exactly one non-empty value
+without surrounding whitespace, and the refspec must equal the standard
+Runtime value byte-for-byte. Both return only generic, credential-free error
+messages when a command fails.
 Never feed config command stderr containing an origin URL into a returned
 error.
 
@@ -1031,13 +1030,21 @@ Co-authored-by: Codex <codex@openai.com>
 - Task 5 retry-budget reset:
   `a68fe55a552f9646a7101a5741545e4ed01d80c4`
   (`fix(sync): reset cache retry budget`).
+- Task 5 repository and generation hardening:
+  `99c9d48e0b4d5adee3277b3962736873c72e6dcb`
+  (`fix(sync): harden shared cache integrity`) and
+  `f2f45711a990045c061ede584e1e7a8154d1cb64`
+  (`fix(sync): validate empty cache cleanup`).
+- Task 5 object-readability repair:
+  `fix(sync): repair incomplete cache objects`.
 - Whole-branch hardening validates a unique raw origin URL, requires a direct
   canonical runtime directory, matches the source repository's Git object
-  format, replaces unsafe cache repositories, repairs invalid active
-  generations through an immutable `N+1` publication, and cleans inactive refs
-  after empty snapshots.
+  format, requires one exact null-delimited fetch refspec, replaces unsafe
+  cache repositories, validates active commit tips, performs one forced repair
+  for deeper import failures, publishes repairs through immutable `N+1`
+  generations, and cleans inactive refs after empty snapshots.
 - Scoped verification passed:
-  `cargo test -p gitim-sync` ran 218 tests,
+  `cargo test -p gitim-sync` ran 224 tests,
   `cargo fmt --all -- --check`,
   `cargo clippy -p gitim-sync --all-targets --no-deps --locked`, and
   `git diff --check`.
