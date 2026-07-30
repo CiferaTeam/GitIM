@@ -1103,19 +1103,15 @@ fn introduced_receipt_owners(
     changed_paths
         .iter()
         .filter(|path| !parent.entries.contains_key(*path))
-        .filter_map(|path| {
-            let request_id = receipt_id_from_path(path)?;
-            let bytes = after.files.get(path)?;
-            let receipt: SkillReceipt = serde_yaml::from_slice(bytes).ok()?;
-            (receipt.id == request_id)
-                .then(|| receipt_owner(&receipt))
-                .flatten()
-                .map(|owner| (path.clone(), owner))
-        })
+        .filter_map(|path| receipt_owner_at(after, path).map(|owner| (path.clone(), owner)))
         .collect()
 }
 
 fn receipt_owner_at(material: &TreeMaterial, path: &str) -> Option<String> {
+    let entry = material.entries.get(path)?;
+    if entry.mode != "100644" || entry.object_type != "blob" {
+        return None;
+    }
     let request_id = receipt_id_from_path(path)?;
     let receipt: SkillReceipt = serde_yaml::from_slice(material.files.get(path)?).ok()?;
     (receipt.id == request_id)

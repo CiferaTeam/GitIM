@@ -1726,6 +1726,174 @@ fn rejected_commits_prune_stale_receipt_cleanup_authority_across_scopes() {
 }
 
 #[test]
+fn receipt_cleanup_authority_requires_a_regular_non_executable_blob() {
+    let repository = Repository::new();
+    let initial = repository.snapshot();
+    let bootstrap = bootstrap_plan(
+        &SkillRepositorySnapshot {
+            active_users: BTreeSet::from([ALICE.to_owned()]),
+            ..Default::default()
+        },
+        'A',
+    );
+    let bootstrap_tip = repository.commit_plan(&bootstrap);
+    let accepted = validate_incoming_skill_history(&repository.storage, &initial, &bootstrap_tip)
+        .unwrap()
+        .checkpoint;
+    let create = create_plan(&bootstrap.after, 'B');
+    let receipt_path = format!("skills/receipts/{}.meta.yaml", create.receipt.id.as_str());
+    let receipt_bytes = serde_yaml::to_string(&create.receipt).unwrap().into_bytes();
+    apply_plan(repository.root(), &create);
+    let meta_path = "skills/release-check/skill.meta.yaml";
+    let malformed_meta = fs::read_to_string(repository.root().join(meta_path))
+        .unwrap()
+        .replace("Verify releases.", "Rejected bytes.");
+    fs::write(repository.root().join(meta_path), malformed_meta).unwrap();
+    commit_all(repository.root(), &create.commit_message, ALICE);
+    let mut checkpoint =
+        validate_incoming_skill_history(&repository.storage, &accepted, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert_eq!(
+        checkpoint.conflicts["release-check"].rejected_receipt_paths,
+        BTreeSet::from([receipt_path.clone()])
+    );
+
+    git(
+        repository.root(),
+        &["update-index", "--chmod=+x", "--", &receipt_path],
+    );
+    git(
+        repository.root(),
+        &["commit", "-m", "make owned receipt executable"],
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert!(checkpoint.conflicts["release-check"]
+        .rejected_receipt_paths
+        .is_empty());
+
+    fs::remove_file(repository.root().join(&receipt_path)).unwrap();
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"first B collision\n",
+    )
+    .unwrap();
+    commit_all(
+        repository.root(),
+        "delete executable receipt while corrupting B",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+
+    fs::write(repository.root().join(&receipt_path), &receipt_bytes).unwrap();
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"second B collision\n",
+    )
+    .unwrap();
+    git(repository.root(), &["add", "-A"]);
+    git(
+        repository.root(),
+        &["update-index", "--chmod=+x", "--", &receipt_path],
+    );
+    commit_index(
+        repository.root(),
+        "executable valid owner receipt reappears",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert!(checkpoint.conflicts["release-check"]
+        .rejected_receipt_paths
+        .is_empty());
+
+    fs::remove_file(repository.root().join(&receipt_path)).unwrap();
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"third B collision\n",
+    )
+    .unwrap();
+    commit_all(
+        repository.root(),
+        "delete executable reappearance while corrupting B",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"fourth B collision\n",
+    )
+    .unwrap();
+    git(repository.root(), &["add", "--", "skills/release-notes"]);
+    let receipt_blob = hash_blob(repository.root(), &receipt_bytes);
+    replace_index_scope_root(repository.root(), &receipt_path, "120000", &receipt_blob);
+    commit_index(
+        repository.root(),
+        "parseable symlink owner receipt reappears",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert!(checkpoint.conflicts["release-check"]
+        .rejected_receipt_paths
+        .is_empty());
+
+    git(
+        repository.root(),
+        &["update-index", "--force-remove", "--", &receipt_path],
+    );
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"fifth B collision\n",
+    )
+    .unwrap();
+    git(repository.root(), &["add", "--", "skills/release-notes"]);
+    commit_index(
+        repository.root(),
+        "delete symlink reappearance while corrupting B",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+
+    fs::write(repository.root().join(&receipt_path), receipt_bytes).unwrap();
+    fs::write(
+        repository.root().join("skills/release-notes"),
+        b"sixth B collision\n",
+    )
+    .unwrap();
+    commit_all(
+        repository.root(),
+        "canonical valid owner receipt reappears",
+        ALICE,
+    );
+    checkpoint =
+        validate_incoming_skill_history(&repository.storage, &checkpoint, &repository.tip())
+            .unwrap()
+            .checkpoint;
+    assert_eq!(
+        checkpoint.conflicts["release-check"].rejected_receipt_paths,
+        BTreeSet::from([receipt_path])
+    );
+}
+
+#[test]
 fn malformed_first_bootstrap_has_no_repository_visible_repair_authority() {
     let repository = Repository::new();
     fs::write(repository.root().join("ordinary.txt"), "preserve\n").unwrap();
