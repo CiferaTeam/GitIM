@@ -1495,8 +1495,48 @@ mod tests {
 
     #[test]
     fn cache_manifest_parser_rejects_malformed_records() {
+        let malformed: &[&[u8]] = &[
+            b"\xff",
+            b"refs/gitim-fetch-cache/remote/heads/main deadbeef\n",
+            b"refs/heads/main\0deadbeef\n",
+            b"refs/gitim-fetch-cache/remote/heads/main\0\n",
+            b"refs/gitim-fetch-cache/remote/heads/main\0dead\0beef\n",
+            concat!(
+                "refs/gitim-fetch-cache/remote/heads/main\0deadbeef\n",
+                "refs/gitim-fetch-cache/remote/heads/main\0cafebabe\n"
+            )
+            .as_bytes(),
+        ];
+
+        for input in malformed {
+            assert_invalid_cache_manifest(parse_cache_ref_manifest(input));
+        }
+    }
+
+    #[test]
+    fn cache_generation_manifest_parser_rejects_malformed_records() {
+        let malformed: &[&[u8]] = &[
+            b"\xff",
+            b"refs/gitim-fetch-cache/generations/1/heads/main deadbeef\n",
+            b"refs/gitim-fetch-cache/generations/2/heads/main\0deadbeef\n",
+            b"refs/gitim-fetch-cache/generations/1/heads/\0deadbeef\n",
+            b"refs/gitim-fetch-cache/generations/1/heads/main\0\n",
+            b"refs/gitim-fetch-cache/generations/1/heads/main\0dead\0beef\n",
+            concat!(
+                "refs/gitim-fetch-cache/generations/1/heads/main\0deadbeef\n",
+                "refs/gitim-fetch-cache/generations/1/heads/main\0cafebabe\n"
+            )
+            .as_bytes(),
+        ];
+
+        for input in malformed {
+            assert_invalid_cache_manifest(parse_cache_generation_manifest(input, 1));
+        }
+    }
+
+    fn assert_invalid_cache_manifest(result: Result<BTreeMap<String, String>, GitError>) {
         assert!(matches!(
-            parse_cache_ref_manifest(b"refs/gitim-fetch-cache/remote/heads/main deadbeef\n"),
+            result,
             Err(GitError::CommandFailed(message))
                 if message == "invalid fetch-cache ref manifest"
         ));

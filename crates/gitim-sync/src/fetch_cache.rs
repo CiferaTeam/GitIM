@@ -1481,6 +1481,144 @@ mod tests {
                 .to_string()
         }
 
+        #[cfg(unix)]
+        fn configure_upload_pack_counter(
+            fixture: &OrchestrationFixture,
+            repos: &[GitStorage],
+        ) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+
+            let counter_dir = fixture.workspace.root.path().join("upload-pack-requests");
+            std::fs::create_dir_all(&counter_dir).expect("create upload-pack counter");
+            let exec_path = git_stdout(fixture.workspace.root.path(), &["--exec-path"]);
+            let upload_pack = PathBuf::from(exec_path).join("git-upload-pack");
+            assert!(upload_pack.is_file(), "git-upload-pack must exist");
+
+            let script = fixture
+                .workspace
+                .root
+                .path()
+                .join("counting-upload-pack.sh");
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nset -eu\n: > {}/request-$$\nexec {} \"$@\"\n",
+                    shell_quote(&counter_dir),
+                    shell_quote(&upload_pack)
+                ),
+            )
+            .expect("write counting upload-pack");
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+                .expect("make counting upload-pack executable");
+
+            for repo in repos {
+                git_config(
+                    repo.root(),
+                    &["remote.origin.uploadpack", path_arg(&script)],
+                );
+            }
+            counter_dir
+        }
+
+        #[cfg(unix)]
+        fn shell_quote(path: &Path) -> String {
+            format!("'{}'", path_arg(path).replace('\'', "'\"'\"'"))
+        }
+
+        #[cfg(unix)]
+        fn request_count(counter_dir: &Path) -> usize {
+            std::fs::read_dir(counter_dir)
+                .expect("read upload-pack counter")
+                .count()
+        }
+
+        #[cfg(unix)]
+        fn run_concurrent_fetches(
+            repos: &[GitStorage],
+            progresses: &mut [SyncCacheProgress],
+            now: SystemTime,
+        ) {
+            assert_eq!(repos.len(), progresses.len());
+            let indices = (0..repos.len()).collect::<Vec<_>>();
+            run_concurrent_fetches_for(repos, progresses, &indices, now);
+        }
+
+        #[cfg(unix)]
+        fn run_concurrent_fetches_for(
+            repos: &[GitStorage],
+            progresses: &mut [SyncCacheProgress],
+            indices: &[usize],
+            now: SystemTime,
+        ) {
+            assert!(!indices.is_empty());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(indices.len()));
+            let handles = indices
+                .iter()
+                .map(|&index| {
+                    let repo = repos[index].clone();
+                    let mut progress = progresses[index].clone();
+                    let barrier = std::sync::Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        barrier.wait();
+                        let result = fetch_for_pull_at(
+                            &repo,
+                            &mut progress,
+                            now,
+                            PublicationHooks::default(),
+                        );
+                        (index, progress, result)
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                let (index, updated, result) = handle.join().expect("join fetch-cache caller");
+                assert!(
+                    matches!(
+                        result,
+                        PullFetchResult::Ready | PullFetchResult::NeutralSkip
+                    ),
+                    "expected ready or neutral result, got {result:?}"
+                );
+                progresses[index] = updated;
+            }
+        }
+
+        #[cfg(unix)]
+        fn converge_with_cache_only_cycles(
+            repos: &[GitStorage],
+            progresses: &mut [SyncCacheProgress],
+            expected_main: &str,
+            counter_dir: &Path,
+            expected_requests: usize,
+            now: SystemTime,
+        ) {
+            for _ in 0..repos.len() {
+                let lagging = repos
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, repo)| {
+                        (git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"])
+                            != expected_main)
+                            .then_some(index)
+                    })
+                    .collect::<Vec<_>>();
+                if lagging.is_empty() {
+                    return;
+                }
+                run_concurrent_fetches_for(repos, progresses, &lagging, now);
+                assert_eq!(request_count(counter_dir), expected_requests);
+            }
+
+            assert!(
+                repos.iter().all(|repo| {
+                    git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"])
+                        == expected_main
+                }),
+                "followers did not converge within bounded cache-only cycles"
+            );
+        }
+
         fn assert_tree_excludes(path: &Path, forbidden: &[&[u8]]) {
             let metadata = std::fs::symlink_metadata(path)
                 .unwrap_or_else(|error| panic!("inspect {}: {error}", path.display()));
@@ -2429,5 +2567,74 @@ mod tests {
             assert_tree_excludes(&context.state_file, &forbidden);
             assert_tree_excludes(&context.cache_repository, &forbidden);
         }
+
+        #[cfg(unix)]
+        pub(super) fn run_ten_daemon_acceptance() {
+            let fixture = OrchestrationFixture::new();
+            let repos = (0..10)
+                .map(|index| fixture.add_agent(&format!("agent-{index}")))
+                .collect::<Vec<_>>();
+            let counter_dir = configure_upload_pack_counter(&fixture, &repos);
+            let mut progresses = vec![SyncCacheProgress::new(30); repos.len()];
+            let first_refresh = UNIX_EPOCH + Duration::from_secs(10_000);
+            fixture.advance_remote("one-plus\n");
+            let origin_main = git_stdout(&fixture.origin, &["rev-parse", "refs/heads/main"]);
+
+            run_concurrent_fetches(&repos, &mut progresses, first_refresh);
+
+            assert_eq!(request_count(&counter_dir), 1);
+            converge_with_cache_only_cycles(
+                &repos,
+                &mut progresses,
+                &origin_main,
+                &counter_dir,
+                1,
+                first_refresh,
+            );
+            for repo in &repos {
+                assert_eq!(
+                    git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"]),
+                    origin_main
+                );
+            }
+
+            run_concurrent_fetches(
+                &repos,
+                &mut progresses,
+                first_refresh + Duration::from_secs(1),
+            );
+            assert_eq!(request_count(&counter_dir), 1);
+
+            fixture.advance_remote("two\n");
+            let updated_origin_main =
+                git_stdout(&fixture.origin, &["rev-parse", "refs/heads/main"]);
+            run_concurrent_fetches(
+                &repos,
+                &mut progresses,
+                first_refresh + Duration::from_secs(31),
+            );
+
+            assert_eq!(request_count(&counter_dir), 2);
+            converge_with_cache_only_cycles(
+                &repos,
+                &mut progresses,
+                &updated_origin_main,
+                &counter_dir,
+                2,
+                first_refresh + Duration::from_secs(31),
+            );
+            for repo in &repos {
+                assert_eq!(
+                    git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"]),
+                    updated_origin_main
+                );
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ten_daemons_coalesce_remote_fetches_and_converge() {
+        orchestration::run_ten_daemon_acceptance();
     }
 }
