@@ -373,6 +373,16 @@ fn execute_transaction(
         fetch(repo, context)?;
         let start_branch = current_branch(repo, context)?;
         let (remote_branch, remote_tip) = resolve_active_remote(repo, &start_branch, context)?;
+        if let Some(result) = reconcile_attempt_authoritative_receipt(
+            repo,
+            &mut journal,
+            &remote_branch,
+            &remote_tip,
+            &request_lock,
+            context,
+        )? {
+            return Ok(result);
+        }
         if matches!(journal.request, SkillMutationRequest::Repair(_)) {
             if let Some(before_repair_checkpoint_load) = &context.before_repair_checkpoint_load {
                 before_repair_checkpoint_load();
@@ -502,6 +512,16 @@ fn execute_transaction(
             Err(SkillSyncError::Git(GitError::PushConflict)) if attempt < 2 => {
                 fetch(repo, context)?;
                 let (next_branch, next_tip) = resolve_active_remote(repo, &start_branch, context)?;
+                if let Some(result) = reconcile_attempt_authoritative_receipt(
+                    repo,
+                    &mut journal,
+                    &next_branch,
+                    &next_tip,
+                    &request_lock,
+                    context,
+                )? {
+                    return Ok(result);
+                }
                 let next_repair_checkpoint =
                     load_repair_checkpoint(repo, &journal.request, context)?;
                 let mut next_snapshot = load_snapshot_for_request(
@@ -585,41 +605,15 @@ fn recover_current_transaction(
     fetch(repo, context)?;
     let start_branch = current_branch(repo, context)?;
     let (remote_branch, remote_tip) = resolve_active_remote(repo, &start_branch, context)?;
-    if read_optional_blob(repo, &remote_tip, &journal.receipt_path, context)?.is_some() {
-        let package = load_snapshotted_package(journal)?;
-        let snapshot = load_snapshot(repo, &remote_tip, &journal.active_users, context)?;
-        let duplicate = plan_skill_mutation(
-            &snapshot,
-            &SkillMutationContext {
-                actor: journal.actor.clone(),
-                now: journal.now.clone(),
-                package,
-            },
-            &journal.request,
-        )?;
-        if !duplicate.edits.is_empty() {
-            return Err(SkillError::RequestIdConflict.into());
-        }
-        let commit_id = find_receipt_commit(repo, &remote_tip, &journal.receipt_path, context)?;
-        if journal.phase == SkillTransactionPhase::Pushed
-            && journal.candidate_commit.as_deref() != Some(commit_id.as_str())
-        {
-            return Err(checkpoint_error(
-                "published receipt does not match the journal candidate",
-            ));
-        }
-        journal.phase = SkillTransactionPhase::Pushed;
-        journal.candidate_commit = Some(commit_id.clone());
-        journal.result = Some(duplicate.result.clone());
-        save_journal(journal, request_lock)?;
-        let local_state =
-            record_published_view(repo, &remote_branch, &remote_tip, &remote_tip, context)?;
-        complete_journal(journal, request_lock)?;
-        return Ok(Some(RemoteSkillTransactionResult {
-            commit_id,
-            result: duplicate.result,
-            local_state,
-        }));
+    if let Some(result) = reconcile_authoritative_receipt(
+        repo,
+        journal,
+        &remote_branch,
+        &remote_tip,
+        request_lock,
+        context,
+    )? {
+        return Ok(Some(result));
     }
 
     if journal.phase == SkillTransactionPhase::Pushed {
@@ -631,6 +625,76 @@ fn recover_current_transaction(
     fs::remove_dir_all(&root)
         .map_err(|error| checkpoint_io("remove unpublished transaction", error))?;
     Ok(None)
+}
+
+fn reconcile_authoritative_receipt(
+    repo: &GitStorage,
+    journal: &mut TransactionJournal,
+    remote_branch: &str,
+    remote_tip: &str,
+    request_lock: &RequestJournalLock,
+    context: &TransactionContext,
+) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
+    if read_optional_blob(repo, remote_tip, &journal.receipt_path, context)?.is_none() {
+        return Ok(None);
+    }
+    let package = load_snapshotted_package(journal)?;
+    let snapshot = load_snapshot(repo, remote_tip, &journal.active_users, context)?;
+    let duplicate = plan_skill_mutation(
+        &snapshot,
+        &SkillMutationContext {
+            actor: journal.actor.clone(),
+            now: journal.now.clone(),
+            package,
+        },
+        &journal.request,
+    )?;
+    if !duplicate.edits.is_empty() {
+        return Err(SkillError::RequestIdConflict.into());
+    }
+    let commit_id = find_receipt_commit(repo, remote_tip, &journal.receipt_path, context)?;
+    if journal.phase == SkillTransactionPhase::Pushed
+        && journal.candidate_commit.as_deref() != Some(commit_id.as_str())
+    {
+        return Err(checkpoint_error(
+            "published receipt does not match the journal candidate",
+        ));
+    }
+    journal.phase = SkillTransactionPhase::Pushed;
+    journal.candidate_commit = Some(commit_id.clone());
+    journal.result = Some(duplicate.result.clone());
+    save_journal(journal, request_lock)?;
+    let local_state = record_published_view(repo, remote_branch, remote_tip, remote_tip, context)?;
+    complete_journal(journal, request_lock)?;
+    Ok(Some(RemoteSkillTransactionResult {
+        commit_id,
+        result: duplicate.result,
+        local_state,
+    }))
+}
+
+fn reconcile_attempt_authoritative_receipt(
+    repo: &GitStorage,
+    journal: &mut TransactionJournal,
+    remote_branch: &str,
+    remote_tip: &str,
+    request_lock: &RequestJournalLock,
+    context: &TransactionContext,
+) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
+    match reconcile_authoritative_receipt(
+        repo,
+        journal,
+        remote_branch,
+        remote_tip,
+        request_lock,
+        context,
+    ) {
+        Err(SkillSyncError::Domain(SkillError::RequestIdConflict)) => {
+            discard_unpublished_journal(journal, request_lock)?;
+            Err(SkillError::RequestIdConflict.into())
+        }
+        result => result,
+    }
 }
 
 fn recover_transaction_journals(

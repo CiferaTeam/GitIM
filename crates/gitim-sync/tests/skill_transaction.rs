@@ -726,6 +726,140 @@ fn install_conflict(
     (store, validation.checkpoint.conflicts[key].clone())
 }
 
+fn install_remote_conflict_checkpoint(root: &Path) -> SkillCheckpointStore {
+    git(root, ["fetch", "origin"]);
+    git(root, ["reset", "--hard", "origin/main"]);
+    let repo = GitStorage::new(root);
+    let store = SkillCheckpointStore::new(root).unwrap();
+    let tip = String::from_utf8(git(root, ["rev-parse", "origin/main"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let validation = validate_incoming_skill_history(
+        &repo,
+        &gitim_sync::skill::checkpoint::SkillValidationCheckpoint::empty("main"),
+        &tip,
+    )
+    .unwrap();
+    store.save(&validation.checkpoint).unwrap();
+    store
+}
+
+fn assert_identical_repair_converges_from_built_journal(
+    fixture: &Fixture,
+    request: SkillMutationRequest,
+    checkpoint_key: &str,
+) {
+    let request_id = request.request_id().clone();
+    let first_store = SkillCheckpointStore::new(fixture.first.path()).unwrap();
+    let second_store = install_remote_conflict_checkpoint(fixture.second.path());
+    assert!(first_store
+        .load()
+        .unwrap()
+        .unwrap()
+        .conflicts
+        .contains_key(checkpoint_key));
+    assert!(second_store
+        .load()
+        .unwrap()
+        .unwrap()
+        .conflicts
+        .contains_key(checkpoint_key));
+
+    let winner_result = Arc::new(Mutex::new(None));
+    let winner_result_for_hook = Arc::clone(&winner_result);
+    let winner_root = fixture.second.path().to_path_buf();
+    let winner_request = request.clone();
+    let launched = Arc::new(AtomicBool::new(false));
+    let launched_for_hook = Arc::clone(&launched);
+    let loser_repo = GitStorage::new(fixture.first.path());
+    let loser_guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let loser = execute_remote_skill_transaction_with_test_config(
+        &loser_repo,
+        &loser_guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig {
+            after_built: Some(Arc::new(move || {
+                if launched_for_hook.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let winner_repo = GitStorage::new(&winner_root);
+                let winner_guard = SkillSyncGuard::new(&winner_root).unwrap();
+                let published = execute_remote_skill_transaction(
+                    &winner_repo,
+                    &winner_guard,
+                    transaction_request(winner_request.clone(), None),
+                )
+                .unwrap();
+                *winner_result_for_hook.lock().unwrap() = Some(published);
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+    let winner = winner_result.lock().unwrap().take().unwrap();
+
+    assert!(launched.load(Ordering::SeqCst));
+    assert_eq!(loser.commit_id, winner.commit_id);
+    assert_eq!(loser.result, winner.result);
+    assert!(!fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str())
+        .exists());
+    git(fixture.first.path(), ["fetch", "origin"]);
+    let receipt_path = format!("skills/receipts/{}.meta.yaml", request_id.as_str());
+    let receipt_commits = String::from_utf8(
+        git(
+            fixture.first.path(),
+            ["log", "--format=%H", "origin/main", "--", &receipt_path],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(receipt_commits.lines().count(), 1);
+    let loser_checkpoint = first_store.load().unwrap().unwrap();
+    assert_eq!(loser_checkpoint.last_scanned_tip, winner.commit_id);
+    assert!(!loser_checkpoint.conflicts.contains_key(checkpoint_key));
+}
+
+#[test]
+fn concurrent_identical_workspace_repairs_resolve_the_global_receipt_first() {
+    let fixture = Fixture::new();
+    fixture.bootstrap_and_create(&SkillSlug::new("workspace-duplicate-repair").unwrap());
+    let (_store, conflict) = install_conflict(&fixture, "skills/workspace.meta.yaml", |value| {
+        value.replace("administrators:\n- alice", "administrators: []")
+    });
+    let request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: RequestId::generate(),
+        scope: SkillRepairScope::Workspace,
+        conflict_tip: conflict.rejected_commit,
+        accepted_tree: conflict.accepted_tree_oid.unwrap(),
+    });
+
+    assert_identical_repair_converges_from_built_journal(&fixture, request, "$workspace");
+}
+
+#[test]
+fn concurrent_identical_skill_repairs_resolve_the_global_receipt_first() {
+    let fixture = Fixture::new();
+    let slug = SkillSlug::new("skill-duplicate-repair").unwrap();
+    fixture.bootstrap_and_create(&slug);
+    let changed_path = format!("skills/{}/skill.meta.yaml", slug.as_str());
+    let (_store, conflict) = install_conflict(&fixture, &changed_path, |value| {
+        value.replace("display_name: Race skill", "display_name: ''")
+    });
+    let request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: RequestId::generate(),
+        scope: SkillRepairScope::Skill(slug.clone()),
+        conflict_tip: conflict.rejected_commit,
+        accepted_tree: conflict.accepted_tree_oid.unwrap(),
+    });
+
+    assert_identical_repair_converges_from_built_journal(&fixture, request, slug.as_str());
+}
+
 #[test]
 fn skill_and_workspace_repairs_restore_the_checkpoint_accepted_tree() {
     for workspace_scope in [false, true] {
