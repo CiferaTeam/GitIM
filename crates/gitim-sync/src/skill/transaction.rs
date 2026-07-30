@@ -21,8 +21,9 @@ use gitim_core::skill::{
 use serde::{Deserialize, Serialize};
 
 use super::checkpoint::{
-    lock_exclusive_until, validate_incoming_skill_history, AcceptedSkillState, AcceptedTree,
-    LockedSkillCheckpoint, SkillCheckpointStore, SkillSyncError, SkillValidationCheckpoint,
+    lock_exclusive_until, validate_incoming_skill_history_with_runner, AcceptedSkillState,
+    AcceptedTree, LockedSkillCheckpoint, SkillCheckpointStore, SkillSyncError,
+    SkillValidationCheckpoint,
 };
 use super::guard::SkillSyncGuard;
 use crate::git::{classify_remote_error, GitError, GitStorage, GIT_HTTP_TIMEOUT_ARGS};
@@ -570,12 +571,11 @@ fn recover_current_transaction(
     context: &TransactionContext,
 ) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
     request_lock.ensure_owns(journal.request.request_id())?;
-    let root = transaction_root(repo.root(), journal.request.request_id())?;
     if journal.phase == SkillTransactionPhase::Completed {
-        fs::remove_dir_all(&root)
-            .map_err(|error| checkpoint_io("remove completed transaction", error))?;
+        remove_completed_journal(repo, journal, request_lock)?;
         return Ok(None);
     }
+    let root = transaction_root(repo.root(), journal.request.request_id())?;
 
     fetch(repo, context)?;
     let start_branch = current_branch(repo, context)?;
@@ -677,6 +677,10 @@ fn recover_transaction_journals(
                 "transaction directory does not match journal request",
             ));
         }
+        if journal.phase == SkillTransactionPhase::Completed {
+            remove_completed_journal(repo, &journal, &request_lock)?;
+            continue;
+        }
         let package = load_snapshotted_package(&journal)?;
         let fingerprint = request_fingerprint(&journal.request, &journal.actor, package.as_ref())?;
         if journal.request_fingerprint != fingerprint {
@@ -689,6 +693,16 @@ fn recover_transaction_journals(
         }
     }
     Ok(recovered)
+}
+
+fn remove_completed_journal(
+    repo: &GitStorage,
+    journal: &TransactionJournal,
+    request_lock: &RequestJournalLock,
+) -> Result<(), SkillSyncError> {
+    request_lock.ensure_owns(journal.request.request_id())?;
+    let root = transaction_root(repo.root(), journal.request.request_id())?;
+    fs::remove_dir_all(&root).map_err(|error| checkpoint_io("remove completed transaction", error))
 }
 
 fn prepare_journal(
@@ -1607,7 +1621,10 @@ fn record_accepted_view_locked(
     let previous = checkpoint
         .load()?
         .unwrap_or_else(|| SkillValidationCheckpoint::empty(branch));
-    let validation = validate_incoming_skill_history(repo, &previous, commit)?;
+    let validation =
+        validate_incoming_skill_history_with_runner(repo, &previous, commit, &|repo, args| {
+            run_git(repo, args, &[], context)
+        })?;
     let head = rev_parse(repo, "HEAD", context)?;
     let head_root = object_oid_at(repo, &head, "skills", context)?;
     let accepted_root = object_oid_at(repo, commit, "skills", context)?;
@@ -2242,24 +2259,39 @@ fn run_git_output(
     }
     let mut child = command.spawn().map_err(GitError::Io)?;
     let pid = child.id();
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| GitError::CommandFailed("git stdout pipe is unavailable".to_owned()))?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or_else(|| GitError::CommandFailed("git stderr pipe is unavailable".to_owned()))?;
-    let stdout_receiver = read_pipe(stdout);
-    let stderr_receiver = read_pipe(stderr);
-    let command_deadline = Instant::now()
+    let command_started = Instant::now();
+    let cleanup_deadline = command_started
         .checked_add(timeout)
         .unwrap_or(context.deadline)
         .min(context.deadline);
+    let cleanup_budget = child_reap_budget(timeout);
+    let command_deadline = cleanup_deadline
+        .checked_sub(cleanup_budget)
+        .unwrap_or(command_started);
+    let Some(stdout) = child.stdout.take() else {
+        terminate_child(
+            child,
+            pid,
+            cleanup_deadline,
+            context.simulate_process_group_kill_failure,
+        );
+        return Err(GitError::CommandFailed("git stdout pipe is unavailable".to_owned()).into());
+    };
+    let Some(stderr) = child.stderr.take() else {
+        terminate_child(
+            child,
+            pid,
+            cleanup_deadline,
+            context.simulate_process_group_kill_failure,
+        );
+        return Err(GitError::CommandFailed("git stderr pipe is unavailable".to_owned()).into());
+    };
+    let stdout_receiver = read_pipe(stdout);
+    let stderr_receiver = read_pipe(stderr);
 
     loop {
-        match child.try_wait().map_err(GitError::Io)? {
-            Some(status) => {
+        match child.try_wait() {
+            Ok(Some(status)) => {
                 let Some(stdout) = receive_pipe(&stdout_receiver, command_deadline)? else {
                     break;
                 };
@@ -2272,23 +2304,37 @@ fn run_git_output(
                     stderr,
                 });
             }
-            None => {
+            Ok(None) => {
                 let now = Instant::now();
                 if now >= command_deadline {
                     break;
                 }
                 std::thread::sleep(CHILD_POLL_INTERVAL.min(command_deadline - now));
             }
+            Err(error) => {
+                terminate_child(
+                    child,
+                    pid,
+                    cleanup_deadline,
+                    context.simulate_process_group_kill_failure,
+                );
+                return Err(GitError::Io(error).into());
+            }
         }
     }
 
     terminate_child(
-        &mut child,
+        child,
         pid,
-        context.deadline,
+        cleanup_deadline,
         context.simulate_process_group_kill_failure,
     );
     Err(GitError::Timeout(timeout).into())
+}
+
+fn child_reap_budget(timeout: Duration) -> Duration {
+    let half = timeout / 2;
+    CHILD_REAP_GRACE.min(if half.is_zero() { timeout } else { half })
 }
 
 fn read_pipe<R>(mut pipe: R) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>
@@ -2322,11 +2368,44 @@ fn receive_pipe(
 }
 
 fn terminate_child(
-    child: &mut Child,
+    mut child: Child,
     pid: u32,
-    transaction_deadline: Instant,
+    cleanup_deadline: Instant,
     simulate_process_group_kill_failure: bool,
 ) {
+    terminate_process_group(pid, simulate_process_group_kill_failure);
+    let _ = child.kill();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Err(_) => {
+                defer_child_reap(child);
+                return;
+            }
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= cleanup_deadline {
+                    break;
+                }
+                std::thread::sleep(CHILD_POLL_INTERVAL.min(cleanup_deadline - now));
+            }
+        }
+    }
+    terminate_process_group(pid, simulate_process_group_kill_failure);
+    let _ = child.kill();
+    match child.try_wait() {
+        Ok(Some(_)) => {}
+        Ok(None) | Err(_) => defer_child_reap(child),
+    }
+}
+
+fn defer_child_reap(mut child: Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+fn terminate_process_group(pid: u32, simulate_process_group_kill_failure: bool) {
     #[cfg(unix)]
     if !simulate_process_group_kill_failure {
         // SAFETY: `pid` names the process-group leader created above.
@@ -2339,23 +2418,6 @@ fn terminate_child(
         let _ = Command::new("taskkill")
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .spawn();
-    }
-    let _ = child.kill();
-    let cleanup_deadline = Instant::now()
-        .checked_add(CHILD_REAP_GRACE)
-        .unwrap_or(transaction_deadline)
-        .min(transaction_deadline);
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) | Err(_) => return,
-            Ok(None) => {
-                let now = Instant::now();
-                if now >= cleanup_deadline {
-                    return;
-                }
-                std::thread::sleep(CHILD_POLL_INTERVAL.min(cleanup_deadline - now));
-            }
-        }
     }
 }
 

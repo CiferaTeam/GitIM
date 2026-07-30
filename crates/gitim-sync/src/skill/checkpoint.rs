@@ -18,7 +18,7 @@ use gitim_core::types::{Handler, UserMeta};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::git_tree::{list_tree_recursive, tree_oid_at, GitTreeEntry};
+use super::git_tree::{list_tree_recursive_with_runner, tree_oid_at_with_runner, GitTreeEntry};
 use crate::git::{run_git_with_env_and_timeout, GitError, GitStorage};
 
 const CHECKPOINT_SCHEMA_VERSION: u32 = 1;
@@ -31,6 +31,8 @@ const MAX_EPOCH_DEPTH: usize = 32;
 const SHA1_EMPTY_TREE_OID: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const SHA256_EMPTY_TREE_OID: &str =
     "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
+type SkillGitRunner<'a> =
+    dyn Fn(&GitStorage, &[&str]) -> Result<std::process::Output, SkillSyncError> + 'a;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -351,15 +353,25 @@ pub fn validate_incoming_skill_history(
     previous: &SkillValidationCheckpoint,
     fetched_tip: &str,
 ) -> Result<IncomingSkillValidation, SkillSyncError> {
+    validate_incoming_skill_history_with_runner(repo, previous, fetched_tip, &run_skill_git)
+}
+
+pub(crate) fn validate_incoming_skill_history_with_runner(
+    repo: &GitStorage,
+    previous: &SkillValidationCheckpoint,
+    fetched_tip: &str,
+    runner: &SkillGitRunner<'_>,
+) -> Result<IncomingSkillValidation, SkillSyncError> {
+    let git = SkillValidationGit { repo, runner };
     validate_checkpoint(previous)?;
-    let fetched_tip = resolve_commit(repo, fetched_tip)?;
+    let fetched_tip = resolve_commit(&git, fetched_tip)?;
     let marker = (!previous.last_scanned_tip.is_empty())
-        .then(|| resolve_commit(repo, &previous.last_scanned_tip))
+        .then(|| resolve_commit(&git, &previous.last_scanned_tip))
         .transpose()?;
-    let mut replay = Replay::new(repo, marker.as_deref(), &previous.active_epoch);
+    let mut replay = Replay::new(git, marker.as_deref(), &previous.active_epoch);
     replay.segment(&fetched_tip, 0)?;
 
-    let top_epoch = epoch_at(repo, &fetched_tip)?;
+    let top_epoch = epoch_at(&replay.git, &fetched_tip)?;
     if top_epoch
         .as_ref()
         .is_some_and(|epoch| epoch.status == EpochStatus::Redirected)
@@ -370,7 +382,7 @@ pub fn validate_incoming_skill_history(
     }
     if let Some(epoch) = &top_epoch {
         let active_ref = format!("refs/remotes/origin/{}", epoch.branch);
-        let authoritative_tip = resolve_commit(repo, &active_ref).map_err(|error| {
+        let authoritative_tip = resolve_commit(&replay.git, &active_ref).map_err(|error| {
             SkillSyncError::EpochValidationBlocked(format!(
                 "active epoch ref {} is unavailable: {error}",
                 epoch.branch
@@ -419,9 +431,20 @@ pub fn validate_incoming_skill_history(
     })
 }
 
-struct Replay<'a> {
+struct SkillValidationGit<'a> {
     repo: &'a GitStorage,
-    marker: Option<&'a str>,
+    runner: &'a SkillGitRunner<'a>,
+}
+
+impl SkillValidationGit<'_> {
+    fn run(&self, args: &[&str]) -> Result<std::process::Output, SkillSyncError> {
+        (self.runner)(self.repo, args)
+    }
+}
+
+struct Replay<'a> {
+    git: SkillValidationGit<'a>,
+    marker: Option<String>,
     marker_seen: bool,
     marker_checkpoint: Option<SkillValidationCheckpoint>,
     checkpoint: SkillValidationCheckpoint,
@@ -466,10 +489,10 @@ struct CommitMetadata {
 }
 
 impl<'a> Replay<'a> {
-    fn new(repo: &'a GitStorage, marker: Option<&'a str>, active_epoch: &str) -> Self {
+    fn new(git: SkillValidationGit<'a>, marker: Option<&str>, active_epoch: &str) -> Self {
         Self {
-            repo,
-            marker,
+            git,
+            marker: marker.map(str::to_owned),
             marker_seen: marker.is_none(),
             marker_checkpoint: None,
             checkpoint: SkillValidationCheckpoint::empty(active_epoch),
@@ -490,8 +513,8 @@ impl<'a> Replay<'a> {
                 "epoch lineage exceeds maximum depth".to_owned(),
             ));
         }
-        let chain = first_parent_chain(self.repo, tip)?;
-        let relevant = relevant_commits(self.repo, tip)?;
+        let chain = first_parent_chain(&self.git, tip)?;
+        let relevant = relevant_commits(&self.git, tip)?;
         let root = chain.first().ok_or_else(|| {
             SkillSyncError::EpochValidationBlocked("empty commit lineage".to_owned())
         })?;
@@ -500,7 +523,7 @@ impl<'a> Replay<'a> {
                 "epoch lineage cycle".to_owned(),
             ));
         }
-        let root_epoch = epoch_at(self.repo, root)?;
+        let root_epoch = epoch_at(&self.git, root)?;
         match root_epoch {
             None => {
                 if depth != 0 && !self.checkpoint.last_scanned_tip.is_empty() {
@@ -508,7 +531,7 @@ impl<'a> Replay<'a> {
                         "epoch predecessor root lacks active metadata".to_owned(),
                     ));
                 }
-                let material = load_tree_material(self.repo, root)?;
+                let material = load_tree_material(&self.git, root)?;
                 let snapshot = parse_snapshot(&material)?;
                 if !snapshot.repository_files.is_empty() {
                     return Err(SkillSyncError::EpochValidationBlocked(
@@ -523,7 +546,7 @@ impl<'a> Replay<'a> {
                 self.advance(root);
             }
             Some(epoch) if epoch.status == EpochStatus::Active => {
-                let root_metadata = commit_metadata(self.repo, root)?;
+                let root_metadata = commit_metadata(&self.git, root)?;
                 if !root_metadata.parents.is_empty() {
                     return Err(SkillSyncError::EpochValidationBlocked(
                         "active epoch snapshot is not an orphan root".to_owned(),
@@ -536,25 +559,25 @@ impl<'a> Replay<'a> {
                 })?;
                 validate_branch_name(&epoch.branch)?;
                 validate_branch_name(&snapshot.source_branch)?;
-                let source_commit = resolve_commit(self.repo, &snapshot.source_commit)?;
-                let source_epoch = epoch_at(self.repo, &source_commit)?;
+                let source_commit = resolve_commit(&self.git, &snapshot.source_commit)?;
+                let source_epoch = epoch_at(&self.git, &source_commit)?;
                 self.segment(&source_commit, depth + 1)?;
                 let seal_ref = format!("refs/remotes/origin/{}", snapshot.source_branch);
-                let seal_oid = resolve_commit(self.repo, &seal_ref).map_err(|error| {
+                let seal_oid = resolve_commit(&self.git, &seal_ref).map_err(|error| {
                     SkillSyncError::EpochValidationBlocked(format!(
                         "retained predecessor {} is unavailable: {error}",
                         snapshot.source_branch
                     ))
                 })?;
-                let seal = commit_metadata(self.repo, &seal_oid)?;
+                let seal = commit_metadata(&self.git, &seal_oid)?;
                 if seal.parents.as_slice() != [source_commit.as_str()]
-                    || changed_paths(self.repo, &seal)? != BTreeSet::from([EPOCH_PATH.to_owned()])
+                    || changed_paths(&self.git, &seal)? != BTreeSet::from([EPOCH_PATH.to_owned()])
                 {
                     return Err(SkillSyncError::EpochValidationBlocked(
                         "predecessor seal is malformed".to_owned(),
                     ));
                 }
-                let seal_epoch = epoch_at(self.repo, &seal_oid)?
+                let seal_epoch = epoch_at(&self.git, &seal_oid)?
                     .filter(|value| value.status == EpochStatus::Redirected)
                     .ok_or_else(|| {
                         SkillSyncError::EpochValidationBlocked(
@@ -580,14 +603,14 @@ impl<'a> Replay<'a> {
                 })?;
                 if redirect.target_epoch != epoch.epoch
                     || redirect.target_branch != epoch.branch
-                    || resolve_commit(self.repo, &redirect.snapshot_of)? != source_commit
+                    || resolve_commit(&self.git, &redirect.snapshot_of)? != source_commit
                     || redirect.target_commit != snapshot.commit
                 {
                     return Err(SkillSyncError::EpochValidationBlocked(
                         "epoch redirect does not match active snapshot".to_owned(),
                     ));
                 }
-                let snapshot_commit = resolve_commit(self.repo, &snapshot.commit)?;
+                let snapshot_commit = resolve_commit(&self.git, &snapshot.commit)?;
                 if snapshot_commit != source_commit && snapshot_commit != *root {
                     return Err(SkillSyncError::EpochValidationBlocked(
                         "active snapshot commit is unrelated".to_owned(),
@@ -595,14 +618,14 @@ impl<'a> Replay<'a> {
                 }
                 self.advance(&seal_oid);
 
-                if repository_tree_entries(self.repo, &source_commit)?
-                    != repository_tree_entries(self.repo, root)?
+                if repository_tree_entries(&self.git, &source_commit)?
+                    != repository_tree_entries(&self.git, root)?
                 {
                     return Err(SkillSyncError::EpochValidationBlocked(
                         "orphan snapshot differs from predecessor Git tree".to_owned(),
                     ));
                 }
-                let material = load_tree_material(self.repo, root)?;
+                let material = load_tree_material(&self.git, root)?;
                 let root_snapshot = parse_snapshot(&material)?;
                 if !self.checkpoint.conflicts.is_empty()
                     || root_snapshot.repository_files != self.accepted.snapshot.repository_files
@@ -635,13 +658,13 @@ impl<'a> Replay<'a> {
                 self.advance(commit);
             }
         }
-        if let Some(root_epoch) = epoch_at(self.repo, root)? {
-            if epoch_at(self.repo, tip)? != Some(root_epoch) {
+        if let Some(root_epoch) = epoch_at(&self.git, root)? {
+            if epoch_at(&self.git, tip)? != Some(root_epoch) {
                 return Err(SkillSyncError::EpochValidationBlocked(
                     "active epoch metadata changed inside an epoch".to_owned(),
                 ));
             }
-        } else if epoch_at(self.repo, tip)?.is_some() {
+        } else if epoch_at(&self.git, tip)?.is_some() {
             return Err(SkillSyncError::EpochValidationBlocked(
                 "legacy lineage contains epoch metadata".to_owned(),
             ));
@@ -650,8 +673,8 @@ impl<'a> Replay<'a> {
     }
 
     fn process_commit(&mut self, commit: &str) -> Result<(), SkillSyncError> {
-        let metadata = commit_metadata(self.repo, commit)?;
-        let paths = changed_paths(self.repo, &metadata)?;
+        let metadata = commit_metadata(&self.git, commit)?;
+        let paths = changed_paths(&self.git, &metadata)?;
         if paths.contains(EPOCH_PATH) {
             return Err(SkillSyncError::EpochValidationBlocked(
                 "epoch metadata changed outside a seal".to_owned(),
@@ -659,13 +682,13 @@ impl<'a> Replay<'a> {
         }
         let skill_affecting = paths.iter().any(|path| managed_skill_path(path));
         if !skill_affecting {
-            let material = load_tree_material(self.repo, commit)?;
+            let material = load_tree_material(&self.git, commit)?;
             self.accepted.snapshot.active_users = material.active_users;
             self.advance(commit);
             return Ok(());
         }
 
-        let actual_after = load_tree_material(self.repo, commit)?;
+        let actual_after = load_tree_material(&self.git, commit)?;
         let receipt = changed_receipt(&paths, &actual_after).ok();
         let mut affected = affected_scopes(&paths, receipt.as_ref());
         let result = receipt
@@ -708,7 +731,7 @@ impl<'a> Replay<'a> {
                 let introduced_receipts = metadata
                     .parents
                     .first()
-                    .and_then(|parent| load_tree_material(self.repo, parent).ok())
+                    .and_then(|parent| load_tree_material(&self.git, parent).ok())
                     .map_or_else(BTreeMap::new, |parent| {
                         introduced_receipt_owners(&paths, &parent, &actual_after)
                     });
@@ -722,7 +745,7 @@ impl<'a> Replay<'a> {
                     key != WORKSPACE_CONFLICT_KEY && !self.checkpoint.skills.contains_key(key)
                 });
                 let absent_tree_oid = needs_absent_tree
-                    .then(|| empty_tree_oid(self.repo))
+                    .then(|| empty_tree_oid(&self.git))
                     .transpose()?;
                 for key in affected {
                     let rejected_receipt_paths: BTreeSet<_> = introduced_receipts
@@ -827,12 +850,12 @@ impl<'a> Replay<'a> {
             .ok_or(SkillError::SyncConflict)?;
         let parent = metadata.parents.first().ok_or(SkillError::SyncConflict)?;
         let actual_parent =
-            load_tree_material(self.repo, parent).map_err(|_| SkillError::SyncConflict)?;
+            load_tree_material(&self.git, parent).map_err(|_| SkillError::SyncConflict)?;
         let mut before = self.accepted.clone();
         let accepted_state = repair_accepted_state(&before.snapshot, receipt)?;
         let accepted_files = scope_files(&before.snapshot.repository_files, receipt.skill.as_ref());
         let accepted_entries =
-            accepted_scope_entries(self.repo, &self.checkpoint, receipt.skill.as_ref())
+            accepted_scope_entries(&self.git, &self.checkpoint, receipt.skill.as_ref())
                 .map_err(|_| SkillError::SyncConflict)?;
         overlay_scope(
             &mut before.snapshot.repository_files,
@@ -875,7 +898,7 @@ impl<'a> Replay<'a> {
         let evidence = evidence(metadata, paths, receipt)?;
         let outcome = validate_skill_commit(&before.snapshot, &projected.snapshot, &evidence)?;
         let repaired_tree =
-            scope_tree_oid(self.repo, commit, &self.checkpoint, receipt.skill.as_ref())
+            scope_tree_oid(&self.git, commit, &self.checkpoint, receipt.skill.as_ref())
                 .map_err(|_| SkillError::SyncConflict)?;
         if repaired_tree.as_deref() != conflict.accepted_tree_oid.as_deref()
             || conflict
@@ -908,7 +931,7 @@ impl<'a> Replay<'a> {
 
     fn update_workspace_pointer(&mut self, commit: &str) -> Result<(), SkillSyncError> {
         self.checkpoint.workspace_tree =
-            tree_oid_at(self.repo, commit, "skills/workspace.meta.yaml")?.map(|tree_oid| {
+            tree_oid_at(&self.git, commit, "skills/workspace.meta.yaml")?.map(|tree_oid| {
                 AcceptedTree {
                     commit_oid: commit.to_owned(),
                     tree_oid,
@@ -931,7 +954,7 @@ impl<'a> Replay<'a> {
                 self.checkpoint.skills.remove(slug.as_str());
                 return Ok(());
             };
-        let tree_oid = tree_oid_at(self.repo, commit, &root)?.ok_or_else(|| {
+        let tree_oid = tree_oid_at(&self.git, commit, &root)?.ok_or_else(|| {
             SkillSyncError::Checkpoint(format!("accepted Skill tree {root} is missing"))
         })?;
         self.checkpoint.skills.insert(
@@ -954,7 +977,7 @@ impl<'a> Replay<'a> {
     }
 
     fn capture_marker(&mut self, commit: &str) {
-        if !self.marker_seen && self.marker == Some(commit) {
+        if !self.marker_seen && self.marker.as_deref() == Some(commit) {
             self.marker_seen = true;
             self.marker_checkpoint = Some(self.checkpoint.clone());
             return;
@@ -1238,14 +1261,14 @@ fn overlay_rejected_receipts(
 }
 
 fn accepted_scope_entries(
-    repo: &GitStorage,
+    git: &SkillValidationGit<'_>,
     checkpoint: &SkillValidationCheckpoint,
     slug: Option<&SkillSlug>,
 ) -> Result<BTreeMap<String, GitEntryIdentity>, SkillSyncError> {
     let Some((commit, root)) = accepted_scope_location(checkpoint, slug) else {
         return Ok(BTreeMap::new());
     };
-    let material = load_tree_material(repo, commit)?;
+    let material = load_tree_material(git, commit)?;
     Ok(material
         .entries
         .into_iter()
@@ -1276,19 +1299,19 @@ fn entry_only_scope_diff(
 }
 
 fn scope_tree_oid(
-    repo: &GitStorage,
+    git: &SkillValidationGit<'_>,
     commit: &str,
     checkpoint: &SkillValidationCheckpoint,
     slug: Option<&SkillSlug>,
 ) -> Result<Option<String>, SkillSyncError> {
     if let Some((_, root)) = accepted_scope_location(checkpoint, slug) {
-        return Ok(tree_oid_at(repo, commit, &root)?);
+        return tree_oid_at(git, commit, &root);
     }
     if let Some(slug) = slug {
-        let active = tree_oid_at(repo, commit, &format!("skills/{}", slug.as_str()))?;
-        let archived = tree_oid_at(repo, commit, &format!("archive/skills/{}", slug.as_str()))?;
+        let active = tree_oid_at(git, commit, &format!("skills/{}", slug.as_str()))?;
+        let archived = tree_oid_at(git, commit, &format!("archive/skills/{}", slug.as_str()))?;
         return match (active, archived) {
-            (None, None) => empty_tree_oid(repo).map(Some),
+            (None, None) => empty_tree_oid(git).map(Some),
             (Some(oid), None) | (None, Some(oid)) => Ok(Some(oid)),
             (Some(_), Some(_)) => Err(SkillSyncError::Checkpoint(format!(
                 "repaired Skill {:?} exists in both active and archived trees",
@@ -1322,11 +1345,11 @@ fn accepted_scope_location<'a>(
 }
 
 fn repository_tree_entries(
-    repo: &GitStorage,
+    git: &SkillValidationGit<'_>,
     commit: &str,
 ) -> Result<BTreeMap<String, (String, String, String)>, SkillSyncError> {
     let mut entries = BTreeMap::new();
-    for entry in list_tree_recursive(repo, commit, "")? {
+    for entry in list_tree_recursive(git, commit, "")? {
         if entry.path == EPOCH_PATH {
             if entry.mode != "100644" || entry.object_type != "blob" {
                 return Err(SkillSyncError::EpochValidationBlocked(
@@ -1341,12 +1364,15 @@ fn repository_tree_entries(
     Ok(entries)
 }
 
-fn load_tree_material(repo: &GitStorage, commit: &str) -> Result<TreeMaterial, SkillSyncError> {
+fn load_tree_material(
+    git: &SkillValidationGit<'_>,
+    commit: &str,
+) -> Result<TreeMaterial, SkillSyncError> {
     let mut files = BTreeMap::new();
     let mut modes = BTreeMap::new();
     let mut entries = BTreeMap::new();
     let mut active_users = BTreeSet::new();
-    for entry in list_tree_recursive(repo, commit, "")? {
+    for entry in list_tree_recursive(git, commit, "")? {
         validate_repository_path(&entry.path)?;
         let managed = managed_skill_path(&entry.path);
         let user = active_user_path(&entry.path);
@@ -1364,14 +1390,14 @@ fn load_tree_material(repo: &GitStorage, commit: &str) -> Result<TreeMaterial, S
             );
             modes.insert(entry.path.clone(), entry.mode.clone());
             if entry.object_type == "blob" {
-                let bytes = read_blob_oid(repo, &entry)?;
+                let bytes = read_blob_oid(git, &entry)?;
                 files.insert(entry.path, bytes);
             }
         } else if let Some(handler) = user {
             if entry.object_type != "blob" {
                 return Err(SkillSyncError::Domain(SkillError::SyncConflict));
             }
-            let bytes = read_blob_oid(repo, &entry)?;
+            let bytes = read_blob_oid(git, &entry)?;
             if !matches!(entry.mode.as_str(), "100644" | "100755")
                 || serde_yaml::from_slice::<UserMeta>(&bytes).is_err()
             {
@@ -1556,8 +1582,31 @@ fn parse_yaml_file<T: serde::de::DeserializeOwned>(
     serde_yaml::from_slice(bytes).map_err(|_| SkillError::SyncConflict)
 }
 
-fn first_parent_chain(repo: &GitStorage, tip: &str) -> Result<Vec<String>, SkillSyncError> {
-    let output = run_skill_git(repo, &["rev-list", "--first-parent", "--reverse", tip])?;
+fn tree_oid_at(
+    git: &SkillValidationGit<'_>,
+    commit: &str,
+    path: &str,
+) -> Result<Option<String>, SkillSyncError> {
+    tree_oid_at_with_runner(git.repo, commit, path, &|repo, args| {
+        (git.runner)(repo, args)
+    })
+}
+
+fn list_tree_recursive(
+    git: &SkillValidationGit<'_>,
+    commit: &str,
+    path: &str,
+) -> Result<Vec<GitTreeEntry>, SkillSyncError> {
+    list_tree_recursive_with_runner(git.repo, commit, path, &|repo, args| {
+        (git.runner)(repo, args)
+    })
+}
+
+fn first_parent_chain(
+    git: &SkillValidationGit<'_>,
+    tip: &str,
+) -> Result<Vec<String>, SkillSyncError> {
+    let output = git.run(&["rev-list", "--first-parent", "--reverse", tip])?;
     let text = std::str::from_utf8(&output.stdout)
         .map_err(|_| SkillSyncError::Checkpoint("non-UTF-8 commit list".to_owned()))?;
     text.lines()
@@ -1565,20 +1614,20 @@ fn first_parent_chain(repo: &GitStorage, tip: &str) -> Result<Vec<String>, Skill
         .collect()
 }
 
-fn relevant_commits(repo: &GitStorage, tip: &str) -> Result<BTreeSet<String>, SkillSyncError> {
-    let output = run_skill_git(
-        repo,
-        &[
-            "rev-list",
-            "--first-parent",
-            tip,
-            "--",
-            "skills",
-            "archive/skills",
-            "users",
-            EPOCH_PATH,
-        ],
-    )?;
+fn relevant_commits(
+    git: &SkillValidationGit<'_>,
+    tip: &str,
+) -> Result<BTreeSet<String>, SkillSyncError> {
+    let output = git.run(&[
+        "rev-list",
+        "--first-parent",
+        tip,
+        "--",
+        "skills",
+        "archive/skills",
+        "users",
+        EPOCH_PATH,
+    ])?;
     let text = std::str::from_utf8(&output.stdout)
         .map_err(|_| SkillSyncError::Checkpoint("non-UTF-8 commit list".to_owned()))?;
     text.lines()
@@ -1586,9 +1635,12 @@ fn relevant_commits(repo: &GitStorage, tip: &str) -> Result<BTreeSet<String>, Sk
         .collect()
 }
 
-fn commit_metadata(repo: &GitStorage, commit: &str) -> Result<CommitMetadata, SkillSyncError> {
+fn commit_metadata(
+    git: &SkillValidationGit<'_>,
+    commit: &str,
+) -> Result<CommitMetadata, SkillSyncError> {
     let format = "%H%x00%T%x00%P%x00%an%x00%B";
-    let output = run_skill_git(repo, &["show", "-s", &format!("--format={format}"), commit])?;
+    let output = git.run(&["show", "-s", &format!("--format={format}"), commit])?;
     let fields: Vec<_> = output.stdout.splitn(5, |byte| *byte == 0).collect();
     if fields.len() != 5 {
         return Err(SkillSyncError::Checkpoint(
@@ -1618,37 +1670,31 @@ fn commit_metadata(repo: &GitStorage, commit: &str) -> Result<CommitMetadata, Sk
 }
 
 fn changed_paths(
-    repo: &GitStorage,
+    git: &SkillValidationGit<'_>,
     metadata: &CommitMetadata,
 ) -> Result<BTreeSet<String>, SkillSyncError> {
     let output = if let Some(parent) = metadata.parents.first() {
-        run_skill_git(
-            repo,
-            &[
-                "diff",
-                "--name-only",
-                "-z",
-                "--no-renames",
-                parent,
-                &metadata.oid,
-                "--",
-            ],
-        )?
+        git.run(&[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            parent,
+            &metadata.oid,
+            "--",
+        ])?
     } else {
-        run_skill_git(
-            repo,
-            &[
-                "diff-tree",
-                "--root",
-                "--no-commit-id",
-                "--name-only",
-                "-r",
-                "-z",
-                "--no-renames",
-                &metadata.oid,
-                "--",
-            ],
-        )?
+        git.run(&[
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "-z",
+            "--no-renames",
+            &metadata.oid,
+            "--",
+        ])?
     };
     output
         .stdout
@@ -1663,8 +1709,11 @@ fn changed_paths(
         .collect()
 }
 
-fn epoch_at(repo: &GitStorage, commit: &str) -> Result<Option<EpochFile>, SkillSyncError> {
-    let entries = list_tree_recursive(repo, commit, EPOCH_PATH)?;
+fn epoch_at(
+    git: &SkillValidationGit<'_>,
+    commit: &str,
+) -> Result<Option<EpochFile>, SkillSyncError> {
+    let entries = list_tree_recursive(git, commit, EPOCH_PATH)?;
     let Some(entry) = entries.into_iter().find(|entry| entry.path == EPOCH_PATH) else {
         return Ok(None);
     };
@@ -1673,7 +1722,7 @@ fn epoch_at(repo: &GitStorage, commit: &str) -> Result<Option<EpochFile>, SkillS
             "epoch metadata is not a blob".to_owned(),
         ));
     }
-    let bytes = read_blob_oid(repo, &entry)?;
+    let bytes = read_blob_oid(git, &entry)?;
     let epoch: EpochFile = serde_yaml::from_slice(&bytes).map_err(|error| {
         SkillSyncError::EpochValidationBlocked(format!("parse epoch metadata: {error}"))
     })?;
@@ -1683,17 +1732,14 @@ fn epoch_at(repo: &GitStorage, commit: &str) -> Result<Option<EpochFile>, SkillS
     Ok(Some(epoch))
 }
 
-fn resolve_commit(repo: &GitStorage, revision: &str) -> Result<String, SkillSyncError> {
+fn resolve_commit(git: &SkillValidationGit<'_>, revision: &str) -> Result<String, SkillSyncError> {
     if revision.is_empty() || revision.starts_with('-') || revision.contains(['\0', '\n', '\r']) {
         return Err(SkillSyncError::Checkpoint(
             "invalid commit revision".to_owned(),
         ));
     }
     let object = format!("{revision}^{{commit}}");
-    let output = run_skill_git(
-        repo,
-        &["rev-parse", "--verify", "--end-of-options", &object],
-    )?;
+    let output = git.run(&["rev-parse", "--verify", "--end-of-options", &object])?;
     let oid = std::str::from_utf8(&output.stdout)
         .map_err(|_| SkillSyncError::Checkpoint("non-UTF-8 object ID".to_owned()))?
         .trim()
@@ -1710,9 +1756,12 @@ const fn canonical_empty_tree_oid(length: usize) -> Option<&'static str> {
     }
 }
 
-fn read_blob_oid(repo: &GitStorage, entry: &GitTreeEntry) -> Result<Vec<u8>, SkillSyncError> {
+fn read_blob_oid(
+    git: &SkillValidationGit<'_>,
+    entry: &GitTreeEntry,
+) -> Result<Vec<u8>, SkillSyncError> {
     validate_oid(&entry.oid)?;
-    Ok(run_skill_git(repo, &["cat-file", "blob", &entry.oid])?.stdout)
+    Ok(git.run(&["cat-file", "blob", &entry.oid])?.stdout)
 }
 
 fn run_skill_git(repo: &GitStorage, args: &[&str]) -> Result<std::process::Output, SkillSyncError> {
@@ -1724,8 +1773,8 @@ fn run_skill_git(repo: &GitStorage, args: &[&str]) -> Result<std::process::Outpu
     )?)
 }
 
-fn empty_tree_oid(repo: &GitStorage) -> Result<String, SkillSyncError> {
-    let output = run_skill_git(repo, &["hash-object", "-t", "tree", "--stdin"])?;
+fn empty_tree_oid(git: &SkillValidationGit<'_>) -> Result<String, SkillSyncError> {
+    let output = git.run(&["hash-object", "-t", "tree", "--stdin"])?;
     let oid = std::str::from_utf8(&output.stdout)
         .map_err(|_| SkillSyncError::Checkpoint("non-UTF-8 empty tree ID".to_owned()))?
         .trim()

@@ -43,12 +43,24 @@ pub fn tree_oid_at(
     commit: &str,
     path: &str,
 ) -> Result<Option<String>, GitError> {
-    let commit_oid = resolve_commit(repo, commit)?;
+    tree_oid_at_with_runner(repo, commit, path, &run_skill_git)
+}
+
+pub(crate) fn tree_oid_at_with_runner<E>(
+    repo: &GitStorage,
+    commit: &str,
+    path: &str,
+    run: &impl Fn(&GitStorage, &[&str]) -> Result<Output, E>,
+) -> Result<Option<String>, E>
+where
+    E: From<GitError>,
+{
+    let commit_oid = resolve_commit_with_runner(repo, commit, run)?;
     if path.is_empty() {
-        return resolve_object(repo, &format!("{commit_oid}^{{tree}}")).map(Some);
+        return resolve_object_with_runner(repo, &format!("{commit_oid}^{{tree}}"), run).map(Some);
     }
-    validate_tree_path(path)?;
-    Ok(ls_tree_entry(repo, &commit_oid, path)?.map(|entry| entry.oid))
+    validate_tree_path(path).map_err(E::from)?;
+    Ok(ls_tree_entry_with_runner(repo, &commit_oid, path, run)?.map(|entry| entry.oid))
 }
 
 pub fn read_blob_at(
@@ -76,13 +88,25 @@ pub fn list_tree_recursive(
     commit: &str,
     path: &str,
 ) -> Result<Vec<GitTreeEntry>, GitError> {
-    let commit_oid = resolve_commit(repo, commit)?;
+    list_tree_recursive_with_runner(repo, commit, path, &run_skill_git)
+}
+
+pub(crate) fn list_tree_recursive_with_runner<E>(
+    repo: &GitStorage,
+    commit: &str,
+    path: &str,
+    run: &impl Fn(&GitStorage, &[&str]) -> Result<Output, E>,
+) -> Result<Vec<GitTreeEntry>, E>
+where
+    E: From<GitError>,
+{
+    let commit_oid = resolve_commit_with_runner(repo, commit, run)?;
     let output = if path.is_empty() {
-        run_skill_git(repo, &["ls-tree", "-r", "-z", "--full-tree", &commit_oid])?
+        run(repo, &["ls-tree", "-r", "-z", "--full-tree", &commit_oid])?
     } else {
-        validate_tree_path(path)?;
+        validate_tree_path(path).map_err(E::from)?;
         let literal_pathspec = format!(":(literal){path}");
-        run_skill_git(
+        run(
             repo,
             &[
                 "ls-tree",
@@ -95,7 +119,7 @@ pub fn list_tree_recursive(
             ],
         )?
     };
-    parse_ls_tree(&output.stdout)
+    parse_ls_tree(&output.stdout).map_err(E::from)
 }
 
 pub fn build_private_index_commit(
@@ -209,13 +233,31 @@ pub fn push_commit_fast_forward(
 }
 
 fn resolve_commit(repo: &GitStorage, commit: &str) -> Result<String, GitError> {
-    validate_revision_argument(commit)?;
-    resolve_object(repo, &format!("{commit}^{{commit}}"))
+    resolve_commit_with_runner(repo, commit, &run_skill_git)
 }
 
-fn resolve_object(repo: &GitStorage, object: &str) -> Result<String, GitError> {
-    let output = run_skill_git(repo, &["rev-parse", "--verify", "--end-of-options", object])?;
-    parse_oid(&output.stdout)
+fn resolve_commit_with_runner<E>(
+    repo: &GitStorage,
+    commit: &str,
+    run: &impl Fn(&GitStorage, &[&str]) -> Result<Output, E>,
+) -> Result<String, E>
+where
+    E: From<GitError>,
+{
+    validate_revision_argument(commit).map_err(E::from)?;
+    resolve_object_with_runner(repo, &format!("{commit}^{{commit}}"), run)
+}
+
+fn resolve_object_with_runner<E>(
+    repo: &GitStorage,
+    object: &str,
+    run: &impl Fn(&GitStorage, &[&str]) -> Result<Output, E>,
+) -> Result<String, E>
+where
+    E: From<GitError>,
+{
+    let output = run(repo, &["rev-parse", "--verify", "--end-of-options", object])?;
+    parse_oid(&output.stdout).map_err(E::from)
 }
 
 fn ls_tree_entry(
@@ -223,8 +265,20 @@ fn ls_tree_entry(
     commit_oid: &str,
     path: &str,
 ) -> Result<Option<GitTreeEntry>, GitError> {
+    ls_tree_entry_with_runner(repo, commit_oid, path, &run_skill_git)
+}
+
+fn ls_tree_entry_with_runner<E>(
+    repo: &GitStorage,
+    commit_oid: &str,
+    path: &str,
+    run: &impl Fn(&GitStorage, &[&str]) -> Result<Output, E>,
+) -> Result<Option<GitTreeEntry>, E>
+where
+    E: From<GitError>,
+{
     let literal_pathspec = format!(":(literal){path}");
-    let output = run_skill_git(
+    let output = run(
         repo,
         &[
             "ls-tree",
@@ -235,13 +289,13 @@ fn ls_tree_entry(
             &literal_pathspec,
         ],
     )?;
-    let mut entries = parse_ls_tree(&output.stdout)?;
+    let mut entries = parse_ls_tree(&output.stdout).map_err(E::from)?;
     match entries.len() {
         0 => Ok(None),
         1 => Ok(entries.pop()),
-        _ => Err(invalid_input(format!(
+        _ => Err(E::from(invalid_input(format!(
             "tree lookup for {path:?} returned multiple entries"
-        ))),
+        )))),
     }
 }
 
