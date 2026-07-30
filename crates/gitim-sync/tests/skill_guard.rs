@@ -101,6 +101,17 @@ fn git_output(root: &Path, args: &[&str]) -> String {
 
 fn commit_all(root: &Path, message: &str, author: &str) {
     git(root, &["add", "-A"]);
+    commit_index(root, message, author);
+}
+
+fn commit_paths(root: &Path, message: &str, author: &str, paths: &[&str]) {
+    let mut add = vec!["add", "--"];
+    add.extend_from_slice(paths);
+    git(root, &add);
+    commit_index(root, message, author);
+}
+
+fn commit_index(root: &Path, message: &str, author: &str) {
     let author = format!("{author} <{author}@example.com>");
     git(root, &["commit", "--author", &author, "-m", message]);
 }
@@ -281,6 +292,7 @@ fn missing_receipt_never_replaces_the_last_accepted_skill_view() {
         .accepted_tree_oid
         .as_ref()
         .is_some_and(|oid| !oid.is_empty()));
+    assert!(conflict.rejected_receipt_paths.is_empty());
     assert!(rejected.accepted_changes.is_empty());
 }
 
@@ -319,6 +331,44 @@ fn mismatched_root_receipt_path_is_rejected() {
         rejected.checkpoint.conflicts["release-check"].rejected_commit,
         repository.tip()
     );
+    assert!(rejected.checkpoint.conflicts["release-check"]
+        .rejected_receipt_paths
+        .is_empty());
+}
+
+#[test]
+fn malformed_root_receipt_creates_no_cleanup_authority() {
+    let repository = Repository::new();
+    let initial = repository.snapshot();
+    let bootstrap = bootstrap_plan(
+        &gitim_core::skill::SkillRepositorySnapshot {
+            active_users: BTreeSet::from([ALICE.to_owned()]),
+            ..Default::default()
+        },
+        'X',
+    );
+    let bootstrap_tip = repository.commit_plan(&bootstrap);
+    let accepted = validate_incoming_skill_history(&repository.storage, &initial, &bootstrap_tip)
+        .unwrap()
+        .checkpoint;
+    let create = create_plan(&bootstrap.after, 'Y');
+    apply_plan(repository.root(), &create);
+    fs::write(
+        repository.root().join(format!(
+            "skills/receipts/{}.meta.yaml",
+            create.receipt.id.as_str()
+        )),
+        "not: [valid\n",
+    )
+    .unwrap();
+    commit_all(repository.root(), &create.commit_message, ALICE);
+
+    let rejected =
+        validate_incoming_skill_history(&repository.storage, &accepted, &repository.tip()).unwrap();
+
+    assert!(rejected.checkpoint.conflicts["release-check"]
+        .rejected_receipt_paths
+        .is_empty());
 }
 
 #[test]
@@ -426,6 +476,7 @@ fn oversized_checkpoint_save_preserves_the_last_good_file() {
             rejected_commit: oversized.last_scanned_tip.clone(),
             code: "x".repeat(4 * 1024 * 1024),
             accepted_tree_oid: Some(repository_tree),
+            rejected_receipt_paths: BTreeSet::new(),
         },
     );
 
@@ -447,6 +498,25 @@ fn checkpoint_rejects_conflict_that_names_a_different_accepted_tree() {
             rejected_commit: checkpoint.last_scanned_tip.clone(),
             code: "skill_sync_conflict".to_owned(),
             accepted_tree_oid: Some("0000000000000000000000000000000000000000".to_owned()),
+            rejected_receipt_paths: BTreeSet::new(),
+        },
+    );
+    let store = SkillCheckpointStore::new(repository.root()).unwrap();
+
+    assert!(store.save(&checkpoint).is_err());
+}
+
+#[test]
+fn checkpoint_rejects_a_noncanonical_absent_skill_tree_oid() {
+    let repository = Repository::new();
+    let mut checkpoint = repository.snapshot();
+    checkpoint.conflicts.insert(
+        "release-check".to_owned(),
+        gitim_sync::skill::checkpoint::SkillConflict {
+            rejected_commit: checkpoint.last_scanned_tip.clone(),
+            code: "skill_sync_conflict".to_owned(),
+            accepted_tree_oid: Some("0000000000000000000000000000000000000000".to_owned()),
+            rejected_receipt_paths: BTreeSet::new(),
         },
     );
     let store = SkillCheckpointStore::new(repository.root()).unwrap();
@@ -648,6 +718,8 @@ fn authorized_repair_clears_only_the_validated_skill_conflict() {
                 .clone(),
         },
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths: BTreeSet::from([meta_path.to_owned()]),
     });
     let repair = plan_skill_mutation(
@@ -677,7 +749,196 @@ fn authorized_repair_clears_only_the_validated_skill_conflict() {
 }
 
 #[test]
-fn authorized_repair_restores_absence_after_malformed_first_bootstrap() {
+fn receipt_only_repair_does_not_clear_a_mode_only_skill_conflict() {
+    let repository = Repository::new();
+    let initial = repository.snapshot();
+    let bootstrap = bootstrap_plan(
+        &gitim_core::skill::SkillRepositorySnapshot {
+            active_users: BTreeSet::from([ALICE.to_owned()]),
+            ..Default::default()
+        },
+        'D',
+    );
+    let bootstrap_tip = repository.commit_plan(&bootstrap);
+    let accepted_bootstrap =
+        validate_incoming_skill_history(&repository.storage, &initial, &bootstrap_tip)
+            .unwrap()
+            .checkpoint;
+    let create = create_plan(&bootstrap.after, 'E');
+    let create_tip = repository.commit_plan(&create);
+    let accepted_create =
+        validate_incoming_skill_history(&repository.storage, &accepted_bootstrap, &create_tip)
+            .unwrap()
+            .checkpoint;
+    let script_path = format!(
+        "skills/release-check/revisions/{}/package/scripts/check.sh",
+        create.receipt.request.revision.as_ref().unwrap().as_str()
+    );
+    git(
+        repository.root(),
+        &["update-index", "--chmod=+x", &script_path],
+    );
+    git(repository.root(), &["commit", "-m", "mode-only bypass"]);
+    let rejected_tip = repository.tip();
+    let conflicted =
+        validate_incoming_skill_history(&repository.storage, &accepted_create, &rejected_tip)
+            .unwrap()
+            .checkpoint;
+    let accepted_tree = conflicted.skills["release-check"].tree.tree_oid.clone();
+    let slug = gitim_core::skill::SkillSlug::new("release-check").unwrap();
+    let accepted_files: BTreeMap<_, _> = create
+        .after
+        .repository_files
+        .iter()
+        .filter(|(path, _)| path.starts_with("skills/release-check/"))
+        .map(|(path, bytes)| (path.clone(), bytes.clone()))
+        .collect();
+    let mut repair_before = create.after.clone();
+    repair_before.conflict_checkpoint = Some(SkillConflictCheckpoint {
+        conflict_tip: rejected_tip.clone(),
+        accepted_tree: accepted_tree.clone(),
+        accepted_state: SkillRepairAcceptedState::ActiveSkill {
+            slug: slug.clone(),
+            skill: create.after.active_skills[&slug].clone(),
+        },
+        accepted_files,
+        entry_changed_paths: BTreeSet::from([script_path.clone()]),
+        rejected_receipt_paths: BTreeSet::new(),
+        changed_paths: BTreeSet::from([script_path.clone()]),
+    });
+    let repair = plan_skill_mutation(
+        &repair_before,
+        &context(None),
+        &SkillMutationRequest::Repair(SkillRepairRequest {
+            request_id: request_id('F'),
+            scope: SkillRepairScope::Skill(slug),
+            conflict_tip: rejected_tip,
+            accepted_tree,
+        }),
+    )
+    .unwrap();
+    assert!(repair.changed_paths.contains(&script_path));
+    for edit in &repair.edits {
+        if matches!(
+            edit,
+            gitim_core::skill::SkillTreeEdit::Upsert { path, .. }
+                if path.starts_with("skills/receipts/")
+        ) {
+            match edit {
+                gitim_core::skill::SkillTreeEdit::Upsert { path, bytes } => {
+                    fs::write(repository.root().join(path), bytes).unwrap();
+                }
+                gitim_core::skill::SkillTreeEdit::Delete { .. } => unreachable!(),
+            }
+        }
+    }
+    let repair_receipt_path = format!("skills/receipts/{}.meta.yaml", repair.receipt.id.as_str());
+    commit_paths(
+        repository.root(),
+        &repair.commit_message,
+        ALICE,
+        &[&repair_receipt_path],
+    );
+
+    let rejected_repair =
+        validate_incoming_skill_history(&repository.storage, &conflicted, &repository.tip())
+            .unwrap();
+
+    assert!(rejected_repair
+        .checkpoint
+        .conflicts
+        .contains_key("release-check"));
+}
+
+#[test]
+fn repair_with_the_wrong_post_repair_tree_oid_keeps_the_conflict() {
+    let repository = Repository::new();
+    let initial = repository.snapshot();
+    let bootstrap = bootstrap_plan(
+        &gitim_core::skill::SkillRepositorySnapshot {
+            active_users: BTreeSet::from([ALICE.to_owned()]),
+            ..Default::default()
+        },
+        'G',
+    );
+    let bootstrap_tip = repository.commit_plan(&bootstrap);
+    let accepted_bootstrap =
+        validate_incoming_skill_history(&repository.storage, &initial, &bootstrap_tip)
+            .unwrap()
+            .checkpoint;
+    let create = create_plan(&bootstrap.after, 'H');
+    let create_tip = repository.commit_plan(&create);
+    let accepted_create =
+        validate_incoming_skill_history(&repository.storage, &accepted_bootstrap, &create_tip)
+            .unwrap()
+            .checkpoint;
+    let meta_path = "skills/release-check/skill.meta.yaml";
+    let mut corrupt_meta = fs::read_to_string(repository.root().join(meta_path)).unwrap();
+    corrupt_meta = corrupt_meta.replace("Verify releases.", "Rejected bytes.");
+    fs::write(repository.root().join(meta_path), &corrupt_meta).unwrap();
+    commit_all(repository.root(), "bypass skill state", ALICE);
+    let rejected_tip = repository.tip();
+    let conflicted =
+        validate_incoming_skill_history(&repository.storage, &accepted_create, &rejected_tip)
+            .unwrap()
+            .checkpoint;
+    let accepted_tree = conflicted.skills["release-check"].tree.tree_oid.clone();
+    let slug = gitim_core::skill::SkillSlug::new("release-check").unwrap();
+    let accepted_files: BTreeMap<_, _> = create
+        .after
+        .repository_files
+        .iter()
+        .filter(|(path, _)| path.starts_with("skills/release-check/"))
+        .map(|(path, bytes)| (path.clone(), bytes.clone()))
+        .collect();
+    let mut repair_before = create.after.clone();
+    repair_before
+        .repository_files
+        .insert(meta_path.to_owned(), corrupt_meta.into_bytes());
+    repair_before.conflict_checkpoint = Some(SkillConflictCheckpoint {
+        conflict_tip: rejected_tip.clone(),
+        accepted_tree: accepted_tree.clone(),
+        accepted_state: SkillRepairAcceptedState::ActiveSkill {
+            slug: slug.clone(),
+            skill: create.after.active_skills[&slug].clone(),
+        },
+        accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
+        changed_paths: BTreeSet::from([meta_path.to_owned()]),
+    });
+    let repair = plan_skill_mutation(
+        &repair_before,
+        &context(None),
+        &SkillMutationRequest::Repair(SkillRepairRequest {
+            request_id: request_id('J'),
+            scope: SkillRepairScope::Skill(slug),
+            conflict_tip: rejected_tip,
+            accepted_tree,
+        }),
+    )
+    .unwrap();
+    apply_plan(repository.root(), &repair);
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(repository.root().join(meta_path))
+        .unwrap()
+        .permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(repository.root().join(meta_path), permissions).unwrap();
+    commit_all(repository.root(), &repair.commit_message, ALICE);
+
+    let rejected_repair =
+        validate_incoming_skill_history(&repository.storage, &conflicted, &repository.tip())
+            .unwrap();
+
+    assert!(rejected_repair
+        .checkpoint
+        .conflicts
+        .contains_key("release-check"));
+}
+
+#[test]
+fn malformed_first_bootstrap_has_no_repository_visible_repair_authority() {
     let repository = Repository::new();
     fs::write(repository.root().join("ordinary.txt"), "preserve\n").unwrap();
     commit_all(repository.root(), "ordinary", ALICE);
@@ -700,40 +961,9 @@ fn authorized_repair_restores_absence_after_malformed_first_bootstrap() {
         .unwrap()
         .checkpoint;
     let conflict = conflicted.conflicts["$workspace"].clone();
-    let accepted_tree = conflict.accepted_tree_oid.clone().unwrap();
-    assert!(!accepted_tree.is_empty());
-
-    let mut repair_before = bootstrap.after.clone();
-    repair_before.workspace = Some(serde_yaml::from_str(&malformed_workspace).unwrap());
-    repair_before
-        .repository_files
-        .insert(workspace_path.to_owned(), malformed_workspace.into_bytes());
-    repair_before.conflict_checkpoint = Some(SkillConflictCheckpoint {
-        conflict_tip: rejected_tip.clone(),
-        accepted_tree: accepted_tree.clone(),
-        accepted_state: SkillRepairAcceptedState::AbsentWorkspace,
-        accepted_files: BTreeMap::new(),
-        changed_paths: BTreeSet::from([workspace_path.to_owned()]),
-    });
-    let repair = plan_skill_mutation(
-        &repair_before,
-        &context(None),
-        &SkillMutationRequest::Repair(SkillRepairRequest {
-            request_id: request_id('5'),
-            scope: SkillRepairScope::Workspace,
-            conflict_tip: rejected_tip,
-            accepted_tree,
-        }),
-    )
-    .unwrap();
-    let repair_tip = repository.commit_plan(&repair);
-
-    let repaired =
-        validate_incoming_skill_history(&repository.storage, &conflicted, &repair_tip).unwrap();
-
-    assert!(repaired.checkpoint.conflicts.is_empty());
-    assert!(repaired.checkpoint.workspace_tree.is_none());
-    assert!(!repository.root().join(workspace_path).exists());
+    assert_eq!(conflict.accepted_tree_oid, None);
+    assert!(conflicted.workspace_tree.is_none());
+    assert!(repository.root().join(workspace_path).exists());
     assert_eq!(
         fs::read_to_string(repository.root().join("ordinary.txt")).unwrap(),
         "preserve\n"
@@ -759,6 +989,7 @@ fn authorized_repair_restores_absence_after_malformed_first_create() {
             .unwrap()
             .checkpoint;
     let create = create_plan(&bootstrap.after, '7');
+    let rejected_receipt_path = format!("skills/receipts/{}.meta.yaml", create.receipt.id.as_str());
     apply_plan(repository.root(), &create);
     let meta_path = "skills/release-check/skill.meta.yaml";
     let mut malformed_meta = fs::read_to_string(repository.root().join(meta_path)).unwrap();
@@ -773,23 +1004,43 @@ fn authorized_repair_restores_absence_after_malformed_first_create() {
     let conflict = conflicted.conflicts["release-check"].clone();
     let accepted_tree = conflict.accepted_tree_oid.clone().unwrap();
     assert!(!accepted_tree.is_empty());
+    assert_eq!(
+        conflict.rejected_receipt_paths,
+        BTreeSet::from([rejected_receipt_path.clone()])
+    );
 
     let slug = gitim_core::skill::SkillSlug::new("release-check").unwrap();
-    let mut repair_before = create.after.clone();
+    let mut repair_before = bootstrap.after.clone();
+    repair_before.repository_files.extend(
+        create
+            .after
+            .repository_files
+            .iter()
+            .filter(|(path, _)| {
+                path.starts_with("skills/release-check/") || *path == &rejected_receipt_path
+            })
+            .map(|(path, bytes)| (path.clone(), bytes.clone())),
+    );
     repair_before
         .repository_files
         .insert(meta_path.to_owned(), malformed_meta.into_bytes());
-    let changed_paths = repair_before
+    repair_before
+        .receipts
+        .insert(create.receipt.id.clone(), create.receipt.clone());
+    let mut changed_paths: BTreeSet<_> = repair_before
         .repository_files
         .keys()
         .filter(|path| path.starts_with("skills/release-check/"))
         .cloned()
         .collect();
+    changed_paths.insert(rejected_receipt_path.clone());
     repair_before.conflict_checkpoint = Some(SkillConflictCheckpoint {
         conflict_tip: rejected_tip.clone(),
         accepted_tree: accepted_tree.clone(),
         accepted_state: SkillRepairAcceptedState::AbsentSkill { slug: slug.clone() },
         accepted_files: BTreeMap::new(),
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::from([rejected_receipt_path.clone()]),
         changed_paths,
     });
     let repair = plan_skill_mutation(
@@ -803,12 +1054,37 @@ fn authorized_repair_restores_absence_after_malformed_first_create() {
         }),
     )
     .unwrap();
+    assert!(repair.changed_paths.contains(&rejected_receipt_path));
+    assert!(repair.edits.iter().any(|edit| {
+        matches!(
+            edit,
+            gitim_core::skill::SkillTreeEdit::Delete { path }
+                if path == &rejected_receipt_path
+        )
+    }));
     let repair_tip = repository.commit_plan(&repair);
+    let committed_paths: BTreeSet<_> = git_output(
+        repository.root(),
+        &[
+            "diff",
+            "--name-only",
+            &format!("{repair_tip}^"),
+            &repair_tip,
+        ],
+    )
+    .lines()
+    .map(str::to_owned)
+    .collect();
+    assert_eq!(committed_paths, repair.changed_paths);
 
     let repaired =
         validate_incoming_skill_history(&repository.storage, &conflicted, &repair_tip).unwrap();
 
-    assert!(repaired.checkpoint.conflicts.is_empty());
+    assert!(
+        repaired.checkpoint.conflicts.is_empty(),
+        "{:?}",
+        repaired.checkpoint.conflicts
+    );
     assert!(!repaired.checkpoint.skills.contains_key("release-check"));
     assert!(git_output(
         repository.root(),
@@ -822,10 +1098,50 @@ fn authorized_repair_restores_absence_after_malformed_first_create() {
         ],
     )
     .is_empty());
+    assert!(git_output(
+        repository.root(),
+        &[
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+            "--",
+            &rejected_receipt_path,
+        ],
+    )
+    .is_empty());
     assert_eq!(
         fs::read_to_string(repository.root().join("ordinary.txt")).unwrap(),
         "preserve\n"
     );
+
+    let bare = tempfile::tempdir().unwrap();
+    git(bare.path(), &["init", "--bare"]);
+    git(
+        repository.root(),
+        &["remote", "add", "origin", bare.path().to_str().unwrap()],
+    );
+    git(repository.root(), &["push", "-u", "origin", "main"]);
+    let archive = tempfile::tempdir().unwrap();
+    let outcome = try_fire_rotation(
+        &repository.storage,
+        "main",
+        1,
+        archive.path(),
+        (ALICE, "alice@example.com"),
+        NOW,
+    )
+    .unwrap();
+    let orphan_commit = match outcome {
+        RotationOutcome::Won {
+            orphan_commit_sha, ..
+        } => orphan_commit_sha,
+        _ => return,
+    };
+    let after_rotation =
+        validate_incoming_skill_history(&repository.storage, &repaired.checkpoint, &orphan_commit)
+            .unwrap();
+    assert_eq!(after_rotation.checkpoint.active_epoch, "main-epoch-2");
 }
 
 struct RotatedRepository {

@@ -700,14 +700,15 @@ fn repair_checkpoint(
         accepted_tree: "accepted-tree-oid".to_owned(),
         accepted_state,
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths: BTreeSet::from([accepted_path.to_owned()]),
     }
 }
 
 fn accepted_state_files(state: &SkillRepairAcceptedState) -> BTreeMap<String, Vec<u8>> {
     match state {
-        SkillRepairAcceptedState::AbsentWorkspace
-        | SkillRepairAcceptedState::AbsentSkill { .. } => BTreeMap::new(),
+        SkillRepairAcceptedState::AbsentSkill { .. } => BTreeMap::new(),
         SkillRepairAcceptedState::Workspace(workspace) => BTreeMap::from([(
             "skills/workspace.meta.yaml".to_owned(),
             serde_yaml::to_string(workspace).unwrap().into_bytes(),
@@ -1034,6 +1035,8 @@ fn repair_moves_a_rejected_active_skill_to_the_accepted_archive_location() {
         accepted_tree: "accepted-tree-oid".to_owned(),
         accepted_state,
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths: BTreeSet::new(),
     };
     checkpoint
@@ -1099,6 +1102,8 @@ fn repair_moves_a_rejected_archived_skill_to_the_accepted_active_location() {
         accepted_tree: "accepted-tree-oid".to_owned(),
         accepted_state,
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths: BTreeSet::new(),
     };
     checkpoint
@@ -1152,6 +1157,8 @@ fn repair_relocation_requires_materializing_every_missing_accepted_file() {
         accepted_tree: "accepted-tree-oid".to_owned(),
         accepted_state,
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths,
     });
     let request = SkillMutationRequest::Repair(SkillRepairRequest {
@@ -1212,6 +1219,8 @@ fn repair_rejects_same_byte_accepted_file_upserts() {
         accepted_tree: "accepted-tree-oid".to_owned(),
         accepted_state,
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths: BTreeSet::from(["skills/release-check/skill.meta.yaml".to_owned()]),
     });
     let request = SkillMutationRequest::Repair(SkillRepairRequest {
@@ -1241,6 +1250,8 @@ fn repair_rejects_deletion_of_nonexistent_nonaccepted_paths() {
         accepted_tree: "accepted-tree-oid".to_owned(),
         accepted_state,
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths: BTreeSet::from(["skills/release-check/nonexistent.meta.yaml".to_owned()]),
     });
     let request = SkillMutationRequest::Repair(SkillRepairRequest {
@@ -1361,6 +1372,8 @@ fn repair_relocation_deletes_unknown_raw_files_in_the_rejected_subtree() {
         accepted_tree: "accepted-tree-oid".to_owned(),
         accepted_state,
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths,
     });
     let request = SkillMutationRequest::Repair(SkillRepairRequest {
@@ -1399,6 +1412,8 @@ fn repair_rejects_unrelated_paths_inside_the_opposite_skill_location() {
         accepted_tree: "accepted-tree-oid".to_owned(),
         accepted_state,
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths,
     });
     let request = SkillMutationRequest::Repair(SkillRepairRequest {
@@ -1452,6 +1467,8 @@ fn repair_rejects_non_normalized_changed_paths_before_planning_deletes() {
             accepted_tree: "accepted-tree-oid".to_owned(),
             accepted_state: accepted_state.clone(),
             accepted_files: accepted_files.clone(),
+            entry_changed_paths: BTreeSet::new(),
+            rejected_receipt_paths: BTreeSet::new(),
             changed_paths: BTreeSet::from([malicious_path.to_owned()]),
         });
 
@@ -1468,6 +1485,8 @@ fn repair_rejects_non_normalized_changed_paths_before_planning_deletes() {
         accepted_tree: "accepted-tree-oid".to_owned(),
         accepted_state,
         accepted_files,
+        entry_changed_paths: BTreeSet::new(),
+        rejected_receipt_paths: BTreeSet::new(),
         changed_paths: BTreeSet::from([
             "skills/release-check/File.md".to_owned(),
             "skills/release-check/file.md".to_owned(),

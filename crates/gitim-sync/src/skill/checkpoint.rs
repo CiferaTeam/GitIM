@@ -26,6 +26,9 @@ const CHECKPOINT_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const WORKSPACE_CONFLICT_KEY: &str = "$workspace";
 const EPOCH_PATH: &str = "gitim.epoch.yaml";
 const MAX_EPOCH_DEPTH: usize = 32;
+const SHA1_EMPTY_TREE_OID: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+const SHA256_EMPTY_TREE_OID: &str =
+    "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -72,6 +75,8 @@ pub struct SkillConflict {
     pub rejected_commit: String,
     pub code: String,
     pub accepted_tree_oid: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub rejected_receipt_paths: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -358,7 +363,15 @@ struct MaterializedSnapshot {
 struct TreeMaterial {
     files: BTreeMap<String, Vec<u8>>,
     modes: BTreeMap<String, String>,
+    entries: BTreeMap<String, GitEntryIdentity>,
     active_users: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GitEntryIdentity {
+    mode: String,
+    object_type: String,
+    oid: String,
 }
 
 struct CommitMetadata {
@@ -573,7 +586,7 @@ impl<'a> Replay<'a> {
             .ok_or(SkillError::SyncConflict)
             .and_then(|receipt| {
                 if receipt.operation == SkillOperation::RepairSkillState {
-                    self.validate_repair(&metadata, &paths, receipt, &actual_after)
+                    self.validate_repair(commit, &metadata, &paths, receipt, &actual_after)
                 } else {
                     self.validate_normal(&metadata, &paths, receipt, &actual_after)
                 }
@@ -605,12 +618,15 @@ impl<'a> Replay<'a> {
                 self.capture_marker(commit);
             }
             Err(error) => {
+                let rejected_receipt_paths = metadata
+                    .parents
+                    .first()
+                    .and_then(|parent| load_tree_material(self.repo, parent).ok())
+                    .map_or_else(BTreeSet::new, |parent| {
+                        introduced_receipt_paths(&paths, &parent, &actual_after)
+                    });
                 let needs_absent_tree = affected.iter().any(|key| {
-                    if key == WORKSPACE_CONFLICT_KEY {
-                        self.checkpoint.workspace_tree.is_none()
-                    } else {
-                        !self.checkpoint.skills.contains_key(key)
-                    }
+                    key != WORKSPACE_CONFLICT_KEY && !self.checkpoint.skills.contains_key(key)
                 });
                 let absent_tree_oid = needs_absent_tree
                     .then(|| empty_tree_oid(self.repo))
@@ -626,15 +642,30 @@ impl<'a> Replay<'a> {
                             .skills
                             .get(&key)
                             .map(|state| state.tree.tree_oid.clone())
-                    }
-                    .or_else(|| absent_tree_oid.clone());
+                    };
+                    let accepted_tree_oid = accepted_tree_oid.or_else(|| {
+                        (key != WORKSPACE_CONFLICT_KEY)
+                            .then(|| absent_tree_oid.clone())
+                            .flatten()
+                    });
                     self.checkpoint
                         .conflicts
                         .entry(key)
+                        .and_modify(|conflict| {
+                            conflict.rejected_commit = commit.to_owned();
+                            conflict.code = error.code().to_owned();
+                            conflict
+                                .rejected_receipt_paths
+                                .retain(|path| actual_after.files.contains_key(path));
+                            conflict
+                                .rejected_receipt_paths
+                                .extend(rejected_receipt_paths.iter().cloned());
+                        })
                         .or_insert_with(|| SkillConflict {
                             rejected_commit: commit.to_owned(),
                             code: error.code().to_owned(),
                             accepted_tree_oid,
+                            rejected_receipt_paths: rejected_receipt_paths.clone(),
                         });
                 }
                 self.advance(commit);
@@ -678,6 +709,7 @@ impl<'a> Replay<'a> {
 
     fn validate_repair(
         &self,
+        commit: &str,
         metadata: &CommitMetadata,
         paths: &BTreeSet<String>,
         receipt: &SkillReceipt,
@@ -704,17 +736,34 @@ impl<'a> Replay<'a> {
         let mut before = self.accepted.clone();
         let accepted_state = repair_accepted_state(&before.snapshot, receipt)?;
         let accepted_files = scope_files(&before.snapshot.repository_files, receipt.skill.as_ref());
+        let accepted_entries =
+            accepted_scope_entries(self.repo, &self.checkpoint, receipt.skill.as_ref())
+                .map_err(|_| SkillError::SyncConflict)?;
         overlay_scope(
             &mut before.snapshot.repository_files,
             &mut before.modes,
             &actual_parent,
             receipt.skill.as_ref(),
         );
-        let changed_paths = raw_scope_diff(
+        overlay_rejected_receipts(
+            &mut before.snapshot,
+            &actual_parent,
+            &conflict.rejected_receipt_paths,
+        )?;
+        let byte_changed_paths = raw_scope_diff(
             &before.snapshot.repository_files,
             &accepted_files,
             receipt.skill.as_ref(),
         );
+        let entry_changed_paths = entry_only_scope_diff(
+            &actual_parent.entries,
+            &accepted_entries,
+            &byte_changed_paths,
+            receipt.skill.as_ref(),
+        );
+        let mut changed_paths = byte_changed_paths;
+        changed_paths.extend(entry_changed_paths.iter().cloned());
+        changed_paths.extend(conflict.rejected_receipt_paths.iter().cloned());
         before.snapshot.conflict_checkpoint = Some(SkillConflictCheckpoint {
             conflict_tip: conflict.rejected_commit.clone(),
             accepted_tree: conflict
@@ -723,11 +772,24 @@ impl<'a> Replay<'a> {
                 .ok_or(SkillError::SyncConflict)?,
             accepted_state,
             accepted_files,
+            entry_changed_paths,
+            rejected_receipt_paths: conflict.rejected_receipt_paths.clone(),
             changed_paths,
         });
         let projected = project_after(&self.accepted, actual_after, paths)?;
         let evidence = evidence(metadata, paths, receipt)?;
         let outcome = validate_skill_commit(&before.snapshot, &projected.snapshot, &evidence)?;
+        let repaired_tree =
+            scope_tree_oid(self.repo, commit, &self.checkpoint, receipt.skill.as_ref())
+                .map_err(|_| SkillError::SyncConflict)?;
+        if repaired_tree.as_deref() != conflict.accepted_tree_oid.as_deref()
+            || conflict
+                .rejected_receipt_paths
+                .iter()
+                .any(|path| actual_after.entries.contains_key(path))
+        {
+            return Err(SkillError::SyncConflict);
+        }
         Ok((projected, outcome))
     }
 
@@ -831,6 +893,7 @@ fn project_after(
     let material = TreeMaterial {
         files,
         modes,
+        entries: BTreeMap::new(),
         active_users: actual_after.active_users.clone(),
     };
     let snapshot = parse_snapshot(&material)?;
@@ -861,7 +924,9 @@ fn changed_receipt(
 ) -> Result<SkillReceipt, SkillError> {
     let paths: Vec<_> = changed_paths
         .iter()
-        .filter(|path| receipt_id_from_path(path).is_some())
+        .filter(|path| {
+            receipt_id_from_path(path).is_some() && material.files.contains_key(path.as_str())
+        })
         .collect();
     if paths.len() != 1 {
         return Err(SkillError::SyncConflict);
@@ -919,10 +984,11 @@ fn repair_accepted_state(
     receipt: &SkillReceipt,
 ) -> Result<SkillRepairAcceptedState, SkillError> {
     match &receipt.skill {
-        None => Ok(snapshot.workspace.clone().map_or(
-            SkillRepairAcceptedState::AbsentWorkspace,
-            SkillRepairAcceptedState::Workspace,
-        )),
+        None => snapshot
+            .workspace
+            .clone()
+            .map(SkillRepairAcceptedState::Workspace)
+            .ok_or(SkillError::AdminUninitialized),
         Some(slug) => snapshot
             .active_skills
             .get(slug)
@@ -1005,6 +1071,128 @@ fn scope_contains(path: &str, slug: Option<&SkillSlug>) -> bool {
     }
 }
 
+fn introduced_receipt_paths(
+    changed_paths: &BTreeSet<String>,
+    parent: &TreeMaterial,
+    after: &TreeMaterial,
+) -> BTreeSet<String> {
+    changed_paths
+        .iter()
+        .filter(|path| !parent.entries.contains_key(*path))
+        .filter_map(|path| {
+            let request_id = receipt_id_from_path(path)?;
+            let bytes = after.files.get(path)?;
+            let receipt: SkillReceipt = serde_yaml::from_slice(bytes).ok()?;
+            (receipt.id == request_id).then(|| path.clone())
+        })
+        .collect()
+}
+
+fn overlay_rejected_receipts(
+    snapshot: &mut SkillRepositorySnapshot,
+    source: &TreeMaterial,
+    paths: &BTreeSet<String>,
+) -> Result<(), SkillError> {
+    for path in paths {
+        let request_id = receipt_id_from_path(path).ok_or(SkillError::SyncConflict)?;
+        let bytes = source.files.get(path).ok_or(SkillError::SyncConflict)?;
+        let receipt: SkillReceipt =
+            serde_yaml::from_slice(bytes).map_err(|_| SkillError::SyncConflict)?;
+        if receipt.id != request_id {
+            return Err(SkillError::SyncConflict);
+        }
+        snapshot
+            .repository_files
+            .insert(path.clone(), bytes.clone());
+        snapshot.receipts.insert(request_id, receipt);
+    }
+    Ok(())
+}
+
+fn accepted_scope_entries(
+    repo: &GitStorage,
+    checkpoint: &SkillValidationCheckpoint,
+    slug: Option<&SkillSlug>,
+) -> Result<BTreeMap<String, GitEntryIdentity>, SkillSyncError> {
+    let Some((commit, root)) = accepted_scope_location(checkpoint, slug) else {
+        return Ok(BTreeMap::new());
+    };
+    let material = load_tree_material(repo, commit)?;
+    Ok(material
+        .entries
+        .into_iter()
+        .filter(|(path, _)| {
+            if slug.is_none() {
+                path.as_str() == root
+            } else {
+                path.starts_with(&format!("{root}/"))
+            }
+        })
+        .collect())
+}
+
+fn entry_only_scope_diff(
+    rejected: &BTreeMap<String, GitEntryIdentity>,
+    accepted: &BTreeMap<String, GitEntryIdentity>,
+    byte_changed_paths: &BTreeSet<String>,
+    slug: Option<&SkillSlug>,
+) -> BTreeSet<String> {
+    rejected
+        .keys()
+        .chain(accepted.keys())
+        .filter(|path| scope_contains(path, slug))
+        .filter(|path| rejected.get(*path) != accepted.get(*path))
+        .filter(|path| !byte_changed_paths.contains(*path))
+        .cloned()
+        .collect()
+}
+
+fn scope_tree_oid(
+    repo: &GitStorage,
+    commit: &str,
+    checkpoint: &SkillValidationCheckpoint,
+    slug: Option<&SkillSlug>,
+) -> Result<Option<String>, SkillSyncError> {
+    if let Some((_, root)) = accepted_scope_location(checkpoint, slug) {
+        return Ok(tree_oid_at(repo, commit, &root)?);
+    }
+    if let Some(slug) = slug {
+        let active = tree_oid_at(repo, commit, &format!("skills/{}", slug.as_str()))?;
+        let archived = tree_oid_at(repo, commit, &format!("archive/skills/{}", slug.as_str()))?;
+        return match (active, archived) {
+            (None, None) => empty_tree_oid(repo).map(Some),
+            (Some(oid), None) | (None, Some(oid)) => Ok(Some(oid)),
+            (Some(_), Some(_)) => Err(SkillSyncError::Checkpoint(format!(
+                "repaired Skill {:?} exists in both active and archived trees",
+                slug.as_str()
+            ))),
+        };
+    }
+    Ok(None)
+}
+
+fn accepted_scope_location<'a>(
+    checkpoint: &'a SkillValidationCheckpoint,
+    slug: Option<&SkillSlug>,
+) -> Option<(&'a str, String)> {
+    match slug {
+        None => checkpoint.workspace_tree.as_ref().map(|tree| {
+            (
+                tree.commit_oid.as_str(),
+                "skills/workspace.meta.yaml".to_owned(),
+            )
+        }),
+        Some(slug) => checkpoint.skills.get(slug.as_str()).map(|state| {
+            let root = if state.archived {
+                format!("archive/skills/{}", slug.as_str())
+            } else {
+                format!("skills/{}", slug.as_str())
+            };
+            (state.tree.commit_oid.as_str(), root)
+        }),
+    }
+}
+
 fn repository_tree_entries(
     repo: &GitStorage,
     commit: &str,
@@ -1028,6 +1216,7 @@ fn repository_tree_entries(
 fn load_tree_material(repo: &GitStorage, commit: &str) -> Result<TreeMaterial, SkillSyncError> {
     let mut files = BTreeMap::new();
     let mut modes = BTreeMap::new();
+    let mut entries = BTreeMap::new();
     let mut active_users = BTreeSet::new();
     for entry in list_tree_recursive(repo, commit, "")? {
         validate_repository_path(&entry.path)?;
@@ -1036,14 +1225,25 @@ fn load_tree_material(repo: &GitStorage, commit: &str) -> Result<TreeMaterial, S
         if !managed && user.is_none() {
             continue;
         }
-        if entry.object_type != "blob" {
-            return Err(SkillSyncError::Domain(SkillError::SyncConflict));
-        }
-        let bytes = read_blob_oid(repo, &entry)?;
         if managed {
+            entries.insert(
+                entry.path.clone(),
+                GitEntryIdentity {
+                    mode: entry.mode.clone(),
+                    object_type: entry.object_type.clone(),
+                    oid: entry.oid.clone(),
+                },
+            );
             modes.insert(entry.path.clone(), entry.mode.clone());
-            files.insert(entry.path, bytes);
+            if entry.object_type == "blob" {
+                let bytes = read_blob_oid(repo, &entry)?;
+                files.insert(entry.path, bytes);
+            }
         } else if let Some(handler) = user {
+            if entry.object_type != "blob" {
+                return Err(SkillSyncError::Domain(SkillError::SyncConflict));
+            }
+            let bytes = read_blob_oid(repo, &entry)?;
             if !matches!(entry.mode.as_str(), "100644" | "100755")
                 || serde_yaml::from_slice::<UserMeta>(&bytes).is_err()
             {
@@ -1055,6 +1255,7 @@ fn load_tree_material(repo: &GitStorage, commit: &str) -> Result<TreeMaterial, S
     Ok(TreeMaterial {
         files,
         modes,
+        entries,
         active_users,
     })
 }
@@ -1366,6 +1567,14 @@ fn resolve_commit(repo: &GitStorage, revision: &str) -> Result<String, SkillSync
     Ok(oid)
 }
 
+const fn canonical_empty_tree_oid(length: usize) -> Option<&'static str> {
+    match length {
+        40 => Some(SHA1_EMPTY_TREE_OID),
+        64 => Some(SHA256_EMPTY_TREE_OID),
+        _ => None,
+    }
+}
+
 fn read_blob_oid(repo: &GitStorage, entry: &GitTreeEntry) -> Result<Vec<u8>, SkillSyncError> {
     validate_oid(&entry.oid)?;
     Ok(run_skill_git(repo, &["cat-file", "blob", &entry.oid])?.stdout)
@@ -1387,6 +1596,11 @@ fn empty_tree_oid(repo: &GitStorage) -> Result<String, SkillSyncError> {
         .trim()
         .to_owned();
     validate_oid(&oid)?;
+    if canonical_empty_tree_oid(oid.len()) != Some(oid.as_str()) {
+        return Err(SkillSyncError::Checkpoint(
+            "Git returned a noncanonical empty tree ID".to_owned(),
+        ));
+    }
     Ok(oid)
 }
 
@@ -1476,10 +1690,17 @@ fn validate_checkpoint(checkpoint: &SkillValidationCheckpoint) -> Result<(), Ski
                 "checkpoint conflict code is empty".to_owned(),
             ));
         }
-        let accepted_tree_oid = conflict.accepted_tree_oid.as_deref().ok_or_else(|| {
-            SkillSyncError::Checkpoint(format!("conflict scope {scope:?} lacks an accepted tree"))
-        })?;
-        validate_oid(accepted_tree_oid)?;
+        for path in &conflict.rejected_receipt_paths {
+            validate_repository_path(path)?;
+            if receipt_id_from_path(path).is_none() {
+                return Err(SkillSyncError::Checkpoint(format!(
+                    "conflict scope {scope:?} has an invalid rejected receipt path"
+                )));
+            }
+        }
+        if let Some(accepted_tree_oid) = conflict.accepted_tree_oid.as_deref() {
+            validate_oid(accepted_tree_oid)?;
+        }
         let expected_tree_oid = if scope == WORKSPACE_CONFLICT_KEY {
             checkpoint
                 .workspace_tree
@@ -1491,7 +1712,15 @@ fn validate_checkpoint(checkpoint: &SkillValidationCheckpoint) -> Result<(), Ski
                 .get(scope)
                 .map(|state| state.tree.tree_oid.as_str())
         };
-        if expected_tree_oid.is_some() && Some(accepted_tree_oid) != expected_tree_oid {
+        let valid_pointer = if let Some(expected_tree_oid) = expected_tree_oid {
+            conflict.accepted_tree_oid.as_deref() == Some(expected_tree_oid)
+        } else if scope == WORKSPACE_CONFLICT_KEY {
+            conflict.accepted_tree_oid.is_none()
+        } else {
+            conflict.accepted_tree_oid.as_deref()
+                == canonical_empty_tree_oid(conflict.rejected_commit.len())
+        };
+        if !valid_pointer {
             return Err(SkillSyncError::Checkpoint(format!(
                 "conflict scope {scope:?} does not match its accepted tree"
             )));
@@ -1663,6 +1892,7 @@ mod tests {
                 .map(|path| (path.clone(), "100644".to_owned()))
                 .collect(),
             files,
+            entries: BTreeMap::new(),
             active_users: BTreeSet::from(["alice".to_owned()]),
         };
 
