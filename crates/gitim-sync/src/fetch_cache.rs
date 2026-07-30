@@ -1,11 +1,30 @@
+//! Shared pull-fetch publication order:
+//!
+//! ```text
+//! private remote snapshot
+//!         |
+//!         v
+//! immutable generation refs in bare cache
+//!         |
+//!         v
+//! atomic state replacement selects generation
+//!         |
+//!         v
+//! followers import selected generation
+//!         |
+//!         v
+//! inactive generations cleaned best effort
+//! ```
+
 #![allow(dead_code)]
 
 use crate::git::{GitError, GitStorage};
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const CACHE_SCHEMA_VERSION: u32 = 1;
 const CACHE_LOCK_FILE: &str = "fetch-cache.lock";
@@ -86,6 +105,34 @@ enum CacheInfraError {
     Io(#[from] std::io::Error),
     #[error("cache state JSON failed: {0}")]
     Json(#[from] serde_json::Error),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+struct PublicationHooks {
+    before_state_replace: Option<fn() -> Result<(), CacheInfraError>>,
+}
+
+#[cfg(not(test))]
+#[derive(Clone, Copy, Default)]
+struct PublicationHooks {
+    _private: (),
+}
+
+enum LockAttempt {
+    Acquired(CacheLock),
+    Contended,
+    Failed(CacheInfraError),
+}
+
+struct CacheLock {
+    file: std::fs::File,
+}
+
+impl Drop for CacheLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
 }
 
 #[derive(Deserialize)]
@@ -298,6 +345,374 @@ fn write_state_atomic(path: &Path, state: &CacheState) -> Result<(), CacheInfraE
         .persist(path)
         .map_err(|error| CacheInfraError::Io(error.error))?;
     Ok(())
+}
+
+fn acquire_lock(path: &Path) -> LockAttempt {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) => return LockAttempt::Failed(error.into()),
+    };
+    let started = Instant::now();
+    loop {
+        if started.elapsed() >= LOCK_WAIT_TIMEOUT {
+            return LockAttempt::Contended;
+        }
+        match file.try_lock_exclusive() {
+            Ok(()) => return LockAttempt::Acquired(CacheLock { file }),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                let elapsed = started.elapsed();
+                if elapsed >= LOCK_WAIT_TIMEOUT {
+                    return LockAttempt::Contended;
+                }
+                std::thread::sleep(LOCK_POLL_INTERVAL.min(LOCK_WAIT_TIMEOUT - elapsed));
+            }
+            Err(error) => return LockAttempt::Failed(error.into()),
+        }
+    }
+}
+
+fn log_cache_outcome(context: &CacheContext, outcome: &'static str, generation: Option<u64>) {
+    tracing::debug!(
+        workspace = %context.workspace.display(),
+        outcome,
+        generation = ?generation,
+        "shared pull-fetch cache"
+    );
+}
+
+fn cleanup_inactive_generations(context: &CacheContext, generation: u64) {
+    if let Err(error) = GitStorage::cleanup_cache_generations(&context.cache_repository, generation)
+    {
+        tracing::debug!(
+            workspace = %context.workspace.display(),
+            outcome = "cleanup_failed",
+            generation,
+            error = %error,
+            "shared pull-fetch cache"
+        );
+    }
+}
+
+pub(crate) fn fetch_for_pull(
+    repo: &GitStorage,
+    progress: &mut SyncCacheProgress,
+) -> PullFetchResult {
+    fetch_for_pull_at(
+        repo,
+        progress,
+        SystemTime::now(),
+        PublicationHooks::default(),
+    )
+}
+
+fn fetch_for_pull_at(
+    repo: &GitStorage,
+    progress: &mut SyncCacheProgress,
+    now: SystemTime,
+    hooks: PublicationHooks,
+) -> PullFetchResult {
+    if progress.disabled {
+        return direct_fallback(repo, progress, None);
+    }
+    let Some(context) = discover(repo) else {
+        return direct_fallback(repo, progress, None);
+    };
+    let _lock = match acquire_lock(&context.lock_file) {
+        LockAttempt::Acquired(cache_lock) => cache_lock,
+        LockAttempt::Contended => {
+            log_cache_outcome(&context, "lock_contended", None);
+            return PullFetchResult::NeutralSkip;
+        }
+        LockAttempt::Failed(error) => {
+            tracing::debug!(
+                workspace = %context.workspace.display(),
+                outcome = "fallback",
+                reason = "lock_failed",
+                error = %error,
+                "shared pull-fetch cache"
+            );
+            return direct_fallback(repo, progress, None);
+        }
+    };
+    match read_state(&context.state_file) {
+        Ok(None) => refresh_as_leader_with_hooks(repo, &context, None, progress, now, hooks),
+        Ok(Some(state))
+            if state.schema_version == CACHE_SCHEMA_VERSION
+                && state.remote_identity == context.remote_identity =>
+        {
+            let now_ms = unix_ms(now);
+            if failure_cooldown_active(&state, now_ms, &context.config_revision) {
+                log_cache_outcome(&context, "cooldown_reuse", Some(state.generation));
+                PullFetchResult::NeutralSkip
+            } else if success_is_fresh(&state, now_ms, progress.interval) {
+                if state.generation > 0 && progress.applied_generation != Some(state.generation) {
+                    match repo.import_cache_generation(&context.cache_repository, state.generation)
+                    {
+                        Ok(()) => {
+                            log_cache_outcome(&context, "follower_import", Some(state.generation));
+                            cleanup_inactive_generations(&context, state.generation);
+                        }
+                        Err(error) => {
+                            tracing::debug!(
+                                workspace = %context.workspace.display(),
+                                outcome = "fallback",
+                                reason = "import_failed",
+                                generation = state.generation,
+                                error = %error,
+                                "shared pull-fetch cache"
+                            );
+                            return direct_fallback(repo, progress, Some(state.generation));
+                        }
+                    }
+                } else {
+                    log_cache_outcome(&context, "fresh_reuse", Some(state.generation));
+                }
+                progress.applied_generation = Some(state.generation);
+                PullFetchResult::Ready
+            } else {
+                refresh_as_leader_with_hooks(repo, &context, Some(&state), progress, now, hooks)
+            }
+        }
+        Ok(Some(_)) => {
+            log_cache_outcome(&context, "fallback_invalid_state", None);
+            direct_fallback(repo, progress, None)
+        }
+        Err(error) => {
+            tracing::debug!(
+                workspace = %context.workspace.display(),
+                outcome = "fallback",
+                reason = "state_read_failed",
+                error = %error,
+                "shared pull-fetch cache"
+            );
+            direct_fallback(repo, progress, None)
+        }
+    }
+}
+
+fn direct_fallback(
+    repo: &GitStorage,
+    progress: &mut SyncCacheProgress,
+    trustworthy_generation: Option<u64>,
+) -> PullFetchResult {
+    match repo.fetch() {
+        Ok(()) => {
+            if let Some(generation) = trustworthy_generation {
+                progress.applied_generation = Some(generation);
+            } else {
+                progress.disabled = true;
+            }
+            PullFetchResult::Ready
+        }
+        Err(error) => PullFetchResult::RemoteError(error),
+    }
+}
+
+fn refresh_as_leader(
+    repo: &GitStorage,
+    context: &CacheContext,
+    previous: Option<&CacheState>,
+    progress: &mut SyncCacheProgress,
+    now: SystemTime,
+) -> PullFetchResult {
+    refresh_as_leader_with_hooks(
+        repo,
+        context,
+        previous,
+        progress,
+        now,
+        PublicationHooks::default(),
+    )
+}
+
+fn refresh_as_leader_with_hooks(
+    repo: &GitStorage,
+    context: &CacheContext,
+    previous: Option<&CacheState>,
+    progress: &mut SyncCacheProgress,
+    now: SystemTime,
+    hooks: PublicationHooks,
+) -> PullFetchResult {
+    log_cache_outcome(
+        context,
+        "leader_refresh",
+        previous.map(|state| state.generation),
+    );
+    if let Err(error) = repo.fetch_cache_shadow() {
+        if let Err(persist_error) =
+            publish_failure(context, previous, &error, progress.interval, unix_ms(now))
+        {
+            tracing::debug!(
+                workspace = %context.workspace.display(),
+                outcome = "cooldown_persist_failed",
+                error = %persist_error,
+                "shared pull-fetch cache"
+            );
+        }
+        tracing::debug!(
+            workspace = %context.workspace.display(),
+            outcome = "leader_remote_error",
+            generation = ?previous.map(|state| state.generation),
+            error = %error,
+            "shared pull-fetch cache"
+        );
+        return PullFetchResult::RemoteError(error);
+    }
+    let manifest = match repo.cache_shadow_manifest() {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::debug!(
+                workspace = %context.workspace.display(),
+                outcome = "fallback",
+                reason = "manifest_failed",
+                generation = ?previous.map(|state| state.generation),
+                error = %error,
+                "shared pull-fetch cache"
+            );
+            return direct_fallback(repo, progress, previous.map(|state| state.generation));
+        }
+    };
+    let manifest_changed = previous.is_none_or(|state| state.manifest != manifest);
+    let generation = if manifest.is_empty() {
+        0
+    } else if !manifest_changed {
+        previous.map_or(1, |state| state.generation)
+    } else {
+        match previous {
+            Some(state) => {
+                let Some(generation) = state.generation.checked_add(1) else {
+                    log_cache_outcome(
+                        context,
+                        "fallback_generation_overflow",
+                        Some(state.generation),
+                    );
+                    return direct_fallback(repo, progress, Some(state.generation));
+                };
+                generation
+            }
+            None => 1,
+        }
+    };
+    if manifest_changed && generation > 0 {
+        if let Err(error) = GitStorage::ensure_bare_cache(&context.cache_repository) {
+            tracing::debug!(
+                workspace = %context.workspace.display(),
+                outcome = "fallback",
+                reason = "cache_init_failed",
+                generation,
+                error = %error,
+                "shared pull-fetch cache"
+            );
+            return direct_fallback(repo, progress, previous.map(|state| state.generation));
+        }
+        if let Err(error) = repo.publish_cache_generation(&context.cache_repository, generation) {
+            tracing::debug!(
+                workspace = %context.workspace.display(),
+                outcome = "fallback",
+                reason = "publication_failed",
+                generation,
+                error = %error,
+                "shared pull-fetch cache"
+            );
+            return direct_fallback(repo, progress, previous.map(|state| state.generation));
+        }
+    }
+    let state = CacheState {
+        schema_version: CACHE_SCHEMA_VERSION,
+        remote_identity: context.remote_identity.clone(),
+        config_revision: context.config_revision.clone(),
+        generation,
+        manifest,
+        completed_at_unix_ms: unix_ms(now),
+        attempt: AttemptClass::Success,
+        retry_after_unix_ms: None,
+    };
+    #[cfg(test)]
+    if let Some(before_state_replace) = hooks.before_state_replace {
+        if let Err(error) = before_state_replace() {
+            tracing::debug!(
+                workspace = %context.workspace.display(),
+                outcome = "fallback",
+                reason = "state_replace_hook_failed",
+                generation,
+                error = %error,
+                "shared pull-fetch cache"
+            );
+            return direct_fallback(repo, progress, previous.map(|state| state.generation));
+        }
+    }
+    let _ = hooks;
+    if let Err(error) = write_state_atomic(&context.state_file, &state) {
+        tracing::debug!(
+            workspace = %context.workspace.display(),
+            outcome = "fallback",
+            reason = "state_replace_failed",
+            generation,
+            error = %error,
+            "shared pull-fetch cache"
+        );
+        return direct_fallback(repo, progress, previous.map(|state| state.generation));
+    }
+    log_cache_outcome(
+        context,
+        if manifest_changed {
+            "leader_published"
+        } else {
+            "leader_unchanged"
+        },
+        Some(generation),
+    );
+    if generation > 0 && progress.applied_generation != Some(generation) {
+        if let Err(error) = repo.import_cache_generation(&context.cache_repository, generation) {
+            tracing::debug!(
+                workspace = %context.workspace.display(),
+                outcome = "fallback",
+                reason = "leader_import_failed",
+                generation,
+                error = %error,
+                "shared pull-fetch cache"
+            );
+            return direct_fallback(repo, progress, Some(generation));
+        }
+        log_cache_outcome(context, "leader_import", Some(generation));
+        progress.applied_generation = Some(generation);
+        cleanup_inactive_generations(context, generation);
+    } else {
+        progress.applied_generation = Some(generation);
+    }
+    PullFetchResult::Ready
+}
+
+fn publish_failure(
+    context: &CacheContext,
+    previous: Option<&CacheState>,
+    error: &GitError,
+    interval: Duration,
+    now_ms: u64,
+) -> Result<(), CacheInfraError> {
+    let attempt = match error {
+        GitError::AuthFailed(_) => AttemptClass::AuthFailed,
+        GitError::RateLimited => AttemptClass::RateLimited,
+        _ => AttemptClass::TransientFailure,
+    };
+    let state = CacheState {
+        schema_version: CACHE_SCHEMA_VERSION,
+        remote_identity: context.remote_identity.clone(),
+        config_revision: context.config_revision.clone(),
+        generation: previous.map_or(0, |state| state.generation),
+        manifest: previous.map_or_else(BTreeMap::new, |state| state.manifest.clone()),
+        completed_at_unix_ms: now_ms,
+        attempt,
+        retry_after_unix_ms: Some(retry_after(error, now_ms, interval)),
+    };
+    write_state_atomic(&context.state_file, &state)
 }
 
 #[cfg(test)]
@@ -762,5 +1177,957 @@ mod tests {
             unix_ms(SystemTime::UNIX_EPOCH - Duration::from_millis(1)),
             0
         );
+    }
+
+    mod orchestration {
+        use super::*;
+        use fs2::FileExt;
+        use std::cell::RefCell;
+        use std::time::Instant;
+
+        struct BoundaryExpectation {
+            state_file: PathBuf,
+            cache_repository: PathBuf,
+            old_generation: u64,
+            new_generation: u64,
+            expected_main: String,
+        }
+
+        thread_local! {
+            static BOUNDARY_EXPECTATION: RefCell<Option<BoundaryExpectation>> =
+                const { RefCell::new(None) };
+        }
+
+        struct OrchestrationFixture {
+            workspace: WorkspaceFixture,
+            origin: PathBuf,
+            seed: PathBuf,
+        }
+
+        impl OrchestrationFixture {
+            fn new() -> Self {
+                let workspace = WorkspaceFixture::human();
+                let origin = workspace.root.path().join("origin.git");
+                git_ok(
+                    workspace.root.path(),
+                    &["init", "--bare", "-b", "main", path_arg(&origin)],
+                );
+                let seed = workspace.root.path().join("seed");
+                git_ok(
+                    workspace.root.path(),
+                    &["clone", path_arg(&origin), path_arg(&seed)],
+                );
+                git_ok(&seed, &["config", "user.name", "Cache Test"]);
+                git_ok(&seed, &["config", "user.email", "cache@test.invalid"]);
+                std::fs::write(seed.join("version.txt"), "one\n").expect("write seed file");
+                git_ok(&seed, &["add", "version.txt"]);
+                git_ok(&seed, &["commit", "-m", "seed remote"]);
+                git_ok(&seed, &["push", "-u", "origin", "main"]);
+
+                let rewrite_key = format!("url.file://{}.insteadOf", origin.display());
+                git_config(&workspace.clone_root, &[rewrite_key.as_str(), RAW_ORIGIN]);
+
+                Self {
+                    workspace,
+                    origin,
+                    seed,
+                }
+            }
+
+            fn storage(&self) -> GitStorage {
+                self.workspace.storage()
+            }
+
+            fn context(&self) -> CacheContext {
+                discover(&self.storage()).expect("discover orchestration fixture")
+            }
+
+            fn advance_remote(&self, contents: &str) {
+                std::fs::write(self.seed.join("version.txt"), contents)
+                    .expect("update remote fixture");
+                git_ok(&self.seed, &["add", "version.txt"]);
+                git_ok(&self.seed, &["commit", "-m", "advance remote"]);
+                git_ok(&self.seed, &["push", "origin", "main"]);
+            }
+
+            fn add_agent(&self, handler: &str) -> GitStorage {
+                let clone_root = self.workspace.workspace.join(handler);
+                git_ok(
+                    self.workspace.root.path(),
+                    &["clone", path_arg(&self.origin), path_arg(&clone_root)],
+                );
+                let gitim_dir = clone_root.join(".gitim");
+                std::fs::create_dir_all(&gitim_dir).expect("create agent metadata");
+                std::fs::write(gitim_dir.join("config.yaml"), "version: 1\n")
+                    .expect("write agent config");
+                std::fs::write(
+                    gitim_dir.join("me.json"),
+                    serde_json::to_vec(&json!({ "handler": handler }))
+                        .expect("serialize agent identity"),
+                )
+                .expect("write agent identity");
+                git_config(&clone_root, &["remote.origin.url", RAW_ORIGIN]);
+                let rewrite_key = format!("url.file://{}.insteadOf", self.origin.display());
+                git_config(&clone_root, &[rewrite_key.as_str(), RAW_ORIGIN]);
+                GitStorage::new(&clone_root)
+            }
+
+            fn fail_remote(&self, stderr: &str) {
+                let script = self.workspace.root.path().join("failing-upload-pack.sh");
+                std::fs::write(
+                    &script,
+                    format!("#!/bin/sh\nprintf '%s\\n' '{stderr}' >&2\nexit 1\n"),
+                )
+                .expect("write failing upload-pack");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
+                        .expect("make upload-pack executable");
+                }
+                git_config(
+                    &self.workspace.clone_root,
+                    &["remote.origin.uploadpack", path_arg(&script)],
+                );
+            }
+
+            fn restore_remote(&self) {
+                git_ok(
+                    &self.workspace.clone_root,
+                    &["config", "--unset-all", "remote.origin.uploadpack"],
+                );
+            }
+
+            fn change_config_revision(&self) {
+                let config_path = self.workspace.workspace.join(".gitim-runtime/config.json");
+                let mut config: serde_json::Value = serde_json::from_slice(
+                    &std::fs::read(&config_path).expect("read workspace config"),
+                )
+                .expect("parse workspace config");
+                config["revision_nonce"] = json!("changed");
+                std::fs::write(
+                    config_path,
+                    serde_json::to_vec_pretty(&config).expect("serialize changed config"),
+                )
+                .expect("write changed config");
+            }
+        }
+
+        fn path_arg(path: &Path) -> &str {
+            path.to_str().expect("test path is UTF-8")
+        }
+
+        fn git_ok(current_dir: &Path, args: &[&str]) {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(current_dir)
+                .output()
+                .expect("run git command");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        fn cache_refs(path: &Path, prefix: &str) -> BTreeMap<String, String> {
+            let output = Command::new("git")
+                .args([
+                    "for-each-ref",
+                    "--format=%(refname)%00%(objectname)",
+                    prefix,
+                ])
+                .current_dir(path)
+                .output()
+                .expect("list cache refs");
+            assert!(
+                output.status.success(),
+                "list cache refs failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("cache refs are UTF-8")
+                .lines()
+                .map(|line| {
+                    let (name, object) = line.split_once('\0').expect("cache ref record");
+                    (name.to_string(), object.to_string())
+                })
+                .collect()
+        }
+
+        fn git_stdout(current_dir: &Path, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(current_dir)
+                .output()
+                .expect("run git command");
+            assert!(
+                output.status.success(),
+                "git {:?} failed: {}",
+                args,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("git stdout is UTF-8")
+                .trim()
+                .to_string()
+        }
+
+        fn assert_tree_excludes(path: &Path, forbidden: &[&[u8]]) {
+            let metadata = std::fs::symlink_metadata(path)
+                .unwrap_or_else(|error| panic!("inspect {}: {error}", path.display()));
+            if metadata.is_dir() {
+                for entry in std::fs::read_dir(path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+                {
+                    let entry = entry.expect("read cache artifact entry");
+                    assert_tree_excludes(&entry.path(), forbidden);
+                }
+                return;
+            }
+            if metadata.is_file() {
+                let bytes = std::fs::read(path)
+                    .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+                for needle in forbidden {
+                    assert!(
+                        !bytes.windows(needle.len()).any(|window| window == *needle),
+                        "{} contains credential material",
+                        path.display()
+                    );
+                }
+            }
+        }
+
+        fn assert_ready(result: PullFetchResult) {
+            assert!(
+                matches!(result, PullFetchResult::Ready),
+                "expected ready result, got {result:?}"
+            );
+        }
+
+        fn assert_neutral(result: PullFetchResult) {
+            assert!(
+                matches!(result, PullFetchResult::NeutralSkip),
+                "expected neutral skip, got {result:?}"
+            );
+        }
+
+        fn reject_state_replacement() -> Result<(), CacheInfraError> {
+            Err(CacheInfraError::Io(std::io::Error::other(
+                "injected state replacement failure",
+            )))
+        }
+
+        fn verify_complete_generation_before_state_replacement() -> Result<(), CacheInfraError> {
+            BOUNDARY_EXPECTATION.with(|slot| {
+                let expectation = slot.borrow_mut().take().ok_or_else(|| {
+                    CacheInfraError::Io(std::io::Error::other(
+                        "missing publication boundary expectation",
+                    ))
+                })?;
+                let selected = read_state(&expectation.state_file)?.ok_or_else(|| {
+                    CacheInfraError::Io(std::io::Error::other("missing selected cache state"))
+                })?;
+                if selected.generation != expectation.old_generation {
+                    return Err(CacheInfraError::Io(std::io::Error::other(
+                        "state selected new generation before publication completed",
+                    )));
+                }
+                let prefix = format!(
+                    "refs/gitim-fetch-cache/generations/{}/",
+                    expectation.new_generation
+                );
+                let refs = cache_refs(&expectation.cache_repository, &prefix);
+                let main_ref = format!(
+                    "refs/gitim-fetch-cache/generations/{}/heads/main",
+                    expectation.new_generation
+                );
+                if refs.len() != 1 || refs.get(&main_ref) != Some(&expectation.expected_main) {
+                    return Err(CacheInfraError::Io(std::io::Error::other(
+                        "new generation was incomplete at publication boundary",
+                    )));
+                }
+                Ok(())
+            })
+        }
+
+        #[test]
+        fn orchestration_first_eligible_caller_publishes_generation_one() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now,
+                PublicationHooks::default(),
+            ));
+
+            let published = read_state(&context.state_file)
+                .expect("read cache state")
+                .expect("published cache state");
+            assert_eq!(published.generation, 1);
+            assert_eq!(published.attempt, AttemptClass::Success);
+            assert_eq!(published.completed_at_unix_ms, unix_ms(now));
+            assert_eq!(progress.applied_generation, Some(1));
+            assert_eq!(
+                cache_refs(
+                    &context.cache_repository,
+                    "refs/gitim-fetch-cache/generations/1/"
+                )
+                .len(),
+                1
+            );
+            assert!(fixture.origin.is_dir());
+            assert!(fixture.seed.is_dir());
+        }
+
+        #[test]
+        fn orchestration_fresh_success_reuses_generation_without_remote_fetch() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            let first = UNIX_EPOCH + Duration::from_secs(10_000);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                first,
+                PublicationHooks::default(),
+            ));
+            let first_state = read_state(&context.state_file)
+                .expect("read first state")
+                .expect("first state");
+            std::fs::rename(
+                &fixture.origin,
+                fixture.workspace.root.path().join("origin-offline.git"),
+            )
+            .expect("make remote transport unavailable");
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                first + Duration::from_secs(1),
+                PublicationHooks::default(),
+            ));
+
+            assert_eq!(
+                read_state(&context.state_file).expect("read reused state"),
+                Some(first_state)
+            );
+            assert_eq!(progress.applied_generation, Some(1));
+        }
+
+        #[test]
+        fn orchestration_unchanged_manifest_refreshes_timestamp_without_incrementing() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            let first = UNIX_EPOCH + Duration::from_secs(10_000);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                first,
+                PublicationHooks::default(),
+            ));
+            let first_state = read_state(&context.state_file)
+                .expect("read first state")
+                .expect("first state");
+            let refreshed_at = first + Duration::from_secs(30);
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                refreshed_at,
+                PublicationHooks::default(),
+            ));
+
+            let refreshed = read_state(&context.state_file)
+                .expect("read refreshed state")
+                .expect("refreshed state");
+            assert_eq!(refreshed.generation, 1);
+            assert_eq!(refreshed.manifest, first_state.manifest);
+            assert_eq!(refreshed.completed_at_unix_ms, unix_ms(refreshed_at));
+            assert!(cache_refs(
+                &context.cache_repository,
+                "refs/gitim-fetch-cache/generations/2/"
+            )
+            .is_empty());
+        }
+
+        #[test]
+        fn orchestration_changed_manifest_publishes_generation_two() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            let first = UNIX_EPOCH + Duration::from_secs(10_000);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                first,
+                PublicationHooks::default(),
+            ));
+            fixture.advance_remote("two\n");
+            let changed_at = first + Duration::from_secs(30);
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                changed_at,
+                PublicationHooks::default(),
+            ));
+
+            let changed = read_state(&context.state_file)
+                .expect("read changed state")
+                .expect("changed state");
+            assert_eq!(changed.generation, 2);
+            assert_eq!(changed.completed_at_unix_ms, unix_ms(changed_at));
+            assert_eq!(progress.applied_generation, Some(2));
+            assert_eq!(
+                git_stdout(&fixture.seed, &["rev-parse", "refs/heads/main"]),
+                git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"])
+            );
+            assert_eq!(
+                cache_refs(
+                    &context.cache_repository,
+                    "refs/gitim-fetch-cache/generations/2/"
+                )
+                .len(),
+                1
+            );
+        }
+
+        #[test]
+        fn orchestration_new_daemon_imports_once_then_skips_applied_generation() {
+            let fixture = OrchestrationFixture::new();
+            let leader = fixture.storage();
+            let follower = fixture.add_agent("alice");
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut leader_progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &leader,
+                &mut leader_progress,
+                now,
+                PublicationHooks::default(),
+            ));
+            git_ok(
+                follower.root(),
+                &["update-ref", "-d", "refs/remotes/origin/main"],
+            );
+            std::fs::rename(
+                &fixture.origin,
+                fixture.workspace.root.path().join("origin-offline.git"),
+            )
+            .expect("make remote transport unavailable");
+            let mut follower_progress = SyncCacheProgress::new(30);
+
+            assert_ready(fetch_for_pull_at(
+                &follower,
+                &mut follower_progress,
+                now + Duration::from_secs(1),
+                PublicationHooks::default(),
+            ));
+            assert_eq!(
+                git_stdout(&fixture.seed, &["rev-parse", "refs/heads/main"]),
+                git_stdout(follower.root(), &["rev-parse", "refs/remotes/origin/main"])
+            );
+            assert_eq!(follower_progress.applied_generation, Some(1));
+
+            std::fs::rename(
+                &context.cache_repository,
+                context.runtime_dir.join("fetch-cache-offline.git"),
+            )
+            .expect("make cache repository unavailable");
+            assert_ready(fetch_for_pull_at(
+                &follower,
+                &mut follower_progress,
+                now + Duration::from_secs(2),
+                PublicationHooks::default(),
+            ));
+        }
+
+        #[test]
+        fn orchestration_restart_with_unknown_generation_imports_once() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut first_process = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut first_process,
+                now,
+                PublicationHooks::default(),
+            ));
+            git_ok(
+                repo.root(),
+                &["update-ref", "-d", "refs/remotes/origin/main"],
+            );
+            std::fs::rename(
+                &fixture.origin,
+                fixture.workspace.root.path().join("origin-offline.git"),
+            )
+            .expect("make remote transport unavailable");
+            let mut restarted_process = SyncCacheProgress::new(30);
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut restarted_process,
+                now + Duration::from_secs(1),
+                PublicationHooks::default(),
+            ));
+
+            assert_eq!(restarted_process.applied_generation, Some(1));
+            assert_eq!(
+                git_stdout(&fixture.seed, &["rev-parse", "refs/heads/main"]),
+                git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"])
+            );
+        }
+
+        #[test]
+        fn orchestration_lock_contention_is_bounded_and_neutral() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let held_lock = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&context.lock_file)
+                .expect("open held lock");
+            held_lock.lock_exclusive().expect("hold cache lock");
+            std::fs::rename(
+                &fixture.origin,
+                fixture.workspace.root.path().join("origin-offline.git"),
+            )
+            .expect("make remote transport unavailable");
+            let mut progress = SyncCacheProgress::new(30);
+            let started = Instant::now();
+
+            assert_neutral(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                UNIX_EPOCH + Duration::from_secs(10_000),
+                PublicationHooks::default(),
+            ));
+
+            let waited = started.elapsed();
+            assert!(
+                waited >= Duration::from_millis(900),
+                "contention returned before the bounded wait: {waited:?}"
+            );
+            assert!(
+                waited < Duration::from_millis(1_250),
+                "contention exceeded the bounded wait: {waited:?}"
+            );
+            assert_eq!(progress.applied_generation, None);
+            assert!(!progress.disabled);
+        }
+
+        #[test]
+        fn orchestration_lock_open_failure_uses_direct_fetch() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            std::fs::create_dir(&context.lock_file).expect("replace lock file with directory");
+            let mut progress = SyncCacheProgress::new(30);
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                UNIX_EPOCH + Duration::from_secs(10_000),
+                PublicationHooks::default(),
+            ));
+
+            assert!(progress.disabled);
+            assert_eq!(
+                git_stdout(&fixture.seed, &["rev-parse", "refs/heads/main"]),
+                git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"])
+            );
+            assert!(read_state(&context.state_file)
+                .expect("read absent state")
+                .is_none());
+        }
+
+        #[test]
+        fn orchestration_auth_failure_publishes_five_minute_cooldown() {
+            let fixture = OrchestrationFixture::new();
+            fixture.fail_remote(
+                "HTTP 401 https://x-access-token:test-pat-123@github.com/CiferaTeam/GitIM.git",
+            );
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+
+            let result = fetch_for_pull_at(&repo, &mut progress, now, PublicationHooks::default());
+
+            assert!(matches!(
+                result,
+                PullFetchResult::RemoteError(GitError::AuthFailed(_))
+            ));
+            let failed = read_state(&context.state_file)
+                .expect("read failure state")
+                .expect("failure state");
+            assert_eq!(failed.attempt, AttemptClass::AuthFailed);
+            assert_eq!(failed.generation, 0);
+            assert!(failed.manifest.is_empty());
+            assert_eq!(failed.completed_at_unix_ms, unix_ms(now));
+            assert_eq!(
+                failed.retry_after_unix_ms,
+                Some(unix_ms(now) + AUTH_FAILURE_COOLDOWN.as_millis() as u64)
+            );
+        }
+
+        #[test]
+        fn orchestration_rate_limit_publishes_two_minute_cooldown() {
+            let fixture = OrchestrationFixture::new();
+            fixture.fail_remote("HTTP 429 too many requests");
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+
+            let result = fetch_for_pull_at(&repo, &mut progress, now, PublicationHooks::default());
+
+            assert!(matches!(
+                result,
+                PullFetchResult::RemoteError(GitError::RateLimited)
+            ));
+            let failed = read_state(&context.state_file)
+                .expect("read failure state")
+                .expect("failure state");
+            assert_eq!(failed.attempt, AttemptClass::RateLimited);
+            assert_eq!(
+                failed.retry_after_unix_ms,
+                Some(unix_ms(now) + RATE_LIMIT_COOLDOWN.as_millis() as u64)
+            );
+        }
+
+        #[test]
+        fn orchestration_transient_failure_uses_interval_with_three_second_floor() {
+            for (interval_secs, expected_cooldown_secs) in [(1, 3), (9, 9)] {
+                let fixture = OrchestrationFixture::new();
+                fixture.fail_remote("temporary network failure");
+                let repo = fixture.storage();
+                let context = fixture.context();
+                let mut progress = SyncCacheProgress::new(interval_secs);
+                let now = UNIX_EPOCH + Duration::from_secs(10_000);
+
+                let result =
+                    fetch_for_pull_at(&repo, &mut progress, now, PublicationHooks::default());
+
+                assert!(matches!(
+                    result,
+                    PullFetchResult::RemoteError(GitError::CommandFailed(_))
+                ));
+                let failed = read_state(&context.state_file)
+                    .expect("read failure state")
+                    .expect("failure state");
+                assert_eq!(failed.attempt, AttemptClass::TransientFailure);
+                assert_eq!(
+                    failed.retry_after_unix_ms,
+                    Some(unix_ms(now) + expected_cooldown_secs * 1_000)
+                );
+            }
+        }
+
+        #[test]
+        fn orchestration_follower_inside_failure_cooldown_is_neutral() {
+            let fixture = OrchestrationFixture::new();
+            fixture.fail_remote("HTTP 401 invalid username or token");
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut leader_progress = SyncCacheProgress::new(30);
+            assert!(matches!(
+                fetch_for_pull_at(
+                    &repo,
+                    &mut leader_progress,
+                    now,
+                    PublicationHooks::default(),
+                ),
+                PullFetchResult::RemoteError(GitError::AuthFailed(_))
+            ));
+            let failure_state = read_state(&context.state_file)
+                .expect("read failure state")
+                .expect("failure state");
+            let mut follower_progress = SyncCacheProgress::new(30);
+
+            assert_neutral(fetch_for_pull_at(
+                &repo,
+                &mut follower_progress,
+                now + Duration::from_secs(1),
+                PublicationHooks::default(),
+            ));
+
+            assert_eq!(
+                read_state(&context.state_file).expect("read unchanged failure state"),
+                Some(failure_state)
+            );
+            assert_eq!(follower_progress.applied_generation, None);
+            assert!(!follower_progress.disabled);
+        }
+
+        #[test]
+        fn orchestration_config_revision_change_invalidates_failure_cooldown() {
+            let fixture = OrchestrationFixture::new();
+            fixture.fail_remote("HTTP 401 invalid username or token");
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut progress = SyncCacheProgress::new(30);
+            assert!(matches!(
+                fetch_for_pull_at(&repo, &mut progress, now, PublicationHooks::default(),),
+                PullFetchResult::RemoteError(GitError::AuthFailed(_))
+            ));
+            let failed_revision = read_state(&context.state_file)
+                .expect("read failure state")
+                .expect("failure state")
+                .config_revision;
+            fixture.restore_remote();
+            fixture.change_config_revision();
+            let refreshed_context = fixture.context();
+            assert_ne!(refreshed_context.config_revision, failed_revision);
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(1),
+                PublicationHooks::default(),
+            ));
+
+            let recovered = read_state(&context.state_file)
+                .expect("read recovered state")
+                .expect("recovered state");
+            assert_eq!(recovered.attempt, AttemptClass::Success);
+            assert_eq!(recovered.generation, 1);
+            assert_eq!(recovered.config_revision, refreshed_context.config_revision);
+        }
+
+        #[test]
+        fn orchestration_corrupt_state_falls_back_and_disables_cache_for_process() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut leader_progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut leader_progress,
+                now,
+                PublicationHooks::default(),
+            ));
+            let valid_state = std::fs::read(&context.state_file).expect("save valid cache state");
+            std::fs::write(&context.state_file, b"{corrupt").expect("corrupt cache state");
+            let mut progress = SyncCacheProgress::new(30);
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(1),
+                PublicationHooks::default(),
+            ));
+            assert!(progress.disabled);
+
+            std::fs::write(&context.state_file, valid_state).expect("restore valid cache state");
+            std::fs::rename(
+                &fixture.origin,
+                fixture.workspace.root.path().join("origin-offline.git"),
+            )
+            .expect("make remote transport unavailable");
+            assert!(matches!(
+                fetch_for_pull_at(
+                    &repo,
+                    &mut progress,
+                    now + Duration::from_secs(2),
+                    PublicationHooks::default(),
+                ),
+                PullFetchResult::RemoteError(GitError::CommandFailed(_))
+            ));
+            assert!(progress.disabled);
+        }
+
+        #[test]
+        fn orchestration_corrupt_bare_fallback_records_trustworthy_generation() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut leader_progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut leader_progress,
+                now,
+                PublicationHooks::default(),
+            ));
+            git_ok(
+                repo.root(),
+                &["update-ref", "-d", "refs/remotes/origin/main"],
+            );
+            std::fs::rename(
+                &context.cache_repository,
+                context.runtime_dir.join("fetch-cache-valid-backup.git"),
+            )
+            .expect("move valid bare cache");
+            std::fs::create_dir(&context.cache_repository).expect("create corrupt bare cache");
+            let mut progress = SyncCacheProgress::new(30);
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(1),
+                PublicationHooks::default(),
+            ));
+            assert_eq!(progress.applied_generation, Some(1));
+            assert!(!progress.disabled);
+            assert_eq!(
+                git_stdout(&fixture.seed, &["rev-parse", "refs/heads/main"]),
+                git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"])
+            );
+
+            std::fs::rename(
+                &fixture.origin,
+                fixture.workspace.root.path().join("origin-offline.git"),
+            )
+            .expect("make remote transport unavailable");
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(2),
+                PublicationHooks::default(),
+            ));
+        }
+
+        #[test]
+        fn orchestration_publication_failure_keeps_old_generation_active() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now,
+                PublicationHooks::default(),
+            ));
+            let first_state = read_state(&context.state_file)
+                .expect("read first state")
+                .expect("first state");
+            fixture.advance_remote("two\n");
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(30),
+                PublicationHooks {
+                    before_state_replace: Some(reject_state_replacement),
+                },
+            ));
+
+            assert_eq!(
+                read_state(&context.state_file).expect("read active state"),
+                Some(first_state)
+            );
+            assert_eq!(progress.applied_generation, Some(1));
+            assert_eq!(
+                cache_refs(
+                    &context.cache_repository,
+                    "refs/gitim-fetch-cache/generations/2/"
+                )
+                .len(),
+                1
+            );
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(31),
+                PublicationHooks::default(),
+            ));
+            assert_eq!(
+                read_state(&context.state_file)
+                    .expect("read retried state")
+                    .expect("retried state")
+                    .generation,
+                2
+            );
+        }
+
+        #[test]
+        fn orchestration_state_replacement_selects_only_complete_generation() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now,
+                PublicationHooks::default(),
+            ));
+            fixture.advance_remote("two\n");
+            let expected_main = git_stdout(&fixture.seed, &["rev-parse", "refs/heads/main"]);
+            BOUNDARY_EXPECTATION.with(|slot| {
+                *slot.borrow_mut() = Some(BoundaryExpectation {
+                    state_file: context.state_file.clone(),
+                    cache_repository: context.cache_repository.clone(),
+                    old_generation: 1,
+                    new_generation: 2,
+                    expected_main,
+                });
+            });
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(30),
+                PublicationHooks {
+                    before_state_replace: Some(verify_complete_generation_before_state_replacement),
+                },
+            ));
+
+            assert_eq!(
+                read_state(&context.state_file)
+                    .expect("read selected state")
+                    .expect("selected state")
+                    .generation,
+                2
+            );
+            BOUNDARY_EXPECTATION.with(|slot| {
+                assert!(
+                    slot.borrow().is_none(),
+                    "publication boundary hook was not called"
+                );
+            });
+        }
+
+        #[test]
+        fn orchestration_cache_artifacts_exclude_credentials() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                UNIX_EPOCH + Duration::from_secs(10_000),
+                PublicationHooks::default(),
+            ));
+
+            let forbidden = [TEST_TOKEN.as_bytes(), RAW_ORIGIN.as_bytes()];
+            assert_tree_excludes(&context.lock_file, &forbidden);
+            assert_tree_excludes(&context.state_file, &forbidden);
+            assert_tree_excludes(&context.cache_repository, &forbidden);
+        }
     }
 }
