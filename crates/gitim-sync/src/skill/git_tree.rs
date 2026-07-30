@@ -363,32 +363,19 @@ fn protected_index_paths(repo: &GitStorage) -> Result<Vec<ProtectedIndex>, GitEr
 
     let mut candidates = vec![common_dir.join("index")];
     let worktrees_dir = common_dir.join("worktrees");
-    let entries = match fs::read_dir(&worktrees_dir) {
-        Ok(entries) => Some(entries),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
+    let entries = match symlink_metadata_if_exists(&worktrees_dir)? {
+        None => None,
+        Some(metadata) if metadata.is_dir() => Some(fs::read_dir(&worktrees_dir)?),
+        Some(_) => {
+            return Err(invalid_input(
+                "Git worktree administration path is not a directory",
+            ));
+        }
     };
     if let Some(entries) = entries {
         for entry in entries {
-            let entry = match entry {
-                Ok(entry) => entry,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
-            };
-            let candidate = entry.path().join("index");
-            match entry.file_type() {
-                Ok(file_type) if file_type.is_dir() => candidates.push(candidate),
-                Ok(_) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                    ) =>
-                {
-                    candidates.push(candidate);
-                }
-                Err(error) => return Err(error.into()),
-            }
+            let entry = entry?;
+            candidates.push(entry.path().join("index"));
         }
     }
 
@@ -399,19 +386,21 @@ fn protected_index_paths(repo: &GitStorage) -> Result<Vec<ProtectedIndex>, GitEr
 }
 
 fn normalize_protected_index(path: PathBuf) -> Result<ProtectedIndex, GitError> {
-    let parent = path
+    if !path.is_absolute() {
+        return Err(invalid_input("protected index path must be absolute"));
+    }
+    let logical_parent = path
         .parent()
-        .ok_or_else(|| invalid_input("protected index path has no parent"))?
-        .canonicalize()?;
+        .ok_or_else(|| invalid_input("protected index path has no parent"))?;
     let file_name = path
         .file_name()
         .ok_or_else(|| invalid_input("protected index path has no file name"))?;
-    let logical = parent.join(file_name);
+    let logical = logical_parent.join(file_name);
     let metadata = symlink_metadata_if_exists(&logical)?;
     let resolved = if metadata.is_some() {
         logical.canonicalize()?
     } else {
-        logical.clone()
+        logical_parent.canonicalize()?.join(file_name)
     };
     let metadata = if metadata.is_some() {
         Some(fs::metadata(&logical)?)

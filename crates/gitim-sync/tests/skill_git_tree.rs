@@ -824,3 +824,94 @@ fn missing_linked_worktree_index_path_remains_protected() {
     );
     assert!(result.is_err(), "missing protected index path was accepted");
 }
+
+#[cfg(unix)]
+struct SymlinkedAdminWorktree {
+    worktrees: ThreeWorktrees,
+    logical_index: PathBuf,
+    target_index: PathBuf,
+}
+
+#[cfg(unix)]
+fn symlinked_admin_worktree() -> SymlinkedAdminWorktree {
+    let worktrees = three_worktrees();
+    let logical_index = worktrees.linked_b_index.clone();
+    let logical_admin = logical_index.parent().unwrap();
+    let target_admin = worktrees._root.path().join("live-linked-b-admin");
+    fs::rename(logical_admin, &target_admin).unwrap();
+    std::os::unix::fs::symlink(&target_admin, logical_admin).unwrap();
+    fs::write(
+        target_admin.join("commondir"),
+        format!(
+            "{}\n",
+            worktrees
+                .main
+                .join(".git")
+                .canonicalize()
+                .unwrap()
+                .display()
+        ),
+    )
+    .unwrap();
+    fs::write(
+        worktrees.linked_b.join(".git"),
+        format!("gitdir: {}\n", target_admin.display()),
+    )
+    .unwrap();
+    let target_index = logical_index.canonicalize().unwrap();
+    assert_eq!(
+        target_index,
+        target_admin.canonicalize().unwrap().join("index")
+    );
+    git(&worktrees.linked_b, ["diff", "--cached", "--binary", "--"]);
+    SymlinkedAdminWorktree {
+        worktrees,
+        logical_index,
+        target_index,
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_worktree_admin_logical_index_is_protected() {
+    let fixture = symlinked_admin_worktree();
+    assert_private_index_rejected_without_victim_mutation(
+        &fixture.worktrees.main,
+        &fixture.worktrees.base,
+        &fixture.logical_index,
+        &fixture.worktrees.linked_b,
+        &fixture.logical_index,
+        "symlinked-admin-logical",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_worktree_admin_target_index_is_protected() {
+    let fixture = symlinked_admin_worktree();
+    assert_private_index_rejected_without_victim_mutation(
+        &fixture.worktrees.main,
+        &fixture.worktrees.base,
+        &fixture.target_index,
+        &fixture.worktrees.linked_b,
+        &fixture.logical_index,
+        "symlinked-admin-target",
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_worktree_admin_hardlink_is_protected() {
+    let fixture = symlinked_admin_worktree();
+    let alias = TempDir::new().unwrap();
+    let hardlink = alias.path().join("hardlink-index");
+    fs::hard_link(&fixture.target_index, &hardlink).unwrap();
+    assert_private_index_rejected_without_victim_mutation(
+        &fixture.worktrees.main,
+        &fixture.worktrees.base,
+        &hardlink,
+        &fixture.worktrees.linked_b,
+        &fixture.logical_index,
+        "symlinked-admin-hardlink",
+    );
+}
