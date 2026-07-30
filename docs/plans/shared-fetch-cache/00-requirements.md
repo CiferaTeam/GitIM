@@ -20,9 +20,10 @@ Coalesce pull-only remote fetches from Runtime-managed clones into one
 workspace-local fetch lane while preserving each daemon's clone, identity,
 permission checks, push path, and conflict handling.
 
-For `N` idle daemons in one workspace, one freshness window should perform at
-most one remote fetch. Followers should update their `origin/*` tracking refs
-from a disposable local cache only when the remote-tracking branch set changes.
+For `N` idle daemons in one workspace, each freshness boundary should perform
+at most one coalesced remote fetch. Followers update their `origin/*` tracking
+refs from a disposable local cache after they acquire the shared lock and the
+remote-tracking branch set has changed.
 
 ## Current Constraints
 
@@ -147,10 +148,11 @@ fetch indefinitely.
 
 When many daemons contend in one scheduler tick, the one-second bound may cause
 some followers to neutrally skip before importing the selected generation.
-Their bounded contention-only retries reuse the fresh generation locally, so
-all followers converge within the same freshness window without another remote
-fetch. If contention persists through the short-retry budget, the daemon
-returns to its regular cadence.
+When the leader completes within a follower's short-retry budget, that follower
+reuses the fresh generation locally and converges inside the same freshness
+window. If contention persists through the budget, the follower returns to its
+regular cadence. That cadence may cross the next freshness boundary and start
+one new coalesced remote fetch.
 
 ### R4 — Credential-free cache
 
@@ -421,15 +423,17 @@ The reviewed 16 new-path groups have implemented coverage:
   `cache_half_open_neutral_skip_preserves_probe_eligibility`,
   `cache_neutral_schedule_retries_contention_and_preserves_backoff_state`,
   `cache_failure_cooldown_preserves_regular_schedule`,
+  `cache_unpushed_cycle_resets_contention_retry_window`,
   `cache_imported_generation_still_rebases_pull_only_clone`, and
   `cache_unpushed_cycle_bypasses_cache_lock_and_state`.
 - Unix multi-daemon acceptance:
   `ten_daemons_coalesce_remote_fetches_and_converge` proves one upload-pack
   request at the first boundary while a FIFO gate keeps the leader inside
-  upload-pack long enough for nine followers to hit real lock contention, no
-  additional request in the fresh window, exactly one more request after the
-  injected clock crosses freshness, and bounded convergence through the
-  production contention-retry scheduler.
+  upload-pack until nine followers hit one real lock-contention result, then
+  releases the leader and proves those followers converge through the
+  production short-retry scheduler. It also proves no additional request in
+  the fresh window and exactly one more request after the injected clock
+  crosses freshness.
 
 Remote request counting uses a per-clone `remote.origin.uploadpack` wrapper
 that creates atomic non-overwriting request directories, synchronizes through
@@ -440,12 +444,13 @@ clocks for freshness decisions and production retry hints for later cadence.
 ## Acceptance Criteria
 
 1. Ten concurrent eligible pull-only cycles in one workspace cause exactly one
-   remote fetch at a freshness boundary. Followers that neutrally skip because
-   of the bounded lock wait converge through the bounded production
-   contention-retry schedule in the same freshness window.
+   remote fetch at a freshness boundary. When the leader completes within the
+   bounded production contention-retry schedule, followers converge in the
+   same freshness window without another remote fetch.
 2. A remote branch update increments the cache generation and becomes visible
-   in every follower clone within bounded subsequent pull-only cycles, without
-   another remote fetch.
+   when each follower next acquires the cache lock. A follower that exhausts
+   its short-retry budget returns to regular cadence; crossing the next
+   freshness boundary may start one new coalesced remote fetch.
 3. An unchanged remote ref manifest keeps the generation stable, and followers
    that already applied it start no remote-fetch or cache-import subprocess.
 4. A leader auth failure suppresses remote fetches for five minutes, a rate
@@ -535,8 +540,9 @@ finding above.
     `crates/gitim-sync/src/git.rs`,
     `docs/plans/shared-fetch-cache/00-requirements.md`,
     `docs/plans/shared-fetch-cache/01-plan.md`.
-  - Commits: `675f35612983d85b56dca336d9eda30ed6cfca00`;
-    review fix titled `fix(sync): retry cache lock contention`.
+  - Commits: `675f35612983d85b56dca336d9eda30ed6cfca00`,
+    `d575fd9b321528874b561b6ec7e84cd75de1999d`;
+    retry-budget reset fix titled `fix(sync): reset cache retry budget`.
   - Verified by: `cargo test -p gitim-sync`;
     `cargo fmt --all -- --check`;
     `cargo clippy -p gitim-sync --all-targets --no-deps --locked`;
@@ -544,7 +550,7 @@ finding above.
 
 ## Final verification
 
-- `cargo test -p gitim-sync` — pass, 203 tests across unit and integration
+- `cargo test -p gitim-sync` — pass, 204 tests across unit and integration
   targets.
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy -p gitim-sync --all-targets --no-deps --locked` — pass.

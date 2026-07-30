@@ -82,7 +82,7 @@ impl SyncCacheProgress {
         }
     }
 
-    fn reset_contention_retries(&mut self) {
+    pub(crate) fn reset_contention_retries(&mut self) {
         self.contention_short_retries = 0;
     }
 }

@@ -468,6 +468,37 @@ fn run_sync_cycle_with_cache(
     on_synced: &dyn Fn(String),
     on_cycle_done: &dyn Fn(),
     rebase_author: Option<&(String, String)>,
+    mut cache_progress: Option<&mut SyncCacheProgress>,
+) -> CacheAwareCycleResult {
+    let result = run_sync_cycle_with_cache_inner(
+        repo,
+        circuit,
+        commit_lock,
+        on_pushed,
+        on_renumbered,
+        on_synced,
+        on_cycle_done,
+        rebase_author,
+        cache_progress.as_deref_mut(),
+    );
+    if result.cache_neutral != Some(CacheNeutralHint::RetryContention) {
+        if let Some(progress) = cache_progress {
+            progress.reset_contention_retries();
+        }
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_sync_cycle_with_cache_inner(
+    repo: &GitStorage,
+    circuit: &mut AuthCircuit,
+    commit_lock: &Mutex<()>,
+    on_pushed: &dyn Fn(String, String),
+    on_renumbered: &dyn Fn(PathBuf, u64, u64),
+    on_synced: &dyn Fn(String),
+    on_cycle_done: &dyn Fn(),
+    rebase_author: Option<&(String, String)>,
     cache_progress: Option<&mut SyncCacheProgress>,
 ) -> CacheAwareCycleResult {
     let probe_state_before_cycle = circuit.tripped_at;
@@ -2220,6 +2251,59 @@ mod tests {
         assert_eq!(fetch_for_pull_entry_count(), 0);
         assert!(!repo.has_unpushed_commits().expect("check pushed state"));
         assert!(!fixture.cache_state_path().exists());
+    }
+
+    #[test]
+    fn cache_unpushed_cycle_resets_contention_retry_window() {
+        let fixture = CacheLoopFixture::new();
+        let repo = fixture.storage();
+        let cache_lock_path = fixture.cache_lock_path();
+        let mut progress = SyncCacheProgress::new(30);
+        let cycle_lock = Mutex::new(());
+
+        let held_cache_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&cache_lock_path)
+            .expect("open held cache lock");
+        held_cache_lock.lock_exclusive().expect("hold cache lock");
+        for _ in 0..3 {
+            let result = cache_cycle_result(&repo, &mut auth_circuit(), &cycle_lock, &mut progress);
+            assert_eq!(
+                result.cache_neutral,
+                Some(CacheNeutralHint::RetryContention)
+            );
+        }
+        FileExt::unlock(&held_cache_lock).expect("release cache lock");
+
+        commit_file(
+            &fixture.clone_root,
+            "local.txt",
+            "unpushed\n",
+            "local change",
+        );
+        let push_result =
+            cache_cycle_result(&repo, &mut auth_circuit(), &cycle_lock, &mut progress);
+        assert!(push_result.cache_neutral.is_none());
+        assert!(!repo.has_unpushed_commits().expect("check pushed state"));
+
+        let held_cache_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(cache_lock_path)
+            .expect("reopen held cache lock");
+        held_cache_lock
+            .lock_exclusive()
+            .expect("hold cache lock again");
+        for _ in 0..3 {
+            let result = cache_cycle_result(&repo, &mut auth_circuit(), &cycle_lock, &mut progress);
+            assert_eq!(
+                result.cache_neutral,
+                Some(CacheNeutralHint::RetryContention)
+            );
+        }
     }
 
     #[test]

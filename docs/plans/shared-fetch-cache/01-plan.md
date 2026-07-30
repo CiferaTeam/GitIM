@@ -779,6 +779,9 @@ fn run_sync_cycle_with_cache(
 `CacheAwareCycleResult` carries the unchanged public `SyncOutcome` plus a
 private `Option<CacheNeutralHint>`. Pass `cache_progress` only to the pull-only
 branch. The push branch and every helper it reaches remain unchanged.
+The outer cache-aware wrapper resets the contention budget after every result
+except `RetryContention`, including push, auth-idle, recovery, and other
+pre-fetch returns.
 
 ### Step 3: Map typed pull outcomes
 
@@ -912,14 +915,13 @@ assert_eq!(request_count(&counter_dir), 1);
 Release the leader only after all nine followers have hit the one-second
 contention bound. Feed each concrete contention hint through the production
 scheduling seam and run only the resulting bounded short-retry cadences at
-advanced injected times. Assert every clone converges while the request count
-stays one. Never schedule a `PreserveSchedule` result inside the acceptance
-boundary.
+advanced injected times. The gate releases the leader after the first
+contention result, so every clone converges while the request count stays one.
+The acceptance test covers completion within the retry budget.
 
 Repeat all ten callers within the same freshness window and assert the count
 remains one. Advance the injected clock beyond freshness, update the remote,
-run all ten again, assert the count becomes two, then use the same bounded
-cache-only convergence check and assert the count remains two.
+run the same gated boundary again, and assert the count becomes two.
 
 The wrapper and assertions must be `#[cfg(unix)]`, matching the workspace's
 v1 platform scope. It must not mutate process-global `PATH`.
@@ -931,7 +933,9 @@ cargo test -p gitim-sync fetch_cache::tests::ten_daemons -- --nocapture
 ```
 
 Expected: the acceptance test exercises one remote request per freshness
-boundary and bounded local convergence.
+boundary and local convergence when the leader completes within the bounded
+short-retry window. Persistent contention returns followers to regular
+cadence, which may cross a later freshness boundary.
 
 ### Step 2: Close acceptance gaps
 
@@ -1016,9 +1020,12 @@ Co-authored-by: Codex <codex@openai.com>
   `544e116c815923edf741bb725e8f47459ccac83a`.
 - Task 5 acceptance and parser coverage:
   `675f35612983d85b56dca336d9eda30ed6cfca00`.
-- Task 5 review fix: commit titled `fix(sync): retry cache lock contention`.
+- Task 5 contention scheduling and deterministic acceptance:
+  `d575fd9b321528874b561b6ec7e84cd75de1999d`.
+- Task 5 retry-budget reset: commit titled
+  `fix(sync): reset cache retry budget`.
 - Scoped verification passed:
-  `cargo test -p gitim-sync` ran 203 tests,
+  `cargo test -p gitim-sync` ran 204 tests,
   `cargo fmt --all -- --check`,
   `cargo clippy -p gitim-sync --all-targets --no-deps --locked`, and
   `git diff --check`.
