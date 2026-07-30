@@ -63,6 +63,16 @@ pub fn scan_skill_references(markdown: &str) -> Vec<SkillReference> {
             continue;
         }
 
+        if link_destination_depth > 0 {
+            match bytes[index] {
+                b'(' => link_destination_depth += 1,
+                b')' => link_destination_depth -= 1,
+                _ => {}
+            }
+            index += markdown[index..].chars().next().map_or(1, char::len_utf8);
+            continue;
+        }
+
         if bytes[index] == b'\\' {
             index += '\\'.len_utf8();
             index += markdown[index..].chars().next().map_or(0, char::len_utf8);
@@ -84,15 +94,6 @@ pub fn scan_skill_references(markdown: &str) -> Vec<SkillReference> {
             continue;
         }
 
-        if link_destination_depth > 0 {
-            match bytes[index] {
-                b'(' => link_destination_depth += 1,
-                b')' => link_destination_depth -= 1,
-                _ => {}
-            }
-            index += markdown[index..].chars().next().map_or(1, char::len_utf8);
-            continue;
-        }
         if bytes[index] == b'(' && index > 0 && bytes[index - 1] == b']' {
             link_destination_depth = 1;
             index += 1;
@@ -186,5 +187,7 @@ fn line_remainder(markdown: &str, index: usize) -> &str {
     let line_end = markdown[index..]
         .find('\n')
         .map_or(markdown.len(), |offset| index + offset);
-    &markdown[index..line_end]
+    markdown[index..line_end]
+        .strip_suffix('\r')
+        .unwrap_or(&markdown[index..line_end])
 }

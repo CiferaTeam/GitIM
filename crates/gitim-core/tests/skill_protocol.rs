@@ -235,6 +235,26 @@ fn scanner_recognizes_only_line_fences() {
 }
 
 #[test]
+fn scanner_closes_backtick_and_tilde_fences_with_crlf() {
+    let refs = scan_skill_references(
+        "```\r\nskill:backtick-hidden@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N\r\n```\r\nskill:backtick-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N\r\n~~~\r\nskill:tilde-hidden@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N\r\n~~~\r\nskill:tilde-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N",
+    );
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs[0].slug.as_str(), "backtick-visible");
+    assert_eq!(refs[1].slug.as_str(), "tilde-visible");
+}
+
+#[test]
+fn scanner_ignores_code_delimiters_inside_link_destinations() {
+    let refs = scan_skill_references(
+        "[x](foo`bar) skill:visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N [nested](a(b`c)) skill:also-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N",
+    );
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs[0].slug.as_str(), "visible");
+    assert_eq!(refs[1].slug.as_str(), "also-visible");
+}
+
+#[test]
 fn local_request_dtos_round_trip_and_expose_request_ids() {
     let request = SkillMutationRequest::Create(SkillCreateRequest {
         request_id: RequestId::new("q-01K1D8QG2S8RX4T9M9BDKQ9Z7N").unwrap(),
