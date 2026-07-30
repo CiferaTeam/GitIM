@@ -521,7 +521,22 @@ impl GitStorage {
     ) -> Result<(), GitError> {
         validate_cache_generation(generation)?;
         let leader_path = cache_path_argument(&self.root)?;
-        let refspec = format!("+{CACHE_REMOTE_HEADS}/*:{CACHE_GENERATIONS}/{generation}/heads/*");
+        let generation_prefix = format!("{CACHE_GENERATIONS}/{generation}/heads/");
+        let output = run_git(
+            &["for-each-ref", "--format=%(refname)", &generation_prefix],
+            cache_path,
+        )?;
+        let mut updates = String::new();
+        for ref_name in String::from_utf8_lossy(&output.stdout).lines() {
+            updates.push_str("delete ");
+            updates.push_str(ref_name);
+            updates.push('\n');
+        }
+        if !updates.is_empty() {
+            run_git_with_input(&["update-ref", "--stdin"], cache_path, updates.as_bytes())?;
+        }
+
+        let refspec = format!("+{CACHE_REMOTE_HEADS}/*:{generation_prefix}*");
         run_git(
             &["fetch", "--atomic", "--no-tags", leader_path, &refspec],
             cache_path,
@@ -1551,6 +1566,52 @@ mod tests {
             ),
             symbolic_head
         );
+    }
+
+    #[test]
+    fn cache_generation_republish_replaces_complete_namespace() {
+        let fixture = CacheGitFixture::new();
+        let storage = fixture.leader_storage();
+        storage.fetch_cache_shadow().unwrap();
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let cache_path = cache_root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path).unwrap();
+        storage.publish_cache_generation(&cache_path, 7).unwrap();
+        assert_eq!(
+            cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/7/heads"))
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                format!("{CACHE_GENERATIONS}/7/heads/main"),
+                format!("{CACHE_GENERATIONS}/7/heads/topic"),
+            ]
+        );
+
+        git_test_ok(
+            fixture.leader.path(),
+            &["push", "origin", "--delete", "topic"],
+        );
+        storage.fetch_cache_shadow().unwrap();
+        storage.publish_cache_generation(&cache_path, 7).unwrap();
+
+        let generation_refs = cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/7/heads"));
+        let expected = storage
+            .cache_shadow_manifest()
+            .unwrap()
+            .into_iter()
+            .map(|(name, object_id)| {
+                (
+                    name.replacen(
+                        CACHE_REMOTE_HEADS,
+                        &format!("{CACHE_GENERATIONS}/7/heads"),
+                        1,
+                    ),
+                    object_id,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(generation_refs, expected);
     }
 
     #[test]
