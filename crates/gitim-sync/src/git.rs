@@ -215,7 +215,9 @@ fn parse_cache_ref_manifest(stdout: &[u8]) -> Result<BTreeMap<String, String>, G
         let (ref_name, object_id) = record.split_once('\0').ok_or_else(|| {
             GitError::CommandFailed("invalid fetch-cache ref manifest".to_string())
         })?;
-        if !ref_name.starts_with(&format!("{CACHE_REMOTE_HEADS}/"))
+        if ref_name
+            .strip_prefix(&format!("{CACHE_REMOTE_HEADS}/"))
+            .is_none_or(|branch| branch.is_empty())
             || object_id.is_empty()
             || object_id.contains('\0')
             || manifest
@@ -1499,6 +1501,7 @@ mod tests {
             b"\xff",
             b"refs/gitim-fetch-cache/remote/heads/main deadbeef\n",
             b"refs/heads/main\0deadbeef\n",
+            b"refs/gitim-fetch-cache/remote/heads/\0deadbeef\n",
             b"refs/gitim-fetch-cache/remote/heads/main\0\n",
             b"refs/gitim-fetch-cache/remote/heads/main\0dead\0beef\n",
             concat!(

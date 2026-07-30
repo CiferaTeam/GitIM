@@ -160,6 +160,7 @@ pub(crate) struct SyncCacheProgress {
     interval: Duration,
     applied_generation: Option<u64>,
     disabled: bool,
+    contention_short_retries: u8,
 }
 
 impl SyncCacheProgress {
@@ -169,8 +170,14 @@ impl SyncCacheProgress {
 #[derive(Debug)]
 pub(crate) enum PullFetchResult {
     Ready,
-    NeutralSkip,
+    NeutralSkip(CacheNeutralHint),
     RemoteError(GitError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheNeutralHint {
+    PreserveSchedule,
+    RetryContention,
 }
 
 #[derive(Debug, Clone)]
@@ -576,10 +583,12 @@ Execution order:
 1. if `progress.disabled`, run direct fetch;
 2. discover eligibility; on `None`, run direct fetch;
 3. acquire lock;
-4. contention returns `NeutralSkip`;
+4. contention returns `NeutralSkip(RetryContention)` while the bounded
+   short-retry budget remains, then `NeutralSkip(PreserveSchedule)`;
 5. lock error runs direct fallback;
 6. read and validate state schema and remote identity;
-7. active same-revision failure cooldown returns `NeutralSkip`;
+7. active same-revision failure cooldown returns
+   `NeutralSkip(PreserveSchedule)`;
 8. fresh success imports its generation when not yet applied;
 9. stale or missing state performs leader refresh;
 10. import/publication/cache errors run direct fallback;
@@ -726,7 +735,7 @@ Add tests proving:
 - internal cache-aware cycle maps neutral skip to public
   `SyncOutcome::Normal` plus a private cache-neutral sideband;
 - the private sideband preserves auth failure count, half-open probe
-  eligibility, current loop delay, and rate-limit/rebase failure counters;
+  eligibility, regular loop delay, and rate-limit/rebase failure counters;
 - cache remote auth failure records exactly one failure;
 - cache remote rate limit returns `SyncOutcome::RateLimited`;
 - cache/direct success clears a half-open auth circuit;
@@ -768,7 +777,7 @@ fn run_sync_cycle_with_cache(
 ```
 
 `CacheAwareCycleResult` carries the unchanged public `SyncOutcome` plus a
-private `cache_neutral` flag. Pass `cache_progress` only to the pull-only
+private `Option<CacheNeutralHint>`. Pass `cache_progress` only to the pull-only
 branch. The push branch and every helper it reaches remain unchanged.
 
 ### Step 3: Map typed pull outcomes
@@ -791,8 +800,8 @@ fn sync_pull_only(
     };
 
     match fetch_result {
-        PullFetchResult::NeutralSkip => {
-            return CacheAwareCycleResult::neutral();
+        PullFetchResult::NeutralSkip(hint) => {
+            return CacheAwareCycleResult::neutral(hint);
         }
         PullFetchResult::Ready => observe_auth(circuit, &Ok(())),
         PullFetchResult::RemoteError(error) => {
@@ -807,11 +816,13 @@ fn sync_pull_only(
 }
 ```
 
-`NeutralSkip` does not call `observe_auth`. The caller restores the
-pre-cycle half-open probe timestamp when the private sideband is set, and the
-async loop preserves its current delay plus rate-limit and rebase counters.
-Another daemon's shared result therefore leaves this daemon's auth probe and
-backoff state unchanged.
+`NeutralSkip` does not call `observe_auth`. The caller restores the pre-cycle
+half-open probe timestamp when the private sideband is set. `RetryContention`
+installs a one-cycle 100-millisecond delay override without changing the
+regular loop delay or the rate-limit and rebase counters.
+`PreserveSchedule` installs no override. Another daemon's shared result
+therefore leaves this daemon's auth probe and backoff state unchanged, and a
+shared failure cooldown never inherits a prior short-retry cadence.
 
 ### Step 4: Move progress through `spawn_blocking`
 
@@ -838,10 +849,11 @@ let join_result = tokio::task::spawn_blocking(move || {
 ```
 
 Copy the cycle result, circuit, and progress back on successful join. When the
-result's private cache-neutral sideband is set, retain the existing loop delay,
-rate-limit counter, and rebase-failure counter before starting the next cadence.
-On the impossible panic path, recreate only `SyncCacheProgress` with the current
-interval, which conservatively causes one later import.
+result's private cache-neutral sideband is set, retain the existing regular
+loop delay, rate-limit counter, and rebase-failure counter. Apply a one-cycle
+short-delay override only for `RetryContention`. On the impossible panic path,
+recreate only `SyncCacheProgress` with the current interval, which
+conservatively causes one later import.
 
 ### Step 5: Run sync regression tests and commit
 
@@ -884,19 +896,25 @@ Co-authored-by: Codex <codex@openai.com>
 Build ten eligible clones under one workspace. Configure each clone's
 `remote.origin.uploadpack` to a fixture script that:
 
-1. creates one uniquely named file in a shared counter directory;
-2. `exec`s the real `git-upload-pack`.
+1. atomically creates a non-overwriting request directory using
+   `mkdir request-$$-$suffix`;
+2. signals a FIFO after entering upload-pack;
+3. waits on a second FIFO before executing the real `git-upload-pack`.
 
-Start ten cache-aware pull cycles behind a barrier. Assert:
+Start the designated leader, wait for the FIFO signal while it holds the cache
+lock, then start the other nine callers behind a barrier. Assert all nine
+followers return `NeutralSkip(RetryContention)` and:
 
 ```rust
 assert_eq!(request_count(&counter_dir), 1);
 ```
 
-Followers that hit the one-second contention bound may neutrally skip that
-scheduler tick. At the same injected time, run cache-only fan-out cycles for
-the lagging clones, bounded by the daemon count, and assert that every clone
-converges while the request count stays one.
+Release the leader only after all nine followers have hit the one-second
+contention bound. Feed each concrete contention hint through the production
+scheduling seam and run only the resulting bounded short-retry cadences at
+advanced injected times. Assert every clone converges while the request count
+stays one. Never schedule a `PreserveSchedule` result inside the acceptance
+boundary.
 
 Repeat all ten callers within the same freshness window and assert the count
 remains one. Advance the injected clock beyond freshness, update the remote,
@@ -928,8 +946,10 @@ the established invariants:
 - no credential artifacts;
 - direct fallback on cache infrastructure failures.
 
-Run the test until it passes without wall-clock retries or sleeps. Cache-only
-fan-out uses the injected time and is bounded by the number of daemons.
+Run the test until it passes without freshness sleeps or narrow wall-clock
+assertions. The upload-pack FIFO deterministically holds the leader through
+the followers' real lock waits. Cache-only fan-out uses injected time, concrete
+production retry hints, and the bounded contention short-retry budget.
 
 ### Step 3: Run the scoped final verification
 
@@ -994,9 +1014,11 @@ Co-authored-by: Codex <codex@openai.com>
   `4227f4588a2932abbc0b54328eaf02083bdeeb75`.
 - Task 4: `f574d1b2b1934e14190c86c8e78cb4a1d9015b6d`,
   `544e116c815923edf741bb725e8f47459ccac83a`.
-- Task 5: commit titled `test(sync): verify shared fetch coalescing`.
+- Task 5 acceptance and parser coverage:
+  `675f35612983d85b56dca336d9eda30ed6cfca00`.
+- Task 5 review fix: commit titled `fix(sync): retry cache lock contention`.
 - Scoped verification passed:
-  `cargo test -p gitim-sync` ran 197 tests,
+  `cargo test -p gitim-sync` ran 203 tests,
   `cargo fmt --all -- --check`,
   `cargo clippy -p gitim-sync --all-targets --no-deps --locked`, and
   `git diff --check`.

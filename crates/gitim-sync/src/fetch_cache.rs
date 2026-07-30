@@ -48,6 +48,7 @@ const CACHE_REPOSITORY_DIR: &str = "fetch-cache.git";
 const CACHE_SHADOW_HEADS_PREFIX: &str = "refs/gitim-fetch-cache/remote/heads/";
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
+const MAX_CONTENTION_SHORT_RETRIES: u8 = 3;
 const RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(120);
 const MIN_TRANSIENT_COOLDOWN: Duration = Duration::from_secs(3);
 const STANDARD_FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
@@ -58,6 +59,7 @@ pub(crate) struct SyncCacheProgress {
     interval: Duration,
     applied_generation: Option<u64>,
     disabled: bool,
+    contention_short_retries: u8,
 }
 
 impl SyncCacheProgress {
@@ -66,15 +68,36 @@ impl SyncCacheProgress {
             interval: Duration::from_secs(u64::from(interval_secs)),
             applied_generation: None,
             disabled: false,
+            contention_short_retries: 0,
         }
+    }
+
+    fn contention_neutral_hint(&mut self) -> CacheNeutralHint {
+        if self.contention_short_retries < MAX_CONTENTION_SHORT_RETRIES {
+            self.contention_short_retries = self.contention_short_retries.saturating_add(1);
+            CacheNeutralHint::RetryContention
+        } else {
+            self.contention_short_retries = 0;
+            CacheNeutralHint::PreserveSchedule
+        }
+    }
+
+    fn reset_contention_retries(&mut self) {
+        self.contention_short_retries = 0;
     }
 }
 
 #[derive(Debug)]
 pub(crate) enum PullFetchResult {
     Ready,
-    NeutralSkip,
+    NeutralSkip(CacheNeutralHint),
     RemoteError(GitError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CacheNeutralHint {
+    PreserveSchedule,
+    RetryContention,
 }
 
 #[derive(Debug, Clone)]
@@ -450,12 +473,8 @@ pub(crate) fn fetch_for_pull(
     #[cfg(test)]
     FETCH_FOR_PULL_ENTRY_COUNT.with(|count| count.set(count.get().saturating_add(1)));
 
-    fetch_for_pull_at(
-        repo,
-        progress,
-        SystemTime::now(),
-        PublicationHooks::default(),
-    )
+    let mut clock = SystemTime::now;
+    fetch_for_pull_with_clock(repo, progress, &mut clock, PublicationHooks::default())
 }
 
 fn fetch_for_pull_at(
@@ -464,6 +483,19 @@ fn fetch_for_pull_at(
     now: SystemTime,
     hooks: PublicationHooks,
 ) -> PullFetchResult {
+    let mut clock = || now;
+    fetch_for_pull_with_clock(repo, progress, &mut clock, hooks)
+}
+
+fn fetch_for_pull_with_clock<F>(
+    repo: &GitStorage,
+    progress: &mut SyncCacheProgress,
+    clock: &mut F,
+    hooks: PublicationHooks,
+) -> PullFetchResult
+where
+    F: FnMut() -> SystemTime,
+{
     if progress.disabled {
         return direct_fallback(repo, progress, None);
     }
@@ -474,7 +506,7 @@ fn fetch_for_pull_at(
         LockAttempt::Acquired(cache_lock) => cache_lock,
         LockAttempt::Contended => {
             log_cache_outcome(&context, "lock_contended", None);
-            return PullFetchResult::NeutralSkip;
+            return PullFetchResult::NeutralSkip(progress.contention_neutral_hint());
         }
         LockAttempt::Failed(error) => {
             tracing::debug!(
@@ -487,17 +519,20 @@ fn fetch_for_pull_at(
             return direct_fallback(repo, progress, None);
         }
     };
+    progress.reset_contention_retries();
+    let decision_at = clock();
     match read_state(&context.state_file) {
-        Ok(None) => refresh_as_leader_with_hooks(repo, &context, None, progress, now, hooks),
+        Ok(None) => refresh_as_leader_with_hooks(repo, &context, None, progress, clock, hooks),
         Ok(Some(state))
             if state.schema_version == CACHE_SCHEMA_VERSION
                 && state.remote_identity == context.remote_identity
                 && state_is_semantically_valid(&state) =>
         {
-            let now_ms = unix_ms(now);
+            let now_ms = unix_ms(decision_at);
             if failure_cooldown_active(&state, now_ms, &context.config_revision) {
                 log_cache_outcome(&context, "cooldown_reuse", Some(state.generation));
-                PullFetchResult::NeutralSkip
+                progress.reset_contention_retries();
+                PullFetchResult::NeutralSkip(CacheNeutralHint::PreserveSchedule)
             } else if success_is_fresh(&state, now_ms, progress.interval) {
                 if !state.manifest.is_empty()
                     && progress.applied_generation != Some(state.generation)
@@ -537,7 +572,7 @@ fn fetch_for_pull_at(
                 progress.applied_generation = Some(state.generation);
                 PullFetchResult::Ready
             } else {
-                refresh_as_leader_with_hooks(repo, &context, Some(&state), progress, now, hooks)
+                refresh_as_leader_with_hooks(repo, &context, Some(&state), progress, clock, hooks)
             }
         }
         Ok(Some(_)) => {
@@ -562,6 +597,7 @@ fn direct_fallback(
     progress: &mut SyncCacheProgress,
     trustworthy_generation: Option<u64>,
 ) -> PullFetchResult {
+    progress.reset_contention_retries();
     match repo.fetch() {
         Ok(()) => {
             if let Some(generation) = trustworthy_generation {
@@ -575,40 +611,31 @@ fn direct_fallback(
     }
 }
 
-fn refresh_as_leader(
+fn refresh_as_leader_with_hooks<F>(
     repo: &GitStorage,
     context: &CacheContext,
     previous: Option<&CacheState>,
     progress: &mut SyncCacheProgress,
-    now: SystemTime,
-) -> PullFetchResult {
-    refresh_as_leader_with_hooks(
-        repo,
-        context,
-        previous,
-        progress,
-        now,
-        PublicationHooks::default(),
-    )
-}
-
-fn refresh_as_leader_with_hooks(
-    repo: &GitStorage,
-    context: &CacheContext,
-    previous: Option<&CacheState>,
-    progress: &mut SyncCacheProgress,
-    now: SystemTime,
+    clock: &mut F,
     hooks: PublicationHooks,
-) -> PullFetchResult {
+) -> PullFetchResult
+where
+    F: FnMut() -> SystemTime,
+{
     log_cache_outcome(
         context,
         "leader_refresh",
         previous.map(|state| state.generation),
     );
     if let Err(error) = repo.fetch_cache_shadow() {
-        if let Err(persist_error) =
-            publish_failure(context, previous, &error, progress.interval, unix_ms(now))
-        {
+        let completed_at = clock();
+        if let Err(persist_error) = publish_failure(
+            context,
+            previous,
+            &error,
+            progress.interval,
+            unix_ms(completed_at),
+        ) {
             tracing::debug!(
                 workspace = %context.workspace.display(),
                 outcome = "cooldown_persist_failed",
@@ -680,13 +707,14 @@ fn refresh_as_leader_with_hooks(
             return direct_fallback(repo, progress, previous.map(|state| state.generation));
         }
     }
+    let completed_at = clock();
     let state = CacheState {
         schema_version: CACHE_SCHEMA_VERSION,
         remote_identity: context.remote_identity.clone(),
         config_revision: context.config_revision.clone(),
         generation,
         manifest,
-        completed_at_unix_ms: unix_ms(now),
+        completed_at_unix_ms: unix_ms(completed_at),
         attempt: AttemptClass::Success,
         retry_after_unix_ms: None,
     };
@@ -1273,6 +1301,38 @@ mod tests {
     }
 
     #[test]
+    fn state_contention_retry_hint_is_bounded() {
+        let mut progress = SyncCacheProgress::new(3);
+
+        for _ in 0..MAX_CONTENTION_SHORT_RETRIES {
+            assert_eq!(
+                progress.contention_neutral_hint(),
+                CacheNeutralHint::RetryContention
+            );
+        }
+        assert_eq!(
+            progress.contention_neutral_hint(),
+            CacheNeutralHint::PreserveSchedule
+        );
+        assert_eq!(
+            progress.contention_neutral_hint(),
+            CacheNeutralHint::RetryContention
+        );
+
+        progress.reset_contention_retries();
+        for _ in 0..MAX_CONTENTION_SHORT_RETRIES {
+            assert_eq!(
+                progress.contention_neutral_hint(),
+                CacheNeutralHint::RetryContention
+            );
+        }
+        assert_eq!(
+            progress.contention_neutral_hint(),
+            CacheNeutralHint::PreserveSchedule
+        );
+    }
+
+    #[test]
     fn state_read_missing_file_is_empty() {
         let temp = tempfile::tempdir().expect("create temp directory");
 
@@ -1482,34 +1542,106 @@ mod tests {
         }
 
         #[cfg(unix)]
-        fn configure_upload_pack_counter(
+        struct UploadPackControl {
+            counter_dir: PathBuf,
+            started: std::fs::File,
+            release: std::fs::File,
+        }
+
+        #[cfg(unix)]
+        impl UploadPackControl {
+            fn wait_for_remote_attempt(&mut self) {
+                use std::io::Read as _;
+
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    let mut byte = [0_u8; 1];
+                    match self.started.read(&mut byte) {
+                        Ok(1) if byte[0] == b'\n' => return,
+                        Ok(0 | 1) => {}
+                        Ok(_) => unreachable!("single-byte FIFO read"),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                        Err(error) => panic!("read upload-pack start gate: {error}"),
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "timed out waiting for upload-pack start gate"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+
+            fn release_remote_attempt(&mut self) {
+                self.release
+                    .write_all(b"go\n")
+                    .expect("release upload-pack gate");
+                self.release.flush().expect("flush upload-pack gate");
+            }
+        }
+
+        #[cfg(unix)]
+        fn create_fifo(path: &Path) {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt as _;
+
+            let path = CString::new(path.as_os_str().as_bytes()).expect("FIFO path has no NUL");
+            // SAFETY: `path` is a live, NUL-terminated C string and the mode is valid.
+            let result = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+            assert_eq!(
+                result,
+                0,
+                "create FIFO failed: {}",
+                std::io::Error::last_os_error()
+            );
+        }
+
+        #[cfg(unix)]
+        fn configure_upload_pack_control(
             fixture: &OrchestrationFixture,
             repos: &[GitStorage],
-        ) -> PathBuf {
-            use std::os::unix::fs::PermissionsExt;
+        ) -> UploadPackControl {
+            use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 
             let counter_dir = fixture.workspace.root.path().join("upload-pack-requests");
             std::fs::create_dir_all(&counter_dir).expect("create upload-pack counter");
+            let started_fifo = fixture
+                .workspace
+                .root
+                .path()
+                .join("upload-pack-started.fifo");
+            let release_fifo = fixture
+                .workspace
+                .root
+                .path()
+                .join("upload-pack-release.fifo");
+            create_fifo(&started_fifo);
+            create_fifo(&release_fifo);
             let exec_path = git_stdout(fixture.workspace.root.path(), &["--exec-path"]);
             let upload_pack = PathBuf::from(exec_path).join("git-upload-pack");
             assert!(upload_pack.is_file(), "git-upload-pack must exist");
 
-            let script = fixture
-                .workspace
-                .root
-                .path()
-                .join("counting-upload-pack.sh");
+            let script = fixture.workspace.root.path().join("gated-upload-pack.sh");
             std::fs::write(
                 &script,
                 format!(
-                    "#!/bin/sh\nset -eu\n: > {}/request-$$\nexec {} \"$@\"\n",
+                    "#!/bin/sh\n\
+                     set -eu\n\
+                     suffix=0\n\
+                     while ! mkdir {}/request-$$-$suffix 2>/dev/null; do\n\
+                       suffix=$((suffix + 1))\n\
+                     done\n\
+                     printf 'started\\n' > {}\n\
+                     IFS= read -r _ < {}\n\
+                     exec {} \"$@\"\n",
                     shell_quote(&counter_dir),
+                    shell_quote(&started_fifo),
+                    shell_quote(&release_fifo),
                     shell_quote(&upload_pack)
                 ),
             )
-            .expect("write counting upload-pack");
+            .expect("write gated upload-pack");
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))
-                .expect("make counting upload-pack executable");
+                .expect("make gated upload-pack executable");
 
             for repo in repos {
                 git_config(
@@ -1517,7 +1649,20 @@ mod tests {
                     &["remote.origin.uploadpack", path_arg(&script)],
                 );
             }
-            counter_dir
+
+            let open_fifo = |path: &Path| {
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(path)
+                    .expect("open upload-pack FIFO")
+            };
+            UploadPackControl {
+                counter_dir,
+                started: open_fifo(&started_fifo),
+                release: open_fifo(&release_fifo),
+            }
         }
 
         #[cfg(unix)]
@@ -1529,6 +1674,14 @@ mod tests {
         fn request_count(counter_dir: &Path) -> usize {
             std::fs::read_dir(counter_dir)
                 .expect("read upload-pack counter")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|name| name.starts_with("request-"))
+                        && entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+                })
                 .count()
         }
 
@@ -1537,24 +1690,27 @@ mod tests {
             repos: &[GitStorage],
             progresses: &mut [SyncCacheProgress],
             now: SystemTime,
-        ) {
+        ) -> Vec<(usize, PullFetchResult)> {
             assert_eq!(repos.len(), progresses.len());
             let indices = (0..repos.len()).collect::<Vec<_>>();
-            run_concurrent_fetches_for(repos, progresses, &indices, now);
+            let scheduled = indices
+                .into_iter()
+                .map(|index| (index, now))
+                .collect::<Vec<_>>();
+            run_scheduled_fetches(repos, progresses, &scheduled)
         }
 
         #[cfg(unix)]
-        fn run_concurrent_fetches_for(
+        fn run_scheduled_fetches(
             repos: &[GitStorage],
             progresses: &mut [SyncCacheProgress],
-            indices: &[usize],
-            now: SystemTime,
-        ) {
-            assert!(!indices.is_empty());
-            let barrier = std::sync::Arc::new(std::sync::Barrier::new(indices.len()));
-            let handles = indices
+            scheduled: &[(usize, SystemTime)],
+        ) -> Vec<(usize, PullFetchResult)> {
+            assert!(!scheduled.is_empty());
+            let barrier = std::sync::Arc::new(std::sync::Barrier::new(scheduled.len()));
+            let handles = scheduled
                 .iter()
-                .map(|&index| {
+                .map(|&(index, now)| {
                     let repo = repos[index].clone();
                     let mut progress = progresses[index].clone();
                     let barrier = std::sync::Arc::clone(&barrier);
@@ -1571,51 +1727,100 @@ mod tests {
                 })
                 .collect::<Vec<_>>();
 
+            let mut results = Vec::with_capacity(handles.len());
             for handle in handles {
                 let (index, updated, result) = handle.join().expect("join fetch-cache caller");
-                assert!(
-                    matches!(
-                        result,
-                        PullFetchResult::Ready | PullFetchResult::NeutralSkip
-                    ),
-                    "expected ready or neutral result, got {result:?}"
-                );
                 progresses[index] = updated;
+                results.push((index, result));
             }
+            results
         }
 
         #[cfg(unix)]
-        fn converge_with_cache_only_cycles(
+        fn run_gated_contention_boundary(
             repos: &[GitStorage],
             progresses: &mut [SyncCacheProgress],
-            expected_main: &str,
-            counter_dir: &Path,
+            control: &mut UploadPackControl,
+            boundary_at: SystemTime,
             expected_requests: usize,
-            now: SystemTime,
         ) {
-            for _ in 0..repos.len() {
-                let lagging = repos
+            use crate::sync_loop::schedule_after_cache_neutral;
+
+            let leader_repo = repos[0].clone();
+            let mut leader_progress = progresses[0].clone();
+            let leader = std::thread::spawn(move || {
+                let result = fetch_for_pull_at(
+                    &leader_repo,
+                    &mut leader_progress,
+                    boundary_at,
+                    PublicationHooks::default(),
+                );
+                (leader_progress, result)
+            });
+            control.wait_for_remote_attempt();
+
+            let followers = (1..repos.len())
+                .map(|index| (index, boundary_at))
+                .collect::<Vec<_>>();
+            let follower_results = run_scheduled_fetches(repos, progresses, &followers);
+            let mut pending = follower_results
+                .into_iter()
+                .map(|(index, result)| match result {
+                    PullFetchResult::NeutralSkip(CacheNeutralHint::RetryContention) => {
+                        (index, CacheNeutralHint::RetryContention, boundary_at)
+                    }
+                    other => panic!("follower {index} bypassed forced contention: {other:?}"),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(pending.len(), repos.len() - 1);
+            assert_eq!(request_count(&control.counter_dir), expected_requests);
+
+            control.release_remote_attempt();
+            let (updated_leader, leader_result) = leader.join().expect("join fetch-cache leader");
+            assert_ready(leader_result);
+            progresses[0] = updated_leader;
+
+            for _ in 0..MAX_CONTENTION_SHORT_RETRIES {
+                if pending.is_empty() {
+                    break;
+                }
+                let scheduled = pending
                     .iter()
-                    .enumerate()
-                    .filter_map(|(index, repo)| {
-                        (git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"])
-                            != expected_main)
-                            .then_some(index)
+                    .map(|&(index, hint, previous_at)| {
+                        let (retry_delay, rate_limits, rebase_failures) =
+                            schedule_after_cache_neutral(Some(hint), 7, 11)
+                                .expect("neutral hint schedules another cycle");
+                        assert_eq!((rate_limits, rebase_failures), (7, 11));
+                        let delay = retry_delay
+                            .expect("contention retry budget must not reach regular cadence");
+                        (index, previous_at + delay)
                     })
                     .collect::<Vec<_>>();
-                if lagging.is_empty() {
-                    return;
-                }
-                run_concurrent_fetches_for(repos, progresses, &lagging, now);
-                assert_eq!(request_count(counter_dir), expected_requests);
+                let results = run_scheduled_fetches(repos, progresses, &scheduled);
+                pending = results
+                    .into_iter()
+                    .filter_map(|(index, result)| match result {
+                        PullFetchResult::Ready => None,
+                        PullFetchResult::NeutralSkip(hint) => {
+                            let scheduled_at = scheduled
+                                .iter()
+                                .find_map(|&(scheduled_index, scheduled_at)| {
+                                    (scheduled_index == index).then_some(scheduled_at)
+                                })
+                                .expect("scheduled follower time");
+                            Some((index, hint, scheduled_at))
+                        }
+                        PullFetchResult::RemoteError(error) => {
+                            panic!("follower {index} unexpectedly fetched remote: {error}")
+                        }
+                    })
+                    .collect();
+                assert_eq!(request_count(&control.counter_dir), expected_requests);
             }
 
             assert!(
-                repos.iter().all(|repo| {
-                    git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"])
-                        == expected_main
-                }),
-                "followers did not converge within bounded cache-only cycles"
+                pending.is_empty(),
+                "followers did not converge through bounded production retry hints"
             );
         }
 
@@ -1648,13 +1853,6 @@ mod tests {
             assert!(
                 matches!(result, PullFetchResult::Ready),
                 "expected ready result, got {result:?}"
-            );
-        }
-
-        fn assert_neutral(result: PullFetchResult) {
-            assert!(
-                matches!(result, PullFetchResult::NeutralSkip),
-                "expected neutral skip, got {result:?}"
             );
         }
 
@@ -1729,6 +1927,99 @@ mod tests {
             );
             assert!(fixture.origin.is_dir());
             assert!(fixture.seed.is_dir());
+        }
+
+        #[test]
+        fn orchestration_clock_is_sampled_while_cache_lock_is_held() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            let mut clock = || {
+                let competing_lock = std::fs::OpenOptions::new()
+                    .create(true)
+                    .read(true)
+                    .write(true)
+                    .truncate(false)
+                    .open(&context.lock_file)
+                    .expect("open competing cache lock");
+                let error = competing_lock
+                    .try_lock_exclusive()
+                    .expect_err("clock must run while cache lock is held");
+                assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+                UNIX_EPOCH + Duration::from_secs(10_000)
+            };
+
+            assert_ready(fetch_for_pull_with_clock(
+                &repo,
+                &mut progress,
+                &mut clock,
+                PublicationHooks::default(),
+            ));
+        }
+
+        #[test]
+        fn orchestration_success_completion_uses_post_publication_clock() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            let decision_at = UNIX_EPOCH + Duration::from_secs(10_000);
+            let completed_at = decision_at + Duration::from_secs(42);
+            let times = std::cell::RefCell::new(std::collections::VecDeque::from([
+                decision_at,
+                completed_at,
+            ]));
+            let mut clock = || times.borrow_mut().pop_front().expect("clock sample");
+
+            assert_ready(fetch_for_pull_with_clock(
+                &repo,
+                &mut progress,
+                &mut clock,
+                PublicationHooks::default(),
+            ));
+
+            let published = read_state(&context.state_file)
+                .expect("read cache state")
+                .expect("published cache state");
+            assert_eq!(published.completed_at_unix_ms, unix_ms(completed_at));
+            assert!(times.borrow().is_empty());
+        }
+
+        #[test]
+        fn orchestration_failure_cooldown_uses_post_attempt_clock() {
+            let fixture = OrchestrationFixture::new();
+            fixture.fail_remote("HTTP 401 invalid username or token");
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let mut progress = SyncCacheProgress::new(30);
+            let decision_at = UNIX_EPOCH + Duration::from_secs(10_000);
+            let completed_at = decision_at + Duration::from_secs(50);
+            let times = std::cell::RefCell::new(std::collections::VecDeque::from([
+                decision_at,
+                completed_at,
+            ]));
+            let mut clock = || times.borrow_mut().pop_front().expect("clock sample");
+
+            assert!(matches!(
+                fetch_for_pull_with_clock(
+                    &repo,
+                    &mut progress,
+                    &mut clock,
+                    PublicationHooks::default(),
+                ),
+                PullFetchResult::RemoteError(GitError::AuthFailed(_))
+            ));
+
+            let published = read_state(&context.state_file)
+                .expect("read cache state")
+                .expect("published failure state");
+            assert_eq!(published.completed_at_unix_ms, unix_ms(completed_at));
+            assert_eq!(
+                published.retry_after_unix_ms,
+                Some(unix_ms(completed_at + AUTH_FAILURE_COOLDOWN))
+            );
+            assert!(times.borrow().is_empty());
         }
 
         #[test]
@@ -2038,11 +2329,14 @@ mod tests {
             let mut progress = SyncCacheProgress::new(30);
             let started = Instant::now();
 
-            assert_neutral(fetch_for_pull_at(
-                &repo,
-                &mut progress,
-                UNIX_EPOCH + Duration::from_secs(10_000),
-                PublicationHooks::default(),
+            assert!(matches!(
+                fetch_for_pull_at(
+                    &repo,
+                    &mut progress,
+                    UNIX_EPOCH + Duration::from_secs(10_000),
+                    PublicationHooks::default(),
+                ),
+                PullFetchResult::NeutralSkip(CacheNeutralHint::RetryContention)
             ));
 
             let waited = started.elapsed();
@@ -2051,11 +2345,35 @@ mod tests {
                 "contention returned before the bounded wait: {waited:?}"
             );
             assert!(
-                waited < Duration::from_millis(1_250),
+                waited < Duration::from_secs(3),
                 "contention exceeded the bounded wait: {waited:?}"
             );
             assert_eq!(progress.applied_generation, None);
             assert!(!progress.disabled);
+        }
+
+        #[test]
+        fn orchestration_acquired_lock_resets_contention_retry_budget() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let mut progress = SyncCacheProgress::new(30);
+            assert_eq!(
+                progress.contention_neutral_hint(),
+                CacheNeutralHint::RetryContention
+            );
+            assert_eq!(
+                progress.contention_neutral_hint(),
+                CacheNeutralHint::RetryContention
+            );
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                UNIX_EPOCH + Duration::from_secs(10_000),
+                PublicationHooks::default(),
+            ));
+
+            assert_eq!(progress.contention_short_retries, 0);
         }
 
         #[test]
@@ -2188,11 +2506,14 @@ mod tests {
                 .expect("failure state");
             let mut follower_progress = SyncCacheProgress::new(30);
 
-            assert_neutral(fetch_for_pull_at(
-                &repo,
-                &mut follower_progress,
-                now + Duration::from_secs(1),
-                PublicationHooks::default(),
+            assert!(matches!(
+                fetch_for_pull_at(
+                    &repo,
+                    &mut follower_progress,
+                    now + Duration::from_secs(1),
+                    PublicationHooks::default(),
+                ),
+                PullFetchResult::NeutralSkip(CacheNeutralHint::PreserveSchedule)
             ));
 
             assert_eq!(
@@ -2574,23 +2895,14 @@ mod tests {
             let repos = (0..10)
                 .map(|index| fixture.add_agent(&format!("agent-{index}")))
                 .collect::<Vec<_>>();
-            let counter_dir = configure_upload_pack_counter(&fixture, &repos);
+            let mut control = configure_upload_pack_control(&fixture, &repos);
             let mut progresses = vec![SyncCacheProgress::new(30); repos.len()];
             let first_refresh = UNIX_EPOCH + Duration::from_secs(10_000);
             fixture.advance_remote("one-plus\n");
             let origin_main = git_stdout(&fixture.origin, &["rev-parse", "refs/heads/main"]);
 
-            run_concurrent_fetches(&repos, &mut progresses, first_refresh);
-
-            assert_eq!(request_count(&counter_dir), 1);
-            converge_with_cache_only_cycles(
-                &repos,
-                &mut progresses,
-                &origin_main,
-                &counter_dir,
-                1,
-                first_refresh,
-            );
+            run_gated_contention_boundary(&repos, &mut progresses, &mut control, first_refresh, 1);
+            assert_eq!(request_count(&control.counter_dir), 1);
             for repo in &repos {
                 assert_eq!(
                     git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"]),
@@ -2598,31 +2910,31 @@ mod tests {
                 );
             }
 
-            run_concurrent_fetches(
+            let fresh_results = run_concurrent_fetches(
                 &repos,
                 &mut progresses,
                 first_refresh + Duration::from_secs(1),
             );
-            assert_eq!(request_count(&counter_dir), 1);
+            assert!(
+                fresh_results
+                    .iter()
+                    .all(|(_, result)| matches!(result, PullFetchResult::Ready)),
+                "fresh-window cycles must reuse the published generation"
+            );
+            assert_eq!(request_count(&control.counter_dir), 1);
 
             fixture.advance_remote("two\n");
             let updated_origin_main =
                 git_stdout(&fixture.origin, &["rev-parse", "refs/heads/main"]);
-            run_concurrent_fetches(
+            run_gated_contention_boundary(
                 &repos,
                 &mut progresses,
+                &mut control,
                 first_refresh + Duration::from_secs(31),
+                2,
             );
 
-            assert_eq!(request_count(&counter_dir), 2);
-            converge_with_cache_only_cycles(
-                &repos,
-                &mut progresses,
-                &updated_origin_main,
-                &counter_dir,
-                2,
-                first_refresh + Duration::from_secs(31),
-            );
+            assert_eq!(request_count(&control.counter_dir), 2);
             for repo in &repos {
                 assert_eq!(
                     git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"]),

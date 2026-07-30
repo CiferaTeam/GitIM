@@ -105,7 +105,12 @@ current direct-fetch behavior.
 An advisory file lock on a stable, separate lock file serializes cache use
 across daemon processes. Each eligible daemon polls `try_lock_exclusive` for at
 most one second. Ordinary contention or a wait timeout returns a neutral cache
-skip for that cycle and never triggers a direct fetch.
+skip with a contention retry hint and never triggers a direct fetch. The async
+loop schedules a 100-millisecond retry without changing its regular cadence,
+auth circuit, rate-limit counter, or rebase-failure counter. A daemon performs
+at most three consecutive short retries before returning to its regular
+schedule. Acquiring the lock or taking any non-contention path resets that
+budget.
 
 The lock holder keeps the lock through the freshness decision, leader remote
 fetch, cache publication and state write, and any follower import into its
@@ -113,10 +118,13 @@ clone. The first eligible daemon after the freshness deadline becomes the
 leader and runs `git fetch origin` in its own clone.
 
 For a successful attempt, shared state records only the completion timestamp,
-not a leader-specific freshness duration. Each lock holder compares that
-timestamp with its own configured sync interval. The shortest interval among
-active daemons therefore bounds the workspace's healthy remote refresh cadence
-while slower daemons reuse the same result.
+sampled after the immutable generation has been published, not a
+leader-specific freshness duration. Failed-attempt completion and retry times
+are sampled after the remote attempt. Freshness is sampled only after the
+cache lock is acquired. Each lock holder compares the recorded completion with
+its own configured sync interval. The shortest interval among active daemons
+therefore bounds the workspace's healthy remote refresh cadence while slower
+daemons reuse the same result.
 
 State is atomically replaced only after the refresh attempt completes, so a
 crashed leader releases the OS lock without publishing a partial success.
@@ -130,17 +138,19 @@ for failures:
 - transient remote failure: the greater of the leader's sync interval and
   three seconds.
 
-Followers before `retry_after` return a neutral skip without starting another
-remote fetch or mutating their own auth circuit or rate-limit backoff. A
-workspace-config file revision change invalidates a stored failure cooldown so
-token rotation can probe immediately. A state timestamp from the future is
-treated as stale rather than suppressing fetch indefinitely.
+Followers before `retry_after` return a neutral skip that preserves the regular
+loop schedule without starting another remote fetch or mutating their own auth
+circuit or rate-limit backoff. A workspace-config file revision change
+invalidates a stored failure cooldown so token rotation can probe immediately.
+A state timestamp from the future is treated as stale rather than suppressing
+fetch indefinitely.
 
 When many daemons contend in one scheduler tick, the one-second bound may cause
 some followers to neutrally skip before importing the selected generation.
-Their subsequent pull-only cycles reuse the fresh generation locally, so all
-followers converge within the same freshness window without another remote
-fetch.
+Their bounded contention-only retries reuse the fresh generation locally, so
+all followers converge within the same freshness window without another remote
+fetch. If contention persists through the short-retry budget, the daemon
+returns to its regular cadence.
 
 ### R4 — Credential-free cache
 
@@ -301,13 +311,13 @@ run_sync_cycle
                   |
                   `-- yes --> try shared lock for <= 1s
                                 |
-                                +-- contended timeout --> neutral skip
+                                +-- contended timeout --> bounded short-retry hint
                                 +-- lock/cache I/O error --> direct fetch
                                 |
                                 `-- locked --> validate state identity
                                               |
                                               +-- identity mismatch --> direct fetch
-                                              +-- failure retry_after active --> neutral skip
+                                              +-- failure retry_after active --> preserve cadence
                                               +-- fresh success --> active generation
                                               |
                                               `-- stale --> remote shadow fetch
@@ -409,26 +419,30 @@ The reviewed 16 new-path groups have implemented coverage:
 - Loop integration:
   `cache_neutral_skip_does_not_record_auth_observation`,
   `cache_half_open_neutral_skip_preserves_probe_eligibility`,
-  `cache_neutral_backoff_preserves_delay_and_failure_counters`,
+  `cache_neutral_schedule_retries_contention_and_preserves_backoff_state`,
+  `cache_failure_cooldown_preserves_regular_schedule`,
   `cache_imported_generation_still_rebases_pull_only_clone`, and
   `cache_unpushed_cycle_bypasses_cache_lock_and_state`.
 - Unix multi-daemon acceptance:
   `ten_daemons_coalesce_remote_fetches_and_converge` proves one upload-pack
-  request at the first boundary, no additional request in the fresh window,
-  exactly one more request after the injected clock crosses freshness, and
-  bounded cache-only convergence of all ten followers at each boundary.
+  request at the first boundary while a FIFO gate keeps the leader inside
+  upload-pack long enough for nine followers to hit real lock contention, no
+  additional request in the fresh window, exactly one more request after the
+  injected clock crosses freshness, and bounded convergence through the
+  production contention-retry scheduler.
 
 Remote request counting uses a per-clone `remote.origin.uploadpack` wrapper
-that executes the absolute `git-upload-pack` path against a local bare remote.
-The tests keep process-global `PATH` unchanged and use injected clocks for
-freshness decisions.
+that creates atomic non-overwriting request directories, synchronizes through
+FIFO gates, and executes the absolute `git-upload-pack` path against a local
+bare remote. The tests keep process-global `PATH` unchanged and use injected
+clocks for freshness decisions and production retry hints for later cadence.
 
 ## Acceptance Criteria
 
 1. Ten concurrent eligible pull-only cycles in one workspace cause exactly one
    remote fetch at a freshness boundary. Followers that neutrally skip because
-   of the bounded lock wait converge through subsequent cache-only cycles in
-   the same freshness window.
+   of the bounded lock wait converge through the bounded production
+   contention-retry schedule in the same freshness window.
 2. A remote branch update increments the cache generation and becomes visible
    in every follower clone within bounded subsequent pull-only cycles, without
    another remote fetch.
@@ -513,7 +527,7 @@ finding above.
 - [x] **T4 (P1, human: ~2h / CC: ~20min)** — concurrency and failure tests — Prove request coalescing, cooldowns, immutable crash safety, fallbacks, and credential hygiene
   - Surfaced by: Test Review — 16 uncovered new branch groups.
   - File: `crates/gitim-sync/src/fetch_cache.rs`.
-  - Commit: `test(sync): verify shared fetch coalescing`.
+  - Commit: `675f35612983d85b56dca336d9eda30ed6cfca00`.
   - Verified by: `cargo test -p gitim-sync`.
 - [x] **T5 (P2, human: ~30min / CC: ~5min)** — compatibility — Run formatting, scoped clippy/tests, diff hygiene, and update current-state documentation
   - Surfaced by: Compatibility Review — branch-only cache must not alter direct paths or public protocols.
@@ -521,7 +535,8 @@ finding above.
     `crates/gitim-sync/src/git.rs`,
     `docs/plans/shared-fetch-cache/00-requirements.md`,
     `docs/plans/shared-fetch-cache/01-plan.md`.
-  - Commit: `test(sync): verify shared fetch coalescing`.
+  - Commits: `675f35612983d85b56dca336d9eda30ed6cfca00`;
+    review fix titled `fix(sync): retry cache lock contention`.
   - Verified by: `cargo test -p gitim-sync`;
     `cargo fmt --all -- --check`;
     `cargo clippy -p gitim-sync --all-targets --no-deps --locked`;
@@ -529,43 +544,10 @@ finding above.
 
 ## Final verification
 
-- `cargo test -p gitim-sync` — pass, 197 tests across unit and integration
+- `cargo test -p gitim-sync` — pass, 203 tests across unit and integration
   targets.
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy -p gitim-sync --all-targets --no-deps --locked` — pass.
 - `git diff --check` — pass.
 - `git status --short` — only the intended `gitim-sync` tests and
   shared-fetch-cache plan documents are present.
-
-## Review completion
-
-- Step 0: Scope Challenge — scope reduced to Runtime-managed GitHub branch fetches.
-- Architecture Review: 15 unique issues found and resolved.
-- Code Quality Review: 3 issues found and resolved.
-- Test Review: coverage diagram produced; 16 new-path gaps assigned to TDD tasks.
-- Performance Review: 2 issues found; bounded lock wait adopted and remaining local probes made explicit.
-- NOT in scope: written.
-- What already exists: written.
-- TODOS.md updates: 0 items; no deferred item blocks this feature.
-- Failure modes: 0 critical gaps.
-- Outside voice: Codex and independent subagent reviews ran; all accepted findings folded.
-- Parallelization: 1 sequential lane, 0 parallel lanes.
-- Lake Score: 13/13 recommendations chose the complete option.
-
-## GSTACK REVIEW REPORT
-
-| Review | Trigger | Why | Runs | Status | Findings |
-|---|---|---|---:|---|---|
-| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | Requirements analysis supplied the scope gate |
-| Codex Review | outside voice | Independent second opinion | 1 | RESOLVED | 8 findings folded into the reviewed design |
-| Eng Review | `/plan-eng-review` | Architecture & tests | 1 | CLEAR (PLAN) | 36 issues and test gaps resolved or assigned |
-| Design Review | `/plan-design-review` | UI/UX gaps | 0 | N/A | No UI change |
-| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | No new developer surface |
-
-**CODEX:** Required origin/token verification, exact pruned snapshots, class-specific cooldowns, immutable generation refs, bounded lock waits, and a deterministic Git test seam.
-
-**CROSS-MODEL:** Both independent reviews favored a smaller branch-only cache with explicit fail-closed eligibility and unchanged direct safety paths.
-
-**VERDICT:** ENG + OUTSIDE VOICE CLEARED — ready for implementation.
-
-NO UNRESOLVED DECISIONS

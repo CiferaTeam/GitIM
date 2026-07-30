@@ -8,8 +8,10 @@ use tokio::sync::Notify;
 use tracing::{error, info, warn};
 
 use crate::conflict::{self, build_rebase_commit_msg};
-use crate::fetch_cache::{fetch_for_pull, PullFetchResult, SyncCacheProgress};
+use crate::fetch_cache::{fetch_for_pull, CacheNeutralHint, PullFetchResult, SyncCacheProgress};
 use crate::git::{GitError, GitStorage};
+
+const CACHE_CONTENTION_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 /// Outcome of a single sync cycle, used to determine backoff.
 pub enum SyncOutcome {
@@ -24,36 +26,41 @@ pub enum SyncOutcome {
 
 struct CacheAwareCycleResult {
     outcome: SyncOutcome,
-    cache_neutral: bool,
+    cache_neutral: Option<CacheNeutralHint>,
 }
 
 impl CacheAwareCycleResult {
     fn regular(outcome: SyncOutcome) -> Self {
         Self {
             outcome,
-            cache_neutral: false,
+            cache_neutral: None,
         }
     }
 
-    fn neutral() -> Self {
+    fn neutral(hint: CacheNeutralHint) -> Self {
         Self {
             outcome: SyncOutcome::Normal,
-            cache_neutral: true,
+            cache_neutral: Some(hint),
         }
     }
 }
 
-fn preserve_backoff_on_cache_neutral(
-    cache_neutral: bool,
-    next_delay: Duration,
+pub(crate) fn schedule_after_cache_neutral(
+    cache_neutral: Option<CacheNeutralHint>,
     consecutive_rate_limits: u32,
     consecutive_rebase_failures: u32,
-) -> Option<(Duration, u32, u32)> {
-    cache_neutral.then_some((
-        next_delay,
-        consecutive_rate_limits,
-        consecutive_rebase_failures,
-    ))
+) -> Option<(Option<Duration>, u32, u32)> {
+    cache_neutral.map(|hint| {
+        let retry_delay = match hint {
+            CacheNeutralHint::PreserveSchedule => None,
+            CacheNeutralHint::RetryContention => Some(CACHE_CONTENTION_RETRY_DELAY),
+        };
+        (
+            retry_delay,
+            consecutive_rate_limits,
+            consecutive_rebase_failures,
+        )
+    })
 }
 
 /// Consecutive auth failures at which the circuit trips.
@@ -246,6 +253,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
 
     // Initial delay before first cycle (skip immediate fire)
     let mut next_delay = Duration::from_millis(base_ms);
+    let mut cache_retry_delay = None;
     let mut last_auth_idle_warn = std::time::Instant::now();
     // Track consecutive rebase failures to throttle warnings and back off.
     // Reset to 0 when a cycle completes without a rebase failure.
@@ -272,13 +280,15 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
             }
         }
 
-        if consecutive_rate_limits > 0 || circuit.is_tripped() {
-            // During rate-limit backoff or tripped auth circuit, ignore
-            // push_notify: hammering the remote just burns rate-limit budget.
-            tokio::time::sleep(next_delay).await;
+        let retry_delay = cache_retry_delay.take();
+        let cycle_delay = retry_delay.unwrap_or(next_delay);
+        if retry_delay.is_some() || consecutive_rate_limits > 0 || circuit.is_tripped() {
+            // Honor bounded contention retries and remote backoff even if a
+            // local push notification arrives.
+            tokio::time::sleep(cycle_delay).await;
         } else {
             tokio::select! {
-                _ = tokio::time::sleep(next_delay) => {}
+                _ = tokio::time::sleep(cycle_delay) => {}
                 _ = push_notify.notified() => {}
             }
         }
@@ -336,15 +346,14 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
             }
         };
 
-        if let Some((preserved_delay, preserved_rate_limits, preserved_rebase_failures)) =
-            preserve_backoff_on_cache_neutral(
+        if let Some((retry_override, preserved_rate_limits, preserved_rebase_failures)) =
+            schedule_after_cache_neutral(
                 cycle_result.cache_neutral,
-                next_delay,
                 consecutive_rate_limits,
                 consecutive_rebase_failures,
             )
         {
-            next_delay = preserved_delay;
+            cache_retry_delay = retry_override;
             consecutive_rate_limits = preserved_rate_limits;
             consecutive_rebase_failures = preserved_rebase_failures;
             continue;
@@ -532,7 +541,7 @@ fn run_sync_cycle_with_cache(
         sync_pull_only(repo, circuit, commit_lock, cache_progress)
     };
 
-    if cycle_result.cache_neutral {
+    if cycle_result.cache_neutral.is_some() {
         circuit.tripped_at = probe_state_before_cycle;
     }
 
@@ -1657,7 +1666,7 @@ fn sync_pull_only(
         },
     };
     match fetch_result {
-        PullFetchResult::NeutralSkip => return CacheAwareCycleResult::neutral(),
+        PullFetchResult::NeutralSkip(hint) => return CacheAwareCycleResult::neutral(hint),
         PullFetchResult::Ready => observe_auth(circuit, &Ok(())),
         PullFetchResult::RemoteError(error) => {
             let classified = Err(error);
@@ -2016,7 +2025,10 @@ mod tests {
         );
 
         assert!(matches!(result.outcome, SyncOutcome::Normal));
-        assert!(result.cache_neutral);
+        assert_eq!(
+            result.cache_neutral,
+            Some(CacheNeutralHint::RetryContention)
+        );
         assert_eq!(circuit.consecutive_failures(), 1);
         assert_eq!(synced.get(), 1);
         assert_eq!(cycle_done.get(), 1);
@@ -2046,23 +2058,54 @@ mod tests {
 
         let result = cache_cycle_result(&repo, &mut circuit, &Mutex::new(()), &mut progress);
 
-        assert!(result.cache_neutral);
+        assert_eq!(
+            result.cache_neutral,
+            Some(CacheNeutralHint::RetryContention)
+        );
         assert_eq!(circuit.tripped_at, Some(original_probe_time));
         assert_eq!(circuit.consecutive_failures(), failures_before);
         assert!(circuit.should_attempt_probe(Instant::now()));
     }
 
     #[test]
-    fn cache_neutral_backoff_preserves_delay_and_failure_counters() {
-        let state = (Duration::from_secs(47), 3, 5);
+    fn cache_neutral_schedule_retries_contention_and_preserves_backoff_state() {
+        let state = (3, 5);
 
         assert_eq!(
-            preserve_backoff_on_cache_neutral(true, state.0, state.1, state.2),
-            Some(state)
+            schedule_after_cache_neutral(
+                Some(CacheNeutralHint::PreserveSchedule),
+                state.0,
+                state.1,
+            ),
+            Some((None, state.0, state.1))
         );
         assert_eq!(
-            preserve_backoff_on_cache_neutral(false, state.0, state.1, state.2),
-            None
+            schedule_after_cache_neutral(Some(CacheNeutralHint::RetryContention), state.0, state.1,),
+            Some((Some(CACHE_CONTENTION_RETRY_DELAY), state.0, state.1))
+        );
+        assert_eq!(schedule_after_cache_neutral(None, state.0, state.1), None);
+    }
+
+    #[test]
+    fn cache_failure_cooldown_preserves_regular_schedule() {
+        let fixture = CacheLoopFixture::new();
+        fixture.fail_remote("HTTP 401 invalid username or token");
+        let repo = fixture.storage();
+        let mut circuit = auth_circuit();
+        let mut progress = SyncCacheProgress::new(30);
+        let lock = Mutex::new(());
+
+        let first = cache_cycle_result(&repo, &mut circuit, &lock, &mut progress);
+        assert!(first.cache_neutral.is_none());
+
+        let cooldown = cache_cycle_result(&repo, &mut circuit, &lock, &mut progress);
+        assert_eq!(
+            cooldown.cache_neutral,
+            Some(CacheNeutralHint::PreserveSchedule)
+        );
+        assert_eq!(
+            schedule_after_cache_neutral(cooldown.cache_neutral, 3, 5),
+            Some((None, 3, 5))
         );
     }
 
