@@ -7,6 +7,8 @@ pub mod renumber;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod rotate;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod skill;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod sync_loop;
 pub mod url_redact;
 #[cfg(not(target_arch = "wasm32"))]

@@ -9,9 +9,9 @@ use crate::url_redact::redacted_url;
 /// Process-level timeout for all git subprocess invocations.
 /// Prevents `Command::output()` from blocking indefinitely when git hangs
 /// (e.g. disk full, credential prompt, NFS stall, lock contention).
-const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
-const GIT_HTTP_TIMEOUT_ARGS: &[&str] = &[
+pub(crate) const GIT_HTTP_TIMEOUT_ARGS: &[&str] = &[
     "-c",
     "http.lowSpeedLimit=1000",
     "-c",
@@ -50,7 +50,7 @@ pub enum GitError {
 /// it to finish. If the deadline expires, the child is killed and
 /// `GitError::Timeout` is returned. On success, stderr is checked for
 /// ENOSPC patterns before returning the output.
-fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
+pub(crate) fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
     run_git_command_with_env(args, current_dir, &[])
 }
 
@@ -101,7 +101,7 @@ fn run_git_command_with_env(
             // Child process is hung — try to kill it.
             // SAFETY: pid belongs to our child process. On Unix, pids are
             // recycled slowly, and the window between spawn and timeout
-            // (120s) makes a pid recycle race practically impossible.
+            // makes a pid recycle race practically impossible.
             #[cfg(unix)]
             {
                 unsafe {
@@ -127,13 +127,13 @@ fn run_git_command_with_env(
 
 /// Run a git subprocess with timeout, returning `Result<Output, GitError>`
 /// where non-zero exit is converted to `CommandFailed` (with ENOSPC check).
-fn run_git(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
+pub(crate) fn run_git(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
     run_git_with_env(args, current_dir, &[])
 }
 
 /// Env-accepting sibling of `run_git`: same non-zero-exit mapping, with
 /// caller-supplied environment overrides.
-fn run_git_with_env(
+pub(crate) fn run_git_with_env(
     args: &[&str],
     current_dir: &Path,
     envs: &[(&str, &str)],
@@ -1154,8 +1154,8 @@ mod tests {
     }
 
     #[test]
-    fn git_command_timeout_is_120_seconds() {
-        assert_eq!(GIT_COMMAND_TIMEOUT, Duration::from_secs(120));
+    fn git_command_timeout_is_60_seconds() {
+        assert_eq!(GIT_COMMAND_TIMEOUT, Duration::from_secs(60));
     }
 
     #[test]
