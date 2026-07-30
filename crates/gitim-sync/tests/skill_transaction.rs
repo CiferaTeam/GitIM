@@ -1,0 +1,851 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Output};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Barrier, Mutex};
+use std::time::Duration;
+
+use gitim_core::skill::{
+    validate_package_entries, PackageEntry, RequestId, SkillCreateRequest, SkillMutationRequest,
+    SkillProposeRequest, SkillRepairRequest, SkillRepairScope, SkillSlug,
+    SkillWorkspaceBootstrapRequest,
+};
+use gitim_sync::git::GitStorage;
+use gitim_sync::skill::checkpoint::{
+    validate_incoming_skill_history, SkillCheckpointStore, SkillConflict,
+};
+use gitim_sync::skill::guard::SkillSyncGuard;
+use gitim_sync::skill::transaction::{
+    execute_remote_skill_transaction, execute_remote_skill_transaction_with_test_config,
+    skill_transport_failure_count, RemoteSkillTransactionRequest, SkillLocalState,
+    SkillTransactionCrashPoint, SkillTransactionTestConfig, SKILL_GIT_COMMAND_TIMEOUT,
+    SKILL_GIT_MAX_CONCURRENCY, SKILL_TRANSACTION_TIMEOUT,
+};
+use tempfile::TempDir;
+
+fn git<I, S>(root: &Path, args: I) -> Output
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("failed to run git");
+    assert!(
+        output.status.success(),
+        "git failed in {}: {}",
+        root.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
+}
+
+fn configure(root: &Path) {
+    git(root, ["config", "user.name", "Fixture"]);
+    git(root, ["config", "user.email", "fixture@example.com"]);
+    git(root, ["config", "commit.gpgsign", "false"]);
+}
+
+struct Fixture {
+    _remote: TempDir,
+    first: TempDir,
+    second: TempDir,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let remote = TempDir::new().unwrap();
+        git(remote.path(), ["init", "--bare", "-b", "main"]);
+
+        let seed = TempDir::new().unwrap();
+        git(seed.path(), ["init", "-b", "main"]);
+        configure(seed.path());
+        fs::create_dir_all(seed.path().join("users")).unwrap();
+        fs::write(
+            seed.path().join("users/alice.meta.yaml"),
+            "display_name: Alice\nrole: human\nintroduction: Owner\n",
+        )
+        .unwrap();
+        fs::write(seed.path().join("README.md"), "workspace\n").unwrap();
+        git(seed.path(), ["add", "."]);
+        git(seed.path(), ["commit", "-m", "initialize workspace"]);
+        git(
+            seed.path(),
+            [
+                OsStr::new("remote"),
+                OsStr::new("add"),
+                OsStr::new("origin"),
+                remote.path().as_os_str(),
+            ],
+        );
+        git(seed.path(), ["push", "-u", "origin", "main"]);
+
+        let first = TempDir::new().unwrap();
+        git(
+            first.path(),
+            [
+                OsStr::new("clone"),
+                remote.path().as_os_str(),
+                OsStr::new("."),
+            ],
+        );
+        configure(first.path());
+        let second = TempDir::new().unwrap();
+        git(
+            second.path(),
+            [
+                OsStr::new("clone"),
+                remote.path().as_os_str(),
+                OsStr::new("."),
+            ],
+        );
+        configure(second.path());
+
+        Self {
+            _remote: remote,
+            first,
+            second,
+        }
+    }
+
+    fn transaction(
+        &self,
+        root: &Path,
+        request: SkillMutationRequest,
+        package: Option<gitim_core::skill::ValidatedPackage>,
+    ) -> Result<
+        gitim_sync::skill::transaction::RemoteSkillTransactionResult,
+        gitim_sync::skill::checkpoint::SkillSyncError,
+    > {
+        let repo = GitStorage::new(root);
+        let guard = SkillSyncGuard::new(root).unwrap();
+        execute_remote_skill_transaction(
+            &repo,
+            &guard,
+            RemoteSkillTransactionRequest {
+                request,
+                actor: "alice".to_owned(),
+                author_email: "alice@example.com".to_owned(),
+                now: "2026-07-31T00:00:00Z".to_owned(),
+                package,
+                active_users: BTreeSet::from(["alice".to_owned()]),
+            },
+        )
+    }
+
+    fn bootstrap_and_create(&self, slug: &SkillSlug) -> String {
+        self.transaction(
+            self.first.path(),
+            SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                request_id: RequestId::generate(),
+            }),
+            None,
+        )
+        .unwrap();
+        let created = self
+            .transaction(
+                self.first.path(),
+                SkillMutationRequest::Create(SkillCreateRequest {
+                    request_id: RequestId::generate(),
+                    slug: slug.clone(),
+                    display_name: "Race skill".to_owned(),
+                    description: "Transaction race fixture".to_owned(),
+                    source_directory: self.first.path().join("unused"),
+                }),
+                Some(package(slug, "initial")),
+            )
+            .unwrap();
+        created.result.current_revision.unwrap().as_str().to_owned()
+    }
+}
+
+fn package(slug: &SkillSlug, body: &str) -> gitim_core::skill::ValidatedPackage {
+    validate_package_entries(
+        slug,
+        vec![PackageEntry::new(
+            "SKILL.md",
+            format!(
+                "---\nname: {}\ndescription: Test skill\n---\n\n{body}\n",
+                slug.as_str()
+            )
+            .into_bytes(),
+        )],
+    )
+    .unwrap()
+}
+
+#[test]
+fn exports_transaction_resource_limits() {
+    assert_eq!(SKILL_TRANSACTION_TIMEOUT.as_secs(), 180);
+    assert_eq!(SKILL_GIT_COMMAND_TIMEOUT.as_secs(), 60);
+    assert_eq!(SKILL_GIT_MAX_CONCURRENCY, 4);
+}
+
+#[test]
+fn published_receipt_is_globally_idempotent_and_mismatched_reuse_is_rejected() {
+    let fixture = Fixture::new();
+    let request_id = RequestId::generate();
+    let bootstrap = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+
+    let published = fixture
+        .transaction(fixture.first.path(), bootstrap.clone(), None)
+        .unwrap();
+    assert_eq!(published.result.control_revision, Some(1));
+    assert_eq!(published.local_state, SkillLocalState::PendingSync);
+
+    let replayed = fixture
+        .transaction(fixture.second.path(), bootstrap, None)
+        .unwrap();
+    assert_eq!(replayed.commit_id, published.commit_id);
+    assert_eq!(replayed.result, published.result);
+
+    let slug = SkillSlug::new("same-request").unwrap();
+    let conflicting = SkillMutationRequest::Create(SkillCreateRequest {
+        request_id,
+        slug: slug.clone(),
+        display_name: "Same request".to_owned(),
+        description: "Conflicting reuse".to_owned(),
+        source_directory: fixture.second.path().join("unused"),
+    });
+    let error = fixture
+        .transaction(
+            fixture.second.path(),
+            conflicting,
+            Some(package(&slug, "different mutation")),
+        )
+        .unwrap_err();
+    assert_eq!(error.code(), "request_id_conflict");
+}
+
+fn transaction_request(
+    request: SkillMutationRequest,
+    package: Option<gitim_core::skill::ValidatedPackage>,
+) -> RemoteSkillTransactionRequest {
+    RemoteSkillTransactionRequest {
+        request,
+        actor: "alice".to_owned(),
+        author_email: "alice@example.com".to_owned(),
+        now: "2026-07-31T00:00:00Z".to_owned(),
+        package,
+        active_users: BTreeSet::from(["alice".to_owned()]),
+    }
+}
+
+#[test]
+fn same_skill_concurrent_proposals_do_not_semantically_retry() {
+    let fixture = Fixture::new();
+    let slug = SkillSlug::new("proposal-race").unwrap();
+    let base = fixture.bootstrap_and_create(&slug);
+    let barrier = Arc::new(Barrier::new(2));
+
+    let run = |root: &Path, marker: &'static str| {
+        let root = root.to_path_buf();
+        let slug = slug.clone();
+        let base = base.clone();
+        let barrier = Arc::clone(&barrier);
+        std::thread::spawn(move || {
+            let repo = GitStorage::new(&root);
+            let guard = SkillSyncGuard::new(&root).unwrap();
+            execute_remote_skill_transaction_with_test_config(
+                &repo,
+                &guard,
+                transaction_request(
+                    SkillMutationRequest::Propose(SkillProposeRequest {
+                        request_id: RequestId::generate(),
+                        slug: slug.clone(),
+                        base_revision: gitim_core::skill::RevisionId::new(&base).unwrap(),
+                        summary: marker.to_owned(),
+                        source_directory: root.join("unused"),
+                    }),
+                    Some(package(&slug, marker)),
+                ),
+                SkillTransactionTestConfig {
+                    after_built: Some(Arc::new(move || {
+                        barrier.wait();
+                    })),
+                    ..SkillTransactionTestConfig::default()
+                },
+            )
+        })
+    };
+
+    let first = run(fixture.first.path(), "first proposal");
+    let second = run(fixture.second.path(), "second proposal");
+    let outcomes = [first.join().unwrap(), second.join().unwrap()];
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|result| result
+                .as_ref()
+                .is_err_and(|error| error.code() == "skill_sync_conflict"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn unrelated_remote_change_rebuilds_the_same_proposal_on_the_new_tip() {
+    let fixture = Fixture::new();
+    let slug = SkillSlug::new("unrelated-retry").unwrap();
+    let base = fixture.bootstrap_and_create(&slug);
+    let request_id = RequestId::generate();
+    let injected = Arc::new(AtomicBool::new(false));
+    let writer = fixture.second.path().to_path_buf();
+    let callback_flag = Arc::clone(&injected);
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let result = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::Propose(SkillProposeRequest {
+                request_id: request_id.clone(),
+                slug: slug.clone(),
+                base_revision: gitim_core::skill::RevisionId::new(&base).unwrap(),
+                summary: "retry unchanged semantics".to_owned(),
+                source_directory: fixture.first.path().join("unused"),
+            }),
+            Some(package(&slug, "candidate")),
+        ),
+        SkillTransactionTestConfig {
+            after_built: Some(Arc::new(move || {
+                if callback_flag.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                git(&writer, ["fetch", "origin"]);
+                git(&writer, ["reset", "--hard", "origin/main"]);
+                fs::write(writer.join("README.md"), "unrelated message\n").unwrap();
+                git(&writer, ["add", "README.md"]);
+                git(&writer, ["commit", "-m", "chore: unrelated message"]);
+                git(&writer, ["push", "origin", "main"]);
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert!(injected.load(Ordering::SeqCst));
+    assert_eq!(result.result.event_revision, Some(2));
+    let suffix = &request_id.as_str()[2..];
+    git(fixture.first.path(), ["fetch", "origin"]);
+    let proposal_path = format!("skills/{}/proposals/p-{suffix}", slug.as_str());
+    let revision_path = format!("skills/{}/revisions/r-{suffix}", slug.as_str());
+    let tree = String::from_utf8(
+        git(
+            fixture.first.path(),
+            ["ls-tree", "-r", "--name-only", "origin/main"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        tree.lines()
+            .filter(|path| path.starts_with(&proposal_path))
+            .count(),
+        2
+    );
+    assert!(tree
+        .lines()
+        .any(|path| path == format!("{revision_path}/revision.meta.yaml")));
+}
+
+#[test]
+fn epoch_rotation_between_attempts_retargets_the_active_branch() {
+    let fixture = Fixture::new();
+    let slug = SkillSlug::new("epoch-retry").unwrap();
+    fixture.bootstrap_and_create(&slug);
+    let rotated = Arc::new(AtomicBool::new(false));
+    let writer = fixture.second.path().to_path_buf();
+    let callback_flag = Arc::clone(&rotated);
+    let archive = TempDir::new().unwrap();
+    let archive_path = archive.path().to_path_buf();
+    let request = SkillMutationRequest::Create(SkillCreateRequest {
+        request_id: RequestId::generate(),
+        slug: SkillSlug::new("after-rotation").unwrap(),
+        display_name: "After rotation".to_owned(),
+        description: "Targets the re-resolved epoch".to_owned(),
+        source_directory: fixture.first.path().join("unused"),
+    });
+    let package_slug = SkillSlug::new("after-rotation").unwrap();
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let result = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, Some(package(&package_slug, "rotated"))),
+        SkillTransactionTestConfig {
+            after_built: Some(Arc::new(move || {
+                if callback_flag.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                git(&writer, ["fetch", "origin"]);
+                git(&writer, ["reset", "--hard", "origin/main"]);
+                let storage = GitStorage::new(&writer);
+                let outcome = gitim_sync::rotate::try_fire_rotation(
+                    &storage,
+                    &Mutex::new(()),
+                    "main",
+                    1,
+                    &archive_path,
+                    ("system", "system@gitim"),
+                    "2026-07-31T00:00:01Z",
+                )
+                .unwrap();
+                assert!(matches!(
+                    outcome,
+                    gitim_sync::rotate::RotationOutcome::Won { .. }
+                ));
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert!(rotated.load(Ordering::SeqCst));
+    assert!(result.result.current_revision.is_some());
+    git(fixture.first.path(), ["fetch", "origin"]);
+    let active = String::from_utf8(
+        git(
+            fixture.first.path(),
+            ["show", "origin/main:gitim.epoch.yaml"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert!(active.contains("target_branch: main-epoch-2"));
+    let receipt = format!(
+        "origin/main-epoch-2:skills/receipts/{}.meta.yaml",
+        result
+            .result
+            .current_revision
+            .as_ref()
+            .unwrap()
+            .as_str()
+            .replacen("r-", "q-", 1)
+    );
+    git(fixture.first.path(), ["show", &receipt]);
+}
+
+fn install_conflict(
+    fixture: &Fixture,
+    changed_path: &str,
+    rewrite: impl FnOnce(String) -> String,
+) -> (SkillCheckpointStore, SkillConflict) {
+    git(fixture.second.path(), ["fetch", "origin"]);
+    git(fixture.second.path(), ["reset", "--hard", "origin/main"]);
+    let path = fixture.second.path().join(changed_path);
+    let original = fs::read_to_string(&path).unwrap();
+    fs::write(&path, rewrite(original)).unwrap();
+    git(fixture.second.path(), ["add", "--", changed_path]);
+    git(
+        fixture.second.path(),
+        ["commit", "-m", "inject invalid Skill state"],
+    );
+    git(fixture.second.path(), ["push", "origin", "main"]);
+
+    git(fixture.first.path(), ["fetch", "origin"]);
+    let repo = GitStorage::new(fixture.first.path());
+    let store = SkillCheckpointStore::new(fixture.first.path()).unwrap();
+    let previous = store.load().unwrap().unwrap();
+    let tip = String::from_utf8(git(fixture.first.path(), ["rev-parse", "origin/main"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let validation = validate_incoming_skill_history(&repo, &previous, &tip).unwrap();
+    store.save(&validation.checkpoint).unwrap();
+    let key = if changed_path == "skills/workspace.meta.yaml" {
+        "$workspace"
+    } else {
+        changed_path.split('/').nth(1).unwrap()
+    };
+    (store, validation.checkpoint.conflicts[key].clone())
+}
+
+#[test]
+fn skill_and_workspace_repairs_restore_the_checkpoint_accepted_tree() {
+    for workspace_scope in [false, true] {
+        let fixture = Fixture::new();
+        let slug = SkillSlug::new("repair-scope").unwrap();
+        fixture.bootstrap_and_create(&slug);
+        let (changed_path, scope, rewrite): (String, SkillRepairScope, fn(String) -> String) =
+            if workspace_scope {
+                (
+                    "skills/workspace.meta.yaml".to_owned(),
+                    SkillRepairScope::Workspace,
+                    |value| value.replace("administrators:\n- alice", "administrators: []"),
+                )
+            } else {
+                (
+                    format!("skills/{}/skill.meta.yaml", slug.as_str()),
+                    SkillRepairScope::Skill(slug.clone()),
+                    |_| "not: [valid\n".to_owned(),
+                )
+            };
+        let (_store, conflict) = install_conflict(&fixture, &changed_path, rewrite);
+        let accepted_tree = conflict.accepted_tree_oid.clone().unwrap();
+        let repair_id = RequestId::generate();
+        let repaired = fixture
+            .transaction(
+                fixture.first.path(),
+                SkillMutationRequest::Repair(SkillRepairRequest {
+                    request_id: repair_id.clone(),
+                    scope,
+                    conflict_tip: conflict.rejected_commit,
+                    accepted_tree: accepted_tree.clone(),
+                }),
+                None,
+            )
+            .unwrap_or_else(|error| {
+                let journal = fixture
+                    .first
+                    .path()
+                    .join(".gitim/skill-transactions")
+                    .join(repair_id.as_str())
+                    .join("transaction.yaml");
+                panic!(
+                    "workspace_scope={workspace_scope}: {error:?}; journal={}",
+                    fs::read_to_string(journal).unwrap_or_default()
+                )
+            });
+        assert!(!repaired.commit_id.is_empty());
+        git(fixture.first.path(), ["fetch", "origin"]);
+        let repaired_scope = if workspace_scope {
+            changed_path.clone()
+        } else {
+            format!("skills/{}", slug.as_str())
+        };
+        let repaired_tree = String::from_utf8(
+            git(
+                fixture.first.path(),
+                ["rev-parse", &format!("origin/main:{repaired_scope}")],
+            )
+            .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        assert_eq!(repaired_tree, accepted_tree);
+    }
+}
+
+#[test]
+fn workspace_repair_rejects_a_checkpoint_changed_after_candidate_build() {
+    let fixture = Fixture::new();
+    let slug = SkillSlug::new("repair-race").unwrap();
+    fixture.bootstrap_and_create(&slug);
+    let changed_path = "skills/workspace.meta.yaml";
+    let (store, conflict) = install_conflict(&fixture, changed_path, |value| {
+        value.replace("administrators:\n- alice", "administrators: []")
+    });
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: request_id.clone(),
+        scope: SkillRepairScope::Workspace,
+        conflict_tip: conflict.rejected_commit,
+        accepted_tree: conflict.accepted_tree_oid.unwrap(),
+    });
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let changed = Arc::new(AtomicBool::new(false));
+    let changed_flag = Arc::clone(&changed);
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig {
+            after_built: Some(Arc::new(move || {
+                if changed_flag.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let mut checkpoint = store.load().unwrap().unwrap();
+                let replacement = checkpoint
+                    .workspace_tree
+                    .as_ref()
+                    .unwrap()
+                    .commit_oid
+                    .clone();
+                checkpoint
+                    .conflicts
+                    .get_mut("$workspace")
+                    .unwrap()
+                    .rejected_commit = replacement;
+                store.save(&checkpoint).unwrap();
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(changed.load(Ordering::SeqCst));
+    assert_eq!(error.code(), "skill_sync_conflict");
+    git(fixture.first.path(), ["fetch", "origin"]);
+    let receipt = format!(
+        "origin/main:skills/receipts/{}.meta.yaml",
+        request_id.as_str()
+    );
+    let output = Command::new("git")
+        .args(["show", &receipt])
+        .current_dir(fixture.first.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn skill_repair_rejects_when_another_clone_restores_the_remote_tree_first() {
+    let fixture = Fixture::new();
+    let slug = SkillSlug::new("remote-repair-race").unwrap();
+    fixture.bootstrap_and_create(&slug);
+    let changed_path = format!("skills/{}/skill.meta.yaml", slug.as_str());
+    let (_first_store, conflict) = install_conflict(&fixture, &changed_path, |value| {
+        value.replace("display_name: Race skill", "display_name: ''")
+    });
+
+    let second_repo = GitStorage::new(fixture.second.path());
+    let second_store = SkillCheckpointStore::new(fixture.second.path()).unwrap();
+    let tip = String::from_utf8(git(fixture.second.path(), ["rev-parse", "origin/main"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned();
+    let second_validation = validate_incoming_skill_history(
+        &second_repo,
+        &gitim_sync::skill::checkpoint::SkillValidationCheckpoint::empty("main"),
+        &tip,
+    )
+    .unwrap();
+    second_store.save(&second_validation.checkpoint).unwrap();
+
+    let first_request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: RequestId::generate(),
+        scope: SkillRepairScope::Skill(slug.clone()),
+        conflict_tip: conflict.rejected_commit.clone(),
+        accepted_tree: conflict.accepted_tree_oid.clone().unwrap(),
+    });
+    let second_request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: RequestId::generate(),
+        scope: SkillRepairScope::Skill(slug),
+        conflict_tip: conflict.rejected_commit,
+        accepted_tree: conflict.accepted_tree_oid.unwrap(),
+    });
+    let second_root = fixture.second.path().to_path_buf();
+    let ran = Arc::new(AtomicBool::new(false));
+    let ran_flag = Arc::clone(&ran);
+    let first_repo = GitStorage::new(fixture.first.path());
+    let first_guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let error = execute_remote_skill_transaction_with_test_config(
+        &first_repo,
+        &first_guard,
+        transaction_request(first_request, None),
+        SkillTransactionTestConfig {
+            after_built: Some(Arc::new(move || {
+                if ran_flag.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                let repo = GitStorage::new(&second_root);
+                let guard = SkillSyncGuard::new(&second_root).unwrap();
+                execute_remote_skill_transaction(
+                    &repo,
+                    &guard,
+                    transaction_request(second_request.clone(), None),
+                )
+                .unwrap();
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(ran.load(Ordering::SeqCst));
+    assert_eq!(error.code(), "skill_sync_conflict");
+}
+
+#[test]
+fn crash_journal_recovers_prepared_built_and_pushed_transactions() {
+    for phase in [
+        SkillTransactionCrashPoint::AfterPrepared,
+        SkillTransactionCrashPoint::AfterBuilt,
+        SkillTransactionCrashPoint::AfterPushed,
+    ] {
+        let fixture = Fixture::new();
+        let request_id = RequestId::generate();
+        let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+            request_id: request_id.clone(),
+        });
+        let repo = GitStorage::new(fixture.first.path());
+        let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+        let crashed = execute_remote_skill_transaction_with_test_config(
+            &repo,
+            &guard,
+            transaction_request(request.clone(), None),
+            SkillTransactionTestConfig {
+                crash_after: Some(phase),
+                ..SkillTransactionTestConfig::default()
+            },
+        );
+        assert!(crashed
+            .unwrap_err()
+            .to_string()
+            .contains("injected transaction crash"));
+        let journal = fixture
+            .first
+            .path()
+            .join(".gitim/skill-transactions")
+            .join(request_id.as_str())
+            .join("transaction.yaml");
+        assert!(journal.exists());
+
+        let recovered = fixture
+            .transaction(fixture.first.path(), request, None)
+            .unwrap();
+        assert_eq!(recovered.result.control_revision, Some(1));
+        assert!(!journal.exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn hanging_git_child_times_out_retains_journal_and_releases_permit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let wrapper = fixture.first.path().join("hanging-git");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = \"-c\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"fetch\" ]; then sleep 10; fi\n  done\nfi\nexec {} \"$@\"\n",
+            real_git.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let failures_before = skill_transport_failure_count();
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request.clone(), None),
+        SkillTransactionTestConfig {
+            transaction_timeout: Duration::from_secs(2),
+            git_command_timeout: Duration::from_millis(100),
+            git_program: Some(wrapper),
+            max_concurrency: 1,
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::Timeout(_))
+    ));
+    assert_eq!(skill_transport_failure_count(), failures_before + 1);
+    assert!(fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str())
+        .join("transaction.yaml")
+        .exists());
+    assert!(!fixture
+        .first
+        .path()
+        .join(".gitim/skill-validation.json")
+        .exists());
+
+    let recovered = fixture
+        .transaction(fixture.first.path(), request, None)
+        .unwrap();
+    assert_eq!(recovered.result.control_revision, Some(1));
+}
+
+#[test]
+fn saturated_workspace_semaphore_obeys_the_overall_deadline() {
+    let fixture = Fixture::new();
+    let root = fixture.first.path().to_path_buf();
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let ready = Arc::new(Barrier::new(2));
+    let worker_gate = Arc::clone(&gate);
+    let worker_ready = Arc::clone(&ready);
+    let worker_root = root.clone();
+    let first = std::thread::spawn(move || {
+        let repo = GitStorage::new(&worker_root);
+        let guard = SkillSyncGuard::new(&worker_root).unwrap();
+        execute_remote_skill_transaction_with_test_config(
+            &repo,
+            &guard,
+            transaction_request(
+                SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                    request_id: RequestId::generate(),
+                }),
+                None,
+            ),
+            SkillTransactionTestConfig {
+                max_concurrency: 1,
+                after_built: Some(Arc::new(move || {
+                    worker_ready.wait();
+                    let (lock, changed) = &*worker_gate;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                })),
+                ..SkillTransactionTestConfig::default()
+            },
+        )
+    });
+    ready.wait();
+
+    let repo = GitStorage::new(&root);
+    let guard = SkillSyncGuard::new(&root).unwrap();
+    let blocked_id = RequestId::generate();
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                request_id: blocked_id.clone(),
+            }),
+            None,
+        ),
+        SkillTransactionTestConfig {
+            transaction_timeout: Duration::from_millis(100),
+            max_concurrency: 1,
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::Timeout(_))
+    ));
+    assert!(!root.join(".gitim/skill-validation.json").exists());
+    assert!(!root
+        .join(".gitim/skill-transactions")
+        .join(blocked_id.as_str())
+        .exists());
+
+    let (lock, changed) = &*gate;
+    *lock.lock().unwrap() = true;
+    changed.notify_all();
+    assert!(first.join().unwrap().is_ok());
+}
