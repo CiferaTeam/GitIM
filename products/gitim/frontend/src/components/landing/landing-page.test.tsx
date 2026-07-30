@@ -75,10 +75,24 @@ describe("LandingPage PPT demo", () => {
     return container;
   }
 
-  it("opens text-first: demo stage mounts only after Watch the demo", async () => {
+  it("flips between the overview and demo faces", async () => {
     const container = await render();
+    const flipCard = container.querySelector<HTMLElement>(
+      '[data-testid="landing-flip-card"]',
+    );
     expect(container.textContent).toContain("You shape the team");
     expect(container.textContent).toContain("Connect your runtime");
+    expect(container.textContent).toContain("Natural as messaging");
+    expect(container.textContent).toContain("Auditable in Git");
+    expect(container.textContent).toContain("Your data, your repository");
+    expect(flipCard?.dataset.side).toBe("overview");
+    const overview = container.querySelector<HTMLElement>(
+      '[data-testid="landing-first-stage"]',
+    );
+    expect(overview).not.toBeNull();
+    expect(overview?.className).toContain("items-start");
+    expect(overview?.className).toContain("md:items-center");
+    expect(container.querySelector('[data-testid="landing-process"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="demo-stage"]')).toBeNull();
 
     const cta = container.querySelector(
@@ -89,21 +103,40 @@ describe("LandingPage PPT demo", () => {
       cta?.click();
     });
 
+    expect(container.querySelector('[data-testid="demo-stage"]')).not.toBeNull();
+    expect(flipCard?.dataset.side).toBe("demo");
+    expect(flipCard?.className).toContain("[transform:rotateY(180deg)]");
     expect(
-      container.querySelector('[data-testid="demo-stage"]'),
-    ).not.toBeNull();
-    // The CTA hides while the demo is open; the close button collapses it.
-    expect(
-      container.querySelector('[data-testid="landing-cta-demo"]'),
-    ).toBeNull();
+      container
+        .querySelector('[data-testid="landing-first-stage"]')
+        ?.getAttribute("aria-hidden"),
+    ).toBe("true");
     const close = container.querySelector(
       '[data-testid="demo-close"]',
     ) as HTMLButtonElement | null;
     expect(close).not.toBeNull();
+    expect(close?.textContent).toContain("Back to overview");
     await act(async () => {
       close?.click();
     });
-    expect(container.querySelector('[data-testid="demo-stage"]')).toBeNull();
+    expect(flipCard?.dataset.side).toBe("overview");
+    expect(flipCard?.className).toContain("[transform:rotateY(0deg)]");
+    expect(
+      container
+        .querySelector('[data-testid="landing-first-stage"]')
+        ?.getAttribute("aria-hidden"),
+    ).toBe("false");
+  });
+
+  it("renders the positioning line at subheadline scale", async () => {
+    const container = await render();
+    const eyebrow = container.querySelector<HTMLElement>(
+      '[data-testid="landing-eyebrow"]',
+    );
+
+    expect(eyebrow).not.toBeNull();
+    expect(eyebrow?.className).toContain("text-lg");
+    expect(eyebrow?.className).toContain("tracking-normal");
   });
 
   it("connect CTA enters existing Desktop Runtime setup flow", async () => {

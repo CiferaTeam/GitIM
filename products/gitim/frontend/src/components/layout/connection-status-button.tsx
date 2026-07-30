@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { RefreshCcw, RotateCcw, Unplug } from "lucide-react";
+import { useNavigate } from "react-router";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -63,13 +64,11 @@ function DiagnosticsRow({
 }
 
 export function ConnectionStatusButton() {
+  const navigate = useNavigate();
   const connected = useChatStore((s) => s.connected);
-  const setConnected = useChatStore((s) => s.setConnected);
   const mode = useConnectionStore((s) => s.mode);
   const status = useConnectionStore((s) => s.status);
   const headCommit = useConnectionStore((s) => s.headCommit);
-  const setConnectionStatus = useConnectionStore((s) => s.setStatus);
-  const setLocalReady = useConnectionStore((s) => s.setLocalReady);
   const poll = useConnectionDiagnosticsStore((s) => s.poll);
   const browserSync = useConnectionDiagnosticsStore((s) => s.browserSync);
   const recordPollFailure = useConnectionDiagnosticsStore((s) => s.recordPollFailure);
@@ -116,9 +115,7 @@ export function ConnectionStatusButton() {
   }
 
   function handleReconnect() {
-    setConnected(false);
-    if (mode === "local") setLocalReady(false);
-    setConnectionStatus("disconnected");
+    navigate("/");
   }
 
   return (

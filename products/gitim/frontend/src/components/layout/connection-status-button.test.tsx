@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { MemoryRouter } from "react-router";
+import { MemoryRouter, useLocation } from "react-router";
 import { ConnectionStatusButton } from "./connection-status-button";
 import { useChatStore } from "@/hooks/use-chat-store";
 import { useConnectionStore } from "@/hooks/use-connection-store";
@@ -56,6 +56,11 @@ vi.mock("../usage-indicator", () => ({
 vi.mock("../timezone-toggle", () => ({
   TimezoneToggle: () => null,
 }));
+
+function LocationProbe() {
+  const location = useLocation();
+  return <output data-testid="location-probe">{`${location.pathname}${location.hash}`}</output>;
+}
 
 describe("ConnectionStatusButton", () => {
   let container: HTMLDivElement;
@@ -116,5 +121,41 @@ describe("ConnectionStatusButton", () => {
     expect(document.body.textContent).toContain("Browser sync");
     expect(document.body.textContent).toContain("Failed to fetch via CORS proxy");
     expect(document.body.textContent).toContain("https://git-cors.gitim.io");
+  });
+
+  it("returns to the landing page when reconnect is selected", async () => {
+    await act(async () => {
+      root.render(
+        <MemoryRouter initialEntries={["/chat"]}>
+          <ConnectionStatusButton />
+          <LocationProbe />
+        </MemoryRouter>,
+      );
+    });
+
+    const statusButton = container.querySelector<HTMLButtonElement>(
+      "button[aria-label='Connection diagnostics']",
+    );
+    expect(statusButton).not.toBeNull();
+
+    await act(async () => {
+      statusButton?.click();
+    });
+
+    expect(
+      document.body.querySelector("button[data-testid='connection-home']"),
+    ).toBeNull();
+    const reconnect = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>("button"),
+    ).find((button) => button.textContent?.includes("Reconnect"));
+    expect(reconnect).not.toBeUndefined();
+
+    await act(async () => {
+      reconnect?.click();
+    });
+
+    expect(container.querySelector("[data-testid='location-probe']")?.textContent).toBe(
+      "/",
+    );
   });
 });

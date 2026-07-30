@@ -14,7 +14,6 @@ import {
   User,
   Volume2,
   VolumeX,
-  X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { buildFileTree, type TreeNode } from "@/lib/demo-story/tree";
@@ -199,11 +198,12 @@ function ChapterBar({
         <button
           type="button"
           onClick={onClose}
-          className="p-1.5 rounded-md text-text-muted hover:text-foreground hover:bg-surface transition-colors shrink-0"
-          aria-label="Close demo"
+          className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-primary/30 bg-primary/10 px-2.5 text-xs font-semibold text-primary transition-colors hover:border-primary/50 hover:bg-primary/20"
+          aria-label="Back to overview"
           data-testid="demo-close"
         >
-          <X className="size-3.5" />
+          <ArrowLeft className="size-3.5" />
+          <span>Back to overview</span>
         </button>
       )}
     </div>
