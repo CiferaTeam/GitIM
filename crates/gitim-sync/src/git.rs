@@ -279,6 +279,46 @@ impl GitStorage {
         run_git_best_effort(&["remote", "get-url", "origin"], &self.root).is_some()
     }
 
+    pub(crate) fn raw_origin_url(&self) -> Result<String, GitError> {
+        let output = run_git_command(&["config", "--get", "remote.origin.url"], &self.root)
+            .map_err(|_| GitError::CommandFailed("failed to read raw origin URL".to_string()))?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                "failed to read raw origin URL".to_string(),
+            ));
+        }
+        let value = String::from_utf8(output.stdout)
+            .map_err(|_| GitError::CommandFailed("raw origin URL is not UTF-8".to_string()))?;
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(GitError::CommandFailed(
+                "raw origin URL is empty".to_string(),
+            ));
+        }
+        Ok(value.to_string())
+    }
+
+    pub(crate) fn origin_fetch_refspecs(&self) -> Result<Vec<String>, GitError> {
+        let output = run_git_command(&["config", "--get-all", "remote.origin.fetch"], &self.root)
+            .map_err(|_| {
+            GitError::CommandFailed("failed to read origin fetch refspecs".to_string())
+        })?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                "failed to read origin fetch refspecs".to_string(),
+            ));
+        }
+        let value = String::from_utf8(output.stdout).map_err(|_| {
+            GitError::CommandFailed("origin fetch refspecs are not UTF-8".to_string())
+        })?;
+        Ok(value
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect())
+    }
+
     pub fn fetch(&self) -> Result<(), GitError> {
         let args = [
             GIT_HTTP_TIMEOUT_ARGS[0],

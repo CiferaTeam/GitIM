@@ -993,6 +993,7 @@ dependencies = [
 name = "gitim-sync"
 version = "0.10.0"
 dependencies = [
+ "fs2",
  "gitim-core",
  "libc",
  "notify",
