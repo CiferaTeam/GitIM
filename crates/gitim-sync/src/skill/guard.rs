@@ -17,6 +17,7 @@ use crate::git::{run_git, GitError, GitStorage};
 const JOURNAL_SCHEMA_VERSION: u32 = 1;
 const JOURNAL_FILE: &str = "skill-quarantine.json";
 const QUARANTINE_REF_PREFIX: &str = "refs/gitim/quarantine/skill-";
+const QUARANTINE_TAIL_REF_PREFIX: &str = "refs/gitim/quarantine/tail-";
 
 #[derive(Clone)]
 pub struct SkillSyncGuard {
@@ -62,6 +63,12 @@ struct QuarantineJournal {
     repaired_head: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     branch_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tail_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tail_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tail_head: Option<String>,
 }
 
 impl SkillSyncGuard {
@@ -200,7 +207,7 @@ impl SkillSyncGuard {
                 let _guard = commit_lock
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                self.complete_quarantine_locked(&pending)?;
+                self.complete_quarantine_locked(repo, &pending)?;
                 Ok(GuardedPushOutcome::RepairedAndPushed {
                     quarantine_ref: pending.quarantine_ref,
                 })
@@ -466,12 +473,21 @@ impl SkillSyncGuard {
 
         if journal.upstream_oid != captured_upstream_oid {
             let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
-            let expected = journal.expected_branch_head();
-            let previous_repaired = journal.repaired_head.as_deref();
-            if current != expected && previous_repaired != Some(current.as_str()) {
-                return Err(SkillSyncError::LocalQuarantineBlocked(
-                    "working branch changed while quarantine awaited a new upstream".to_owned(),
-                ));
+            let expected = journal.expected_branch_head().to_owned();
+            let previous_repaired = journal.repaired_head.clone();
+            if current != expected && previous_repaired.as_deref() != Some(current.as_str()) {
+                let already_captured = journal.tail_head.as_deref() == Some(current.as_str());
+                if !already_captured {
+                    let repaired = previous_repaired.as_deref().ok_or_else(|| {
+                        SkillSyncError::LocalQuarantineBlocked(
+                            "working branch changed before quarantine replay".to_owned(),
+                        )
+                    })?;
+                    let replay_base = journal.upstream_oid.clone();
+                    capture_quarantine_tail(repo, &mut journal, repaired, &replay_base, &current)?;
+                    self.save_journal(&journal)?;
+                    cleanup_quarantine_tail_refs(repo, &journal, journal.tail_ref.as_deref())?;
+                }
             }
             journal.upstream_oid = captured_upstream_oid.to_owned();
             journal.branch_head = Some(current);
@@ -562,12 +578,14 @@ impl SkillSyncGuard {
             ensure_clean_tracked_worktree(repo)?;
             update_working_branch(repo, &journal.branch, validated_upstream_oid, expected)?;
         }
+        cleanup_quarantine_tail_refs(repo, journal, None)?;
         self.remove_journal()?;
         Ok(true)
     }
 
     fn complete_quarantine_locked(
         &self,
+        repo: &GitStorage,
         pending: &PendingQuarantinePush,
     ) -> Result<(), SkillSyncError> {
         match self.load_journal()? {
@@ -576,6 +594,7 @@ impl SkillSyncGuard {
                     && journal.phase == QuarantinePhase::Moved
                     && journal.repaired_head.as_deref() == Some(pending.repaired_head.as_str()) =>
             {
+                cleanup_quarantine_tail_refs(repo, &journal, None)?;
                 self.remove_journal()
             }
             Some(_) => Ok(()),
@@ -701,6 +720,9 @@ impl QuarantineJournal {
             phase: QuarantinePhase::Prepared,
             repaired_head: None,
             branch_head: Some(original_head.to_owned()),
+            tail_ref: None,
+            tail_base: None,
+            tail_head: None,
         })
     }
 
@@ -739,6 +761,39 @@ fn validate_journal(repo: &GitStorage, journal: &QuarantineJournal) -> Result<()
     if let Some(branch_head) = &journal.branch_head {
         validate_oid(branch_head)?;
         repo.rev_parse(&format!("{branch_head}^{{commit}}"))?;
+    }
+    match (&journal.tail_ref, &journal.tail_base, &journal.tail_head) {
+        (None, None, None) => {}
+        (Some(tail_ref), Some(tail_base), Some(tail_head)) => {
+            validate_oid(tail_base)?;
+            validate_oid(tail_head)?;
+            let expected_tail_ref = format!(
+                "{QUARANTINE_TAIL_REF_PREFIX}{}-{tail_head}",
+                journal.operation_id
+            );
+            if tail_ref != &expected_tail_ref {
+                return Err(SkillSyncError::LocalQuarantineBlocked(
+                    "quarantine tail ref does not match operation identity".to_owned(),
+                ));
+            }
+            if repo.rev_parse(tail_ref)? != *tail_head || !is_ancestor(repo, tail_base, tail_head)?
+            {
+                return Err(SkillSyncError::LocalQuarantineBlocked(
+                    "quarantine tail ref or ancestry is invalid".to_owned(),
+                ));
+            }
+            verify_managed_roots(repo, tail_base, tail_head)?;
+            if history_touches_managed_skills_between(repo, tail_base, tail_head)? {
+                return Err(SkillSyncError::LocalQuarantineBlocked(
+                    "quarantine tail touches managed Skill paths".to_owned(),
+                ));
+            }
+        }
+        _ => {
+            return Err(SkillSyncError::LocalQuarantineBlocked(
+                "quarantine tail metadata is incomplete".to_owned(),
+            ));
+        }
     }
     repo.rev_parse(&format!("{}^{{commit}}", journal.original_head))?;
     repo.rev_parse(&format!("{}^{{commit}}", journal.upstream_oid))?;
@@ -800,6 +855,67 @@ fn ensure_quarantine_ref(
     }
 }
 
+fn capture_quarantine_tail(
+    repo: &GitStorage,
+    journal: &mut QuarantineJournal,
+    ancestry_base: &str,
+    replay_base: &str,
+    tail_head: &str,
+) -> Result<(), SkillSyncError> {
+    if !is_ancestor(repo, ancestry_base, tail_head)?
+        || !is_ancestor(repo, replay_base, tail_head)?
+        || history_touches_managed_skills_between(repo, ancestry_base, tail_head)?
+        || history_touches_managed_skills_between(repo, replay_base, tail_head)?
+    {
+        return Err(SkillSyncError::LocalQuarantineBlocked(
+            "working branch tail is unrelated or touches managed Skill paths".to_owned(),
+        ));
+    }
+    verify_managed_roots(repo, ancestry_base, tail_head)?;
+    verify_managed_roots(repo, replay_base, tail_head)?;
+
+    let tail_ref = format!(
+        "{QUARANTINE_TAIL_REF_PREFIX}{}-{tail_head}",
+        journal.operation_id
+    );
+    match revision_oid(repo, &tail_ref)? {
+        Some(existing) if existing == tail_head => {}
+        Some(_) => {
+            return Err(SkillSyncError::LocalQuarantineBlocked(
+                "quarantine tail ref collides with another operation".to_owned(),
+            ));
+        }
+        None => {
+            let zero_oid = "0".repeat(tail_head.len());
+            run_git(
+                &["update-ref", &tail_ref, tail_head, &zero_oid],
+                repo.root(),
+            )?;
+        }
+    }
+    journal.tail_ref = Some(tail_ref);
+    journal.tail_base = Some(replay_base.to_owned());
+    journal.tail_head = Some(tail_head.to_owned());
+    Ok(())
+}
+
+fn cleanup_quarantine_tail_refs(
+    repo: &GitStorage,
+    journal: &QuarantineJournal,
+    keep: Option<&str>,
+) -> Result<(), SkillSyncError> {
+    let prefix = format!("{QUARANTINE_TAIL_REF_PREFIX}{}-", journal.operation_id);
+    let refs = repo.run_git_capture(&["for-each-ref", "--format=%(refname)", &prefix])?;
+    for reference in refs.lines().filter(|reference| !reference.is_empty()) {
+        if keep == Some(reference) {
+            continue;
+        }
+        let oid = repo.rev_parse(reference)?;
+        run_git(&["update-ref", "-d", reference, &oid], repo.root())?;
+    }
+    Ok(())
+}
+
 fn replay_without_managed_skills(
     repo: &GitStorage,
     journal: &QuarantineJournal,
@@ -826,7 +942,11 @@ fn replay_without_managed_skills(
         repo.root(),
     )?;
     let replay_repo = GitStorage::new(&worktree);
-    let result = replay_commits(repo, &replay_repo, journal, author);
+    let result = if journal.tail_head.is_some() {
+        replay_quarantine_tail(repo, &replay_repo, journal, author)
+    } else {
+        replay_commits(repo, &replay_repo, journal, author)
+    };
     let cleanup = cleanup_worktree(repo, &worktree);
     match (result, cleanup) {
         (Ok(head), Ok(())) => Ok(head),
@@ -846,7 +966,59 @@ fn replay_commits(
         .trim()
         .to_owned();
     validate_oid(&merge_base)?;
-    let range = format!("{merge_base}..{}", journal.original_head);
+    let replayed_non_skill_commits =
+        replay_linear_range(source, target, &merge_base, &journal.original_head, author)?;
+    let repaired = target.rev_parse("HEAD")?;
+    if replayed_non_skill_commits == 0
+        && changed_paths(source, &merge_base, &journal.original_head)?
+            .iter()
+            .any(|path| !is_managed_skill_path(path))
+    {
+        return Err(SkillSyncError::LocalQuarantineBlocked(
+            "quarantine replay omitted ordinary changes".to_owned(),
+        ));
+    }
+    verify_managed_roots(target, &journal.upstream_oid, &repaired)?;
+    if merge_base == journal.upstream_oid {
+        verify_non_skill_tree_equivalence(source, &journal.original_head, target, &repaired)?;
+    }
+    Ok(repaired)
+}
+
+fn replay_quarantine_tail(
+    source: &GitStorage,
+    target: &GitStorage,
+    journal: &QuarantineJournal,
+    author: (&str, &str),
+) -> Result<String, SkillSyncError> {
+    let (Some(tail_base), Some(tail_head)) =
+        (journal.tail_base.as_deref(), journal.tail_head.as_deref())
+    else {
+        return target.rev_parse("HEAD").map_err(Into::into);
+    };
+    let replayed = replay_linear_range(source, target, tail_base, tail_head, author)?;
+    if replayed == 0
+        && changed_paths(source, tail_base, tail_head)?
+            .iter()
+            .any(|path| !is_managed_skill_path(path))
+    {
+        return Err(SkillSyncError::LocalQuarantineBlocked(
+            "quarantine tail replay omitted ordinary changes".to_owned(),
+        ));
+    }
+    let repaired = target.rev_parse("HEAD")?;
+    verify_managed_roots(target, &journal.upstream_oid, &repaired)?;
+    Ok(repaired)
+}
+
+fn replay_linear_range(
+    source: &GitStorage,
+    target: &GitStorage,
+    base: &str,
+    head: &str,
+    author: (&str, &str),
+) -> Result<usize, SkillSyncError> {
+    let range = format!("{base}..{head}");
     let commits = source.run_git_capture(&[
         "rev-list",
         "--reverse",
@@ -897,21 +1069,7 @@ fn replay_commits(
         )?;
         replayed_non_skill_commits = replayed_non_skill_commits.saturating_add(1);
     }
-    let repaired = target.rev_parse("HEAD")?;
-    if replayed_non_skill_commits == 0
-        && changed_paths(source, &merge_base, &journal.original_head)?
-            .iter()
-            .any(|path| !is_managed_skill_path(path))
-    {
-        return Err(SkillSyncError::LocalQuarantineBlocked(
-            "quarantine replay omitted ordinary changes".to_owned(),
-        ));
-    }
-    verify_managed_roots(target, &journal.upstream_oid, &repaired)?;
-    if merge_base == journal.upstream_oid {
-        verify_non_skill_tree_equivalence(source, &journal.original_head, target, &repaired)?;
-    }
-    Ok(repaired)
+    Ok(replayed_non_skill_commits)
 }
 
 fn apply_replay_patch(
@@ -1415,15 +1573,22 @@ fn validate_user_archive_preconditions(
     for commit in commits.lines().filter(|line| !line.is_empty()) {
         let parent = format!("{commit}^");
         let changes = repo.changed_files_range(&parent, commit)?;
-        let archived_handlers: BTreeSet<String> = changes
+        let archive_paths: Vec<(String, String)> = changes
             .iter()
             .filter_map(|path| {
-                let path = path.to_string_lossy();
+                let path = path.to_string_lossy().into_owned();
                 path.strip_prefix("archive/users/")
                     .and_then(|name| name.strip_suffix(".meta.yaml"))
                     .map(str::to_owned)
+                    .map(|handler| (handler, path))
             })
             .collect();
+        let mut archived_handlers = BTreeSet::new();
+        for (handler, path) in archive_paths {
+            if repo.show_file_at_ref(commit, &path)?.is_some() {
+                archived_handlers.insert(handler);
+            }
+        }
         if archived_handlers.is_empty() {
             continue;
         }

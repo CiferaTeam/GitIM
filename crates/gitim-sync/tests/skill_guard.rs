@@ -2918,12 +2918,15 @@ fn quarantine_resume_replays_the_original_ref_after_remote_advance_and_thread_co
     }
 
     let first = guard.guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"));
-    assert!(matches!(
-        first,
-        Err(gitim_sync::skill::checkpoint::SkillSyncError::Git(
-            gitim_sync::git::GitError::PushConflict
-        ))
-    ));
+    assert!(
+        matches!(
+            first,
+            Err(gitim_sync::skill::checkpoint::SkillSyncError::Git(
+                gitim_sync::git::GitError::PushConflict
+            ))
+        ),
+        "unexpected first push result: {first:?}"
+    );
     assert!(fixture
         .clone_root()
         .join(".gitim/skill-quarantine.json")
@@ -2961,6 +2964,133 @@ fn quarantine_resume_replays_the_original_ref_after_remote_advance_and_thread_co
         ]
     )
     .is_none());
+}
+
+#[test]
+fn quarantine_remote_advance_replays_a_handler_tail_committed_during_exact_push() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+    let base = "[L000001][P000000][@alice][20260730T120000Z] base\n";
+
+    fs::write(fixture.writer_root().join("channels/general.thread"), base).unwrap();
+    commit_all(fixture.writer_root(), "seed shared thread", "bob");
+    git(fixture.writer_root(), &["push"]);
+    git(local_root, &["fetch", "origin"]);
+    git(local_root, &["rebase", "origin/main"]);
+
+    fs::create_dir_all(local_root.join("skills/poison")).unwrap();
+    fs::write(local_root.join("skills/poison/SKILL.md"), "# invalid\n").unwrap();
+    let original_content =
+        format!("{base}[L000002][P000001][@alice][20260730T120100Z] sanitized original\n");
+    fs::write(
+        local_root.join("channels/general.thread"),
+        &original_content,
+    )
+    .unwrap();
+    commit_all(local_root, "mixed bypass", ALICE);
+    let original = git_output(local_root, &["rev-parse", "HEAD"]);
+    let quarantine_ref = format!("refs/gitim/quarantine/skill-{original}");
+
+    fs::write(
+        fixture.writer_root().join("channels/general.thread"),
+        format!("{base}[L000002][P000001][@bob][20260730T120200Z] remote advance\n"),
+    )
+    .unwrap();
+    commit_all(fixture.writer_root(), "remote thread advance", "bob");
+
+    let hook = local_root.join(".git/hooks/pre-push");
+    let marker = local_root.join(".gitim/tail-race-fired");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    let handler_content =
+        format!("{original_content}[L000003][P000002][@alice][20260730T120300Z] handler tail\n");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nif [ ! -f '{}' ]; then\n  touch '{}'\n  cat > '{}' <<'EOF'\n{}EOF\n  git -C '{}' add channels/general.thread\n  git -C '{}' commit -m 'handler tail during exact push'\n  git -C '{}' push origin HEAD:main\nfi\n",
+            marker.display(),
+            marker.display(),
+            local_root.join("channels/general.thread").display(),
+            handler_content,
+            local_root.display(),
+            local_root.display(),
+            fixture.writer_root().display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).unwrap();
+    }
+
+    let first = guard.guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"));
+    assert!(
+        matches!(
+            first,
+            Err(gitim_sync::skill::checkpoint::SkillSyncError::Git(
+                gitim_sync::git::GitError::PushConflict
+            ))
+        ),
+        "unexpected tail-race first push result: {first:?}"
+    );
+    let handler_head = git_output(local_root, &["rev-parse", "HEAD"]);
+    assert_ne!(handler_head, original);
+    assert!(local_root.join(".gitim/skill-quarantine.json").exists());
+    fs::remove_file(&hook).unwrap();
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        GuardedPushOutcome::RepairedAndPushed { .. }
+    ));
+
+    assert!(!local_root.join(".gitim/skill-quarantine.json").exists());
+    assert_eq!(
+        git_output(local_root, &["rev-parse", &quarantine_ref]),
+        original
+    );
+    let published = git_output(
+        local_root,
+        &["show", "refs/remotes/origin/main:channels/general.thread"],
+    );
+    for message in ["remote advance", "sanitized original", "handler tail"] {
+        assert_eq!(
+            published.matches(message).count(),
+            1,
+            "{message} must be published exactly once: {published}"
+        );
+    }
+    assert!(
+        published.contains("[L000004]"),
+        "tail must be renumbered: {published}"
+    );
+    assert!(git_status(
+        local_root,
+        &[
+            "cat-file",
+            "-e",
+            "refs/remotes/origin/main:skills/poison/SKILL.md"
+        ]
+    )
+    .is_none());
+    assert!(
+        git_output(
+            local_root,
+            &[
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/gitim/quarantine/tail-"
+            ]
+        )
+        .is_empty(),
+        "completed tail ref must be cleaned"
+    );
 }
 
 #[test]

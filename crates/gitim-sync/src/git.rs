@@ -192,6 +192,13 @@ pub struct GitStorage {
     root: PathBuf,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GitTreeEntry {
+    pub mode: String,
+    pub object_type: String,
+    pub path: PathBuf,
+}
+
 impl GitStorage {
     pub fn new(root: &Path) -> Self {
         Self {
@@ -793,6 +800,52 @@ impl GitStorage {
             }
             Err(e) => Err(e),
         }
+    }
+
+    pub fn list_tree_entries_at_ref(
+        &self,
+        reference: &str,
+        roots: &[&str],
+    ) -> Result<Vec<GitTreeEntry>, GitError> {
+        let mut args = vec!["ls-tree", "-r", "-z", reference, "--"];
+        args.extend_from_slice(roots);
+        let output = run_git(&args, &self.root)?;
+        let mut entries = Vec::new();
+        for record in output.stdout.split(|byte| *byte == b'\0') {
+            if record.is_empty() {
+                continue;
+            }
+            let record = std::str::from_utf8(record).map_err(|error| {
+                GitError::CommandFailed(format!("git tree entry is not UTF-8: {error}"))
+            })?;
+            let (metadata, path) = record.split_once('\t').ok_or_else(|| {
+                GitError::CommandFailed("git tree entry is missing a path".to_owned())
+            })?;
+            let mut fields = metadata.split_whitespace();
+            let mode = fields
+                .next()
+                .ok_or_else(|| {
+                    GitError::CommandFailed("git tree entry is missing mode".to_owned())
+                })?
+                .to_owned();
+            let object_type = fields
+                .next()
+                .ok_or_else(|| {
+                    GitError::CommandFailed("git tree entry is missing type".to_owned())
+                })?
+                .to_owned();
+            if fields.next().is_none() || fields.next().is_some() {
+                return Err(GitError::CommandFailed(
+                    "git tree entry has malformed metadata".to_owned(),
+                ));
+            }
+            entries.push(GitTreeEntry {
+                mode,
+                object_type,
+                path: PathBuf::from(path),
+            });
+        }
+        Ok(entries)
     }
 
     /// Read a path from the current branch/upstream merge base without

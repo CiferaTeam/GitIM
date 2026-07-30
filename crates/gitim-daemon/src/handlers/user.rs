@@ -2,6 +2,8 @@ use crate::api::{Event, Response};
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 use gitim_core::types::{Handler, UserMeta, MAX_INTRODUCTION_LEN};
+use gitim_sync::git::GitStorage;
+use std::path::Component;
 use tracing::{info, warn};
 
 pub async fn handle_register_user(
@@ -496,56 +498,60 @@ pub(crate) fn ensure_no_skill_roles(
     repo_root: &std::path::Path,
     handler: &str,
 ) -> Result<(), String> {
-    let workspace = repo_root.join("skills/workspace.meta.yaml");
-    if workspace.exists() {
-        let value: serde_yaml::Value = serde_yaml::from_str(
-            &std::fs::read_to_string(&workspace)
-                .map_err(|error| format!("read workspace Skill metadata: {error}"))?,
-        )
-        .map_err(|error| format!("parse workspace Skill metadata: {error}"))?;
-        if yaml_role_contains(&value, "administrators", handler) {
+    let repo = GitStorage::new(repo_root);
+    let entries = repo
+        .list_tree_entries_at_ref("HEAD", &["skills", "archive/skills"])
+        .map_err(|error| format!("read committed Skill tree: {error}"))?;
+    for entry in entries {
+        if !is_bounded_skill_tree_path(&entry.path)
+            || entry.object_type != "blob"
+            || !matches!(entry.mode.as_str(), "100644" | "100755")
+        {
+            return Err("invalid_skill_tree_entry".to_owned());
+        }
+        let Some(path) = entry.path.to_str() else {
+            return Err("invalid_skill_tree_entry".to_owned());
+        };
+        let is_workspace = path == "skills/workspace.meta.yaml";
+        let is_skill_meta = path.ends_with("/skill.meta.yaml");
+        if !is_workspace && !is_skill_meta {
+            continue;
+        }
+        let content = repo
+            .show_file_at_ref("HEAD", path)
+            .map_err(|error| format!("read committed {path}: {error}"))?
+            .ok_or_else(|| format!("committed Skill metadata disappeared: {path}"))?;
+        let value: serde_yaml::Value = serde_yaml::from_str(&content)
+            .map_err(|error| format!("parse committed {path}: {error}"))?;
+        if is_workspace && yaml_role_contains(&value, "administrators", handler) {
             return Err("skill_admin_role_present".to_owned());
         }
-    }
-    for root in [repo_root.join("skills"), repo_root.join("archive/skills")] {
-        let mut files = Vec::new();
-        collect_skill_meta_files(&root, &mut files)?;
-        for path in files {
-            let value: serde_yaml::Value = serde_yaml::from_str(
-                &std::fs::read_to_string(&path)
-                    .map_err(|error| format!("read {}: {error}", path.display()))?,
-            )
-            .map_err(|error| format!("parse {}: {error}", path.display()))?;
-            if yaml_role_contains(&value, "owners", handler)
-                || yaml_role_contains(&value, "maintainers", handler)
-            {
-                return Err("skill_roles_present".to_owned());
-            }
+        if is_skill_meta
+            && (yaml_role_contains(&value, "owners", handler)
+                || yaml_role_contains(&value, "maintainers", handler))
+        {
+            return Err("skill_roles_present".to_owned());
         }
     }
     Ok(())
 }
 
-fn collect_skill_meta_files(
-    directory: &std::path::Path,
-    files: &mut Vec<std::path::PathBuf>,
-) -> Result<(), String> {
-    let entries = match std::fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("read {}: {error}", directory.display())),
-    };
-    for entry in entries {
-        let path = entry
-            .map_err(|error| format!("read {} entry: {error}", directory.display()))?
-            .path();
-        if path.is_dir() {
-            collect_skill_meta_files(&path, files)?;
-        } else if path.file_name().and_then(|name| name.to_str()) == Some("skill.meta.yaml") {
-            files.push(path);
-        }
+fn is_bounded_skill_tree_path(path: &std::path::Path) -> bool {
+    let components: Vec<_> = path.components().collect();
+    if components
+        .iter()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return false;
     }
-    Ok(())
+    matches!(
+        components.as_slice(),
+        [Component::Normal(root), ..] if *root == "skills"
+    ) || matches!(
+        components.as_slice(),
+        [Component::Normal(archive), Component::Normal(skills), ..]
+            if *archive == "archive" && *skills == "skills"
+    )
 }
 
 fn yaml_role_contains(value: &serde_yaml::Value, key: &str, handler: &str) -> bool {
@@ -676,6 +682,81 @@ mod tests {
         assert!(!state
             .repo_root
             .join("archive/showboards/alice/board.md")
+            .exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn archive_user_rejects_external_skill_metadata_symlink_before_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        register(&state, "bob").await;
+        let external = tmp.path().join("outside-skill.meta.yaml");
+        let external_content = "owners: []\nmaintainers: []\n";
+        std::fs::write(&external, external_content).unwrap();
+        let skill_dir = state.repo_root.join("skills/external");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        symlink(&external, skill_dir.join("skill.meta.yaml")).unwrap();
+        std::process::Command::new("git")
+            .args(["add", "skills/external/skill.meta.yaml"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "test: external Skill metadata symlink"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        let head = state.git_storage.rev_parse("HEAD").unwrap();
+
+        let response =
+            handle_archive_user(state.clone(), "alice".to_owned(), "bob".to_owned()).await;
+
+        assert!(!response.ok);
+        assert_eq!(response.error.as_deref(), Some("invalid_skill_tree_entry"));
+        assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head);
+        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+        assert_eq!(
+            std::fs::read_to_string(&external).unwrap(),
+            external_content
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn depart_user_rejects_a_skill_directory_symlink_loop_before_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        let skills = state.repo_root.join("skills");
+        std::fs::create_dir_all(&skills).unwrap();
+        symlink("../skills", skills.join("loop")).unwrap();
+        std::process::Command::new("git")
+            .args(["add", "skills/loop"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "test: Skill directory symlink loop"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        let head = state.git_storage.rev_parse("HEAD").unwrap();
+
+        let response = crate::handlers::handle_depart_user(state.clone(), "alice".to_owned()).await;
+
+        assert!(!response.ok);
+        assert_eq!(response.error.as_deref(), Some("invalid_skill_tree_entry"));
+        assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head);
+        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(!state
+            .repo_root
+            .join("archive/users/alice.meta.yaml")
             .exists());
     }
 
