@@ -1,9 +1,13 @@
 import { useState } from "react";
-import { Loader2 } from "lucide-react";
+import { FolderOpen, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
-import { toSlug, validateSlug } from "@/lib/client";
+import {
+  pickWorkspaceDirectory,
+  toSlug,
+  validateSlug,
+} from "@/lib/client";
 import type {
   CreateWorkspaceRequest,
   WorkspaceProvider,
@@ -74,12 +78,49 @@ export function CreateWorkspaceForm({
   const [remoteUrl, setRemoteUrl] = useState("");
   const [token, setToken] = useState("");
   const [acknowledged, setAcknowledged] = useState(false);
+  const [picking, setPicking] = useState(false);
+  const [manualPathEntry, setManualPathEntry] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [localError, setLocalError] = useState<string | null>(null);
 
   function mapError(code: string | null, fallback: string | null): string | null {
     if (!code) return fallback;
     return ERROR_MESSAGES[code] ?? fallback;
+  }
+
+  function updatePath(nextPath: string) {
+    setPath(nextPath);
+    if (!slugManuallyEdited) {
+      const basename = nextPath.split(/[\\/]/).filter(Boolean).pop() ?? "";
+      setSlug(toSlug(basename));
+    }
+  }
+
+  async function handleChooseFolder() {
+    setLocalError(null);
+    clearError();
+    setPicking(true);
+    try {
+      const result = await pickWorkspaceDirectory();
+      if (!result.ok) {
+        if (result.error_code === "directory_picker_unavailable") {
+          setManualPathEntry(true);
+          return;
+        }
+        setLocalError(result.error ?? "Could not open the folder picker.");
+        return;
+      }
+      const selectedPath = result.data?.path;
+      if (selectedPath) {
+        updatePath(selectedPath);
+      }
+    } catch (error) {
+      setLocalError(
+        error instanceof Error ? error.message : "Could not open the folder picker.",
+      );
+    } finally {
+      setPicking(false);
+    }
   }
 
   async function handleSubmit(e: React.FormEvent) {
@@ -89,7 +130,7 @@ export function CreateWorkspaceForm({
 
     const trimmedPath = path.trim();
     if (!trimmedPath) {
-      setLocalError("Please enter a workspace path.");
+      setLocalError("Please choose or enter a workspace folder.");
       return;
     }
 
@@ -135,7 +176,6 @@ export function CreateWorkspaceForm({
     setSubmitting(false);
 
     if (!created) {
-      // Store error was populated; useEffect above will sync it.
       const s = useWorkspaceStore.getState();
       setLocalError(mapError(s.errorCode, s.error));
       return;
@@ -151,25 +191,54 @@ export function CreateWorkspaceForm({
           htmlFor="ws-path"
           className="text-xs font-medium text-text-secondary"
         >
-          Workspace path
+          Workspace folder
         </label>
-        <Input
-          id="ws-path"
-          data-testid="ws-path"
-          value={path}
-          onChange={(e) => {
-            const next = e.target.value;
-            setPath(next);
-            if (!slugManuallyEdited) {
-              const basename = next.split(/[\\/]/).pop() ?? "";
-              setSlug(toSlug(basename));
-            }
-          }}
-          placeholder="/path/to/workspace"
-          className="font-mono text-sm"
-          disabled={submitting}
-          autoFocus
-        />
+        <div className="flex gap-2">
+          <Input
+            id="ws-path"
+            data-testid="ws-path"
+            value={path}
+            readOnly={!manualPathEntry}
+            onChange={(event) => updatePath(event.target.value)}
+            placeholder="No folder selected"
+            className="font-mono text-sm"
+            disabled={submitting || picking}
+          />
+          <Button
+            type="button"
+            data-testid="ws-folder-picker"
+            variant="outline"
+            onClick={() => void handleChooseFolder()}
+            disabled={submitting || picking}
+            autoFocus
+          >
+            {picking ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <FolderOpen className="size-3.5" />
+            )}
+            {picking ? "Choosing..." : path ? "Change folder" : "Choose folder"}
+          </Button>
+        </div>
+        <p className="text-[11px] leading-relaxed text-text-muted">
+          {manualPathEntry
+            ? "Enter the absolute path to an existing workspace folder."
+            : "Choose an existing folder. On supported systems, the picker can create and select an empty folder."}
+          {!manualPathEntry && (
+            <>
+              {" "}
+              <button
+                type="button"
+                data-testid="ws-manual-path"
+                className="text-primary hover:underline"
+                onClick={() => setManualPathEntry(true)}
+                disabled={submitting || picking}
+              >
+                Enter path manually
+              </button>
+            </>
+          )}
+        </p>
       </div>
 
       <div className="space-y-1.5">
@@ -346,6 +415,7 @@ export function CreateWorkspaceForm({
           data-testid="ws-create-submit"
           disabled={
             submitting ||
+            picking ||
             !path.trim() ||
             (provider === "github" && !acknowledged)
           }
