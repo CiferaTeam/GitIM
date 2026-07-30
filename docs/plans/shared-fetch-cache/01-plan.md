@@ -1022,8 +1022,8 @@ Co-authored-by: Codex <codex@openai.com>
   `675f35612983d85b56dca336d9eda30ed6cfca00`.
 - Task 5 contention scheduling and deterministic acceptance:
   `d575fd9b321528874b561b6ec7e84cd75de1999d`.
-- Task 5 retry-budget reset: commit titled
-  `fix(sync): reset cache retry budget`.
+- Task 5 retry-budget reset:
+  `a68fe55a552f9646a7101a5741545e4ed01d80c4`.
 - Scoped verification passed:
   `cargo test -p gitim-sync` ran 204 tests,
   `cargo fmt --all -- --check`,
