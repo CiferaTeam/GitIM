@@ -26,6 +26,21 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+thread_local! {
+    static FETCH_FOR_PULL_ENTRY_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_fetch_for_pull_entry_count() {
+    FETCH_FOR_PULL_ENTRY_COUNT.set(0);
+}
+
+#[cfg(test)]
+pub(crate) fn fetch_for_pull_entry_count() -> u64 {
+    FETCH_FOR_PULL_ENTRY_COUNT.get()
+}
+
 const CACHE_SCHEMA_VERSION: u32 = 1;
 const CACHE_LOCK_FILE: &str = "fetch-cache.lock";
 const CACHE_STATE_FILE: &str = "fetch-cache-state.json";
@@ -432,6 +447,9 @@ pub(crate) fn fetch_for_pull(
     repo: &GitStorage,
     progress: &mut SyncCacheProgress,
 ) -> PullFetchResult {
+    #[cfg(test)]
+    FETCH_FOR_PULL_ENTRY_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+
     fetch_for_pull_at(
         repo,
         progress,

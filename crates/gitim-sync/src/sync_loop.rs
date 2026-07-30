@@ -22,6 +22,40 @@ pub enum SyncOutcome {
     RebaseFailed,
 }
 
+struct CacheAwareCycleResult {
+    outcome: SyncOutcome,
+    cache_neutral: bool,
+}
+
+impl CacheAwareCycleResult {
+    fn regular(outcome: SyncOutcome) -> Self {
+        Self {
+            outcome,
+            cache_neutral: false,
+        }
+    }
+
+    fn neutral() -> Self {
+        Self {
+            outcome: SyncOutcome::Normal,
+            cache_neutral: true,
+        }
+    }
+}
+
+fn preserve_backoff_on_cache_neutral(
+    cache_neutral: bool,
+    next_delay: Duration,
+    consecutive_rate_limits: u32,
+    consecutive_rebase_failures: u32,
+) -> Option<(Duration, u32, u32)> {
+    cache_neutral.then_some((
+        next_delay,
+        consecutive_rate_limits,
+        consecutive_rebase_failures,
+    ))
+}
+
 /// Consecutive auth failures at which the circuit trips.
 /// Credentials can fail for 1-2 cycles during rotation; 3 strikes is where we're
 /// confident the PAT is revoked rather than transiently noisy.
@@ -285,7 +319,7 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
         })
         .await;
 
-        let outcome = match join_result {
+        let cycle_result = match join_result {
             Ok((o, circuit_back, cache_progress_back)) => {
                 circuit = circuit_back;
                 cache_progress = cache_progress_back;
@@ -298,10 +332,25 @@ pub async fn start_sync_loop<F1, F2, F3, F4>(
                 // treat as Normal so the loop survives.
                 error!("sync_cycle spawn_blocking failed: {e}");
                 cache_progress = SyncCacheProgress::new(interval_secs);
-                SyncOutcome::Normal
+                CacheAwareCycleResult::regular(SyncOutcome::Normal)
             }
         };
 
+        if let Some((preserved_delay, preserved_rate_limits, preserved_rebase_failures)) =
+            preserve_backoff_on_cache_neutral(
+                cycle_result.cache_neutral,
+                next_delay,
+                consecutive_rate_limits,
+                consecutive_rebase_failures,
+            )
+        {
+            next_delay = preserved_delay;
+            consecutive_rate_limits = preserved_rate_limits;
+            consecutive_rebase_failures = preserved_rebase_failures;
+            continue;
+        }
+
+        let outcome = cycle_result.outcome;
         next_delay = match outcome {
             SyncOutcome::Normal => {
                 consecutive_rate_limits = 0;
@@ -397,6 +446,7 @@ pub fn run_sync_cycle(
         rebase_author,
         None,
     )
+    .outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -410,14 +460,15 @@ fn run_sync_cycle_with_cache(
     on_cycle_done: &dyn Fn(),
     rebase_author: Option<&(String, String)>,
     cache_progress: Option<&mut SyncCacheProgress>,
-) -> SyncOutcome {
+) -> CacheAwareCycleResult {
+    let probe_state_before_cycle = circuit.tripped_at;
     if circuit.is_tripped() {
         // Half-open: after AUTH_PROBE_INTERVAL, let one cycle retry git. A
         // successful push/fetch below clears the latch via observe_auth ->
         // record(Ok); a failed one re-arms it. Until the interval elapses, idle.
         if !circuit.should_attempt_probe(Instant::now()) {
             on_cycle_done();
-            return SyncOutcome::AuthCircuitOpen;
+            return CacheAwareCycleResult::regular(SyncOutcome::AuthCircuitOpen);
         }
         // Reset the timer up front so a failed probe backs off another full
         // interval rather than re-probing every cycle.
@@ -435,7 +486,7 @@ fn run_sync_cycle_with_cache(
         if let Err(e) = repo.recover_from_stale_rebase() {
             error!("sync: stale rebase recovery failed: {}", e);
             on_cycle_done();
-            return SyncOutcome::Normal;
+            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
         }
         info!("sync: stale rebase recovered, continuing cycle");
     }
@@ -450,36 +501,40 @@ fn run_sync_cycle_with_cache(
             if let Err(e) = repo.recover_from_stale_rebase() {
                 error!("sync: detached-HEAD recovery failed: {}", e);
                 on_cycle_done();
-                return SyncOutcome::Normal;
+                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
             }
             match repo.has_unpushed_commits() {
                 Ok(v) => v,
                 Err(e) => {
                     warn!("sync: still failing after detached-HEAD recovery: {}", e);
                     on_cycle_done();
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
             }
         }
         Err(e) => {
             warn!("sync: failed to check unpushed commits: {}", e);
             on_cycle_done();
-            return SyncOutcome::Normal;
+            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
         }
     };
 
-    let outcome = if has_unpushed {
-        sync_with_push(
+    let cycle_result = if has_unpushed {
+        CacheAwareCycleResult::regular(sync_with_push(
             repo,
             circuit,
             commit_lock,
             on_pushed,
             on_renumbered,
             rebase_author,
-        )
+        ))
     } else {
         sync_pull_only(repo, circuit, commit_lock, cache_progress)
     };
+
+    if cycle_result.cache_neutral {
+        circuit.tripped_at = probe_state_before_cycle;
+    }
 
     match repo.rev_parse("HEAD") {
         Ok(head) => on_synced(head),
@@ -487,7 +542,7 @@ fn run_sync_cycle_with_cache(
     }
 
     on_cycle_done();
-    outcome
+    cycle_result
 }
 
 /// Push-first strategy: try push, fallback to fetch+rebase, then conflict resolution.
@@ -1593,7 +1648,7 @@ fn sync_pull_only(
     circuit: &mut AuthCircuit,
     commit_lock: &Mutex<()>,
     cache_progress: Option<&mut SyncCacheProgress>,
-) -> SyncOutcome {
+) -> CacheAwareCycleResult {
     let fetch_result = match cache_progress {
         Some(progress) => fetch_for_pull(repo, progress),
         None => match repo.fetch() {
@@ -1602,7 +1657,7 @@ fn sync_pull_only(
         },
     };
     match fetch_result {
-        PullFetchResult::NeutralSkip => return SyncOutcome::Normal,
+        PullFetchResult::NeutralSkip => return CacheAwareCycleResult::neutral(),
         PullFetchResult::Ready => observe_auth(circuit, &Ok(())),
         PullFetchResult::RemoteError(error) => {
             let classified = Err(error);
@@ -1610,18 +1665,18 @@ fn sync_pull_only(
             match classified {
                 Err(GitError::RateLimited) => {
                     warn!("sync: fetch rate limited (pull-only)");
-                    return SyncOutcome::RateLimited;
+                    return CacheAwareCycleResult::regular(SyncOutcome::RateLimited);
                 }
                 Err(GitError::AuthFailed(_)) => {
                     warn!("sync: fetch auth failed (pull-only)");
                     if circuit.is_tripped() {
-                        return SyncOutcome::AuthCircuitOpen;
+                        return CacheAwareCycleResult::regular(SyncOutcome::AuthCircuitOpen);
                     }
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
                 Err(e) => {
                     warn!("sync: fetch failed: {}", e);
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
                 Ok(()) => {}
             }
@@ -1635,7 +1690,7 @@ fn sync_pull_only(
     // the cycle. No local unpushed commits exist on this path (we'd be in
     // sync_with_push if there were), so the reset is data-safe.
     if enforce_max_divergence(repo, commit_lock) {
-        return SyncOutcome::Normal;
+        return CacheAwareCycleResult::regular(SyncOutcome::Normal);
     }
 
     // Rebase mutates the local commit tree; hold commit_lock so it can't
@@ -1651,16 +1706,18 @@ fn sync_pull_only(
         // when the working tree stays dirty for extended periods).
         warn!("sync: rebase failed after fetch: {}", e);
         let _ = repo.abort_rebase();
-        return SyncOutcome::RebaseFailed;
+        return CacheAwareCycleResult::regular(SyncOutcome::RebaseFailed);
     }
 
-    SyncOutcome::Normal
+    CacheAwareCycleResult::regular(SyncOutcome::Normal)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fetch_cache::SyncCacheProgress;
+    use crate::fetch_cache::{
+        fetch_for_pull_entry_count, reset_fetch_for_pull_entry_count, SyncCacheProgress,
+    };
     use crate::test_util::{
         commit_file, configure_git_identity, push_n_commits_to_bare, seed_bare_with_clone,
     };
@@ -1860,12 +1917,12 @@ mod tests {
         );
     }
 
-    fn cache_cycle(
+    fn cache_cycle_result(
         repo: &GitStorage,
         circuit: &mut AuthCircuit,
         lock: &Mutex<()>,
         progress: &mut SyncCacheProgress,
-    ) -> SyncOutcome {
+    ) -> CacheAwareCycleResult {
         run_sync_cycle_with_cache(
             repo,
             circuit,
@@ -1877,6 +1934,15 @@ mod tests {
             None,
             Some(progress),
         )
+    }
+
+    fn cache_cycle(
+        repo: &GitStorage,
+        circuit: &mut AuthCircuit,
+        lock: &Mutex<()>,
+        progress: &mut SyncCacheProgress,
+    ) -> SyncOutcome {
+        cache_cycle_result(repo, circuit, lock, progress).outcome
     }
 
     fn direct_cycle(repo: &GitStorage, circuit: &mut AuthCircuit, lock: &Mutex<()>) -> SyncOutcome {
@@ -1905,23 +1971,12 @@ mod tests {
         let fixture = CacheLoopFixture::new();
         fixture.advance_remote("two\n");
         let repo = fixture.storage();
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(fixture.cache_lock_path())
-            .expect("open cache lock");
-        lock_file.lock_exclusive().expect("hold cache lock");
-        let started = Instant::now();
+        reset_fetch_for_pull_entry_count();
 
         let outcome = direct_cycle(&repo, &mut auth_circuit(), &Mutex::new(()));
 
         assert!(matches!(outcome, SyncOutcome::Normal));
-        assert!(
-            started.elapsed() < Duration::from_millis(900),
-            "public direct cycle waited on the shared cache"
-        );
+        assert_eq!(fetch_for_pull_entry_count(), 0);
         assert_eq!(
             std::fs::read_to_string(fixture.clone_root.join("version.txt"))
                 .expect("read pulled version"),
@@ -1946,10 +2001,69 @@ mod tests {
         circuit.record(&Err(GitError::AuthFailed("first failure".to_string())));
         let mut progress = SyncCacheProgress::new(30);
 
-        let outcome = cache_cycle(&repo, &mut circuit, &Mutex::new(()), &mut progress);
+        let synced = std::cell::Cell::new(0);
+        let cycle_done = std::cell::Cell::new(0);
+        let result = run_sync_cycle_with_cache(
+            &repo,
+            &mut circuit,
+            &Mutex::new(()),
+            &|_, _| {},
+            &|_, _, _| {},
+            &|_| synced.set(synced.get() + 1),
+            &|| cycle_done.set(cycle_done.get() + 1),
+            None,
+            Some(&mut progress),
+        );
 
-        assert!(matches!(outcome, SyncOutcome::Normal));
+        assert!(matches!(result.outcome, SyncOutcome::Normal));
+        assert!(result.cache_neutral);
         assert_eq!(circuit.consecutive_failures(), 1);
+        assert_eq!(synced.get(), 1);
+        assert_eq!(cycle_done.get(), 1);
+    }
+
+    #[test]
+    fn cache_half_open_neutral_skip_preserves_probe_eligibility() {
+        let fixture = CacheLoopFixture::new();
+        let repo = fixture.storage();
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(fixture.cache_lock_path())
+            .expect("open cache lock");
+        lock_file.lock_exclusive().expect("hold cache lock");
+        let mut circuit = auth_circuit();
+        for attempt in 0..AUTH_FAILURE_TRIP_THRESHOLD {
+            circuit.record(&Err(GitError::AuthFailed(format!("failure {attempt}"))));
+        }
+        let original_probe_time = Instant::now() - AUTH_PROBE_INTERVAL - Duration::from_secs(1);
+        circuit.tripped_at = Some(original_probe_time);
+        let failures_before = circuit.consecutive_failures();
+        assert!(circuit.should_attempt_probe(Instant::now()));
+        let mut progress = SyncCacheProgress::new(30);
+
+        let result = cache_cycle_result(&repo, &mut circuit, &Mutex::new(()), &mut progress);
+
+        assert!(result.cache_neutral);
+        assert_eq!(circuit.tripped_at, Some(original_probe_time));
+        assert_eq!(circuit.consecutive_failures(), failures_before);
+        assert!(circuit.should_attempt_probe(Instant::now()));
+    }
+
+    #[test]
+    fn cache_neutral_backoff_preserves_delay_and_failure_counters() {
+        let state = (Duration::from_secs(47), 3, 5);
+
+        assert_eq!(
+            preserve_backoff_on_cache_neutral(true, state.0, state.1, state.2),
+            Some(state)
+        );
+        assert_eq!(
+            preserve_backoff_on_cache_neutral(false, state.0, state.1, state.2),
+            None
+        );
     }
 
     #[test]
@@ -2054,24 +2168,13 @@ mod tests {
             "unpushed\n",
             "local change",
         );
-        let lock_file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(fixture.cache_lock_path())
-            .expect("open cache lock");
-        lock_file.lock_exclusive().expect("hold cache lock");
+        reset_fetch_for_pull_entry_count();
         let mut progress = SyncCacheProgress::new(30);
-        let started = Instant::now();
 
         let outcome = cache_cycle(&repo, &mut auth_circuit(), &Mutex::new(()), &mut progress);
 
         assert!(matches!(outcome, SyncOutcome::Normal));
-        assert!(
-            started.elapsed() < Duration::from_millis(900),
-            "unpushed cycle waited on the shared cache"
-        );
+        assert_eq!(fetch_for_pull_entry_count(), 0);
         assert!(!repo.has_unpushed_commits().expect("check pushed state"));
         assert!(!fixture.cache_state_path().exists());
     }
