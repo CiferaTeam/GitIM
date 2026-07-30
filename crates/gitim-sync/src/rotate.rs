@@ -188,6 +188,14 @@ pub fn try_fire_rotation(
     let current_epoch = origin_epoch.as_ref().map(|f| f.epoch).unwrap_or(1);
     let new_epoch = current_epoch + 1;
     let new_branch = format!("main-epoch-{new_epoch}");
+    let new_origin_ref = format!("refs/remotes/origin/{new_branch}");
+    if !storage
+        .run_git_capture(&["for-each-ref", "--format=%(objectname)", &new_origin_ref])?
+        .trim()
+        .is_empty()
+    {
+        return Ok(RotationOutcome::Lost);
+    }
 
     let sealed_commit_sha = storage.rev_parse(current_branch)?.trim().to_string();
     let sealed_short = sealed_commit_sha.get(..7).unwrap_or(&sealed_commit_sha);
@@ -240,8 +248,10 @@ pub fn try_fire_rotation(
     match storage.atomic_push_two_refs_exact(
         current_branch,
         &redirect_commit_sha,
+        &captured_origin_oid,
         &new_branch,
         &orphan_commit_sha,
+        None,
     ) {
         Ok(()) => {
             let local_guard = commit_lock

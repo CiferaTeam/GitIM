@@ -88,6 +88,29 @@ fn upstream_of(dir: &tempfile::TempDir, branch: &str) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+fn install_receive_pack_race(clone: &tempfile::TempDir, race_command: &str) -> std::path::PathBuf {
+    let script = clone.path().join(".git/test-receive-pack-race");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nset -eu\n{race_command}\nexec git-receive-pack \"$@\"\n"),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(
+        clone,
+        &[
+            "config",
+            "remote.origin.receivepack",
+            script.to_str().unwrap(),
+        ],
+    );
+    script
+}
+
 #[test]
 fn under_threshold_returns_not_ready() {
     let (_bare, clone) = setup_bare_and_clone(3);
@@ -103,6 +126,45 @@ fn under_threshold_returns_not_ready() {
     )
     .unwrap();
     assert!(matches!(o, RotationOutcome::NotReady));
+}
+
+#[test]
+fn epoch_publication_rejects_a_remote_rewind_after_validation() {
+    let (bare, clone) = setup_bare_and_clone(5);
+    let storage = GitStorage::new(clone.path());
+    let accepted = storage.rev_parse("origin/main").unwrap();
+    let rewound = storage.rev_parse("origin/main^").unwrap();
+    install_receive_pack_race(
+        &clone,
+        &format!(
+            "git --git-dir='{}' update-ref refs/heads/main '{}' '{}'",
+            bare.path().display(),
+            rewound,
+            accepted
+        ),
+    );
+    let archive = tempfile::TempDir::new().unwrap();
+
+    let outcome = try_fire_rotation(
+        &storage,
+        "main",
+        3,
+        archive.path(),
+        ("d", "d@g"),
+        "2026-07-31T04:00:00Z",
+    );
+
+    assert!(
+        matches!(outcome, Ok(RotationOutcome::Lost) | Err(_)),
+        "epoch publication unexpectedly won: {outcome:?}"
+    );
+    assert_eq!(
+        GitStorage::new(bare.path()).rev_parse("main").unwrap(),
+        rewound
+    );
+    assert!(GitStorage::new(bare.path())
+        .rev_parse("main-epoch-2")
+        .is_err());
 }
 
 #[test]

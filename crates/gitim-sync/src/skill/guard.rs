@@ -186,7 +186,7 @@ impl SkillSyncGuard {
                 }
                 head
             };
-            repo.push_working_branch_unchecked(&captured_branch, &head)?;
+            repo.push_working_branch_exact(&captured_branch, &head, None)?;
             return Ok(GuardedPushOutcome::Pushed);
         };
         match crate::rotate::epoch_status_at_ref(repo, &upstream_ref)
@@ -305,11 +305,15 @@ impl SkillSyncGuard {
         match prepared {
             PreparedPush::Nothing => Ok(GuardedPushOutcome::NothingToPush),
             PreparedPush::Ordinary { head } => {
-                repo.push_working_branch_unchecked(&captured_branch, &head)?;
+                repo.push_working_branch_exact(&captured_branch, &head, Some(&upstream_oid))?;
                 Ok(GuardedPushOutcome::Pushed)
             }
             PreparedPush::Quarantine(pending) => {
-                repo.push_working_branch_unchecked(&pending.branch, &pending.repaired_head)?;
+                repo.push_working_branch_exact(
+                    &pending.branch,
+                    &pending.repaired_head,
+                    Some(&upstream_oid),
+                )?;
                 let _guard = commit_lock
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);

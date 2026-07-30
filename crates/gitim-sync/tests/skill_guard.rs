@@ -3278,6 +3278,104 @@ fn quarantine_resume_replays_the_original_ref_after_remote_advance_and_thread_co
 }
 
 #[test]
+fn guarded_working_publication_rejects_a_remote_rewind_after_validation() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+
+    fs::write(
+        fixture.writer_root().join("accepted.txt"),
+        "accepted remote tip\n",
+    )
+    .unwrap();
+    commit_all(fixture.writer_root(), "accepted remote tip", "bob");
+    git(fixture.writer_root(), &["push"]);
+    git(local_root, &["fetch", "origin"]);
+    git(local_root, &["reset", "--hard", "origin/main"]);
+
+    let accepted = git_output(local_root, &["rev-parse", "origin/main"]);
+    let rewound = git_output(local_root, &["rev-parse", "origin/main^"]);
+    fs::write(
+        local_root.join("local.txt"),
+        "validated local publication\n",
+    )
+    .unwrap();
+    commit_all(local_root, "validated local publication", ALICE);
+    let local_head = git_output(local_root, &["rev-parse", "HEAD"]);
+
+    install_receive_pack_race(
+        local_root,
+        &format!(
+            "git --git-dir='{}' update-ref refs/heads/main '{}' '{}'",
+            fixture.remote_root().display(),
+            rewound,
+            accepted
+        ),
+    );
+
+    let result = guard.guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"));
+
+    assert!(matches!(
+        result,
+        Err(gitim_sync::skill::checkpoint::SkillSyncError::Git(
+            gitim_sync::git::GitError::PushConflict
+        ))
+    ));
+    assert_eq!(
+        git_output(fixture.remote_root(), &["rev-parse", "refs/heads/main"]),
+        rewound
+    );
+    assert_eq!(git_output(local_root, &["rev-parse", "HEAD"]), local_head);
+    assert!(git_status(
+        fixture.remote_root(),
+        &["cat-file", "-e", "refs/heads/main:local.txt"]
+    )
+    .is_none());
+}
+
+#[test]
+fn guarded_working_publication_rejects_remote_deletion_after_validation() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+    let accepted = git_output(local_root, &["rev-parse", "origin/main"]);
+
+    fs::write(
+        local_root.join("local.txt"),
+        "validated local publication\n",
+    )
+    .unwrap();
+    commit_all(local_root, "validated local publication", ALICE);
+    let local_head = git_output(local_root, &["rev-parse", "HEAD"]);
+
+    install_receive_pack_race(
+        local_root,
+        &format!(
+            "git --git-dir='{}' update-ref -d refs/heads/main '{}'",
+            fixture.remote_root().display(),
+            accepted
+        ),
+    );
+
+    let result = guard.guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"));
+
+    assert!(matches!(
+        result,
+        Err(gitim_sync::skill::checkpoint::SkillSyncError::Git(
+            gitim_sync::git::GitError::PushConflict
+        ))
+    ));
+    assert!(git_status(
+        fixture.remote_root(),
+        &["rev-parse", "--verify", "refs/heads/main"]
+    )
+    .is_none());
+    assert_eq!(git_output(local_root, &["rev-parse", "HEAD"]), local_head);
+}
+
+#[test]
 fn quarantine_remote_advance_replays_a_handler_tail_committed_during_exact_push() {
     let fixture = RemoteRepository::new();
     let local_root = fixture.clone_root();
@@ -5372,6 +5470,7 @@ fn sync_loop_routes_destructive_epoch_fallback_through_the_skill_guard() {
 
 struct RemoteRepository {
     _directory: TempDir,
+    remote_root: std::path::PathBuf,
     clone_root: std::path::PathBuf,
     writer_root: std::path::PathBuf,
 }
@@ -5425,9 +5524,14 @@ impl RemoteRepository {
         git(&clone_root, &["config", "user.email", "alice@example.com"]);
         Self {
             _directory: directory,
+            remote_root: remote,
             clone_root,
             writer_root,
         }
+    }
+
+    fn remote_root(&self) -> &Path {
+        &self.remote_root
     }
 
     fn clone_root(&self) -> &Path {
@@ -5437,6 +5541,29 @@ impl RemoteRepository {
     fn writer_root(&self) -> &Path {
         &self.writer_root
     }
+}
+
+fn install_receive_pack_race(local_root: &Path, race_command: &str) {
+    let script = local_root.join(".gitim/test-receive-pack-race");
+    fs::create_dir_all(script.parent().unwrap()).unwrap();
+    fs::write(
+        &script,
+        format!("#!/bin/sh\nset -eu\n{race_command}\nexec git-receive-pack \"$@\"\n"),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(
+        local_root,
+        &[
+            "config",
+            "remote.origin.receivepack",
+            script.to_str().unwrap(),
+        ],
+    );
 }
 
 fn git_status(root: &Path, args: &[&str]) -> Option<String> {

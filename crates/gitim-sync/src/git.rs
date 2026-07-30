@@ -279,12 +279,21 @@ impl GitStorage {
         self.rev_parse("HEAD")
     }
 
-    pub(crate) fn push_working_branch_unchecked(
+    pub(crate) fn push_working_branch_exact(
         &self,
         branch: &str,
-        expected_head: &str,
+        new_oid: &str,
+        expected_remote_oid: Option<&str>,
     ) -> Result<(), GitError> {
-        let refspec = format!("{expected_head}:refs/heads/{branch}");
+        if let Some(expected_remote_oid) = expected_remote_oid {
+            self.ensure_fast_forward(expected_remote_oid, new_oid)?;
+        }
+        let remote_ref = format!("refs/heads/{branch}");
+        let refspec = format!("{new_oid}:{remote_ref}");
+        let lease = format!(
+            "--force-with-lease={remote_ref}:{}",
+            expected_remote_oid.unwrap_or_default()
+        );
         let needs_upstream = self.rev_parse("@{upstream}").is_err();
         let args = [
             GIT_HTTP_TIMEOUT_ARGS[0],
@@ -292,6 +301,7 @@ impl GitStorage {
             GIT_HTTP_TIMEOUT_ARGS[2],
             GIT_HTTP_TIMEOUT_ARGS[3],
             "push",
+            &lease,
             "origin",
             &refspec,
         ];
@@ -856,15 +866,30 @@ impl GitStorage {
         self.show_file_at_ref(&merge_base, path)
     }
 
-    /// `git push --atomic origin <new>:refs/heads/<new> <old>:refs/heads/<old>`.
-    /// Both refs update or neither does — this is the rotation arbiter.
-    /// A reject classifies through `classify_remote_error` like every other
-    /// remote op (stderr embeds the credential-bearing remote URL, so it must
-    /// be redacted before entering the error value): non-fast-forward →
-    /// `PushConflict`, the caller's "lost the rotation race" signal.
-    pub fn atomic_push_two_refs(&self, old_branch: &str, new_branch: &str) -> Result<(), GitError> {
-        let new_spec = format!("{new_branch}:refs/heads/{new_branch}");
-        let old_spec = format!("{old_branch}:refs/heads/{old_branch}");
+    /// Atomically publish two exact ref values when both remote refs still
+    /// match the caller's accepted snapshot.
+    pub fn atomic_push_two_refs_exact(
+        &self,
+        old_branch: &str,
+        old_oid: &str,
+        expected_old_remote_oid: &str,
+        new_branch: &str,
+        new_oid: &str,
+        expected_new_remote_oid: Option<&str>,
+    ) -> Result<(), GitError> {
+        self.ensure_fast_forward(expected_old_remote_oid, old_oid)?;
+        if let Some(expected_new_remote_oid) = expected_new_remote_oid {
+            self.ensure_fast_forward(expected_new_remote_oid, new_oid)?;
+        }
+        let new_ref = format!("refs/heads/{new_branch}");
+        let old_ref = format!("refs/heads/{old_branch}");
+        let new_spec = format!("{new_oid}:{new_ref}");
+        let old_spec = format!("{old_oid}:{old_ref}");
+        let new_lease = format!(
+            "--force-with-lease={new_ref}:{}",
+            expected_new_remote_oid.unwrap_or_default()
+        );
+        let old_lease = format!("--force-with-lease={old_ref}:{expected_old_remote_oid}");
         let args = [
             GIT_HTTP_TIMEOUT_ARGS[0],
             GIT_HTTP_TIMEOUT_ARGS[1],
@@ -872,6 +897,8 @@ impl GitStorage {
             GIT_HTTP_TIMEOUT_ARGS[3],
             "push",
             "--atomic",
+            &new_lease,
+            &old_lease,
             "origin",
             &new_spec,
             &old_spec,
@@ -885,33 +912,20 @@ impl GitStorage {
         Ok(())
     }
 
-    pub(crate) fn atomic_push_two_refs_exact(
-        &self,
-        old_branch: &str,
-        old_oid: &str,
-        new_branch: &str,
-        new_oid: &str,
-    ) -> Result<(), GitError> {
-        let new_spec = format!("{new_oid}:refs/heads/{new_branch}");
-        let old_spec = format!("{old_oid}:refs/heads/{old_branch}");
-        let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0],
-            GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2],
-            GIT_HTTP_TIMEOUT_ARGS[3],
-            "push",
-            "--atomic",
-            "origin",
-            &new_spec,
-            &old_spec,
-        ];
-        let output = run_git_command(&args, &self.root)?;
-        if !output.status.success() {
-            return Err(classify_remote_error(&String::from_utf8_lossy(
-                &output.stderr,
-            )));
+    fn ensure_fast_forward(&self, expected_old_oid: &str, new_oid: &str) -> Result<(), GitError> {
+        let output = run_git_command(
+            &["merge-base", "--is-ancestor", expected_old_oid, new_oid],
+            &self.root,
+        )?;
+        if output.status.success() {
+            return Ok(());
         }
-        Ok(())
+        if output.status.code() == Some(1) {
+            return Err(GitError::PushConflict);
+        }
+        Err(GitError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ))
     }
 
     /// `git rebase --onto <new_base> <old_base>` — transplant the commits in
@@ -1685,10 +1699,11 @@ mod tests {
         let repo = GitStorage::new(clone.path());
         commit_file(clone.path(), "first.txt", "first", "first");
         let validated_head = repo.rev_parse("HEAD").unwrap();
+        let accepted_remote = repo.rev_parse("origin/main").unwrap();
         commit_file(clone.path(), "later.txt", "later", "later");
         let later_head = repo.rev_parse("HEAD").unwrap();
 
-        repo.push_working_branch_unchecked("main", &validated_head)
+        repo.push_working_branch_exact("main", &validated_head, Some(&accepted_remote))
             .unwrap();
 
         assert_eq!(repo.rev_parse("origin/main").unwrap(), validated_head);

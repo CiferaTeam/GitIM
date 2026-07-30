@@ -637,6 +637,28 @@ fn setup_two_clones() -> (TempDir, TempDir, TempDir) {
     (bare, clone_a, clone_b)
 }
 
+fn install_receive_pack_race(local: &Path, race_command: &str) {
+    let script = local.join(".git/test-receive-pack-race");
+    std::fs::write(
+        &script,
+        format!("#!/bin/sh\nset -eu\n{race_command}\nexec git-receive-pack \"$@\"\n"),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    run_git(
+        local,
+        &[
+            "config",
+            "remote.origin.receivepack",
+            script.to_str().unwrap(),
+        ],
+    );
+}
+
 #[test]
 fn show_file_at_ref_reads_committed_content_without_checkout() {
     let (_bare, clone_dir, storage) = setup_repo_pair();
@@ -674,7 +696,17 @@ fn atomic_push_two_refs_all_or_nothing() {
     run_git(clone_b.path(), &["branch", "feature-x"]);
 
     let storage_b = GitStorage::new(clone_b.path());
-    let result = storage_b.atomic_push_two_refs("main", "feature-x");
+    let old_oid = storage_b.rev_parse("main").unwrap();
+    let expected_old = storage_b.rev_parse("origin/main").unwrap();
+    let new_oid = storage_b.rev_parse("feature-x").unwrap();
+    let result = storage_b.atomic_push_two_refs_exact(
+        "main",
+        &old_oid,
+        &expected_old,
+        "feature-x",
+        &new_oid,
+        None,
+    );
     // Typed PushConflict (not CommandFailed-with-raw-stderr): the reject
     // path must go through classify_remote_error, which both redacts
     // credentials from stderr and gives the rotation caller the
@@ -698,14 +730,119 @@ fn atomic_push_two_refs_all_or_nothing() {
 }
 
 #[test]
+fn atomic_push_rejects_a_rewound_old_ref_after_validation() {
+    let (bare, clone) = setup_bare_and_clone_main();
+    commit_file(clone.path(), "accepted.txt", "accepted");
+    run_git(clone.path(), &["push", "origin", "main"]);
+    let accepted = GitStorage::new(clone.path())
+        .rev_parse("origin/main")
+        .unwrap();
+    let rewound = GitStorage::new(clone.path())
+        .rev_parse("origin/main^")
+        .unwrap();
+
+    commit_file(clone.path(), "redirect.txt", "redirect");
+    run_git(clone.path(), &["branch", "main-epoch-2"]);
+    install_receive_pack_race(
+        clone.path(),
+        &format!(
+            "git --git-dir='{}' update-ref refs/heads/main '{}' '{}'",
+            bare.path().display(),
+            rewound,
+            accepted
+        ),
+    );
+
+    let storage = GitStorage::new(clone.path());
+    let old_oid = storage.rev_parse("main").unwrap();
+    let new_oid = storage.rev_parse("main-epoch-2").unwrap();
+    let result = storage.atomic_push_two_refs_exact(
+        "main",
+        &old_oid,
+        &accepted,
+        "main-epoch-2",
+        &new_oid,
+        None,
+    );
+
+    assert!(
+        matches!(result, Err(GitError::PushConflict)),
+        "unexpected atomic push result: {result:?}"
+    );
+    assert_eq!(
+        GitStorage::new(bare.path()).rev_parse("main").unwrap(),
+        rewound
+    );
+    assert!(GitStorage::new(bare.path())
+        .rev_parse("main-epoch-2")
+        .is_err());
+}
+
+#[test]
+fn atomic_push_rejects_a_new_ref_created_after_validation() {
+    let (bare, clone) = setup_bare_and_clone_main();
+    let accepted = GitStorage::new(clone.path())
+        .rev_parse("origin/main")
+        .unwrap();
+    commit_file(clone.path(), "redirect.txt", "redirect");
+    run_git(clone.path(), &["branch", "main-epoch-2"]);
+    let raced_new = accepted.clone();
+    install_receive_pack_race(
+        clone.path(),
+        &format!(
+            "git --git-dir='{}' update-ref refs/heads/main-epoch-2 '{}'",
+            bare.path().display(),
+            raced_new
+        ),
+    );
+
+    let storage = GitStorage::new(clone.path());
+    let old_oid = storage.rev_parse("main").unwrap();
+    let new_oid = storage.rev_parse("main-epoch-2").unwrap();
+    let result = storage.atomic_push_two_refs_exact(
+        "main",
+        &old_oid,
+        &accepted,
+        "main-epoch-2",
+        &new_oid,
+        None,
+    );
+
+    assert!(
+        matches!(result, Err(GitError::PushConflict)),
+        "unexpected atomic push result: {result:?}"
+    );
+    assert_eq!(
+        GitStorage::new(bare.path()).rev_parse("main").unwrap(),
+        accepted
+    );
+    assert_eq!(
+        GitStorage::new(bare.path())
+            .rev_parse("main-epoch-2")
+            .unwrap(),
+        raced_new
+    );
+}
+
+#[test]
 fn atomic_push_two_refs_succeeds_when_unraced() {
     let (bare, clone_a, _clone_b) = setup_two_clones();
     commit_file(clone_a.path(), "m1.txt", "tip");
     run_git(clone_a.path(), &["branch", "main-epoch-2"]);
 
     let storage = GitStorage::new(clone_a.path());
+    let old_oid = storage.rev_parse("main").unwrap();
+    let expected_old = storage.rev_parse("origin/main").unwrap();
+    let new_oid = storage.rev_parse("main-epoch-2").unwrap();
     storage
-        .atomic_push_two_refs("main", "main-epoch-2")
+        .atomic_push_two_refs_exact(
+            "main",
+            &old_oid,
+            &expected_old,
+            "main-epoch-2",
+            &new_oid,
+            None,
+        )
         .expect("uncontended atomic push must succeed");
 
     // Both refs landed on the bare.

@@ -15,7 +15,7 @@ fn daemon_working_branch_publication_has_one_state_facade() {
     visit_rust_files(&src, &mut |path, source| {
         for (line_index, line) in source.lines().enumerate() {
             if line.contains("git_storage.push(")
-                || line.contains("push_working_branch_unchecked(")
+                || line.contains("push_working_branch_exact(")
                 || line.contains("git_storage.rebase_onto_origin(")
                 || line.contains("git_storage.pull_rebase(")
                 || line.contains("git_storage.discard_unpushed(")
@@ -43,7 +43,7 @@ fn daemon_working_branch_publication_has_one_state_facade() {
 }
 
 #[test]
-fn unchecked_working_branch_push_is_private_to_the_guard_implementation() {
+fn exact_working_branch_push_is_private_to_the_guard_implementation() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -56,14 +56,14 @@ fn unchecked_working_branch_push_is_private_to_the_guard_implementation() {
             return;
         }
         for (line_index, line) in source.lines().enumerate() {
-            if line.contains("push_working_branch_unchecked(") {
+            if line.contains("push_working_branch_exact(") {
                 violations.push(format!("{}:{}", path.display(), line_index + 1));
             }
         }
     });
     assert!(
         violations.is_empty(),
-        "unchecked working-branch push escaped git/guard implementation: {violations:?}"
+        "exact working-branch push escaped git/guard implementation: {violations:?}"
     );
 }
 
