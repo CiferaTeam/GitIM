@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -33,6 +33,8 @@ pub const SKILL_GIT_MAX_CONCURRENCY: usize = 4;
 const JOURNAL_SCHEMA_VERSION: u32 = 1;
 const MAX_EPOCH_DEPTH: usize = 32;
 const RECEIPT_ROOT: &str = "skills/receipts";
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const CHILD_REAP_GRACE: Duration = Duration::from_millis(250);
 
 static SKILL_TRANSPORT_FAILURES: AtomicU64 = AtomicU64::new(0);
 
@@ -85,7 +87,9 @@ pub struct SkillTransactionTestConfig {
     pub max_concurrency: usize,
     pub git_program: Option<PathBuf>,
     pub crash_after: Option<SkillTransactionCrashPoint>,
+    pub after_repair_snapshot: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_built: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub simulate_process_group_kill_failure: bool,
 }
 
 impl Default for SkillTransactionTestConfig {
@@ -96,7 +100,9 @@ impl Default for SkillTransactionTestConfig {
             max_concurrency: SKILL_GIT_MAX_CONCURRENCY,
             git_program: None,
             crash_after: None,
+            after_repair_snapshot: None,
             after_built: None,
+            simulate_process_group_kill_failure: false,
         }
     }
 }
@@ -174,7 +180,9 @@ struct TransactionContext {
     max_concurrency: usize,
     git_program: PathBuf,
     crash_after: Option<SkillTransactionCrashPoint>,
+    after_repair_snapshot: Option<Arc<dyn Fn() + Send + Sync>>,
     after_built: Option<Arc<dyn Fn() + Send + Sync>>,
+    simulate_process_group_kill_failure: bool,
 }
 
 #[derive(Default)]
@@ -218,7 +226,9 @@ pub fn recover_remote_skill_transactions(
         max_concurrency: config.max_concurrency,
         git_program: config.git_program.unwrap_or_else(|| PathBuf::from("git")),
         crash_after: None,
+        after_repair_snapshot: None,
         after_built: None,
+        simulate_process_group_kill_failure: false,
     };
     let result = recover_transaction_journals(repo, guard, &context);
     if result
@@ -269,7 +279,9 @@ fn execute_remote_skill_transaction_with_config(
         max_concurrency: config.max_concurrency,
         git_program: config.git_program.unwrap_or_else(|| PathBuf::from("git")),
         crash_after: config.crash_after,
+        after_repair_snapshot: config.after_repair_snapshot,
         after_built: config.after_built,
+        simulate_process_group_kill_failure: config.simulate_process_group_kill_failure,
     };
     let result = execute_transaction(repo, guard, request, &context);
     if matches!(result, Err(SkillSyncError::Git(GitError::Timeout(_)))) {
@@ -302,14 +314,26 @@ fn execute_transaction(
         fetch(repo, context)?;
         let start_branch = current_branch(repo, context)?;
         let (remote_branch, remote_tip) = resolve_active_remote(repo, &start_branch, context)?;
+        let repair_checkpoint = load_repair_checkpoint(repo, &journal.request)?;
         let mut snapshot = load_snapshot_for_request(
             repo,
             &remote_tip,
             &journal.active_users,
             &journal.request,
+            repair_checkpoint.as_ref(),
             context,
         )?;
-        attach_repair_checkpoint(repo, &mut snapshot, &journal.request, &remote_tip, context)?;
+        attach_repair_checkpoint(
+            repo,
+            &mut snapshot,
+            &journal.request,
+            &remote_tip,
+            repair_checkpoint.as_ref(),
+            context,
+        )?;
+        if let Some(after_repair_snapshot) = &context.after_repair_snapshot {
+            after_repair_snapshot();
+        }
 
         let mutation_context = SkillMutationContext {
             actor: journal.actor.clone(),
@@ -335,7 +359,9 @@ fn execute_transaction(
 
         let mut captured_semantic_oids =
             semantic_oids(repo, &remote_tip, &journal.request, &snapshot, context)?;
-        if let Some(fingerprint) = repair_checkpoint_fingerprint(repo, &journal.request)? {
+        if let Some(fingerprint) =
+            repair_checkpoint_fingerprint(&journal.request, repair_checkpoint.as_ref())?
+        {
             captured_semantic_oids.insert("$checkpoint".to_owned(), fingerprint);
         }
         journal.remote_branch = Some(remote_branch.clone());
@@ -380,11 +406,13 @@ fn execute_transaction(
             Err(SkillSyncError::Git(GitError::PushConflict)) if attempt < 2 => {
                 fetch(repo, context)?;
                 let (next_branch, next_tip) = resolve_active_remote(repo, &start_branch, context)?;
+                let next_repair_checkpoint = load_repair_checkpoint(repo, &journal.request)?;
                 let mut next_snapshot = load_snapshot_for_request(
                     repo,
                     &next_tip,
                     &journal.active_users,
                     &journal.request,
+                    next_repair_checkpoint.as_ref(),
                     context,
                 )?;
                 attach_repair_checkpoint(
@@ -392,6 +420,7 @@ fn execute_transaction(
                     &mut next_snapshot,
                     &journal.request,
                     &next_tip,
+                    next_repair_checkpoint.as_ref(),
                     context,
                 )?;
                 let duplicate =
@@ -425,7 +454,10 @@ fn execute_transaction(
                 }
                 let mut next_semantic =
                     semantic_oids(repo, &next_tip, &journal.request, &next_snapshot, context)?;
-                if let Some(fingerprint) = repair_checkpoint_fingerprint(repo, &journal.request)? {
+                if let Some(fingerprint) = repair_checkpoint_fingerprint(
+                    &journal.request,
+                    next_repair_checkpoint.as_ref(),
+                )? {
                     next_semantic.insert("$checkpoint".to_owned(), fingerprint);
                 }
                 if captured_semantic_oids != next_semantic {
@@ -838,14 +870,13 @@ fn load_snapshot_for_request(
     commit: &str,
     active_users: &BTreeSet<String>,
     request: &SkillMutationRequest,
+    repair_checkpoint: Option<&SkillValidationCheckpoint>,
     context: &TransactionContext,
 ) -> Result<SkillRepositorySnapshot, SkillSyncError> {
     let SkillMutationRequest::Repair(repair) = request else {
         return load_snapshot(repo, commit, active_users, context);
     };
-    let checkpoint = SkillCheckpointStore::new(repo.root())?
-        .load()?
-        .ok_or(SkillError::SyncConflict)?;
+    let checkpoint = repair_checkpoint.ok_or(SkillError::SyncConflict)?;
     if checkpoint.last_scanned_tip != commit {
         return Err(SkillError::SyncConflict.into());
     }
@@ -881,7 +912,7 @@ fn load_snapshot_for_request(
     parseable.modes.retain(|path, _| {
         !scope_contains(path, slug) && !conflict.rejected_receipt_paths.contains(path)
     });
-    if let Some((accepted_commit, _)) = accepted_scope_location(&checkpoint, slug) {
+    if let Some((accepted_commit, _)) = accepted_scope_location(checkpoint, slug) {
         let accepted = load_tree_material(repo, accepted_commit, context)?;
         parseable.files.extend(
             accepted
@@ -1349,15 +1380,16 @@ fn record_accepted_view(
         .load()?
         .unwrap_or_else(|| SkillValidationCheckpoint::empty(branch));
     let validation = validate_incoming_skill_history(repo, &previous, commit)?;
-    store.save(&validation.checkpoint)?;
     let head = rev_parse(repo, "HEAD", context)?;
     let head_root = object_oid_at(repo, &head, "skills", context)?;
     let accepted_root = object_oid_at(repo, commit, "skills", context)?;
-    Ok(if head_root == accepted_root {
+    let local_state = if head_root == accepted_root {
         SkillLocalState::Current
     } else {
         SkillLocalState::PendingSync
-    })
+    };
+    store.save(&validation.checkpoint)?;
+    Ok(local_state)
 }
 
 fn record_published_view(
@@ -1426,14 +1458,13 @@ fn attach_repair_checkpoint(
     snapshot: &mut SkillRepositorySnapshot,
     request: &SkillMutationRequest,
     remote_tip: &str,
+    repair_checkpoint: Option<&SkillValidationCheckpoint>,
     context: &TransactionContext,
 ) -> Result<(), SkillSyncError> {
     let SkillMutationRequest::Repair(request) = request else {
         return Ok(());
     };
-    let checkpoint = SkillCheckpointStore::new(repo.root())?
-        .load()?
-        .ok_or(SkillError::SyncConflict)?;
+    let checkpoint = repair_checkpoint.ok_or(SkillError::SyncConflict)?;
     if checkpoint.last_scanned_tip != remote_tip {
         return Err(SkillError::SyncConflict.into());
     }
@@ -1452,7 +1483,7 @@ fn attach_repair_checkpoint(
     }
 
     let (accepted_state, accepted_files, accepted_modes) = if let Some((commit, archived)) =
-        accepted_scope_location(&checkpoint, slug)
+        accepted_scope_location(checkpoint, slug)
     {
         let accepted_material = load_tree_material(repo, commit, context)?;
         let accepted_modes = accepted_material
@@ -1573,16 +1604,27 @@ fn scope_contains(path: &str, slug: Option<&SkillSlug>) -> bool {
     }
 }
 
-fn repair_checkpoint_fingerprint(
+fn load_repair_checkpoint(
     repo: &GitStorage,
     request: &SkillMutationRequest,
+) -> Result<Option<SkillValidationCheckpoint>, SkillSyncError> {
+    if !matches!(request, SkillMutationRequest::Repair(_)) {
+        return Ok(None);
+    }
+    SkillCheckpointStore::new(repo.root())?
+        .load()?
+        .map(Some)
+        .ok_or_else(|| SkillError::SyncConflict.into())
+}
+
+fn repair_checkpoint_fingerprint(
+    request: &SkillMutationRequest,
+    repair_checkpoint: Option<&SkillValidationCheckpoint>,
 ) -> Result<Option<String>, SkillSyncError> {
     let SkillMutationRequest::Repair(repair) = request else {
         return Ok(None);
     };
-    let checkpoint = SkillCheckpointStore::new(repo.root())?
-        .load()?
-        .ok_or(SkillError::SyncConflict)?;
+    let checkpoint = repair_checkpoint.ok_or(SkillError::SyncConflict)?;
     let (key, accepted): (&str, Option<&AcceptedTree>) = match &repair.scope {
         SkillRepairScope::Workspace => ("$workspace", checkpoint.workspace_tree.as_ref()),
         SkillRepairScope::Skill(slug) => (
@@ -1598,8 +1640,8 @@ fn repair_checkpoint_fingerprint(
         .get(key)
         .ok_or(SkillError::SyncConflict)?;
     serde_json::to_string(&(
-        checkpoint.active_epoch,
-        checkpoint.last_scanned_tip,
+        &checkpoint.active_epoch,
+        &checkpoint.last_scanned_tip,
         conflict,
         accepted,
     ))
@@ -1615,7 +1657,8 @@ fn ensure_repair_checkpoint_unchanged(
     let Some(expected) = semantic_oids.get("$checkpoint") else {
         return Ok(());
     };
-    if repair_checkpoint_fingerprint(repo, request)?.as_ref() != Some(expected) {
+    let checkpoint = load_repair_checkpoint(repo, request)?;
+    if repair_checkpoint_fingerprint(request, checkpoint.as_ref())?.as_ref() != Some(expected) {
         return Err(SkillError::SyncConflict.into());
     }
     Ok(())
@@ -1947,34 +1990,121 @@ fn run_git_output(
             });
         }
     }
-    let child = command.spawn().map_err(GitError::Io)?;
+    let mut child = command.spawn().map_err(GitError::Io)?;
     let pid = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| GitError::CommandFailed("git stdout pipe is unavailable".to_owned()))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| GitError::CommandFailed("git stderr pipe is unavailable".to_owned()))?;
+    let stdout_receiver = read_pipe(stdout);
+    let stderr_receiver = read_pipe(stderr);
+    let command_deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or(context.deadline)
+        .min(context.deadline);
+
+    loop {
+        match child.try_wait().map_err(GitError::Io)? {
+            Some(status) => {
+                let Some(stdout) = receive_pipe(&stdout_receiver, command_deadline)? else {
+                    break;
+                };
+                let Some(stderr) = receive_pipe(&stderr_receiver, command_deadline)? else {
+                    break;
+                };
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr,
+                });
+            }
+            None => {
+                let now = Instant::now();
+                if now >= command_deadline {
+                    break;
+                }
+                std::thread::sleep(CHILD_POLL_INTERVAL.min(command_deadline - now));
+            }
+        }
+    }
+
+    terminate_child(
+        &mut child,
+        pid,
+        context.deadline,
+        context.simulate_process_group_kill_failure,
+    );
+    Err(GitError::Timeout(timeout).into())
+}
+
+fn read_pipe<R>(mut pipe: R) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>
+where
+    R: Read + Send + 'static,
+{
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let _ = sender.send(child.wait_with_output());
+        let mut bytes = Vec::new();
+        let result = pipe.read_to_end(&mut bytes).map(|_| bytes);
+        let _ = sender.send(result);
     });
-    match receiver.recv_timeout(timeout) {
-        Ok(Ok(output)) => Ok(output),
+    receiver
+}
+
+fn receive_pipe(
+    receiver: &std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
+    deadline: Instant,
+) -> Result<Option<Vec<u8>>, SkillSyncError> {
+    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+        return Ok(None);
+    };
+    match receiver.recv_timeout(remaining) {
+        Ok(Ok(bytes)) => Ok(Some(bytes)),
         Ok(Err(error)) => Err(GitError::Io(error).into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Ok(None),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Err(GitError::CommandFailed("git wait thread disconnected".to_owned()).into())
+            Err(GitError::CommandFailed("git pipe reader disconnected".to_owned()).into())
         }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            #[cfg(unix)]
-            {
-                // SAFETY: `pid` names the process-group leader created above.
-                unsafe {
-                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+    }
+}
+
+fn terminate_child(
+    child: &mut Child,
+    pid: u32,
+    transaction_deadline: Instant,
+    simulate_process_group_kill_failure: bool,
+) {
+    #[cfg(unix)]
+    if !simulate_process_group_kill_failure {
+        // SAFETY: `pid` names the process-group leader created above.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    if !simulate_process_group_kill_failure {
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .spawn();
+    }
+    let _ = child.kill();
+    let cleanup_deadline = Instant::now()
+        .checked_add(CHILD_REAP_GRACE)
+        .unwrap_or(transaction_deadline)
+        .min(transaction_deadline);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= cleanup_deadline {
+                    return;
                 }
+                std::thread::sleep(CHILD_POLL_INTERVAL.min(cleanup_deadline - now));
             }
-            #[cfg(not(unix))]
-            {
-                let _ = Command::new("taskkill")
-                    .args(["/PID", &pid.to_string(), "/T", "/F"])
-                    .output();
-            }
-            let _ = receiver.recv();
-            Err(GitError::Timeout(timeout).into())
         }
     }
 }

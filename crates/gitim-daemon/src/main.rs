@@ -5,7 +5,7 @@ use std::{path::Path, sync::Arc};
 use tokio::sync::broadcast;
 use tracing::info;
 
-use gitim_daemon::{api, http, lifecycle, server, state};
+use gitim_daemon::{api, http, lifecycle, server, startup, state};
 
 type DaemonIdentity = (Option<String>, bool, bool, Option<String>);
 
@@ -114,6 +114,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .is_admin
             .store(true, std::sync::atomic::Ordering::SeqCst);
         tracing::info!("daemon identity: admin mode (from me.json)");
+    }
+
+    let recovered = startup::recover_skill_transactions_before_serving(repo_root.clone()).await?;
+    if !recovered.is_empty() {
+        tracing::info!(
+            "recovered {} remote skill transaction(s) before serving",
+            recovered.len()
+        );
     }
 
     let lc = lifecycle::DaemonLifecycle::new(&repo_root);
