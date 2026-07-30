@@ -2775,6 +2775,83 @@ fn quarantine_resume_accepts_a_branch_already_moved_to_the_repaired_head() {
 }
 
 #[test]
+fn quarantine_resume_reconciles_an_update_ref_only_crash_residue() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+    let upstream = git_output(local_root, &["rev-parse", "origin/main"]);
+
+    fs::create_dir_all(local_root.join("skills/poison")).unwrap();
+    fs::write(local_root.join("skills/poison/SKILL.md"), "# invalid\n").unwrap();
+    fs::write(local_root.join("ordinary.txt"), "preserved\n").unwrap();
+    commit_all(local_root, "mixed bypass", ALICE);
+    let original = git_output(local_root, &["rev-parse", "HEAD"]);
+    let quarantine_ref = format!("refs/gitim/quarantine/skill-{original}");
+    git(local_root, &["update-ref", &quarantine_ref, &original]);
+
+    git(local_root, &["reset", "--hard", &upstream]);
+    fs::write(local_root.join("ordinary.txt"), "preserved\n").unwrap();
+    commit_all(local_root, "sanitized ordinary replay", ALICE);
+    let repaired = git_output(local_root, &["rev-parse", "HEAD"]);
+    git(local_root, &["reset", "--hard", &original]);
+    git(
+        local_root,
+        &["update-ref", "refs/heads/main", &repaired, &original],
+    );
+
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    fs::write(
+        local_root.join(".gitim/skill-quarantine.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "operation_id": original,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "original_head": original,
+            "quarantine_ref": quarantine_ref,
+            "phase": "replayed",
+            "repaired_head": repaired
+        })
+        .to_string(),
+    )
+    .unwrap();
+    assert!(storage.has_dirty_tracked_files().unwrap());
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        GuardedPushOutcome::RepairedAndPushed { .. }
+    ));
+    assert_eq!(git_output(local_root, &["rev-parse", "HEAD"]), repaired);
+    assert!(!storage.has_dirty_tracked_files().unwrap());
+    assert!(!local_root.join(".gitim/skill-quarantine.json").exists());
+    assert_eq!(
+        git_output(
+            local_root,
+            &["show", "refs/remotes/origin/main:ordinary.txt"]
+        ),
+        "preserved"
+    );
+    assert!(git_status(
+        local_root,
+        &[
+            "cat-file",
+            "-e",
+            "refs/remotes/origin/main:skills/poison/SKILL.md"
+        ]
+    )
+    .is_none());
+    assert_eq!(
+        git_output(local_root, &["rev-parse", &quarantine_ref]),
+        original
+    );
+}
+
+#[test]
 fn quarantine_resume_clears_a_moved_journal_after_its_exact_push_succeeded() {
     let fixture = RemoteRepository::new();
     let local_root = fixture.clone_root();
@@ -3732,6 +3809,122 @@ fn stale_user_archive_is_quarantined_while_its_descendant_message_remains_publis
         ]
     )
     .is_none());
+}
+
+#[test]
+fn semantic_archive_resume_reconciles_an_update_ref_only_crash_residue() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+    let upstream = git_output(local_root, &["rev-parse", "origin/main"]);
+
+    fs::create_dir_all(local_root.join("archive/users")).unwrap();
+    git(
+        local_root,
+        &[
+            "mv",
+            "users/alice.meta.yaml",
+            "archive/users/alice.meta.yaml",
+        ],
+    );
+    commit_all(
+        local_root,
+        "archive: depart user @alice\n\nGitim-Skills-Tree: absent",
+        ALICE,
+    );
+    let archive_commit = git_output(local_root, &["rev-parse", "HEAD"]);
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260731T013000Z] preserved descendant\n",
+    )
+    .unwrap();
+    commit_all(local_root, "message after stale archive", ALICE);
+    let original = git_output(local_root, &["rev-parse", "HEAD"]);
+    let quarantine_ref = format!("refs/gitim/quarantine/user-archive-{original}");
+    git(local_root, &["update-ref", &quarantine_ref, &original]);
+
+    git(local_root, &["reset", "--hard", &upstream]);
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260731T013000Z] preserved descendant\n",
+    )
+    .unwrap();
+    commit_all(local_root, "sanitized semantic replay", ALICE);
+    let repaired = git_output(local_root, &["rev-parse", "HEAD"]);
+    git(local_root, &["reset", "--hard", &original]);
+    git(
+        local_root,
+        &["update-ref", "refs/heads/main", &repaired, &original],
+    );
+
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    fs::write(
+        local_root.join(".gitim/skill-quarantine.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": original,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "original_head": original,
+            "quarantine_ref": quarantine_ref,
+            "phase": "replayed",
+            "repaired_head": repaired,
+            "branch_head": original,
+            "kind": "user_archive",
+            "excluded_commits": [archive_commit],
+            "semantic_error_code": "skill_tree_changed"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(storage.has_dirty_tracked_files().unwrap());
+
+    fs::write(
+        local_root.join("channels/general.meta.yaml"),
+        "deferred send\n",
+    )
+    .unwrap();
+    let first = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap_err();
+    assert!(matches!(
+        first,
+        gitim_sync::skill::checkpoint::SkillSyncError::LocalQuarantineBlocked(_)
+    ));
+    assert_eq!(
+        fs::read_to_string(local_root.join("channels/general.meta.yaml")).unwrap(),
+        "deferred send\n"
+    );
+    assert!(local_root.join(".gitim/skill-quarantine.json").exists());
+    git(local_root, &["restore", "--", "channels/general.meta.yaml"]);
+
+    let recovered = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap_err();
+    assert!(matches!(
+        recovered,
+        gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::PushConflict)
+    ));
+    assert_eq!(git_output(local_root, &["rev-parse", "HEAD"]), repaired);
+    assert!(!storage.has_dirty_tracked_files().unwrap());
+    assert!(!local_root.join(".gitim/skill-quarantine.json").exists());
+    assert!(local_root.join("users/alice.meta.yaml").exists());
+    assert!(!local_root.join("archive/users/alice.meta.yaml").exists());
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+    assert!(matches!(outcome, GuardedPushOutcome::Pushed));
+    let published = git_output(
+        local_root,
+        &["show", "refs/remotes/origin/main:channels/general.thread"],
+    );
+    assert_eq!(published.matches("preserved descendant").count(), 1);
+    assert_eq!(
+        git_output(local_root, &["rev-parse", &quarantine_ref]),
+        original
+    );
 }
 
 #[test]

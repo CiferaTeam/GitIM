@@ -640,6 +640,7 @@ impl SkillSyncGuard {
             verify_replayed_result(repo, &journal, repaired)?;
             let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
             let expected = journal.expected_branch_head();
+            reconcile_update_ref_only_residue(repo, &current, repaired, expected)?;
             if current == expected {
                 ensure_clean_tracked_worktree(repo)?;
                 update_working_branch(repo, &journal.branch, repaired, expected)?;
@@ -800,6 +801,20 @@ impl SkillSyncGuard {
         }
         validate_journal(repo, &journal)?;
         ensure_quarantine_ref(repo, &journal)?;
+        if journal.phase == QuarantinePhase::Replayed && active_remote.branch == journal.branch {
+            let repaired = journal.repaired_head.as_deref().ok_or_else(|| {
+                SkillSyncError::LocalQuarantineBlocked(
+                    "semantic archive recovery is missing its repaired head".to_owned(),
+                )
+            })?;
+            let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
+            reconcile_update_ref_only_residue(
+                repo,
+                &current,
+                repaired,
+                journal.expected_branch_head(),
+            )?;
+        }
         ensure_clean_tracked_worktree(repo)?;
 
         if journal.upstream_oid != active_remote.oid {
@@ -1061,12 +1076,7 @@ impl SkillSyncGuard {
                     .expected_head
                     .as_deref()
                     .unwrap_or(journal.tail_head.as_str());
-                if current == repaired
-                    && repo.has_dirty_tracked_files()?
-                    && tracked_worktree_matches_commit(repo, expected)?
-                {
-                    repo.reset_hard_to(repaired)?;
-                }
+                reconcile_update_ref_only_residue(repo, &current, repaired, expected)?;
                 ensure_clean_tracked_worktree(repo)?;
                 if current == expected {
                     update_working_branch(repo, &journal.branch, repaired, expected)?;
@@ -2588,6 +2598,21 @@ fn tracked_worktree_matches_commit(
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ))),
     }
+}
+
+fn reconcile_update_ref_only_residue(
+    repo: &GitStorage,
+    current: &str,
+    repaired: &str,
+    expected: &str,
+) -> Result<(), SkillSyncError> {
+    if current == repaired
+        && repo.has_dirty_tracked_files()?
+        && tracked_worktree_matches_commit(repo, expected)?
+    {
+        repo.reset_hard_to(repaired)?;
+    }
+    Ok(())
 }
 
 fn capture_remote_ref(
