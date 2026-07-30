@@ -5,11 +5,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use gitim_core::skill::{
     plan_skill_mutation, validate_package_entries, validate_skill_commit, PackageEntry, ProposalId,
     ProposalStatus, RequestId, RevisionId, SkillConflictCheckpoint, SkillError,
-    SkillMutationContext, SkillMutationRequest, SkillOperation, SkillProposalMeta,
-    SkillProposalSnapshot, SkillProposalTransitionRequest, SkillProposeRequest,
-    SkillPublicationMeta, SkillRepairAcceptedState, SkillRepairRequest, SkillRepairScope,
-    SkillRepositorySnapshot, SkillRevisionMeta, SkillRevisionSnapshot, SkillSlug, SkillTreeEdit,
-    SkillWorkspaceBootstrapRequest, WorkspaceSkillMeta, SKILL_SCHEMA_VERSION,
+    SkillMutationContext, SkillMutationPlan, SkillMutationRequest, SkillOperation,
+    SkillProposalMeta, SkillProposalSnapshot, SkillProposalTransitionRequest, SkillProposeRequest,
+    SkillPublicationMeta, SkillReceipt, SkillReceiptScope, SkillRepairAcceptedState,
+    SkillRepairRequest, SkillRepairScope, SkillRepositorySnapshot, SkillRevisionMeta,
+    SkillRevisionSnapshot, SkillSlug, SkillTreeEdit, SkillWorkspaceBootstrapRequest,
+    WorkspaceSkillMeta, SKILL_SCHEMA_VERSION,
 };
 use gitim_core::types::Handler;
 
@@ -358,12 +359,8 @@ fn matching_retry_returns_recorded_result_when_the_original_target_is_gone() {
     );
     let first = plan_skill_mutation(&before, &transition_context, &request).unwrap();
     let mut target_gone = first.after.clone();
-    target_gone
-        .active_skills
-        .get_mut(&slug())
-        .unwrap()
-        .proposals
-        .clear();
+    target_gone.active_skills.remove(&slug());
+    refresh_repository_files(&mut target_gone);
 
     let retry = plan_skill_mutation(&target_gone, &transition_context, &request).unwrap();
 
@@ -371,6 +368,82 @@ fn matching_retry_returns_recorded_result_when_the_original_target_is_gone() {
     assert!(retry.edits.is_empty());
     assert!(retry.changed_paths.is_empty());
     assert_eq!(retry.after, target_gone);
+}
+
+#[test]
+fn matching_retry_rejects_missing_or_different_receipt_raw_bytes() {
+    let before = initialized_snapshot();
+    let validated = package("initial");
+    let request = SkillMutationRequest::Create(gitim_core::skill::SkillCreateRequest {
+        request_id: request_id('D'),
+        slug: slug(),
+        display_name: "Release Check".to_owned(),
+        description: "Verify a release candidate.".to_owned(),
+        source_directory: "/unused".into(),
+    });
+    let first =
+        plan_skill_mutation(&before, &context(ALICE, Some(validated.clone())), &request).unwrap();
+    let receipt_path = format!(
+        "skills/receipts/{}.meta.yaml",
+        request.request_id().as_str()
+    );
+
+    let mut missing = first.after.clone();
+    missing.repository_files.remove(&receipt_path);
+    assert_eq!(
+        plan_skill_mutation(&missing, &context(ALICE, Some(validated.clone())), &request),
+        Err(SkillError::SyncConflict)
+    );
+
+    let mut different = first.after;
+    different
+        .repository_files
+        .insert(receipt_path, b"schema_version: 1\n".to_vec());
+    assert_eq!(
+        plan_skill_mutation(&different, &context(ALICE, Some(validated)), &request),
+        Err(SkillError::SyncConflict)
+    );
+}
+
+#[test]
+fn matching_retry_rejects_other_managed_raw_bytes_that_contradict_typed_state() {
+    let before = initialized_snapshot();
+    let validated = package("initial");
+    let request = SkillMutationRequest::Create(gitim_core::skill::SkillCreateRequest {
+        request_id: request_id('E'),
+        slug: slug(),
+        display_name: "Release Check".to_owned(),
+        description: "Verify a release candidate.".to_owned(),
+        source_directory: "/unused".into(),
+    });
+    let first =
+        plan_skill_mutation(&before, &context(ALICE, Some(validated.clone())), &request).unwrap();
+    let mut corrupted = first.after;
+    corrupted.repository_files.insert(
+        "skills/workspace.meta.yaml".to_owned(),
+        b"schema_version: 1\nadministrators: [mallory]\n".to_vec(),
+    );
+
+    assert_eq!(
+        plan_skill_mutation(
+            &corrupted,
+            &context(ALICE, Some(validated.clone())),
+            &request
+        ),
+        Err(SkillError::SyncConflict)
+    );
+
+    let conflicting = SkillMutationRequest::Create(gitim_core::skill::SkillCreateRequest {
+        request_id: request_id('E'),
+        slug: slug(),
+        display_name: "Release Check".to_owned(),
+        description: "Different meaning.".to_owned(),
+        source_directory: "/unused".into(),
+    });
+    assert_eq!(
+        plan_skill_mutation(&corrupted, &context(ALICE, Some(validated)), &conflicting),
+        Err(SkillError::RequestIdConflict)
+    );
 }
 
 #[test]
@@ -743,6 +816,21 @@ fn raw_tree_diff(
         .filter(|path| before.get(*path) != after.get(*path))
         .cloned()
         .collect()
+}
+
+fn replace_incoming_receipt(
+    before: &SkillRepositorySnapshot,
+    plan: &mut SkillMutationPlan,
+    receipt: SkillReceipt,
+) {
+    plan.after
+        .receipts
+        .insert(receipt.id.clone(), receipt.clone());
+    refresh_repository_files(&mut plan.after);
+    plan.receipt = receipt.clone();
+    plan.commit_evidence.receipt = receipt;
+    plan.commit_evidence.changed_paths =
+        raw_tree_diff(&before.repository_files, &plan.after.repository_files);
 }
 
 #[test]
@@ -1436,6 +1524,187 @@ fn commit_validation_rejects_merges_wrong_author_trailer_receipt_and_paths() {
         .insert("channels/general/meta.yaml".to_owned());
     assert_eq!(
         validate_skill_commit(&before, &plan.after, &unrelated_path),
+        Err(SkillError::SyncConflict)
+    );
+}
+
+#[test]
+fn incoming_validation_rejects_noncanonical_request_derived_revision() {
+    let create_before = initialized_snapshot();
+    let create_request = SkillMutationRequest::Create(gitim_core::skill::SkillCreateRequest {
+        request_id: request_id('M'),
+        slug: slug(),
+        display_name: "Release Check".to_owned(),
+        description: "Verify releases.".to_owned(),
+        source_directory: "/unused".into(),
+    });
+    let mut create_plan = plan_skill_mutation(
+        &create_before,
+        &context(ALICE, Some(package("initial"))),
+        &create_request,
+    )
+    .unwrap();
+    let forged_revision = revision_id('Z');
+    let original_revision = create_plan.receipt.request.revision.clone().unwrap();
+    let skill = create_plan.after.active_skills.get_mut(&slug()).unwrap();
+    let mut revision = skill.revisions.remove(&original_revision).unwrap();
+    revision.meta.id = forged_revision.clone();
+    skill.revisions.insert(forged_revision.clone(), revision);
+    let mut publication = skill.publications.remove(&original_revision).unwrap();
+    publication.revision = forged_revision.clone();
+    skill
+        .publications
+        .insert(forged_revision.clone(), publication);
+    skill.meta.current_revision = forged_revision.clone();
+    let mut receipt = create_plan.receipt.clone();
+    receipt.request.revision = Some(forged_revision.clone());
+    receipt.result.current_revision = Some(forged_revision.clone());
+    receipt.result.canonical_ref.as_mut().unwrap().revision = Some(forged_revision);
+    replace_incoming_receipt(&create_before, &mut create_plan, receipt);
+
+    assert_eq!(
+        validate_skill_commit(
+            &create_before,
+            &create_plan.after,
+            &create_plan.commit_evidence
+        ),
+        Err(SkillError::SyncConflict)
+    );
+}
+
+#[test]
+fn incoming_validation_rejects_noncanonical_request_derived_proposal() {
+    let proposal_before = create_active_skill();
+    let proposal_request = SkillMutationRequest::Propose(SkillProposeRequest {
+        request_id: request_id('N'),
+        slug: slug(),
+        base_revision: proposal_before.active_skills[&slug()]
+            .meta
+            .current_revision
+            .clone(),
+        summary: "Candidate.".to_owned(),
+        source_directory: "/unused".into(),
+    });
+    let mut proposal_plan = plan_skill_mutation(
+        &proposal_before,
+        &context(BOB, Some(package("candidate"))),
+        &proposal_request,
+    )
+    .unwrap();
+    let original_candidate = proposal_plan
+        .receipt
+        .request
+        .candidate_revision
+        .clone()
+        .unwrap();
+    let original_proposal = proposal_plan.receipt.request.proposal.clone().unwrap();
+    let forged_candidate = revision_id('Y');
+    let forged_proposal = ProposalId::new("p-01K1D8QG2S8RX4T9M9BDKQ9Z7Z").unwrap();
+    let skill = proposal_plan.after.active_skills.get_mut(&slug()).unwrap();
+    let mut revision = skill.revisions.remove(&original_candidate).unwrap();
+    revision.meta.id = forged_candidate.clone();
+    skill.revisions.insert(forged_candidate.clone(), revision);
+    let mut proposal = skill.proposals.remove(&original_proposal).unwrap();
+    proposal.meta.id = forged_proposal.clone();
+    proposal.meta.candidate_revision = forged_candidate.clone();
+    skill.proposals.insert(forged_proposal.clone(), proposal);
+    skill.meta.open_proposal_ids = vec![forged_proposal.clone()];
+    let mut receipt = proposal_plan.receipt.clone();
+    receipt.request.candidate_revision = Some(forged_candidate);
+    receipt.request.proposal = Some(forged_proposal);
+    replace_incoming_receipt(&proposal_before, &mut proposal_plan, receipt);
+
+    assert_eq!(
+        validate_skill_commit(
+            &proposal_before,
+            &proposal_plan.after,
+            &proposal_plan.commit_evidence
+        ),
+        Err(SkillError::SyncConflict)
+    );
+}
+
+#[test]
+fn incoming_validation_rejects_noncanonical_payload_scope_and_skill() {
+    let bootstrap_before = empty_snapshot();
+    let bootstrap_request =
+        SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+            request_id: request_id('P'),
+        });
+    let bootstrap_plan =
+        plan_skill_mutation(&bootstrap_before, &context(ALICE, None), &bootstrap_request).unwrap();
+    let mut wrong_payload = bootstrap_plan.clone();
+    let mut receipt = wrong_payload.receipt.clone();
+    receipt.request.payload_sha256 = "wrong-payload".to_owned();
+    replace_incoming_receipt(&bootstrap_before, &mut wrong_payload, receipt);
+    assert_eq!(
+        validate_skill_commit(
+            &bootstrap_before,
+            &wrong_payload.after,
+            &wrong_payload.commit_evidence
+        ),
+        Err(SkillError::SyncConflict)
+    );
+
+    let create_before = initialized_snapshot();
+    let create_request = SkillMutationRequest::Create(gitim_core::skill::SkillCreateRequest {
+        request_id: request_id('Q'),
+        slug: slug(),
+        display_name: "Release Check".to_owned(),
+        description: "Verify releases.".to_owned(),
+        source_directory: "/unused".into(),
+    });
+    let mut wrong_scope = plan_skill_mutation(
+        &create_before,
+        &context(ALICE, Some(package("initial"))),
+        &create_request,
+    )
+    .unwrap();
+    let mut receipt = wrong_scope.receipt.clone();
+    receipt.scope = SkillReceiptScope::Workspace;
+    receipt.request.slug = Some(SkillSlug::new("other-skill").unwrap());
+    replace_incoming_receipt(&create_before, &mut wrong_scope, receipt);
+    assert_eq!(
+        validate_skill_commit(
+            &create_before,
+            &wrong_scope.after,
+            &wrong_scope.commit_evidence
+        ),
+        Err(SkillError::SyncConflict)
+    );
+}
+
+#[test]
+fn incoming_validation_rejects_missing_and_irrelevant_request_fields() {
+    let before = empty_snapshot();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id('R'),
+    });
+    let plan = plan_skill_mutation(&before, &context(ALICE, None), &request).unwrap();
+
+    let mut missing_required = plan.clone();
+    let mut receipt = missing_required.receipt.clone();
+    receipt.request.target = None;
+    replace_incoming_receipt(&before, &mut missing_required, receipt);
+    assert_eq!(
+        validate_skill_commit(
+            &before,
+            &missing_required.after,
+            &missing_required.commit_evidence
+        ),
+        Err(SkillError::SyncConflict)
+    );
+
+    let mut irrelevant_populated = plan;
+    let mut receipt = irrelevant_populated.receipt.clone();
+    receipt.request.comment = Some("ignored extra semantics".to_owned());
+    replace_incoming_receipt(&before, &mut irrelevant_populated, receipt);
+    assert_eq!(
+        validate_skill_commit(
+            &before,
+            &irrelevant_populated.after,
+            &irrelevant_populated.commit_evidence
+        ),
         Err(SkillError::SyncConflict)
     );
 }

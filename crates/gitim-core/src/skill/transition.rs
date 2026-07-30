@@ -114,6 +114,7 @@ pub fn plan_skill_mutation(
 ) -> Result<SkillMutationPlan, SkillError> {
     if let Some(recorded) = before.receipts.get(request.request_id()) {
         if raw_semantic_request_matches(recorded, context, request) {
+            validate_snapshot(before)?;
             return Ok(duplicate_plan(before, recorded));
         }
         return Err(SkillError::RequestIdConflict);
@@ -122,6 +123,7 @@ pub fn plan_skill_mutation(
     let actor = Handler::new(&context.actor).map_err(|_| SkillError::RoleTargetInvalid)?;
     let receipt = receipt_for_request(before, context, request, actor)?;
     let (mut after, final_receipt) = execute_transition(before, receipt, context.package.as_ref())?;
+    validate_canonical_receipt_request(before, &after, &final_receipt, context.package.as_ref())?;
     let edits = expected_edits(before, &after, &final_receipt)?;
     after.repository_files = apply_tree_edits(&before.repository_files, &edits);
     let changed_paths = edit_paths(&edits);
@@ -310,6 +312,7 @@ pub fn validate_skill_commit(
     }
 
     let package = transition_package(after, &evidence.receipt)?;
+    validate_canonical_receipt_request(before, after, &evidence.receipt, package)?;
     let (mut expected_after, expected_receipt) =
         execute_transition(before, evidence.receipt.clone(), package)?;
     let expected_edits = expected_edits(before, &expected_after, &evidence.receipt)?;
@@ -459,6 +462,165 @@ fn receipt_for_request(
         result: empty_result(),
         created_at: context.now.clone(),
     })
+}
+
+struct CanonicalReceiptRequest {
+    scope: SkillReceiptScope,
+    skill: Option<SkillSlug>,
+    request: SkillReceiptRequest,
+}
+
+fn validate_canonical_receipt_request(
+    before: &SkillRepositorySnapshot,
+    after: &SkillRepositorySnapshot,
+    receipt: &SkillReceipt,
+    package: Option<&ValidatedPackage>,
+) -> Result<(), SkillError> {
+    if receipt.schema_version != SKILL_SCHEMA_VERSION {
+        return Err(SkillError::SyncConflict);
+    }
+    let canonical = canonical_receipt_request(before, after, receipt, package)?;
+    if receipt.scope != canonical.scope
+        || receipt.skill != canonical.skill
+        || receipt.request != canonical.request
+    {
+        return Err(SkillError::SyncConflict);
+    }
+    Ok(())
+}
+
+fn canonical_receipt_request(
+    before: &SkillRepositorySnapshot,
+    after: &SkillRepositorySnapshot,
+    receipt: &SkillReceipt,
+    package: Option<&ValidatedPackage>,
+) -> Result<CanonicalReceiptRequest, SkillError> {
+    let operation_payload = || hash_bytes(operation_name(receipt.operation).as_bytes());
+    match receipt.operation {
+        SkillOperation::WorkspaceBootstrap => Ok(CanonicalReceiptRequest {
+            scope: SkillReceiptScope::Workspace,
+            skill: None,
+            request: SkillReceiptRequest {
+                payload_sha256: operation_payload(),
+                target: Some(receipt.actor.clone()),
+                ..SkillReceiptRequest::default()
+            },
+        }),
+        SkillOperation::SkillCreate => {
+            let slug = receipt
+                .skill
+                .as_ref()
+                .ok_or(SkillError::SyncConflict)?
+                .clone();
+            let revision = revision_for_request(&receipt.id)?;
+            let package = package.ok_or(SkillError::InvalidPackage)?;
+            let skill = after
+                .active_skills
+                .get(&slug)
+                .ok_or(SkillError::SyncConflict)?;
+            Ok(CanonicalReceiptRequest {
+                scope: SkillReceiptScope::Skill,
+                skill: Some(slug.clone()),
+                request: SkillReceiptRequest {
+                    payload_sha256: package.content_sha256.clone(),
+                    slug: Some(slug),
+                    revision: Some(revision),
+                    display_name: Some(skill.meta.display_name.clone()),
+                    description: Some(skill.meta.description.clone()),
+                    ..SkillReceiptRequest::default()
+                },
+            })
+        }
+        SkillOperation::ProposalCreate => {
+            let slug = receipt
+                .skill
+                .as_ref()
+                .ok_or(SkillError::SyncConflict)?
+                .clone();
+            let candidate_revision = revision_for_request(&receipt.id)?;
+            let proposal = proposal_for_request(&receipt.id)?;
+            let package = package.ok_or(SkillError::InvalidPackage)?;
+            let proposal_meta = &after
+                .active_skills
+                .get(&slug)
+                .ok_or(SkillError::SyncConflict)?
+                .proposals
+                .get(&proposal)
+                .ok_or(SkillError::SyncConflict)?
+                .meta;
+            Ok(CanonicalReceiptRequest {
+                scope: SkillReceiptScope::Skill,
+                skill: Some(slug.clone()),
+                request: SkillReceiptRequest {
+                    payload_sha256: package.content_sha256.clone(),
+                    slug: Some(slug),
+                    base_revision: Some(proposal_meta.base_revision.clone()),
+                    candidate_revision: Some(candidate_revision),
+                    proposal: Some(proposal),
+                    summary: Some(proposal_meta.summary.clone()),
+                    ..SkillReceiptRequest::default()
+                },
+            })
+        }
+        SkillOperation::ProposalPublish
+        | SkillOperation::ProposalReject
+        | SkillOperation::ProposalWithdraw => {
+            let proposal = receipt
+                .request
+                .proposal
+                .as_ref()
+                .ok_or(SkillError::SyncConflict)?
+                .clone();
+            let (slug, skill, _) =
+                find_proposal(before, &proposal).ok_or(SkillError::ProposalNotFound)?;
+            let expected_control_revision = if receipt.operation == SkillOperation::ProposalPublish
+                || receipt.request.expected_control_revision.is_some()
+            {
+                Some(skill.meta.control_revision)
+            } else {
+                None
+            };
+            Ok(CanonicalReceiptRequest {
+                scope: SkillReceiptScope::Skill,
+                skill: Some(slug.clone()),
+                request: SkillReceiptRequest {
+                    payload_sha256: operation_payload(),
+                    slug: Some(slug.clone()),
+                    proposal: Some(proposal.clone()),
+                    expected_control_revision,
+                    expected_proposal_revision: Some(
+                        skill.proposals[&proposal].meta.state_revision,
+                    ),
+                    ..SkillReceiptRequest::default()
+                },
+            })
+        }
+        SkillOperation::RepairSkillState => {
+            let checkpoint = before
+                .conflict_checkpoint
+                .as_ref()
+                .ok_or(SkillError::SyncConflict)?;
+            let (scope, skill) = match &checkpoint.accepted_state {
+                SkillRepairAcceptedState::Workspace(_) => (SkillReceiptScope::Workspace, None),
+                SkillRepairAcceptedState::ActiveSkill { slug, .. }
+                | SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
+                    (SkillReceiptScope::Skill, Some(slug.clone()))
+                }
+            };
+            Ok(CanonicalReceiptRequest {
+                scope,
+                skill: skill.clone(),
+                request: SkillReceiptRequest {
+                    payload_sha256: operation_payload(),
+                    slug: skill,
+                    conflict_tip: Some(checkpoint.conflict_tip.clone()),
+                    accepted_tree: Some(checkpoint.accepted_tree.clone()),
+                    ..SkillReceiptRequest::default()
+                },
+            })
+        }
+        _ => Err(SkillError::SyncConflict),
+    }
 }
 
 trait ReceiptTuplePayload {
