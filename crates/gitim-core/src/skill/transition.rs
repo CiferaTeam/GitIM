@@ -1462,7 +1462,6 @@ fn valid_repair_checkpoint(
     if checkpoint.conflict_tip.is_empty()
         || checkpoint.accepted_tree.is_empty()
         || checkpoint.accepted_files.is_empty()
-        || checkpoint.changed_paths.is_empty()
         || !valid_portable_relative_paths(checkpoint.changed_paths.iter().map(String::as_str))
     {
         return false;
@@ -1482,101 +1481,50 @@ fn valid_repair_checkpoint(
     if accepted_paths != expected_paths {
         return false;
     }
-    if !repair_edits_materialize_accepted_state(checkpoint, &before.repository_files) {
+    if checkpoint.changed_paths != exact_repair_raw_diff(before, checkpoint) {
         return false;
     }
-    let paths_in_scope = match &checkpoint.accepted_state {
-        SkillRepairAcceptedState::Workspace(workspace) => {
-            checkpoint
-                .changed_paths
-                .iter()
-                .all(|path| path == "skills/workspace.meta.yaml")
-                && yaml_matches(
-                    &checkpoint.accepted_files["skills/workspace.meta.yaml"],
-                    workspace,
-                )
-        }
-        SkillRepairAcceptedState::ActiveSkill { slug, .. } => {
-            let accepted_prefix = format!("skills/{}/", slug.as_str());
-            let opposite_prefix = format!("archive/skills/{}/", slug.as_str());
-            checkpoint.changed_paths.iter().all(|path| {
-                path.starts_with(&accepted_prefix) || path.starts_with(&opposite_prefix)
-            }) && opposite_repair_paths_match(
-                &before.repository_files,
-                &opposite_prefix,
-                &checkpoint.changed_paths,
-            )
-        }
-        SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
-            let accepted_prefix = format!("archive/skills/{}/", slug.as_str());
-            let opposite_prefix = format!("skills/{}/", slug.as_str());
-            checkpoint.changed_paths.iter().all(|path| {
-                path.starts_with(&accepted_prefix) || path.starts_with(&opposite_prefix)
-            }) && opposite_repair_paths_match(
-                &before.repository_files,
-                &opposite_prefix,
-                &checkpoint.changed_paths,
-            )
-        }
-    };
-    paths_in_scope
-        && match &checkpoint.accepted_state {
-            SkillRepairAcceptedState::Workspace(_) => true,
-            SkillRepairAcceptedState::ActiveSkill { slug, skill } => accepted_object_bytes_match(
-                &format!("skills/{}", slug.as_str()),
-                skill,
-                &checkpoint.accepted_files,
-            ),
-            SkillRepairAcceptedState::ArchivedSkill { slug, skill } => accepted_object_bytes_match(
-                &format!("archive/skills/{}", slug.as_str()),
-                skill,
-                &checkpoint.accepted_files,
-            ),
-        }
+    match &checkpoint.accepted_state {
+        SkillRepairAcceptedState::Workspace(workspace) => yaml_matches(
+            &checkpoint.accepted_files["skills/workspace.meta.yaml"],
+            workspace,
+        ),
+        SkillRepairAcceptedState::ActiveSkill { slug, skill } => accepted_object_bytes_match(
+            &format!("skills/{}", slug.as_str()),
+            skill,
+            &checkpoint.accepted_files,
+        ),
+        SkillRepairAcceptedState::ArchivedSkill { slug, skill } => accepted_object_bytes_match(
+            &format!("archive/skills/{}", slug.as_str()),
+            skill,
+            &checkpoint.accepted_files,
+        ),
+    }
 }
 
-fn repair_edits_materialize_accepted_state(
+fn exact_repair_raw_diff(
+    before: &SkillRepositorySnapshot,
     checkpoint: &SkillConflictCheckpoint,
-    current_files: &BTreeMap<String, Vec<u8>>,
-) -> bool {
-    if checkpoint.accepted_files.iter().any(|(path, bytes)| {
-        !checkpoint.changed_paths.contains(path) && current_files.get(path) != Some(bytes)
-    }) {
-        return false;
-    }
-
-    let accepted_prefix = match &checkpoint.accepted_state {
-        SkillRepairAcceptedState::Workspace(_) => return true,
+) -> BTreeSet<String> {
+    let path_in_scope = |path: &str| match &checkpoint.accepted_state {
+        SkillRepairAcceptedState::Workspace(_) => path == "skills/workspace.meta.yaml",
         SkillRepairAcceptedState::ActiveSkill { slug, .. } => {
-            format!("skills/{}/", slug.as_str())
+            path.starts_with(&format!("skills/{}/", slug.as_str()))
+                || path.starts_with(&format!("archive/skills/{}/", slug.as_str()))
         }
         SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
-            format!("archive/skills/{}/", slug.as_str())
+            path.starts_with(&format!("skills/{}/", slug.as_str()))
+                || path.starts_with(&format!("archive/skills/{}/", slug.as_str()))
         }
     };
-    current_files.keys().all(|path| {
-        !path.starts_with(&accepted_prefix)
-            || checkpoint.accepted_files.contains_key(path)
-            || checkpoint.changed_paths.contains(path)
-    })
-}
-
-fn opposite_repair_paths_match(
-    repository_files: &BTreeMap<String, Vec<u8>>,
-    rejected_prefix: &str,
-    changed_paths: &BTreeSet<String>,
-) -> bool {
-    let rejected_changed_paths: BTreeSet<_> = changed_paths
-        .iter()
-        .filter(|path| path.starts_with(rejected_prefix))
-        .cloned()
-        .collect();
-    let rejected_repository_paths: BTreeSet<_> = repository_files
+    before
+        .repository_files
         .keys()
-        .filter(|path| path.starts_with(rejected_prefix))
+        .chain(checkpoint.accepted_files.keys())
+        .filter(|path| path_in_scope(path))
+        .filter(|path| before.repository_files.get(*path) != checkpoint.accepted_files.get(*path))
         .cloned()
-        .collect();
-    rejected_changed_paths == rejected_repository_paths
+        .collect()
 }
 
 fn skill_object_paths(root: &str, skill: &SkillObjectSnapshot) -> BTreeSet<String> {
