@@ -10,8 +10,9 @@ use gitim_core::skill::{
     validate_package_entries, validate_skill_commit, PackageEntry, PackageEntryKind, ProposalId,
     RequestId, RevisionId, SkillCommitEvidence, SkillConflictCheckpoint, SkillError, SkillMeta,
     SkillObjectSnapshot, SkillOperation, SkillProposalMeta, SkillProposalSnapshot,
-    SkillPublicationMeta, SkillReceipt, SkillRepairAcceptedState, SkillRepositorySnapshot,
-    SkillRevisionMeta, SkillRevisionSnapshot, SkillSlug, WorkspaceSkillMeta,
+    SkillPublicationMeta, SkillReceipt, SkillReceiptScope, SkillRepairAcceptedState,
+    SkillRepositorySnapshot, SkillRevisionMeta, SkillRevisionSnapshot, SkillSlug,
+    WorkspaceSkillMeta, SKILL_SCHEMA_VERSION,
 };
 use gitim_core::types::{Handler, UserMeta};
 use serde::{Deserialize, Serialize};
@@ -357,6 +358,7 @@ struct RecordedChange {
 struct MaterializedSnapshot {
     snapshot: SkillRepositorySnapshot,
     modes: BTreeMap<String, String>,
+    entries: BTreeMap<String, GitEntryIdentity>,
 }
 
 #[derive(Clone)]
@@ -392,6 +394,7 @@ impl<'a> Replay<'a> {
             accepted: MaterializedSnapshot {
                 snapshot: SkillRepositorySnapshot::default(),
                 modes: BTreeMap::new(),
+                entries: BTreeMap::new(),
             },
             changes: Vec::new(),
             new_commits: marker.map(|_| BTreeSet::new()),
@@ -433,6 +436,7 @@ impl<'a> Replay<'a> {
                 self.accepted = MaterializedSnapshot {
                     snapshot,
                     modes: material.modes,
+                    entries: material.entries,
                 };
                 self.advance(root);
             }
@@ -529,6 +533,7 @@ impl<'a> Replay<'a> {
                 self.accepted = MaterializedSnapshot {
                     snapshot: root_snapshot,
                     modes: material.modes,
+                    entries: material.entries,
                 };
                 self.checkpoint.active_epoch = epoch.branch;
                 self.rollover(root)?;
@@ -580,7 +585,7 @@ impl<'a> Replay<'a> {
 
         let actual_after = load_tree_material(self.repo, commit)?;
         let receipt = changed_receipt(&paths, &actual_after).ok();
-        let affected = affected_scopes(&paths, receipt.as_ref());
+        let mut affected = affected_scopes(&paths, receipt.as_ref());
         let result = receipt
             .as_ref()
             .ok_or(SkillError::SyncConflict)
@@ -618,13 +623,14 @@ impl<'a> Replay<'a> {
                 self.capture_marker(commit);
             }
             Err(error) => {
-                let rejected_receipt_paths = metadata
+                let introduced_receipts = metadata
                     .parents
                     .first()
                     .and_then(|parent| load_tree_material(self.repo, parent).ok())
-                    .map_or_else(BTreeSet::new, |parent| {
-                        introduced_receipt_paths(&paths, &parent, &actual_after)
+                    .map_or_else(BTreeMap::new, |parent| {
+                        introduced_receipt_owners(&paths, &parent, &actual_after)
                     });
+                affected.extend(introduced_receipts.values().cloned());
                 let needs_absent_tree = affected.iter().any(|key| {
                     key != WORKSPACE_CONFLICT_KEY && !self.checkpoint.skills.contains_key(key)
                 });
@@ -632,6 +638,11 @@ impl<'a> Replay<'a> {
                     .then(|| empty_tree_oid(self.repo))
                     .transpose()?;
                 for key in affected {
+                    let rejected_receipt_paths: BTreeSet<_> = introduced_receipts
+                        .iter()
+                        .filter(|(_, owner)| *owner == &key)
+                        .map(|(path, _)| path.clone())
+                        .collect();
                     let accepted_tree_oid = if key == WORKSPACE_CONFLICT_KEY {
                         self.checkpoint
                             .workspace_tree
@@ -650,13 +661,13 @@ impl<'a> Replay<'a> {
                     });
                     self.checkpoint
                         .conflicts
-                        .entry(key)
+                        .entry(key.clone())
                         .and_modify(|conflict| {
                             conflict.rejected_commit = commit.to_owned();
                             conflict.code = error.code().to_owned();
-                            conflict
-                                .rejected_receipt_paths
-                                .retain(|path| actual_after.files.contains_key(path));
+                            conflict.rejected_receipt_paths.retain(|path| {
+                                receipt_owner_at(&actual_after, path).as_ref() == Some(&key)
+                            });
                             conflict
                                 .rejected_receipt_paths
                                 .extend(rejected_receipt_paths.iter().cloned());
@@ -879,6 +890,7 @@ fn project_after(
 ) -> Result<MaterializedSnapshot, SkillError> {
     let mut files = accepted.snapshot.repository_files.clone();
     let mut modes = accepted.modes.clone();
+    let mut entries = accepted.entries.clone();
     for path in changed_paths.iter().filter(|path| managed_skill_path(path)) {
         if let Some(bytes) = actual_after.files.get(path) {
             files.insert(path.clone(), bytes.clone());
@@ -889,17 +901,23 @@ fn project_after(
             files.remove(path);
             modes.remove(path);
         }
+        if let Some(entry) = actual_after.entries.get(path) {
+            entries.insert(path.clone(), entry.clone());
+        } else {
+            entries.remove(path);
+        }
     }
     let material = TreeMaterial {
         files,
         modes,
-        entries: BTreeMap::new(),
+        entries,
         active_users: actual_after.active_users.clone(),
     };
     let snapshot = parse_snapshot(&material)?;
     Ok(MaterializedSnapshot {
         snapshot,
         modes: material.modes,
+        entries: material.entries,
     })
 }
 
@@ -1065,17 +1083,21 @@ fn scope_contains(path: &str, slug: Option<&SkillSlug>) -> bool {
     match slug {
         None => path == "skills/workspace.meta.yaml",
         Some(slug) => {
-            path.starts_with(&format!("skills/{}/", slug.as_str()))
-                || path.starts_with(&format!("archive/skills/{}/", slug.as_str()))
+            let active = format!("skills/{}", slug.as_str());
+            let archived = format!("archive/skills/{}", slug.as_str());
+            path == active
+                || path.starts_with(&format!("{active}/"))
+                || path == archived
+                || path.starts_with(&format!("{archived}/"))
         }
     }
 }
 
-fn introduced_receipt_paths(
+fn introduced_receipt_owners(
     changed_paths: &BTreeSet<String>,
     parent: &TreeMaterial,
     after: &TreeMaterial,
-) -> BTreeSet<String> {
+) -> BTreeMap<String, String> {
     changed_paths
         .iter()
         .filter(|path| !parent.entries.contains_key(*path))
@@ -1083,9 +1105,35 @@ fn introduced_receipt_paths(
             let request_id = receipt_id_from_path(path)?;
             let bytes = after.files.get(path)?;
             let receipt: SkillReceipt = serde_yaml::from_slice(bytes).ok()?;
-            (receipt.id == request_id).then(|| path.clone())
+            (receipt.id == request_id)
+                .then(|| receipt_owner(&receipt))
+                .flatten()
+                .map(|owner| (path.clone(), owner))
         })
         .collect()
+}
+
+fn receipt_owner_at(material: &TreeMaterial, path: &str) -> Option<String> {
+    let request_id = receipt_id_from_path(path)?;
+    let receipt: SkillReceipt = serde_yaml::from_slice(material.files.get(path)?).ok()?;
+    (receipt.id == request_id)
+        .then(|| receipt_owner(&receipt))
+        .flatten()
+}
+
+fn receipt_owner(receipt: &SkillReceipt) -> Option<String> {
+    if receipt.schema_version != SKILL_SCHEMA_VERSION {
+        return None;
+    }
+    match (receipt.scope, receipt.skill.as_ref()) {
+        (SkillReceiptScope::Workspace, None) if receipt.request.slug.is_none() => {
+            Some(WORKSPACE_CONFLICT_KEY.to_owned())
+        }
+        (SkillReceiptScope::Skill, Some(slug)) if receipt.request.slug.as_ref() == Some(slug) => {
+            Some(slug.as_str().to_owned())
+        }
+        _ => None,
+    }
 }
 
 fn overlay_rejected_receipts(
@@ -1125,7 +1173,7 @@ fn accepted_scope_entries(
             if slug.is_none() {
                 path.as_str() == root
             } else {
-                path.starts_with(&format!("{root}/"))
+                path == &root || path.starts_with(&format!("{root}/"))
             }
         })
         .collect())
@@ -1261,6 +1309,13 @@ fn load_tree_material(repo: &GitStorage, commit: &str) -> Result<TreeMaterial, S
 }
 
 fn parse_snapshot(material: &TreeMaterial) -> Result<SkillRepositorySnapshot, SkillError> {
+    if material
+        .entries
+        .values()
+        .any(|entry| entry.mode != "100644" || entry.object_type != "blob")
+    {
+        return Err(SkillError::SyncConflict);
+    }
     let workspace = material
         .files
         .get("skills/workspace.meta.yaml")

@@ -706,11 +706,9 @@ fn validate_repair_pre_state(
         | SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
             unaffected.active_skills.remove(slug);
             unaffected.archived_skills.remove(slug);
-            let active_prefix = format!("skills/{}/", slug.as_str());
-            let archived_prefix = format!("archive/skills/{}/", slug.as_str());
-            unaffected.repository_files.retain(|path, _| {
-                !path.starts_with(&active_prefix) && !path.starts_with(&archived_prefix)
-            });
+            unaffected
+                .repository_files
+                .retain(|path, _| !repair_scope_contains(path, &checkpoint.accepted_state));
         }
     }
     for path in &checkpoint.rejected_receipt_paths {
@@ -1722,8 +1720,9 @@ fn valid_entry_changed_paths(
     checkpoint.entry_changed_paths.iter().all(|path| {
         repair_scope_contains(path, &checkpoint.accepted_state)
             && !checkpoint.rejected_receipt_paths.contains(path)
-            && before.repository_files.contains_key(path)
             && before.repository_files.get(path) == checkpoint.accepted_files.get(path)
+            && (before.repository_files.contains_key(path)
+                || repair_scope_root(path, &checkpoint.accepted_state))
     })
 }
 
@@ -1752,13 +1751,26 @@ fn repair_scope_contains(path: &str, accepted_state: &SkillRepairAcceptedState) 
     match accepted_state {
         SkillRepairAcceptedState::Workspace(_) => path == "skills/workspace.meta.yaml",
         SkillRepairAcceptedState::AbsentSkill { slug }
-        | SkillRepairAcceptedState::ActiveSkill { slug, .. } => {
-            path.starts_with(&format!("skills/{}/", slug.as_str()))
-                || path.starts_with(&format!("archive/skills/{}/", slug.as_str()))
+        | SkillRepairAcceptedState::ActiveSkill { slug, .. }
+        | SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
+            let active = format!("skills/{}", slug.as_str());
+            let archived = format!("archive/skills/{}", slug.as_str());
+            path == active
+                || path.starts_with(&format!("{active}/"))
+                || path == archived
+                || path.starts_with(&format!("{archived}/"))
         }
-        SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
-            path.starts_with(&format!("skills/{}/", slug.as_str()))
-                || path.starts_with(&format!("archive/skills/{}/", slug.as_str()))
+    }
+}
+
+fn repair_scope_root(path: &str, accepted_state: &SkillRepairAcceptedState) -> bool {
+    match accepted_state {
+        SkillRepairAcceptedState::Workspace(_) => path == "skills/workspace.meta.yaml",
+        SkillRepairAcceptedState::AbsentSkill { slug }
+        | SkillRepairAcceptedState::ActiveSkill { slug, .. }
+        | SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
+            path == format!("skills/{}", slug.as_str())
+                || path == format!("archive/skills/{}", slug.as_str())
         }
     }
 }
