@@ -9,7 +9,7 @@ use crate::url_redact::redacted_url;
 /// Process-level timeout for all git subprocess invocations.
 /// Prevents `Command::output()` from blocking indefinitely when git hangs
 /// (e.g. disk full, credential prompt, NFS stall, lock contention).
-const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub(crate) const GIT_HTTP_TIMEOUT_ARGS: &[&str] = &[
     "-c",
@@ -54,14 +54,21 @@ pub(crate) fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Outpu
     run_git_command_with_env(args, current_dir, &[])
 }
 
-/// Like `run_git_command`, but with caller-supplied environment overrides
-/// (`GIT_AUTHOR_*` / `GIT_COMMITTER_*`). Every git subprocess in this file —
-/// env-ful or not — must route through here so all share the timeout + kill
-/// plumbing.
+/// Like `run_git_command`, but with caller-supplied environment overrides.
 fn run_git_command_with_env(
     args: &[&str],
     current_dir: &Path,
     envs: &[(&str, &str)],
+) -> Result<Output, GitError> {
+    run_git_command_with_env_and_timeout(args, current_dir, envs, GIT_COMMAND_TIMEOUT)
+}
+
+/// Timeout-aware process runner shared by operations with a narrower deadline.
+pub(crate) fn run_git_command_with_env_and_timeout(
+    args: &[&str],
+    current_dir: &Path,
+    envs: &[(&str, &str)],
+    timeout: Duration,
 ) -> Result<Output, GitError> {
     let mut cmd = Command::new("git");
     cmd.args(args)
@@ -85,7 +92,7 @@ fn run_git_command_with_env(
         let _ = tx.send(child.wait_with_output());
     });
 
-    match rx.recv_timeout(GIT_COMMAND_TIMEOUT) {
+    match rx.recv_timeout(timeout) {
         Ok(Ok(output)) => {
             // Check for disk-full even on "success" — git sometimes exits 0
             // with ENOSPC warnings in stderr, and some commands (e.g. fetch)
@@ -114,7 +121,7 @@ fn run_git_command_with_env(
                 // the child will be reaped when it eventually exits.
                 let _ = Command::new("kill").args([&pid.to_string()]).output();
             }
-            Err(GitError::Timeout(GIT_COMMAND_TIMEOUT))
+            Err(GitError::Timeout(timeout))
         }
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
             // Thread panicked before sending — treat as I/O error.
@@ -138,7 +145,17 @@ pub(crate) fn run_git_with_env(
     current_dir: &Path,
     envs: &[(&str, &str)],
 ) -> Result<Output, GitError> {
-    let output = run_git_command_with_env(args, current_dir, envs)?;
+    run_git_with_env_and_timeout(args, current_dir, envs, GIT_COMMAND_TIMEOUT)
+}
+
+/// Timeout-aware command runner that maps non-zero exit to `GitError`.
+pub(crate) fn run_git_with_env_and_timeout(
+    args: &[&str],
+    current_dir: &Path,
+    envs: &[(&str, &str)],
+    timeout: Duration,
+) -> Result<Output, GitError> {
+    let output = run_git_command_with_env_and_timeout(args, current_dir, envs, timeout)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         if is_disk_full(&stderr) {
@@ -1154,8 +1171,8 @@ mod tests {
     }
 
     #[test]
-    fn git_command_timeout_is_60_seconds() {
-        assert_eq!(GIT_COMMAND_TIMEOUT, Duration::from_secs(60));
+    fn shared_git_command_timeout_remains_120_seconds() {
+        assert_eq!(GIT_COMMAND_TIMEOUT, Duration::from_secs(120));
     }
 
     #[test]

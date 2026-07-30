@@ -243,6 +243,24 @@ fn private_index_commit_uses_explicit_base_and_preserves_checkout_state() {
             .collect::<Vec<_>>(),
         ["Gitim-Request-Id: q-01K1D8QG2S8RX4T9M9BDKQ9Z7N"]
     );
+    let commit_message = git(
+        fixture.clone.path(),
+        ["show", "-s", "--format=%B", &built.commit_oid],
+    )
+    .stdout;
+    let message_file = transaction.path().join("commit-message");
+    fs::write(&message_file, commit_message).unwrap();
+    assert_eq!(
+        git_stdout(
+            fixture.clone.path(),
+            [
+                OsStr::new("interpret-trailers"),
+                OsStr::new("--parse"),
+                message_file.as_os_str()
+            ]
+        ),
+        "Gitim-Request-Id: q-01K1D8QG2S8RX4T9M9BDKQ9Z7N"
+    );
 
     assert_eq!(
         git_stdout(fixture.clone.path(), ["rev-parse", "HEAD"]),
@@ -361,4 +379,29 @@ fn plumbing_rejects_option_like_revisions_refs_and_active_index() {
     )
     .unwrap();
     assert!(push_commit_fast_forward(&fixture.repo, &built.commit_oid, "--mirror").is_err());
+}
+
+#[test]
+fn commit_message_rejects_semantic_request_id_trailer_variants() {
+    let fixture = fixture();
+    for (position, trailer) in [
+        "gitim-request-id: q-01K1D8QG2S8RX4T9M9BDKQ9Z7P",
+        "GITIM-REQUEST-ID : q-01K1D8QG2S8RX4T9M9BDKQ9Z7Q",
+        "  Gitim-Request-Id\t: q-01K1D8QG2S8RX4T9M9BDKQ9Z7R",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let transaction = TempDir::new().unwrap();
+        let mut candidate = request(
+            &fixture.base,
+            &transaction.path().join(format!("private-index-{position}")),
+            "duplicate-trailer",
+        );
+        candidate.message = format!("skill: duplicate trailer\n\n{trailer}");
+        assert!(
+            build_private_index_commit(&fixture.repo, &candidate).is_err(),
+            "message containing {trailer:?} must be rejected"
+        );
+    }
 }

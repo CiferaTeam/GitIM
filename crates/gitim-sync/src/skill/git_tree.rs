@@ -1,13 +1,17 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::process::Output;
+use std::time::Duration;
 
 use gitim_core::skill::{RequestId, SkillTreeEdit};
 
 use crate::git::{
-    classify_remote_error, run_git, run_git_command, run_git_with_env, GitError, GitStorage,
-    GIT_HTTP_TIMEOUT_ARGS,
+    classify_remote_error, run_git_command_with_env_and_timeout, run_git_with_env_and_timeout,
+    GitError, GitStorage, GIT_HTTP_TIMEOUT_ARGS,
 };
+
+const SKILL_GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GitTreeEntry {
@@ -63,7 +67,7 @@ pub fn read_blob_at(
             entry.object_type
         )));
     }
-    let output = run_git(&["cat-file", "blob", &entry.oid], repo.root())?;
+    let output = run_skill_git(repo, &["cat-file", "blob", &entry.oid])?;
     Ok(Some(output.stdout))
 }
 
@@ -74,14 +78,12 @@ pub fn list_tree_recursive(
 ) -> Result<Vec<GitTreeEntry>, GitError> {
     let commit_oid = resolve_commit(repo, commit)?;
     let output = if path.is_empty() {
-        run_git(
-            &["ls-tree", "-r", "-z", "--full-tree", &commit_oid],
-            repo.root(),
-        )?
+        run_skill_git(repo, &["ls-tree", "-r", "-z", "--full-tree", &commit_oid])?
     } else {
         validate_tree_path(path)?;
         let literal_pathspec = format!(":(literal){path}");
-        run_git(
+        run_skill_git(
+            repo,
             &[
                 "ls-tree",
                 "-r",
@@ -91,7 +93,6 @@ pub fn list_tree_recursive(
                 "--",
                 &literal_pathspec,
             ],
-            repo.root(),
         )?
     };
     parse_ls_tree(&output.stdout)
@@ -112,11 +113,7 @@ pub fn build_private_index_commit(
         .to_str()
         .ok_or_else(|| invalid_input("private index path is not UTF-8"))?;
     let index_env = [("GIT_INDEX_FILE", index)];
-    run_git_with_env(
-        &["read-tree", "--reset", &base_commit],
-        repo.root(),
-        &index_env,
-    )?;
+    run_skill_git_with_env(repo, &["read-tree", "--reset", &base_commit], &index_env)?;
 
     let temp_dir = request
         .private_index
@@ -133,27 +130,27 @@ pub fn build_private_index_commit(
                     .path()
                     .to_str()
                     .ok_or_else(|| invalid_input("temporary blob path is not UTF-8"))?;
-                let output = run_git(&["hash-object", "-w", "--", blob_path], repo.root())?;
+                let output = run_skill_git(repo, &["hash-object", "-w", "--", blob_path])?;
                 let blob_oid = parse_oid(&output.stdout)?;
                 let cache_info = format!("100644,{blob_oid},{path}");
-                run_git_with_env(
+                run_skill_git_with_env(
+                    repo,
                     &["update-index", "--add", "--cacheinfo", &cache_info],
-                    repo.root(),
                     &index_env,
                 )?;
             }
             SkillTreeEdit::Delete { path } => {
                 validate_tree_path(path)?;
-                run_git_with_env(
+                run_skill_git_with_env(
+                    repo,
                     &["update-index", "--force-remove", "--", path],
-                    repo.root(),
                     &index_env,
                 )?;
             }
         }
     }
 
-    let tree_output = run_git_with_env(&["write-tree"], repo.root(), &index_env)?;
+    let tree_output = run_skill_git_with_env(repo, &["write-tree"], &index_env)?;
     let tree_oid = parse_oid(&tree_output.stdout)?;
     let commit_message = format!(
         "{}\n\nGitim-Request-Id: {}\n",
@@ -166,7 +163,8 @@ pub fn build_private_index_commit(
         ("GIT_COMMITTER_NAME", request.author_name.as_str()),
         ("GIT_COMMITTER_EMAIL", request.author_email.as_str()),
     ];
-    let commit_output = run_git_with_env(
+    let commit_output = run_skill_git_with_env(
+        repo,
         &[
             "commit-tree",
             &tree_oid,
@@ -175,7 +173,6 @@ pub fn build_private_index_commit(
             "-m",
             &commit_message,
         ],
-        repo.root(),
         &identity_env,
     )?;
     let commit_oid = parse_oid(&commit_output.stdout)?;
@@ -203,7 +200,7 @@ pub fn push_commit_fast_forward(
         "origin",
         &refspec,
     ];
-    let output = run_git_command(&args, repo.root())?;
+    let output = run_skill_git_command(repo, &args)?;
     if output.status.success() {
         Ok(())
     } else {
@@ -219,10 +216,7 @@ fn resolve_commit(repo: &GitStorage, commit: &str) -> Result<String, GitError> {
 }
 
 fn resolve_object(repo: &GitStorage, object: &str) -> Result<String, GitError> {
-    let output = run_git(
-        &["rev-parse", "--verify", "--end-of-options", object],
-        repo.root(),
-    )?;
+    let output = run_skill_git(repo, &["rev-parse", "--verify", "--end-of-options", object])?;
     parse_oid(&output.stdout)
 }
 
@@ -232,7 +226,8 @@ fn ls_tree_entry(
     path: &str,
 ) -> Result<Option<GitTreeEntry>, GitError> {
     let literal_pathspec = format!(":(literal){path}");
-    let output = run_git(
+    let output = run_skill_git(
+        repo,
         &[
             "ls-tree",
             "-z",
@@ -241,7 +236,6 @@ fn ls_tree_entry(
             "--",
             &literal_pathspec,
         ],
-        repo.root(),
     )?;
     let mut entries = parse_ls_tree(&output.stdout)?;
     match entries.len() {
@@ -305,7 +299,7 @@ fn prepare_private_index(repo: &GitStorage, private_index: &Path) -> Result<(), 
         .ok_or_else(|| invalid_input("private index path has no file name"))?;
     let normalized_private = private_parent.join(private_name);
 
-    let active_output = run_git(&["rev-parse", "--git-path", "index"], repo.root())?;
+    let active_output = run_skill_git(repo, &["rev-parse", "--git-path", "index"])?;
     let active_text = std::str::from_utf8(&active_output.stdout)
         .map_err(|error| invalid_input(format!("active index path is not UTF-8: {error}")))?;
     let active_path = PathBuf::from(active_text.trim());
@@ -345,7 +339,7 @@ fn validate_remote_branch(repo: &GitStorage, branch: &str) -> Result<(), GitErro
     {
         return Err(invalid_input("invalid remote branch"));
     }
-    run_git(&["check-ref-format", "--branch", branch], repo.root()).map(|_| ())
+    run_skill_git(repo, &["check-ref-format", "--branch", branch]).map(|_| ())
 }
 
 fn validate_tree_path(path: &str) -> Result<(), GitError> {
@@ -375,10 +369,11 @@ fn validate_message(message: &str) -> Result<(), GitError> {
     if message.is_empty() || message.contains('\0') {
         return Err(invalid_input("invalid commit message"));
     }
-    if message
-        .lines()
-        .any(|line| line.starts_with("Gitim-Request-Id:"))
-    {
+    if message.lines().any(|line| {
+        line.trim()
+            .split_once(':')
+            .is_some_and(|(token, _)| token.trim().eq_ignore_ascii_case("Gitim-Request-Id"))
+    }) {
         return Err(invalid_input(
             "commit message already contains a Gitim-Request-Id trailer",
         ));
@@ -403,4 +398,33 @@ fn validate_oid(oid: &str) -> Result<(), GitError> {
 
 fn invalid_input(message: impl Into<String>) -> GitError {
     GitError::CommandFailed(message.into())
+}
+
+fn run_skill_git(repo: &GitStorage, args: &[&str]) -> Result<Output, GitError> {
+    run_skill_git_with_env(repo, args, &[])
+}
+
+fn run_skill_git_with_env(
+    repo: &GitStorage,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<Output, GitError> {
+    run_git_with_env_and_timeout(args, repo.root(), envs, SKILL_GIT_COMMAND_TIMEOUT)
+}
+
+fn run_skill_git_command(repo: &GitStorage, args: &[&str]) -> Result<Output, GitError> {
+    run_git_command_with_env_and_timeout(args, repo.root(), &[], SKILL_GIT_COMMAND_TIMEOUT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skill_git_command_timeout_is_60_seconds() {
+        assert_eq!(
+            SKILL_GIT_COMMAND_TIMEOUT,
+            std::time::Duration::from_secs(60)
+        );
+    }
 }
