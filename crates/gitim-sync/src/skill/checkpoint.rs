@@ -201,6 +201,14 @@ impl SkillCheckpointStore {
         let bytes = serde_json::to_vec_pretty(checkpoint).map_err(|error| {
             SkillSyncError::Checkpoint(format!("serialize checkpoint: {error}"))
         })?;
+        let persisted_len = bytes.len().checked_add(1).ok_or_else(|| {
+            SkillSyncError::Checkpoint("checkpoint exceeds size limit".to_owned())
+        })?;
+        if persisted_len > CHECKPOINT_MAX_BYTES as usize {
+            return Err(SkillSyncError::Checkpoint(
+                "checkpoint exceeds size limit".to_owned(),
+            ));
+        }
         let mut temporary = tempfile::NamedTempFile::new_in(parent)
             .map_err(|error| checkpoint_error("create checkpoint temp file", error))?;
         temporary
@@ -416,6 +424,12 @@ impl<'a> Replay<'a> {
                 self.advance(root);
             }
             Some(epoch) if epoch.status == EpochStatus::Active => {
+                let root_metadata = commit_metadata(self.repo, root)?;
+                if !root_metadata.parents.is_empty() {
+                    return Err(SkillSyncError::EpochValidationBlocked(
+                        "active epoch snapshot is not an orphan root".to_owned(),
+                    ));
+                }
                 let snapshot = epoch.snapshot.as_ref().ok_or_else(|| {
                     SkillSyncError::EpochValidationBlocked(
                         "active epoch lacks snapshot metadata".to_owned(),
@@ -424,6 +438,7 @@ impl<'a> Replay<'a> {
                 validate_branch_name(&epoch.branch)?;
                 validate_branch_name(&snapshot.source_branch)?;
                 let source_commit = resolve_commit(self.repo, &snapshot.source_commit)?;
+                let source_epoch = epoch_at(self.repo, &source_commit)?;
                 self.segment(&source_commit, depth + 1)?;
                 let seal_ref = format!("refs/remotes/origin/{}", snapshot.source_branch);
                 let seal_oid = resolve_commit(self.repo, &seal_ref).map_err(|error| {
@@ -440,14 +455,30 @@ impl<'a> Replay<'a> {
                         "predecessor seal is malformed".to_owned(),
                     ));
                 }
-                let redirect = epoch_at(self.repo, &seal_oid)?
+                let seal_epoch = epoch_at(self.repo, &seal_oid)?
                     .filter(|value| value.status == EpochStatus::Redirected)
-                    .and_then(|value| value.redirect)
                     .ok_or_else(|| {
                         SkillSyncError::EpochValidationBlocked(
                             "predecessor seal lacks redirect".to_owned(),
                         )
                     })?;
+                if seal_epoch.branch != snapshot.source_branch
+                    || seal_epoch.epoch.checked_add(1) != Some(epoch.epoch)
+                    || source_epoch.as_ref().is_some_and(|source| {
+                        source.status != EpochStatus::Active
+                            || source.branch != seal_epoch.branch
+                            || source.epoch != seal_epoch.epoch
+                    })
+                {
+                    return Err(SkillSyncError::EpochValidationBlocked(
+                        "predecessor seal source metadata is malformed".to_owned(),
+                    ));
+                }
+                let redirect = seal_epoch.redirect.ok_or_else(|| {
+                    SkillSyncError::EpochValidationBlocked(
+                        "predecessor seal lacks redirect".to_owned(),
+                    )
+                })?;
                 if redirect.target_epoch != epoch.epoch
                     || redirect.target_branch != epoch.branch
                     || resolve_commit(self.repo, &redirect.snapshot_of)? != source_commit
@@ -465,6 +496,13 @@ impl<'a> Replay<'a> {
                 }
                 self.advance(&seal_oid);
 
+                if repository_tree_entries(self.repo, &source_commit)?
+                    != repository_tree_entries(self.repo, root)?
+                {
+                    return Err(SkillSyncError::EpochValidationBlocked(
+                        "orphan snapshot differs from predecessor Git tree".to_owned(),
+                    ));
+                }
                 let material = load_tree_material(self.repo, root)?;
                 let root_snapshot = parse_snapshot(&material)?;
                 if !self.checkpoint.conflicts.is_empty()
@@ -567,6 +605,16 @@ impl<'a> Replay<'a> {
                 self.capture_marker(commit);
             }
             Err(error) => {
+                let needs_absent_tree = affected.iter().any(|key| {
+                    if key == WORKSPACE_CONFLICT_KEY {
+                        self.checkpoint.workspace_tree.is_none()
+                    } else {
+                        !self.checkpoint.skills.contains_key(key)
+                    }
+                });
+                let absent_tree_oid = needs_absent_tree
+                    .then(|| empty_tree_oid(self.repo))
+                    .transpose()?;
                 for key in affected {
                     let accepted_tree_oid = if key == WORKSPACE_CONFLICT_KEY {
                         self.checkpoint
@@ -578,7 +626,8 @@ impl<'a> Replay<'a> {
                             .skills
                             .get(&key)
                             .map(|state| state.tree.tree_oid.clone())
-                    };
+                    }
+                    .or_else(|| absent_tree_oid.clone());
                     self.checkpoint
                         .conflicts
                         .entry(key)
@@ -870,11 +919,10 @@ fn repair_accepted_state(
     receipt: &SkillReceipt,
 ) -> Result<SkillRepairAcceptedState, SkillError> {
     match &receipt.skill {
-        None => snapshot
-            .workspace
-            .clone()
-            .map(SkillRepairAcceptedState::Workspace)
-            .ok_or(SkillError::SyncConflict),
+        None => Ok(snapshot.workspace.clone().map_or(
+            SkillRepairAcceptedState::AbsentWorkspace,
+            SkillRepairAcceptedState::Workspace,
+        )),
         Some(slug) => snapshot
             .active_skills
             .get(slug)
@@ -891,7 +939,10 @@ fn repair_accepted_state(
                     }
                 })
             })
-            .ok_or(SkillError::SyncConflict),
+            .map_or_else(
+                || Ok(SkillRepairAcceptedState::AbsentSkill { slug: slug.clone() }),
+                Ok,
+            ),
     }
 }
 
@@ -952,6 +1003,26 @@ fn scope_contains(path: &str, slug: Option<&SkillSlug>) -> bool {
                 || path.starts_with(&format!("archive/skills/{}/", slug.as_str()))
         }
     }
+}
+
+fn repository_tree_entries(
+    repo: &GitStorage,
+    commit: &str,
+) -> Result<BTreeMap<String, (String, String, String)>, SkillSyncError> {
+    let mut entries = BTreeMap::new();
+    for entry in list_tree_recursive(repo, commit, "")? {
+        if entry.path == EPOCH_PATH {
+            if entry.mode != "100644" || entry.object_type != "blob" {
+                return Err(SkillSyncError::EpochValidationBlocked(
+                    "epoch metadata is not a regular file".to_owned(),
+                ));
+            }
+            continue;
+        }
+        validate_repository_path(&entry.path)?;
+        entries.insert(entry.path, (entry.mode, entry.object_type, entry.oid));
+    }
+    Ok(entries)
 }
 
 fn load_tree_material(repo: &GitStorage, commit: &str) -> Result<TreeMaterial, SkillSyncError> {
@@ -1057,9 +1128,14 @@ fn parse_skill_object(
     let mut revision_ids = BTreeSet::new();
     let mut publication_ids = BTreeSet::new();
     let mut proposal_ids = BTreeSet::new();
-    for path in material.files.keys().filter(|path| path.starts_with(&root)) {
+    let root_prefix = format!("{root}/");
+    for path in material
+        .files
+        .keys()
+        .filter(|path| path.starts_with(&root_prefix))
+    {
         let suffix = path
-            .strip_prefix(&format!("{root}/"))
+            .strip_prefix(&root_prefix)
             .ok_or(SkillError::SyncConflict)?;
         let parts: Vec<_> = suffix.split('/').collect();
         match parts.as_slice() {
@@ -1304,6 +1380,16 @@ fn run_skill_git(repo: &GitStorage, args: &[&str]) -> Result<std::process::Outpu
     )?)
 }
 
+fn empty_tree_oid(repo: &GitStorage) -> Result<String, SkillSyncError> {
+    let output = run_skill_git(repo, &["hash-object", "-t", "tree", "--stdin"])?;
+    let oid = std::str::from_utf8(&output.stdout)
+        .map_err(|_| SkillSyncError::Checkpoint("non-UTF-8 empty tree ID".to_owned()))?
+        .trim()
+        .to_owned();
+    validate_oid(&oid)?;
+    Ok(oid)
+}
+
 fn managed_skill_path(path: &str) -> bool {
     path.starts_with("skills/") || path.starts_with("archive/skills/")
 }
@@ -1390,9 +1476,10 @@ fn validate_checkpoint(checkpoint: &SkillValidationCheckpoint) -> Result<(), Ski
                 "checkpoint conflict code is empty".to_owned(),
             ));
         }
-        if let Some(oid) = &conflict.accepted_tree_oid {
-            validate_oid(oid)?;
-        }
+        let accepted_tree_oid = conflict.accepted_tree_oid.as_deref().ok_or_else(|| {
+            SkillSyncError::Checkpoint(format!("conflict scope {scope:?} lacks an accepted tree"))
+        })?;
+        validate_oid(accepted_tree_oid)?;
         let expected_tree_oid = if scope == WORKSPACE_CONFLICT_KEY {
             checkpoint
                 .workspace_tree
@@ -1404,7 +1491,7 @@ fn validate_checkpoint(checkpoint: &SkillValidationCheckpoint) -> Result<(), Ski
                 .get(scope)
                 .map(|state| state.tree.tree_oid.as_str())
         };
-        if conflict.accepted_tree_oid.as_deref() != expected_tree_oid {
+        if expected_tree_oid.is_some() && Some(accepted_tree_oid) != expected_tree_oid {
             return Err(SkillSyncError::Checkpoint(format!(
                 "conflict scope {scope:?} does not match its accepted tree"
             )));
@@ -1485,4 +1572,108 @@ fn sync_parent_directory(path: &Path) -> Result<(), SkillSyncError> {
 
 fn checkpoint_error(context: &str, error: std::io::Error) -> SkillSyncError {
     SkillSyncError::Checkpoint(format!("{context}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gitim_core::skill::{
+        plan_skill_mutation, validate_package_entries, PackageEntry, RequestId, SkillCreateRequest,
+        SkillMutationContext, SkillMutationRequest, SkillWorkspaceBootstrapRequest,
+    };
+
+    fn request_id(suffix: char) -> RequestId {
+        RequestId::new(&format!("q-01K1D8QG2S8RX4T9M9BDKQ9Z7{suffix}")).unwrap()
+    }
+
+    fn context(package: Option<gitim_core::skill::ValidatedPackage>) -> SkillMutationContext {
+        SkillMutationContext {
+            actor: "alice".to_owned(),
+            now: "2026-07-30T10:00:00Z".to_owned(),
+            package,
+        }
+    }
+
+    fn package(slug: &SkillSlug) -> gitim_core::skill::ValidatedPackage {
+        validate_package_entries(
+            slug,
+            vec![PackageEntry::new(
+                "SKILL.md",
+                format!(
+                    "---\nname: {}\ndescription: Verify releases.\n---\n",
+                    slug.as_str()
+                )
+                .into_bytes(),
+            )],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn archived_skill_parser_uses_a_slash_terminated_slug_prefix() {
+        let initial = SkillRepositorySnapshot {
+            active_users: BTreeSet::from(["alice".to_owned()]),
+            ..Default::default()
+        };
+        let bootstrap = plan_skill_mutation(
+            &initial,
+            &context(None),
+            &SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                request_id: request_id('A'),
+            }),
+        )
+        .unwrap();
+        let mut snapshot = bootstrap.after;
+        for (suffix, name) in [('B', "release"), ('C', "release-check")] {
+            let slug = SkillSlug::new(name).unwrap();
+            snapshot = plan_skill_mutation(
+                &snapshot,
+                &context(Some(package(&slug))),
+                &SkillMutationRequest::Create(SkillCreateRequest {
+                    request_id: request_id(suffix),
+                    slug,
+                    display_name: name.to_owned(),
+                    description: "Verify releases.".to_owned(),
+                    source_directory: "/unused".into(),
+                }),
+            )
+            .unwrap()
+            .after;
+        }
+        let mut files = snapshot.repository_files;
+        for name in ["release", "release-check"] {
+            let prefix = format!("skills/{name}/");
+            let relocated: Vec<_> = files
+                .keys()
+                .filter(|path| path.starts_with(&prefix))
+                .cloned()
+                .collect();
+            for path in relocated {
+                let bytes = files.remove(&path).unwrap();
+                files.insert(
+                    path.replacen(&prefix, &format!("archive/skills/{name}/"), 1),
+                    bytes,
+                );
+            }
+        }
+        let material = TreeMaterial {
+            modes: files
+                .keys()
+                .filter(|path| managed_skill_path(path))
+                .map(|path| (path.clone(), "100644".to_owned()))
+                .collect(),
+            files,
+            active_users: BTreeSet::from(["alice".to_owned()]),
+        };
+
+        let parsed = parse_snapshot(&material).unwrap();
+
+        assert!(parsed.active_skills.is_empty());
+        assert!(parsed
+            .archived_skills
+            .contains_key(&SkillSlug::new("release").unwrap()));
+        assert!(parsed
+            .archived_skills
+            .contains_key(&SkillSlug::new("release-check").unwrap()));
+    }
 }

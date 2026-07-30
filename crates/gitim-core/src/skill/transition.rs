@@ -47,7 +47,11 @@ pub struct SkillProposalSnapshot {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SkillRepairAcceptedState {
+    AbsentWorkspace,
     Workspace(WorkspaceSkillMeta),
+    AbsentSkill {
+        slug: SkillSlug,
+    },
     ActiveSkill {
         slug: SkillSlug,
         skill: SkillObjectSnapshot,
@@ -601,8 +605,10 @@ fn canonical_receipt_request(
                 .as_ref()
                 .ok_or(SkillError::SyncConflict)?;
             let (scope, skill) = match &checkpoint.accepted_state {
-                SkillRepairAcceptedState::Workspace(_) => (SkillReceiptScope::Workspace, None),
-                SkillRepairAcceptedState::ActiveSkill { slug, .. }
+                SkillRepairAcceptedState::AbsentWorkspace
+                | SkillRepairAcceptedState::Workspace(_) => (SkillReceiptScope::Workspace, None),
+                SkillRepairAcceptedState::AbsentSkill { slug }
+                | SkillRepairAcceptedState::ActiveSkill { slug, .. }
                 | SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
                     (SkillReceiptScope::Skill, Some(slug.clone()))
                 }
@@ -684,6 +690,12 @@ fn validate_repair_pre_state(
 
     let mut unaffected = before.clone();
     match &checkpoint.accepted_state {
+        SkillRepairAcceptedState::AbsentWorkspace => {
+            unaffected.workspace = None;
+            unaffected
+                .repository_files
+                .remove("skills/workspace.meta.yaml");
+        }
         SkillRepairAcceptedState::Workspace(workspace) => {
             unaffected.workspace = Some(workspace.clone());
             let accepted_bytes = checkpoint
@@ -695,7 +707,8 @@ fn validate_repair_pre_state(
                 accepted_bytes.clone(),
             );
         }
-        SkillRepairAcceptedState::ActiveSkill { slug, .. }
+        SkillRepairAcceptedState::AbsentSkill { slug }
+        | SkillRepairAcceptedState::ActiveSkill { slug, .. }
         | SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
             unaffected.active_skills.remove(slug);
             unaffected.archived_skills.remove(slug);
@@ -800,11 +813,13 @@ fn authorize_and_check_preconditions(
             }
             let workspace = match &checkpoint.accepted_state {
                 SkillRepairAcceptedState::Workspace(workspace) => workspace,
-                SkillRepairAcceptedState::ActiveSkill { .. }
+                SkillRepairAcceptedState::AbsentSkill { .. }
+                | SkillRepairAcceptedState::ActiveSkill { .. }
                 | SkillRepairAcceptedState::ArchivedSkill { .. } => before
                     .workspace
                     .as_ref()
                     .ok_or(SkillError::AdminUninitialized)?,
+                SkillRepairAcceptedState::AbsentWorkspace => return Ok(()),
             };
             if !contains_handler(&workspace.administrators, &receipt.actor) {
                 return Err(SkillError::AdminRequired);
@@ -1091,6 +1106,10 @@ fn apply_repair(
         .clone()
         .ok_or(SkillError::SyncConflict)?;
     let result = match checkpoint.accepted_state {
+        SkillRepairAcceptedState::AbsentWorkspace => {
+            after.workspace = None;
+            empty_result()
+        }
         SkillRepairAcceptedState::Workspace(workspace) => {
             let control_revision = workspace.control_revision;
             after.workspace = Some(workspace);
@@ -1108,6 +1127,11 @@ fn apply_repair(
             after.active_skills.remove(&slug);
             after.archived_skills.insert(slug, skill.clone());
             result_for_skill(&skill, None)
+        }
+        SkillRepairAcceptedState::AbsentSkill { slug } => {
+            after.active_skills.remove(&slug);
+            after.archived_skills.remove(&slug);
+            empty_result()
         }
     };
     if receipt.request.accepted_tree.as_deref() != Some(&checkpoint.accepted_tree) {
@@ -1607,10 +1631,11 @@ fn find_proposal<'a>(
 
 fn repair_scope_matches(receipt: &SkillReceipt, accepted: &SkillRepairAcceptedState) -> bool {
     match accepted {
-        SkillRepairAcceptedState::Workspace(_) => {
+        SkillRepairAcceptedState::AbsentWorkspace | SkillRepairAcceptedState::Workspace(_) => {
             receipt.scope == SkillReceiptScope::Workspace && receipt.skill.is_none()
         }
-        SkillRepairAcceptedState::ActiveSkill { slug, .. }
+        SkillRepairAcceptedState::AbsentSkill { slug }
+        | SkillRepairAcceptedState::ActiveSkill { slug, .. }
         | SkillRepairAcceptedState::ArchivedSkill { slug, .. } => {
             receipt.scope == SkillReceiptScope::Skill && receipt.skill.as_ref() == Some(slug)
         }
@@ -1623,12 +1648,13 @@ fn valid_repair_checkpoint(
 ) -> bool {
     if checkpoint.conflict_tip.is_empty()
         || checkpoint.accepted_tree.is_empty()
-        || checkpoint.accepted_files.is_empty()
         || !valid_portable_relative_paths(checkpoint.changed_paths.iter().map(String::as_str))
     {
         return false;
     }
     let expected_paths = match &checkpoint.accepted_state {
+        SkillRepairAcceptedState::AbsentWorkspace
+        | SkillRepairAcceptedState::AbsentSkill { .. } => BTreeSet::new(),
         SkillRepairAcceptedState::Workspace(_) => {
             BTreeSet::from(["skills/workspace.meta.yaml".to_owned()])
         }
@@ -1647,6 +1673,8 @@ fn valid_repair_checkpoint(
         return false;
     }
     match &checkpoint.accepted_state {
+        SkillRepairAcceptedState::AbsentWorkspace
+        | SkillRepairAcceptedState::AbsentSkill { .. } => checkpoint.accepted_files.is_empty(),
         SkillRepairAcceptedState::Workspace(workspace) => yaml_matches(
             &checkpoint.accepted_files["skills/workspace.meta.yaml"],
             workspace,
@@ -1669,8 +1697,11 @@ fn exact_repair_raw_diff(
     checkpoint: &SkillConflictCheckpoint,
 ) -> BTreeSet<String> {
     let path_in_scope = |path: &str| match &checkpoint.accepted_state {
-        SkillRepairAcceptedState::Workspace(_) => path == "skills/workspace.meta.yaml",
-        SkillRepairAcceptedState::ActiveSkill { slug, .. } => {
+        SkillRepairAcceptedState::AbsentWorkspace | SkillRepairAcceptedState::Workspace(_) => {
+            path == "skills/workspace.meta.yaml"
+        }
+        SkillRepairAcceptedState::AbsentSkill { slug }
+        | SkillRepairAcceptedState::ActiveSkill { slug, .. } => {
             path.starts_with(&format!("skills/{}/", slug.as_str()))
                 || path.starts_with(&format!("archive/skills/{}/", slug.as_str()))
         }

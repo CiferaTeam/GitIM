@@ -706,6 +706,8 @@ fn repair_checkpoint(
 
 fn accepted_state_files(state: &SkillRepairAcceptedState) -> BTreeMap<String, Vec<u8>> {
     match state {
+        SkillRepairAcceptedState::AbsentWorkspace
+        | SkillRepairAcceptedState::AbsentSkill { .. } => BTreeMap::new(),
         SkillRepairAcceptedState::Workspace(workspace) => BTreeMap::from([(
             "skills/workspace.meta.yaml".to_owned(),
             serde_yaml::to_string(workspace).unwrap().into_bytes(),
