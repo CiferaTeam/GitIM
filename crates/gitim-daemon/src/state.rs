@@ -241,7 +241,16 @@ impl AppState {
                     if SkillSyncGuard::new(&self.repo_root)?.quarantine_pending()? {
                         continue;
                     }
-                    self.integrate_working_branch(IntegrationOperation::RebaseOntoOrigin)?;
+                    let expected_head = {
+                        let _guard = self
+                            .commit_lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        self.git_storage.rev_parse("HEAD")?
+                    };
+                    self.integrate_working_branch(IntegrationOperation::RebaseOntoOrigin {
+                        expected_head,
+                    })?;
                 }
                 Err(error) => return Err(error),
             }

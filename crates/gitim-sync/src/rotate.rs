@@ -109,6 +109,11 @@ pub fn try_fire_rotation(
     author: (&str, &str),
     created_at: &str,
 ) -> Result<RotationOutcome, RotationError> {
+    let captured_branch = storage.current_branch()?;
+    let captured_head = storage.rev_parse("HEAD")?;
+    if captured_branch != current_branch {
+        return Err(RotationError::Git(GitError::PushConflict));
+    }
     let skill_guard = crate::skill::guard::SkillSyncGuard::new(storage.root())
         .map_err(|error| RotationError::Epoch(error.to_string()))?;
     skill_guard
@@ -138,8 +143,11 @@ pub fn try_fire_rotation(
     skill_guard
         .quarantine_resolved()
         .map_err(|error| RotationError::Epoch(error.to_string()))?;
-    if storage.rev_parse(&origin_ref)? != captured_origin_oid {
-        return Ok(RotationOutcome::Lost);
+    if storage.current_branch()? != captured_branch
+        || storage.rev_parse("HEAD")? != captured_head
+        || storage.rev_parse(&origin_ref)? != captured_origin_oid
+    {
+        return Err(RotationError::Git(GitError::PushConflict));
     }
     // Zero-loss guard (review I3): the Lost path resets hard onto origin, so
     // fire may only proceed from a clean local == origin state. Any backlog

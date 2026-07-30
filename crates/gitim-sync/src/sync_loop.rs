@@ -487,15 +487,25 @@ struct ConflictReplayRollback<'a> {
     repo: &'a GitStorage,
     commit_lock: &'a Mutex<()>,
     saved_head: String,
+    recovery_branch: String,
+    recovery_head: String,
     armed: bool,
 }
 
 impl<'a> ConflictReplayRollback<'a> {
-    fn new(repo: &'a GitStorage, commit_lock: &'a Mutex<()>, saved_head: String) -> Self {
+    fn new(
+        repo: &'a GitStorage,
+        commit_lock: &'a Mutex<()>,
+        saved_head: String,
+        recovery_branch: String,
+        recovery_head: String,
+    ) -> Self {
         Self {
             repo,
             commit_lock,
             saved_head,
+            recovery_branch,
+            recovery_head,
             armed: false,
         }
     }
@@ -518,6 +528,16 @@ impl Drop for ConflictReplayRollback<'_> {
             .commit_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.repo.current_branch().ok().as_deref() != Some(self.recovery_branch.as_str())
+            || self.repo.rev_parse("HEAD").ok().as_deref() != Some(self.recovery_head.as_str())
+        {
+            warn!("sync: conflict replay rollback skipped because local HEAD moved after recovery");
+            return;
+        }
+        if self.repo.has_dirty_tracked_files().unwrap_or(true) {
+            warn!("sync: conflict replay rollback skipped because tracked files are dirty");
+            return;
+        }
         match self.repo.reset_hard_to(&self.saved_head) {
             Ok(()) => warn!(
                 "sync: conflict replay failed; restored pre-rebase HEAD {}",
@@ -546,6 +566,23 @@ fn complete_quick_session_pair(
         (None, None) => Ok(None),
         _ => Err(format!("{description} transaction is incomplete")),
     }
+}
+
+fn replay_parent_directories_available(
+    repo_root: &Path,
+    mut paths: impl Iterator<Item = PathBuf>,
+) -> bool {
+    paths.all(|path| {
+        let absolute = repo_root.join(path);
+        let mut parent = absolute.parent();
+        while let Some(candidate) = parent {
+            if candidate.exists() {
+                return candidate.is_dir();
+            }
+            parent = candidate.parent();
+        }
+        false
+    })
 }
 
 fn prepare_quick_session_resolutions(
@@ -827,10 +864,22 @@ fn enforce_divergence_threshold(
             return false;
         }
     };
+    let expected_head = {
+        let _guard = commit_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match repo.rev_parse("HEAD") {
+            Ok(head) => head,
+            Err(error) => {
+                error!("sync: divergence HEAD capture failed: {error}");
+                return false;
+            }
+        }
+    };
     if let Err(e) = guard.guarded_integrate(
         repo,
         commit_lock,
-        IntegrationOperation::HardDivergenceRecovery,
+        IntegrationOperation::HardDivergenceRecovery { expected_head },
     ) {
         error!("sync: divergence safety net hard reset failed: {}", e);
         return false;
@@ -958,81 +1007,115 @@ fn epoch_fence_and_follow(
     }
 }
 
-/// Last-resort migrate: capture unpushed `.thread` additions, discard the
-/// local commits, follow the redirect with a clean tree, then re-apply the
-/// captured messages through the renumbering resolver (same machinery as
-/// sync's rebase-conflict path, different base branch).
-///
-/// Scope judgment (v1): only `.thread` content is carried — that's the
-/// zero-loss guarantee's object. Unpushed meta/board edits are state files
-/// with last-writer-wins semantics; losing one in this already-rare double
-/// conflict means redoing a join/rename, not losing a message. Renumber
-/// mappings are dropped (no on_renumbered here): SSE consumers may show a
-/// stale line number until the next poll.
+struct EpochReplaySnapshot {
+    branch: String,
+    head: String,
+    additions: HashMap<PathBuf, String>,
+    metas: HashMap<PathBuf, Option<String>>,
+}
+
+fn capture_epoch_replay_snapshot(
+    repo: &GitStorage,
+    commit_lock: &Mutex<()>,
+) -> Result<EpochReplaySnapshot, GitError> {
+    let _snapshot_guard = commit_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let branch = repo.current_branch()?;
+    let head = repo.rev_parse("HEAD")?;
+    let mut additions = repo.diff_unpushed("*.thread")?;
+    additions.retain(|path, _| {
+        let path = path.to_string_lossy();
+        !path.starts_with("skills/") && !path.starts_with("archive/skills/")
+    });
+
+    let changed_meta_files = repo.changed_files_unpushed("*.meta.yaml")?;
+    let mut metas = HashMap::new();
+    for path in changed_meta_files {
+        let path_text = path.to_string_lossy();
+        if path_text.starts_with("skills/") || path_text.starts_with("archive/skills/") {
+            continue;
+        }
+        metas.insert(path.clone(), repo.show_file_at_ref(&head, &path_text)?);
+    }
+
+    Ok(EpochReplaySnapshot {
+        branch,
+        head,
+        additions,
+        metas,
+    })
+}
+
+/// Last-resort migrate: atomically capture the current branch, exact HEAD,
+/// unpushed `.thread` additions, and meta snapshots; follow the redirect
+/// only if that branch/HEAD pair remains current; then re-apply the captured
+/// state through the normal content resolvers.
 fn migrate_via_content_replay(
     repo: &GitStorage,
     skill_guard: &SkillSyncGuard,
     commit_lock: &Mutex<()>,
     rebase_author: Option<&(String, String)>,
 ) {
-    let additions = match repo.diff_unpushed("*.thread") {
-        Ok(mut additions) => {
-            additions.retain(|path, _| {
-                let path = path.to_string_lossy();
-                !path.starts_with("skills/") && !path.starts_with("archive/skills/")
-            });
-            additions
-        }
+    migrate_via_content_replay_with_snapshot_hook(
+        repo,
+        skill_guard,
+        commit_lock,
+        rebase_author,
+        &|| {},
+    );
+}
+
+fn migrate_via_content_replay_with_snapshot_hook(
+    repo: &GitStorage,
+    skill_guard: &SkillSyncGuard,
+    commit_lock: &Mutex<()>,
+    rebase_author: Option<&(String, String)>,
+    after_snapshot: &dyn Fn(),
+) {
+    let snapshot = match capture_epoch_replay_snapshot(repo, commit_lock) {
+        Ok(snapshot) => snapshot,
         Err(e) => {
             warn!("epoch migrate replay: capture failed: {e}");
             return;
         }
     };
-    // Snapshot before the discard. The inner follow does a NETWORK round
-    // trip (fetch) between the discard and the re-apply — if it fails
-    // (offline, unreadable origin epoch.yaml), rolling back to this sha is
-    // what keeps "any failure mode = delay, never loss" true. Without it
-    // the captured additions die with this stack frame.
-    let saved_sha = match repo.rev_parse("HEAD") {
-        Ok(s) => s.trim().to_string(),
-        Err(e) => {
-            warn!("epoch migrate replay: HEAD snapshot failed: {e}");
-            return;
-        }
-    };
+    after_snapshot();
     match skill_guard.guarded_integrate(
         repo,
         commit_lock,
         IntegrationOperation::FollowEpochRedirectAfterDiscard {
-            expected_head: saved_sha.clone(),
+            expected_head: snapshot.head.clone(),
         },
     ) {
         Ok(_) => {}
+        Err(SkillSyncError::Git(GitError::PushConflict)) => {
+            warn!(
+                "epoch migrate replay: {}@{} moved after capture; restarting next cycle",
+                snapshot.branch, snapshot.head
+            );
+            return;
+        }
         Err(e) => {
-            warn!("epoch migrate replay: clean follow failed ({e}); restoring");
-            let restore = {
-                let _guard = commit_lock
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                repo.reset_hard_to(&saved_sha)
-            };
-            if let Err(e) = restore {
-                warn!("epoch migrate replay: restore failed: {e} (recover via reflog {saved_sha})");
-            }
+            warn!("epoch migrate replay: clean follow failed ({e}); retrying next cycle");
             return;
         }
     }
-    if additions.is_empty() {
+    if snapshot.additions.is_empty() && snapshot.metas.is_empty() {
         return;
     }
     let _rewrite_guard = commit_lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let (resolved_files, mappings) = match conflict::resolve_content(&additions, repo.root()) {
-        Ok(r) => r,
-        Err(e) => {
-            warn!("epoch migrate replay: resolve failed: {e} — messages remain captured-only; manual recovery from reflog required");
-            return;
+    let (resolved_files, mappings) = if snapshot.additions.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        match conflict::resolve_content(&snapshot.additions, repo.root()) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("epoch migrate replay: resolve failed: {e} — messages remain recoverable from {}", snapshot.head);
+                return;
+            }
         }
     };
     let mut paths: Vec<String> = Vec::new();
@@ -1050,8 +1133,102 @@ fn migrate_via_content_replay(
         }
         paths.push(f.path.to_string_lossy().to_string());
     }
+    for (path, content) in &snapshot.metas {
+        let abs = repo.root().join(path);
+        match content {
+            Some(local_content) if path.starts_with("channels/") && abs.exists() => {
+                let remote_content = match std::fs::read_to_string(&abs) {
+                    Ok(content) => content,
+                    Err(error) => {
+                        warn!(
+                            "epoch migrate replay: read remote meta {} failed: {error}",
+                            path.display()
+                        );
+                        return;
+                    }
+                };
+                let local_meta: gitim_core::types::ChannelMeta =
+                    match serde_yaml::from_str(local_content) {
+                        Ok(meta) => meta,
+                        Err(error) => {
+                            warn!(
+                                "epoch migrate replay: parse local meta {} failed: {error}",
+                                path.display()
+                            );
+                            return;
+                        }
+                    };
+                let remote_meta: gitim_core::types::ChannelMeta =
+                    match serde_yaml::from_str(&remote_content) {
+                        Ok(meta) => meta,
+                        Err(error) => {
+                            warn!(
+                                "epoch migrate replay: parse remote meta {} failed: {error}",
+                                path.display()
+                            );
+                            return;
+                        }
+                    };
+                let merged = conflict::merge_channel_meta(&local_meta, &remote_meta);
+                let yaml = match serde_yaml::to_string(&merged) {
+                    Ok(yaml) => yaml,
+                    Err(error) => {
+                        warn!(
+                            "epoch migrate replay: serialize meta {} failed: {error}",
+                            path.display()
+                        );
+                        return;
+                    }
+                };
+                if let Err(error) = std::fs::write(&abs, yaml) {
+                    warn!(
+                        "epoch migrate replay: write meta {} failed: {error}",
+                        path.display()
+                    );
+                    return;
+                }
+            }
+            Some(local_content) => {
+                if let Some(parent) = abs.parent() {
+                    if let Err(error) = std::fs::create_dir_all(parent) {
+                        warn!(
+                            "epoch migrate replay: create meta dir {} failed: {error}",
+                            parent.display()
+                        );
+                        return;
+                    }
+                }
+                if let Err(error) = std::fs::write(&abs, local_content) {
+                    warn!(
+                        "epoch migrate replay: write meta {} failed: {error}",
+                        path.display()
+                    );
+                    return;
+                }
+            }
+            None if abs.exists() => {
+                if let Err(error) = std::fs::remove_file(&abs) {
+                    warn!(
+                        "epoch migrate replay: remove meta {} failed: {error}",
+                        path.display()
+                    );
+                    return;
+                }
+            }
+            None => {}
+        }
+        paths.push(path.to_string_lossy().to_string());
+    }
+    paths.sort();
+    paths.dedup();
     let path_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
-    let msg = build_rebase_commit_msg(&mappings, &additions);
+    let msg = if snapshot.additions.is_empty() {
+        "meta: sync after epoch redirect".to_string()
+    } else if snapshot.metas.is_empty() {
+        build_rebase_commit_msg(&mappings, &snapshot.additions)
+    } else {
+        "sync: messages/meta after epoch redirect".to_string()
+    };
     let author = rebase_author.map(|(n, e)| (n.as_str(), e.as_str()));
     match repo.add_and_commit_as(&path_refs, &msg, author) {
         Ok(()) => info!(
@@ -1069,6 +1246,26 @@ fn sync_with_push(
     on_pushed: &dyn Fn(String, String),
     on_renumbered: &dyn Fn(PathBuf, u64, u64),
     rebase_author: Option<&(String, String)>,
+) -> SyncOutcome {
+    sync_with_push_with_snapshot_hook(
+        repo,
+        circuit,
+        commit_lock,
+        on_pushed,
+        on_renumbered,
+        rebase_author,
+        &|| {},
+    )
+}
+
+fn sync_with_push_with_snapshot_hook(
+    repo: &GitStorage,
+    circuit: &mut AuthCircuit,
+    commit_lock: &Mutex<()>,
+    on_pushed: &dyn Fn(String, String),
+    on_renumbered: &dyn Fn(PathBuf, u64, u64),
+    rebase_author: Option<&(String, String)>,
+    after_rebase_snapshot: &dyn Fn(),
 ) -> SyncOutcome {
     let guard = match SkillSyncGuard::new(repo.root()) {
         Ok(guard) => guard,
@@ -1188,6 +1385,13 @@ fn sync_with_push(
         let rebase_guard = commit_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let local_branch_before_rebase = match repo.current_branch() {
+            Ok(branch) => branch,
+            Err(error) => {
+                warn!("sync: failed to snapshot pre-rebase branch: {}", error);
+                return SyncOutcome::Normal;
+            }
+        };
         let local_head_before_rebase = match repo.rev_parse("HEAD") {
             Ok(head) => head,
             Err(error) => {
@@ -1240,9 +1444,16 @@ fn sync_with_push(
             }
         }
         drop(rebase_guard);
+        after_rebase_snapshot();
 
         // Try rebase (fast path: no .thread conflicts)
-        match guard.guarded_integrate(repo, commit_lock, IntegrationOperation::RebaseOntoOrigin) {
+        match guard.guarded_integrate(
+            repo,
+            commit_lock,
+            IntegrationOperation::RebaseOntoOrigin {
+                expected_head: local_head_before_rebase.clone(),
+            },
+        ) {
             Ok(_) => {
                 included_head_before_rewrite
                     .get_or_insert_with(|| local_head_before_rebase.clone());
@@ -1302,6 +1513,16 @@ fn sync_with_push(
                 let rebase_guard = commit_lock
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if repo.current_branch().ok().as_deref()
+                    != Some(local_branch_before_rebase.as_str())
+                    || repo.rev_parse("HEAD").ok().as_deref()
+                        != Some(local_head_before_rebase.as_str())
+                {
+                    warn!(
+                        "sync: local HEAD advanced after rebase snapshot; restarting conflict capture"
+                    );
+                    return SyncOutcome::Normal;
+                }
                 if let Err(error) = repo.abort_rebase() {
                     warn!("sync: failed to abort conflicted rebase: {}", error);
                     return SyncOutcome::Normal;
@@ -1363,26 +1584,47 @@ fn sync_with_push(
                     return SyncOutcome::Normal;
                 }
 
+                // SyncLoop manages git state; resolve_content does pure content transform
+                drop(rebase_guard);
+                let recovery = match guard.guarded_integrate(
+                    repo,
+                    commit_lock,
+                    IntegrationOperation::HardDivergenceRecovery {
+                        expected_head: local_head_before_rebase.clone(),
+                    },
+                ) {
+                    Ok(validation) => validation,
+                    Err(e) => {
+                        warn!("sync: discard_unpushed failed: {}", e);
+                        return SyncOutcome::Normal;
+                    }
+                };
+                let recovery_head = recovery.checkpoint.last_scanned_tip.clone();
                 let mut replay_rollback = ConflictReplayRollback::new(
                     repo,
                     commit_lock,
                     local_head_before_rebase.clone(),
+                    local_branch_before_rebase.clone(),
+                    recovery_head.clone(),
                 );
-
-                // SyncLoop manages git state; resolve_content does pure content transform
-                drop(rebase_guard);
-                if let Err(e) = guard.guarded_integrate(
-                    repo,
-                    commit_lock,
-                    IntegrationOperation::HardDivergenceRecovery,
-                ) {
-                    warn!("sync: discard_unpushed failed: {}", e);
-                    return SyncOutcome::Normal;
-                }
-                replay_rollback.arm();
                 let rebase_guard = commit_lock
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if repo.current_branch().ok().as_deref()
+                    != Some(local_branch_before_rebase.as_str())
+                    || repo.rev_parse("HEAD").ok().as_deref() != Some(recovery_head.as_str())
+                {
+                    warn!("sync: local HEAD advanced after conflict recovery; restarting capture");
+                    return SyncOutcome::Normal;
+                }
+                replay_rollback.arm();
+                if !replay_parent_directories_available(
+                    repo.root(),
+                    quick_session_resolutions.writes.keys().cloned(),
+                ) {
+                    warn!("sync: conflict replay destination is blocked by a non-directory parent");
+                    return SyncOutcome::Normal;
+                }
 
                 let mut modified_paths: Vec<String> = Vec::new();
 
@@ -1697,9 +1939,23 @@ fn sync_pull_only(
         return SyncOutcome::Normal;
     }
 
-    if let Err(e) =
-        guard.guarded_integrate(repo, commit_lock, IntegrationOperation::RebaseOntoOrigin)
-    {
+    let expected_head = {
+        let _guard = commit_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match repo.rev_parse("HEAD") {
+            Ok(head) => head,
+            Err(error) => {
+                warn!("sync: pull-only HEAD capture failed: {error}");
+                return SyncOutcome::Normal;
+            }
+        }
+    };
+    if let Err(e) = guard.guarded_integrate(
+        repo,
+        commit_lock,
+        IntegrationOperation::RebaseOntoOrigin { expected_head },
+    ) {
         // Emit the error to daemon log so the first failure is always
         // visible, then return RebaseFailed so the loop can throttle
         // subsequent warnings and apply backoff instead of retrying at
@@ -1722,7 +1978,300 @@ mod tests {
     use crate::test_util::{
         commit_file, configure_git_identity, push_n_commits_to_bare, seed_bare_with_clone,
     };
+    use std::path::Path;
     use std::process::Command as ProcessCommand;
+
+    #[test]
+    fn epoch_replay_snapshot_includes_a_handler_commit_waiting_before_capture() {
+        let (_bare, clone) = seed_bare_with_clone("A", "a@test.com");
+        commit_file(
+            clone.path(),
+            "general.thread",
+            "[L000001][P000000][@a][20260730T000000Z] base\n",
+            "base thread",
+        );
+        ProcessCommand::new("git")
+            .args(["push"])
+            .current_dir(clone.path())
+            .output()
+            .unwrap();
+
+        let lock = Arc::new(Mutex::new(()));
+        let held = lock.lock().unwrap();
+        let worker_lock = lock.clone();
+        let worker_root = clone.path().to_path_buf();
+        let worker = std::thread::spawn(move || {
+            capture_epoch_replay_snapshot(&GitStorage::new(&worker_root), &worker_lock)
+        });
+
+        let content = concat!(
+            "[L000001][P000000][@a][20260730T000000Z] base\n",
+            "[L000002][P000001][@a][20260730T000001Z] handler message\n"
+        );
+        commit_file(
+            clone.path(),
+            "general.thread",
+            content,
+            "handler commit before replay capture",
+        );
+        let handler_head = GitStorage::new(clone.path()).rev_parse("HEAD").unwrap();
+        drop(held);
+
+        let snapshot = worker.join().unwrap().unwrap();
+        assert_eq!(snapshot.head, handler_head);
+        assert_eq!(snapshot.branch, "main");
+        assert!(snapshot
+            .additions
+            .get(Path::new("general.thread"))
+            .is_some_and(|addition| addition.contains("handler message")));
+    }
+
+    #[test]
+    fn epoch_content_replay_restarts_when_a_handler_commits_after_snapshot() {
+        let (bare, firer) = seed_bare_with_clone("A", "a@test.com");
+        let follower = tempfile::TempDir::new().unwrap();
+        ProcessCommand::new("git")
+            .args([
+                "clone",
+                bare.path().to_str().unwrap(),
+                follower.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        configure_git_identity(follower.path(), "B", "b@test.com");
+
+        let firer_repo = GitStorage::new(firer.path());
+        let archive = tempfile::TempDir::new().unwrap();
+        assert!(matches!(
+            crate::rotate::try_fire_rotation(
+                &firer_repo,
+                &Mutex::new(()),
+                "main",
+                1,
+                archive.path(),
+                ("A", "a@test.com"),
+                "2026-07-30T00:00:00Z",
+            )
+            .unwrap(),
+            crate::rotate::RotationOutcome::Won { .. }
+        ));
+        let remote_message = "[L000001][P000000][@a][20260730T000000Z] remote epoch message\n";
+        commit_file(
+            firer.path(),
+            "general.thread",
+            remote_message,
+            "remote epoch message",
+        );
+        ProcessCommand::new("git")
+            .args(["push"])
+            .current_dir(firer.path())
+            .output()
+            .unwrap();
+
+        let first_local = "[L000001][P000000][@b][20260730T000001Z] first local message\n";
+        commit_file(
+            follower.path(),
+            "general.thread",
+            first_local,
+            "first local message",
+        );
+        let repo = GitStorage::new(follower.path());
+        let guard = SkillSyncGuard::new(follower.path()).unwrap();
+        let lock = Mutex::new(());
+        let raced = AtomicBool::new(false);
+        let hook = || {
+            if raced.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let _handler_guard = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let second_local = concat!(
+                "[L000001][P000000][@b][20260730T000001Z] first local message\n",
+                "[L000002][P000001][@b][20260730T000002Z] raced local message\n"
+            );
+            commit_file(
+                follower.path(),
+                "general.thread",
+                second_local,
+                "handler commit after epoch replay snapshot",
+            );
+        };
+
+        migrate_via_content_replay_with_snapshot_hook(
+            &repo,
+            &guard,
+            &lock,
+            Some(&("B".to_owned(), "b@test.com".to_owned())),
+            &hook,
+        );
+        assert_eq!(repo.current_branch().unwrap(), "main");
+        let after_race = std::fs::read_to_string(follower.path().join("general.thread")).unwrap();
+        assert!(after_race.contains("first local message"));
+        assert!(after_race.contains("raced local message"));
+
+        migrate_via_content_replay(
+            &repo,
+            &guard,
+            &lock,
+            Some(&("B".to_owned(), "b@test.com".to_owned())),
+        );
+        assert_eq!(repo.current_branch().unwrap(), "main-epoch-2");
+        let replayed = std::fs::read_to_string(follower.path().join("general.thread")).unwrap();
+        assert!(replayed.contains("remote epoch message"));
+        assert!(replayed.contains("first local message"));
+        assert!(replayed.contains("raced local message"));
+
+        let mut circuit = AuthCircuit::new(Arc::new(AtomicBool::new(false)));
+        assert!(matches!(
+            sync_with_push(
+                &repo,
+                &mut circuit,
+                &lock,
+                &|_, _| {},
+                &|_, _, _| {},
+                Some(&("B".to_owned(), "b@test.com".to_owned())),
+            ),
+            SyncOutcome::Normal
+        ));
+        repo.fetch().unwrap();
+        let published = repo
+            .show_file_at_ref("origin/main-epoch-2", "general.thread")
+            .unwrap()
+            .unwrap();
+        assert!(published.contains("remote epoch message"));
+        assert!(published.contains("first local message"));
+        assert!(published.contains("raced local message"));
+    }
+
+    #[test]
+    fn sync_rebase_restarts_when_a_handler_commits_after_conflict_snapshot() {
+        let (bare, clone) = seed_bare_with_clone("A", "a@test.com");
+        let base = "[L000001][P000000][@a][20260730T000000Z] base\n";
+        commit_file(clone.path(), "general.thread", base, "base thread");
+        ProcessCommand::new("git")
+            .args(["push"])
+            .current_dir(clone.path())
+            .output()
+            .unwrap();
+
+        let helper = tempfile::TempDir::new().unwrap();
+        ProcessCommand::new("git")
+            .args([
+                "clone",
+                bare.path().to_str().unwrap(),
+                helper.path().to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        configure_git_identity(helper.path(), "H", "h@test.com");
+        let remote_content =
+            format!("{base}[L000002][P000001][@h][20260730T000001Z] remote conflict\n");
+        commit_file(
+            helper.path(),
+            "general.thread",
+            &remote_content,
+            "remote conflict",
+        );
+        ProcessCommand::new("git")
+            .args(["push"])
+            .current_dir(helper.path())
+            .output()
+            .unwrap();
+
+        let first_local = format!("{base}[L000002][P000001][@a][20260730T000002Z] first local\n");
+        commit_file(
+            clone.path(),
+            "general.thread",
+            &first_local,
+            "first local conflict",
+        );
+
+        let repo = GitStorage::new(clone.path());
+        let lock = Mutex::new(());
+        let raced = AtomicBool::new(false);
+        let hook = || {
+            if raced.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let _handler_guard = lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let second_local =
+                format!("{first_local}[L000003][P000002][@a][20260730T000003Z] raced local\n");
+            commit_file(
+                clone.path(),
+                "general.thread",
+                &second_local,
+                "handler commit after rebase snapshot",
+            );
+        };
+        let mut circuit = AuthCircuit::new(Arc::new(AtomicBool::new(false)));
+        let outcome = sync_with_push_with_snapshot_hook(
+            &repo,
+            &mut circuit,
+            &lock,
+            &|_, _| {},
+            &|_, _, _| {},
+            Some(&("a".to_owned(), "a@test.com".to_owned())),
+            &hook,
+        );
+        assert!(matches!(outcome, SyncOutcome::Normal));
+        let after_race = std::fs::read_to_string(clone.path().join("general.thread")).unwrap();
+        assert!(after_race.contains("first local"));
+        assert!(after_race.contains("raced local"));
+
+        let outcome = sync_with_push(
+            &repo,
+            &mut circuit,
+            &lock,
+            &|_, _| {},
+            &|_, _, _| {},
+            Some(&("a".to_owned(), "a@test.com".to_owned())),
+        );
+        assert!(matches!(outcome, SyncOutcome::Normal));
+        repo.fetch().unwrap();
+        let published = repo
+            .show_file_at_ref("origin/main", "general.thread")
+            .unwrap()
+            .unwrap();
+        assert!(published.contains("remote conflict"));
+        assert!(published.contains("first local"));
+        assert!(published.contains("raced local"));
+    }
+
+    #[test]
+    fn conflict_replay_rollback_never_resets_a_newer_handler_head() {
+        let (_bare, clone) = seed_bare_with_clone("A", "a@test.com");
+        let repo = GitStorage::new(clone.path());
+        let saved_head = repo.rev_parse("HEAD").unwrap();
+        commit_file(
+            clone.path(),
+            "recovery.thread",
+            "[L000001][P000000][@a][20260730T000000Z] recovery\n",
+            "simulated recovery head",
+        );
+        let recovery_head = repo.rev_parse("HEAD").unwrap();
+        let lock = Mutex::new(());
+        let mut rollback =
+            ConflictReplayRollback::new(&repo, &lock, saved_head, "main".to_owned(), recovery_head);
+        rollback.arm();
+
+        commit_file(
+            clone.path(),
+            "handler.thread",
+            "[L000001][P000000][@a][20260730T000001Z] handler race\n",
+            "handler commit before rollback",
+        );
+        let handler_head = repo.rev_parse("HEAD").unwrap();
+        drop(rollback);
+
+        assert_eq!(repo.rev_parse("HEAD").unwrap(), handler_head);
+        assert_eq!(
+            std::fs::read_to_string(clone.path().join("handler.thread")).unwrap(),
+            "[L000001][P000000][@a][20260730T000001Z] handler race\n"
+        );
+    }
 
     #[test]
     fn enforce_divergence_no_op_when_under_threshold() {

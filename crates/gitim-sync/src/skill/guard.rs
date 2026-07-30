@@ -26,8 +26,8 @@ pub struct SkillSyncGuard {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IntegrationOperation {
-    RebaseOntoOrigin,
-    HardDivergenceRecovery,
+    RebaseOntoOrigin { expected_head: String },
+    HardDivergenceRecovery { expected_head: String },
     FollowEpochRedirect,
     FollowEpochRedirectAfterDiscard { expected_head: String },
     CleanupFailedFire { orphan_branch: String },
@@ -129,6 +129,7 @@ impl SkillSyncGuard {
             Nothing,
             Ordinary { head: String },
             Quarantine(PendingQuarantinePush),
+            PublishedQuarantine { quarantine_ref: String },
         }
 
         let prepared = {
@@ -141,13 +142,23 @@ impl SkillSyncGuard {
             ensure_ref_equals(repo, &upstream_ref, &upstream_oid)?;
 
             if let Some(journal) = self.load_journal()? {
-                validate_user_archive_preconditions(repo, &upstream_oid, &journal.original_head)?;
-                PreparedPush::Quarantine(self.prepare_quarantine_locked(
-                    repo,
-                    author,
-                    journal,
-                    &upstream_oid,
-                )?)
+                if self.reconcile_published_quarantine_locked(repo, &journal, &upstream_oid)? {
+                    PreparedPush::PublishedQuarantine {
+                        quarantine_ref: journal.quarantine_ref,
+                    }
+                } else {
+                    validate_user_archive_preconditions(
+                        repo,
+                        &upstream_oid,
+                        &journal.original_head,
+                    )?;
+                    PreparedPush::Quarantine(self.prepare_quarantine_locked(
+                        repo,
+                        author,
+                        journal,
+                        &upstream_oid,
+                    )?)
+                }
             } else {
                 let original_head = repo.rev_parse("HEAD")?;
                 validate_user_archive_preconditions(repo, &upstream_oid, &original_head)?;
@@ -194,6 +205,9 @@ impl SkillSyncGuard {
                     quarantine_ref: pending.quarantine_ref,
                 })
             }
+            PreparedPush::PublishedQuarantine { quarantine_ref } => {
+                Ok(GuardedPushOutcome::RepairedAndPushed { quarantine_ref })
+            }
         }
     }
 
@@ -205,9 +219,8 @@ impl SkillSyncGuard {
     ) -> Result<IncomingSkillValidation, SkillSyncError> {
         let captured_branch = repo.current_branch()?;
         let captured_head = repo.rev_parse("HEAD")?;
-        if let IntegrationOperation::FollowEpochRedirectAfterDiscard { expected_head } = &operation
-        {
-            if expected_head != &captured_head {
+        if let Some(expected_head) = operation.expected_head() {
+            if expected_head != captured_head {
                 return Err(SkillSyncError::Git(GitError::PushConflict));
             }
         }
@@ -268,7 +281,7 @@ impl SkillSyncGuard {
         if journal.is_some()
             && matches!(
                 &operation,
-                IntegrationOperation::HardDivergenceRecovery
+                IntegrationOperation::HardDivergenceRecovery { .. }
                     | IntegrationOperation::FollowEpochRedirect
                     | IntegrationOperation::FollowEpochRedirectAfterDiscard { .. }
                     | IntegrationOperation::CleanupFailedFire { .. }
@@ -288,18 +301,31 @@ impl SkillSyncGuard {
         }
 
         match operation {
-            IntegrationOperation::RebaseOntoOrigin => {
-                repo.rebase_onto_exact(&current_upstream_oid)?;
+            IntegrationOperation::RebaseOntoOrigin { expected_head } => {
+                ensure_clean_tracked_worktree(repo)?;
+                if let Err(error) = repo.rebase_onto_exact(&current_upstream_oid) {
+                    repo.abort_rebase()?;
+                    if repo.current_branch()? != captured_branch
+                        || repo.rev_parse("HEAD")? != expected_head
+                    {
+                        return Err(SkillSyncError::LocalQuarantineBlocked(
+                            "failed rebase did not restore the expected local head".to_owned(),
+                        ));
+                    }
+                    return Err(error.into());
+                }
                 if let Some(mut journal) = journal {
                     journal.upstream_oid = current_upstream_oid.clone();
                     journal.repaired_head = Some(repo.rev_parse("HEAD")?);
                     self.save_journal(&journal)?;
                 }
             }
-            IntegrationOperation::HardDivergenceRecovery => {
+            IntegrationOperation::HardDivergenceRecovery { .. } => {
+                ensure_clean_tracked_worktree(repo)?;
                 repo.discard_unpushed_to(&current_upstream_oid)?;
             }
             IntegrationOperation::FollowEpochRedirect => {
+                ensure_clean_tracked_worktree(repo)?;
                 crate::rotate::follow_redirect_exact(
                     repo,
                     &captured_branch,
@@ -312,9 +338,11 @@ impl SkillSyncGuard {
                 )
                 .map_err(|error| SkillSyncError::EpochValidationBlocked(error.to_string()))?;
             }
-            IntegrationOperation::FollowEpochRedirectAfterDiscard { .. } => {
+            IntegrationOperation::FollowEpochRedirectAfterDiscard { expected_head } => {
+                ensure_clean_tracked_worktree(repo)?;
                 repo.discard_unpushed_to(&current_upstream_oid)?;
-                let followed = crate::rotate::follow_redirect_exact(
+                let intermediate_head = repo.rev_parse("HEAD")?;
+                let follow_result = crate::rotate::follow_redirect_exact(
                     repo,
                     &captured_branch,
                     &current_upstream_oid,
@@ -323,9 +351,24 @@ impl SkillSyncGuard {
                     captured_target
                         .as_ref()
                         .and_then(|captured| captured.oid.as_deref()),
-                )
-                .map_err(|error| SkillSyncError::EpochValidationBlocked(error.to_string()))?;
+                );
+                let followed = match follow_result {
+                    Ok(followed) => followed,
+                    Err(error) => {
+                        if repo.current_branch()? == captured_branch
+                            && repo.rev_parse("HEAD")? == intermediate_head
+                        {
+                            repo.reset_hard_to(&expected_head)?;
+                        }
+                        return Err(SkillSyncError::EpochValidationBlocked(error.to_string()));
+                    }
+                };
                 if !followed {
+                    if repo.current_branch()? == captured_branch
+                        && repo.rev_parse("HEAD")? == intermediate_head
+                    {
+                        repo.reset_hard_to(&expected_head)?;
+                    }
                     return Err(SkillSyncError::EpochValidationBlocked(
                         "epoch redirect follow was a no-op after discard".to_owned(),
                     ));
@@ -339,9 +382,7 @@ impl SkillSyncGuard {
                 {
                     return Ok(validation);
                 }
-                if repo.has_dirty_tracked_files()? {
-                    return Ok(validation);
-                }
+                ensure_clean_tracked_worktree(repo)?;
                 repo.discard_unpushed_to(&current_upstream_oid)?;
                 if let Some(orphan_oid) = captured_orphan
                     .as_ref()
@@ -456,8 +497,10 @@ impl SkillSyncGuard {
             let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
             let expected = journal.expected_branch_head();
             if current == expected {
+                ensure_clean_tracked_worktree(repo)?;
                 update_working_branch(repo, &journal.branch, repaired, expected)?;
             } else if current == repaired {
+                ensure_clean_tracked_worktree(repo)?;
                 repo.reset_hard_to(repaired)?;
             } else {
                 return Err(SkillSyncError::LocalQuarantineBlocked(
@@ -486,6 +529,41 @@ impl SkillSyncGuard {
             repaired_head: repaired.to_owned(),
             quarantine_ref: journal.quarantine_ref,
         })
+    }
+
+    fn reconcile_published_quarantine_locked(
+        &self,
+        repo: &GitStorage,
+        journal: &QuarantineJournal,
+        validated_upstream_oid: &str,
+    ) -> Result<bool, SkillSyncError> {
+        validate_journal(repo, journal)?;
+        ensure_quarantine_ref(repo, journal)?;
+        if journal.phase != QuarantinePhase::Moved {
+            return Ok(false);
+        }
+        let repaired = journal.repaired_head.as_deref().ok_or_else(|| {
+            SkillSyncError::LocalQuarantineBlocked(
+                "moved quarantine is missing repaired head".to_owned(),
+            )
+        })?;
+        if repaired != validated_upstream_oid
+            && !is_ancestor(repo, repaired, validated_upstream_oid)?
+        {
+            return Ok(false);
+        }
+
+        let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
+        if current != repaired && !is_ancestor(repo, repaired, &current)? {
+            let expected = journal.expected_branch_head();
+            if current != expected {
+                return Err(SkillSyncError::Git(GitError::PushConflict));
+            }
+            ensure_clean_tracked_worktree(repo)?;
+            update_working_branch(repo, &journal.branch, validated_upstream_oid, expected)?;
+        }
+        self.remove_journal()?;
+        Ok(true)
     }
 
     fn complete_quarantine_locked(
@@ -548,6 +626,17 @@ impl SkillSyncGuard {
             })?),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(quarantine_error("remove journal", error)),
+        }
+    }
+}
+
+impl IntegrationOperation {
+    fn expected_head(&self) -> Option<&str> {
+        match self {
+            Self::RebaseOntoOrigin { expected_head }
+            | Self::HardDivergenceRecovery { expected_head }
+            | Self::FollowEpochRedirectAfterDiscard { expected_head } => Some(expected_head),
+            Self::FollowEpochRedirect | Self::CleanupFailedFire { .. } => None,
         }
     }
 }
@@ -1153,6 +1242,15 @@ fn is_ancestor(
             String::from_utf8_lossy(&output.stderr).into_owned(),
         ))),
     }
+}
+
+fn ensure_clean_tracked_worktree(repo: &GitStorage) -> Result<(), SkillSyncError> {
+    if repo.has_dirty_tracked_files()? {
+        return Err(SkillSyncError::LocalQuarantineBlocked(
+            "tracked working-tree changes block a guarded rewrite".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn capture_remote_ref(

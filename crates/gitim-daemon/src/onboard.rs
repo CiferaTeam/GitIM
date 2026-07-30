@@ -329,7 +329,19 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
                     // Someone else already initialized — discard our commit and move on
                     warn!("ensure_repo: push conflict — discarding local init (someone else initialized)");
                     state
-                        .integrate_working_branch(IntegrationOperation::HardDivergenceRecovery)
+                        .integrate_working_branch(IntegrationOperation::HardDivergenceRecovery {
+                            expected_head: {
+                                let _guard = state
+                                    .commit_lock
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                state.git_storage.rev_parse("HEAD").map_err(|e| {
+                                    Response::error(format!(
+                                        "capture reset precondition failed: {e}"
+                                    ))
+                                })?
+                            },
+                        })
                         .map_err(|e| Response::error(format!("guarded reset failed: {e}")))?;
                 }
                 Err(e) => return Err(Response::error(format!("ensure_repo push failed: {}", e))),
@@ -899,7 +911,15 @@ mod tests {
         // Each bot needs to pull latest state first (simulating sync)
         for state in [&state_a, &state_b, &state_c] {
             state
-                .integrate_working_branch(IntegrationOperation::RebaseOntoOrigin)
+                .integrate_working_branch(IntegrationOperation::RebaseOntoOrigin {
+                    expected_head: {
+                        let _guard = state
+                            .commit_lock
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        state.git_storage.rev_parse("HEAD").unwrap()
+                    },
+                })
                 .unwrap();
             // Refresh users list from disk
             let users_dir = state.repo_root.join("users");

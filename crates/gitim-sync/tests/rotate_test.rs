@@ -2,9 +2,12 @@
 
 use gitim_sync::git::GitStorage;
 use gitim_sync::rotate::{
-    check_push_fence, follow_redirect, try_fire_rotation as try_fire_rotation_impl, RotationOutcome,
+    check_push_fence, follow_redirect, try_fire_rotation as try_fire_rotation_impl, RotationError,
+    RotationOutcome,
 };
 use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 mod support;
 use support::TestWorkingBranchPush;
@@ -100,6 +103,85 @@ fn under_threshold_returns_not_ready() {
     )
     .unwrap();
     assert!(matches!(o, RotationOutcome::NotReady));
+}
+
+#[test]
+fn fire_rejects_a_handler_commit_after_its_network_snapshot() {
+    let (bare, clone) = setup_bare_and_clone(5);
+    let storage = GitStorage::new(clone.path());
+    let captured_origin = storage.rev_parse("origin/main").unwrap();
+    let commit_lock = Arc::new(Mutex::new(()));
+    let held = commit_lock.lock().unwrap();
+    let worker_lock = commit_lock.clone();
+    let worker_root = clone.path().to_path_buf();
+    let worker = std::thread::spawn(move || {
+        let archive = tempfile::TempDir::new().unwrap();
+        try_fire_rotation_impl(
+            &GitStorage::new(&worker_root),
+            &worker_lock,
+            "main",
+            3,
+            archive.path(),
+            ("d", "d@g"),
+            "2026-06-10T00:00:00Z",
+        )
+    });
+
+    let checkpoint = clone.path().join(".gitim/skill-validation.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if std::fs::read_to_string(&checkpoint)
+            .is_ok_and(|contents| contents.contains(&captured_origin))
+        {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        std::fs::read_to_string(&checkpoint)
+            .unwrap_or_default()
+            .contains(&captured_origin),
+        "rotation must complete network validation before the handler race"
+    );
+
+    commit_file(
+        &clone,
+        "handler.thread",
+        "handler commit after rotation capture",
+    );
+    let handler_head = storage.rev_parse("HEAD").unwrap();
+    drop(held);
+
+    let error = worker.join().unwrap().unwrap_err();
+    assert!(matches!(
+        error,
+        RotationError::Git(gitim_sync::git::GitError::PushConflict)
+    ));
+    assert_eq!(head_branch(&clone), "main");
+    assert_eq!(storage.rev_parse("HEAD").unwrap(), handler_head);
+    assert!(!clone.path().join("gitim.epoch.yaml").exists());
+    assert!(
+        Command::new("git")
+            .args(["show-ref", "--verify", "--quiet", "refs/heads/main-epoch-2"])
+            .current_dir(clone.path())
+            .status()
+            .is_ok_and(|status| !status.success()),
+        "CAS rejection must not leave a local orphan branch"
+    );
+    assert!(
+        Command::new("git")
+            .args([
+                "--git-dir",
+                bare.path().to_str().unwrap(),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                "refs/heads/main-epoch-2",
+            ])
+            .status()
+            .is_ok_and(|status| !status.success()),
+        "CAS rejection must not publish a partial epoch"
+    );
 }
 
 #[test]
@@ -734,13 +816,17 @@ fn cleanup_refuses_when_tracked_files_dirty() {
     // Dirty a TRACKED file after the residue commit (f0.txt exists from setup).
     std::fs::write(clone.path().join("f0.txt"), "deferred message content").unwrap();
 
-    gitim_sync::rotate::cleanup_failed_fire(
+    let error = gitim_sync::rotate::cleanup_failed_fire(
         &storage,
         &std::sync::Mutex::new(()),
         "main",
         "main-epoch-2",
     )
-    .unwrap();
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("tracked working-tree changes"),
+        "unexpected cleanup error: {error}"
+    );
 
     let dirty = std::fs::read_to_string(clone.path().join("f0.txt")).unwrap();
     assert_eq!(dirty, "deferred message content", "dirty file must survive");
