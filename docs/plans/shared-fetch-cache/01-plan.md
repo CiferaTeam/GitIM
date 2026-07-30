@@ -234,9 +234,12 @@ impl GitStorage {
 }
 ```
 
-Both use exact `git config --get remote.origin.url` and
-`git config --get-all remote.origin.fetch` invocations, trim output, and
-return only generic, credential-free error messages when a command fails.
+The URL read uses exact null-delimited
+`git config --null --get-all remote.origin.url` output and accepts exactly one
+non-empty value without surrounding whitespace. Fetch refspec discovery uses
+`git config --get-all remote.origin.fetch` and requires exactly one standard
+value. Both return only generic, credential-free error messages when a command
+fails.
 Never feed config command stderr containing an origin URL into a returned
 error.
 
@@ -427,7 +430,10 @@ Add:
 
 ```rust
 impl GitStorage {
-    pub(crate) fn ensure_bare_cache(path: &Path) -> Result<(), GitError>;
+    pub(crate) fn ensure_bare_cache(
+        path: &Path,
+        object_format: GitObjectFormat,
+    ) -> Result<(), GitError>;
     pub(crate) fn publish_cache_generation(
         &self,
         cache_path: &Path,
@@ -1023,9 +1029,15 @@ Co-authored-by: Codex <codex@openai.com>
 - Task 5 contention scheduling and deterministic acceptance:
   `d575fd9b321528874b561b6ec7e84cd75de1999d`.
 - Task 5 retry-budget reset:
-  `a68fe55a552f9646a7101a5741545e4ed01d80c4`.
+  `a68fe55a552f9646a7101a5741545e4ed01d80c4`
+  (`fix(sync): reset cache retry budget`).
+- Whole-branch hardening validates a unique raw origin URL, requires a direct
+  canonical runtime directory, matches the source repository's Git object
+  format, replaces unsafe cache repositories, repairs invalid active
+  generations through an immutable `N+1` publication, and cleans inactive refs
+  after empty snapshots.
 - Scoped verification passed:
-  `cargo test -p gitim-sync` ran 204 tests,
+  `cargo test -p gitim-sync` ran 213 tests,
   `cargo fmt --all -- --check`,
   `cargo clippy -p gitim-sync --all-targets --no-deps --locked`, and
   `git diff --check`.

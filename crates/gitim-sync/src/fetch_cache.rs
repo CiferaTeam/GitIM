@@ -18,7 +18,7 @@
 
 #![allow(dead_code)]
 
-use crate::git::{GitError, GitStorage};
+use crate::git::{GitError, GitObjectFormat, GitStorage};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -109,6 +109,7 @@ struct CacheContext {
     lock_file: PathBuf,
     remote_identity: String,
     config_revision: ConfigRevision,
+    object_format: GitObjectFormat,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -195,9 +196,18 @@ struct MeView {
 fn discover(repo: &GitStorage) -> Option<CacheContext> {
     let clone_root = repo.root().canonicalize().ok()?;
     let workspace = find_workspace(&clone_root)?.canonicalize().ok()?;
+    let runtime_dir = workspace.join(".gitim-runtime");
+    if !std::fs::symlink_metadata(&runtime_dir)
+        .ok()?
+        .file_type()
+        .is_dir()
+        || runtime_dir.canonicalize().ok()? != runtime_dir
+    {
+        return None;
+    }
     validate_managed_layout(&workspace, &clone_root)?;
 
-    let config_path = workspace.join(".gitim-runtime/config.json");
+    let config_path = runtime_dir.join("config.json");
     let config: WorkspaceConfigView =
         serde_json::from_slice(&std::fs::read(&config_path).ok()?).ok()?;
     if config.workspace.canonicalize().ok()? != workspace || config.git.provider != "github" {
@@ -220,9 +230,9 @@ fn discover(repo: &GitStorage) -> Option<CacheContext> {
     if fetch_refspecs.as_slice() != [STANDARD_FETCH_REFSPEC] {
         return None;
     }
+    let object_format = repo.object_format().ok()?;
 
     let revision = config_revision(&config_path)?;
-    let runtime_dir = workspace.join(".gitim-runtime");
     Some(CacheContext {
         workspace,
         cache_repository: runtime_dir.join(CACHE_REPOSITORY_DIR),
@@ -231,6 +241,7 @@ fn discover(repo: &GitStorage) -> Option<CacheContext> {
         runtime_dir,
         remote_identity,
         config_revision: revision,
+        object_format,
     })
 }
 
@@ -456,6 +467,11 @@ fn cleanup_inactive_generations(context: &CacheContext, generation: u64) {
 }
 
 fn validate_active_generation(context: &CacheContext, state: &CacheState) -> Result<(), GitError> {
+    if !GitStorage::cache_repository_is_valid(&context.cache_repository, context.object_format) {
+        return Err(GitError::CommandFailed(
+            "fetch-cache repository validation failed".to_string(),
+        ));
+    }
     let manifest =
         GitStorage::cache_generation_manifest(&context.cache_repository, state.generation)?;
     if manifest != state.manifest {
@@ -534,37 +550,51 @@ where
                 progress.reset_contention_retries();
                 PullFetchResult::NeutralSkip(CacheNeutralHint::PreserveSchedule)
             } else if success_is_fresh(&state, now_ms, progress.interval) {
-                if !state.manifest.is_empty()
-                    && progress.applied_generation != Some(state.generation)
-                {
-                    if let Err(error) = validate_active_generation(&context, &state) {
-                        tracing::debug!(
-                            workspace = %context.workspace.display(),
-                            outcome = "fallback",
-                            reason = "active_generation_invalid",
-                            generation = state.generation,
-                            error = %error,
-                            "shared pull-fetch cache"
-                        );
-                        return direct_fallback(repo, progress, Some(state.generation));
-                    }
-                    match repo.import_cache_generation(&context.cache_repository, state.generation)
-                    {
-                        Ok(()) => {
-                            log_cache_outcome(&context, "follower_import", Some(state.generation));
-                            cleanup_inactive_generations(&context, state.generation);
-                        }
-                        Err(error) => {
+                if !state.manifest.is_empty() {
+                    if progress.applied_generation != Some(state.generation) {
+                        if let Err(error) = validate_active_generation(&context, &state) {
                             tracing::debug!(
                                 workspace = %context.workspace.display(),
-                                outcome = "fallback",
-                                reason = "import_failed",
+                                outcome = "repair",
+                                reason = "active_generation_invalid",
                                 generation = state.generation,
                                 error = %error,
                                 "shared pull-fetch cache"
                             );
-                            return direct_fallback(repo, progress, Some(state.generation));
+                            return refresh_as_leader_with_hooks(
+                                repo,
+                                &context,
+                                Some(&state),
+                                progress,
+                                clock,
+                                hooks,
+                            );
                         }
+                        match repo
+                            .import_cache_generation(&context.cache_repository, state.generation)
+                        {
+                            Ok(()) => {
+                                log_cache_outcome(
+                                    &context,
+                                    "follower_import",
+                                    Some(state.generation),
+                                );
+                                cleanup_inactive_generations(&context, state.generation);
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    workspace = %context.workspace.display(),
+                                    outcome = "fallback",
+                                    reason = "import_failed",
+                                    generation = state.generation,
+                                    error = %error,
+                                    "shared pull-fetch cache"
+                                );
+                                return direct_fallback(repo, progress, Some(state.generation));
+                            }
+                        }
+                    } else {
+                        log_cache_outcome(&context, "fresh_reuse", Some(state.generation));
                     }
                 } else {
                     log_cache_outcome(&context, "fresh_reuse", Some(state.generation));
@@ -627,6 +657,12 @@ where
         "leader_refresh",
         previous.map(|state| state.generation),
     );
+    let active_generation_invalid = previous.is_some_and(|state| {
+        !state.manifest.is_empty() && validate_active_generation(context, state).is_err()
+    });
+    let trustworthy_previous_generation = previous
+        .filter(|_| !active_generation_invalid)
+        .map(|state| state.generation);
     if let Err(error) = repo.fetch_cache_shadow() {
         let completed_at = clock();
         if let Err(persist_error) = publish_failure(
@@ -663,14 +699,15 @@ where
                 error = %error,
                 "shared pull-fetch cache"
             );
-            return direct_fallback(repo, progress, previous.map(|state| state.generation));
+            return direct_fallback(repo, progress, trustworthy_previous_generation);
         }
     };
     let manifest_changed = previous.is_none_or(|state| state.manifest != manifest);
+    let needs_publication = manifest_changed || active_generation_invalid;
     let generation = match previous {
         None if manifest.is_empty() => 0,
         None => 1,
-        Some(state) if !manifest_changed => state.generation,
+        Some(state) if !needs_publication => state.generation,
         Some(state) => {
             let Some(generation) = state.generation.checked_add(1) else {
                 log_cache_outcome(
@@ -678,13 +715,15 @@ where
                     "fallback_generation_overflow",
                     Some(state.generation),
                 );
-                return direct_fallback(repo, progress, Some(state.generation));
+                return direct_fallback(repo, progress, trustworthy_previous_generation);
             };
             generation
         }
     };
-    if manifest_changed && !manifest.is_empty() {
-        if let Err(error) = GitStorage::ensure_bare_cache(&context.cache_repository) {
+    if needs_publication && !manifest.is_empty() {
+        if let Err(error) =
+            GitStorage::ensure_bare_cache(&context.cache_repository, context.object_format)
+        {
             tracing::debug!(
                 workspace = %context.workspace.display(),
                 outcome = "fallback",
@@ -693,7 +732,7 @@ where
                 error = %error,
                 "shared pull-fetch cache"
             );
-            return direct_fallback(repo, progress, previous.map(|state| state.generation));
+            return direct_fallback(repo, progress, trustworthy_previous_generation);
         }
         if let Err(error) = repo.publish_cache_generation(&context.cache_repository, generation) {
             tracing::debug!(
@@ -704,7 +743,7 @@ where
                 error = %error,
                 "shared pull-fetch cache"
             );
-            return direct_fallback(repo, progress, previous.map(|state| state.generation));
+            return direct_fallback(repo, progress, trustworthy_previous_generation);
         }
     }
     let completed_at = clock();
@@ -729,7 +768,7 @@ where
                 error = %error,
                 "shared pull-fetch cache"
             );
-            return direct_fallback(repo, progress, previous.map(|state| state.generation));
+            return direct_fallback(repo, progress, trustworthy_previous_generation);
         }
     }
     let _ = hooks;
@@ -742,11 +781,11 @@ where
             error = %error,
             "shared pull-fetch cache"
         );
-        return direct_fallback(repo, progress, previous.map(|state| state.generation));
+        return direct_fallback(repo, progress, trustworthy_previous_generation);
     }
     log_cache_outcome(
         context,
-        if manifest_changed {
+        if needs_publication {
             "leader_published"
         } else {
             "leader_unchanged"
@@ -778,9 +817,11 @@ where
         }
         log_cache_outcome(context, "leader_import", Some(generation));
         progress.applied_generation = Some(generation);
-        cleanup_inactive_generations(context, generation);
     } else {
         progress.applied_generation = Some(generation);
+    }
+    if generation > 0 {
+        cleanup_inactive_generations(context, generation);
     }
     PullFetchResult::Ready
 }
@@ -1024,6 +1065,20 @@ mod tests {
         assert!(discover(&fixture.storage()).is_none());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn discovery_rejects_runtime_directory_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = WorkspaceFixture::agent("alice");
+        let runtime_dir = fixture.workspace.join(".gitim-runtime");
+        let external_runtime = fixture.root.path().join("external-runtime");
+        std::fs::rename(&runtime_dir, &external_runtime).expect("move runtime directory");
+        symlink(&external_runtime, &runtime_dir).expect("link external runtime directory");
+
+        assert!(discover(&fixture.storage()).is_none());
+    }
+
     #[test]
     fn discovery_falls_back_for_missing_or_malformed_config() {
         let fixture = WorkspaceFixture::human();
@@ -1081,6 +1136,52 @@ mod tests {
         fixture.set_origin("https://x-access-token:different-pat@github.com/CiferaTeam/GitIM.git");
 
         assert!(discover(&fixture.storage()).is_none());
+    }
+
+    #[test]
+    fn discovery_rejects_multiple_origin_urls_in_any_order() {
+        let mismatch = "https://x-access-token:test-pat-123@github.com/CiferaTeam/Other.git";
+
+        let mismatch_then_match = WorkspaceFixture::human();
+        git_config(
+            &mismatch_then_match.clone_root,
+            &["--unset-all", "remote.origin.url"],
+        );
+        git_config(
+            &mismatch_then_match.clone_root,
+            &["--add", "remote.origin.url", mismatch],
+        );
+        git_config(
+            &mismatch_then_match.clone_root,
+            &["--add", "remote.origin.url", RAW_ORIGIN],
+        );
+        assert!(discover(&mismatch_then_match.storage()).is_none());
+
+        let match_then_mismatch = WorkspaceFixture::human();
+        git_config(
+            &match_then_mismatch.clone_root,
+            &["--add", "remote.origin.url", mismatch],
+        );
+        assert!(discover(&match_then_mismatch.storage()).is_none());
+
+        let duplicate = WorkspaceFixture::human();
+        git_config(
+            &duplicate.clone_root,
+            &["--add", "remote.origin.url", RAW_ORIGIN],
+        );
+        assert!(discover(&duplicate.storage()).is_none());
+    }
+
+    #[test]
+    fn discovery_rejects_empty_or_whitespace_padded_origin_url() {
+        let empty = WorkspaceFixture::human();
+        empty.set_origin("");
+        assert!(discover(&empty.storage()).is_none());
+
+        let padded = WorkspaceFixture::human();
+        padded.set_origin(&format!(" {RAW_ORIGIN} "));
+
+        assert!(discover(&padded.storage()).is_none());
     }
 
     #[test]
@@ -2179,6 +2280,11 @@ mod tests {
             assert_eq!(empty_state.generation, 2);
             assert!(empty_state.manifest.is_empty());
             assert_eq!(leader_progress.applied_generation, Some(2));
+            assert!(cache_refs(
+                &context.cache_repository,
+                "refs/gitim-fetch-cache/generations/1/"
+            )
+            .is_empty());
 
             let offline_origin = fixture.workspace.root.path().join("origin-offline.git");
             std::fs::rename(&fixture.origin, &offline_origin)
@@ -2633,7 +2739,7 @@ mod tests {
         }
 
         #[test]
-        fn orchestration_corrupt_bare_fallback_records_trustworthy_generation() {
+        fn orchestration_corrupt_bare_repairs_with_new_generation() {
             let fixture = OrchestrationFixture::new();
             let repo = fixture.storage();
             let context = fixture.context();
@@ -2663,7 +2769,7 @@ mod tests {
                 now + Duration::from_secs(1),
                 PublicationHooks::default(),
             ));
-            assert_eq!(progress.applied_generation, Some(1));
+            assert_eq!(progress.applied_generation, Some(2));
             assert!(!progress.disabled);
             assert_eq!(
                 git_stdout(&fixture.seed, &["rev-parse", "refs/heads/main"]),
@@ -2684,11 +2790,12 @@ mod tests {
         }
 
         #[test]
-        fn orchestration_active_generation_manifest_mismatch_uses_direct_fetch() {
+        fn orchestration_fresh_follower_repairs_invalid_active_generation() {
             for tamper in ["missing", "altered"] {
                 let fixture = OrchestrationFixture::new();
                 let leader = fixture.storage();
                 let follower = fixture.add_agent("alice");
+                let later_follower = fixture.add_agent("bob");
                 let context = fixture.context();
                 let now = UNIX_EPOCH + Duration::from_secs(10_000);
                 let mut leader_progress = SyncCacheProgress::new(30);
@@ -2705,6 +2812,10 @@ mod tests {
                     selected.manifest[&format!("{CACHE_SHADOW_HEADS_PREFIX}main")].clone();
                 git_ok(
                     follower.root(),
+                    &["update-ref", "-d", "refs/remotes/origin/main"],
+                );
+                git_ok(
+                    later_follower.root(),
                     &["update-ref", "-d", "refs/remotes/origin/main"],
                 );
                 let generation_main = "refs/gitim-fetch-cache/generations/1/heads/main";
@@ -2755,14 +2866,135 @@ mod tests {
                     PublicationHooks::default(),
                 ));
 
-                assert_eq!(progress.applied_generation, Some(1), "{tamper}");
+                let repaired = read_state(&context.state_file)
+                    .expect("read repaired state")
+                    .expect("repaired state");
+                assert_eq!(repaired.generation, 2, "{tamper}");
+                assert_eq!(repaired.manifest, selected.manifest, "{tamper}");
+                validate_active_generation(&context, &repaired)
+                    .expect("repaired active generation matches manifest");
+                assert_eq!(progress.applied_generation, Some(2), "{tamper}");
                 assert!(!progress.disabled, "{tamper}");
                 assert_eq!(
                     git_stdout(follower.root(), &["rev-parse", "refs/remotes/origin/main"]),
                     expected_main,
                     "{tamper}"
                 );
+
+                std::fs::rename(
+                    &fixture.origin,
+                    fixture.workspace.root.path().join("origin-offline.git"),
+                )
+                .expect("make remote transport unavailable");
+                let mut later_progress = SyncCacheProgress::new(30);
+                assert_ready(fetch_for_pull_at(
+                    &later_follower,
+                    &mut later_progress,
+                    now + Duration::from_secs(2),
+                    PublicationHooks::default(),
+                ));
+                assert_eq!(later_progress.applied_generation, Some(2), "{tamper}");
+                assert_eq!(
+                    git_stdout(
+                        later_follower.root(),
+                        &["rev-parse", "refs/remotes/origin/main"]
+                    ),
+                    expected_main,
+                    "{tamper}"
+                );
             }
+        }
+
+        #[test]
+        fn orchestration_stale_leader_repairs_invalid_applied_generation() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now,
+                PublicationHooks::default(),
+            ));
+            let selected = read_state(&context.state_file)
+                .expect("read selected state")
+                .expect("selected state");
+            let expected_main =
+                selected.manifest[&format!("{CACHE_SHADOW_HEADS_PREFIX}main")].clone();
+            git_ok(
+                &context.cache_repository,
+                &[
+                    "update-ref",
+                    "-d",
+                    "refs/gitim-fetch-cache/generations/1/heads/main",
+                ],
+            );
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(30),
+                PublicationHooks::default(),
+            ));
+
+            let repaired = read_state(&context.state_file)
+                .expect("read repaired state")
+                .expect("repaired state");
+            assert_eq!(repaired.generation, 2);
+            assert_eq!(repaired.manifest, selected.manifest);
+            validate_active_generation(&context, &repaired)
+                .expect("repaired active generation matches manifest");
+            assert_eq!(progress.applied_generation, Some(2));
+            assert_eq!(
+                git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"]),
+                expected_main
+            );
+        }
+
+        #[test]
+        fn orchestration_active_repair_preserves_remote_error_classification() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now,
+                PublicationHooks::default(),
+            ));
+            let selected = read_state(&context.state_file)
+                .expect("read selected state")
+                .expect("selected state");
+            git_ok(
+                &context.cache_repository,
+                &[
+                    "update-ref",
+                    "-d",
+                    "refs/gitim-fetch-cache/generations/1/heads/main",
+                ],
+            );
+            fixture.fail_remote("HTTP 401 invalid username or token");
+
+            assert!(matches!(
+                fetch_for_pull_at(
+                    &repo,
+                    &mut progress,
+                    now + Duration::from_secs(30),
+                    PublicationHooks::default(),
+                ),
+                PullFetchResult::RemoteError(GitError::AuthFailed(_))
+            ));
+
+            let failed = read_state(&context.state_file)
+                .expect("read failed repair state")
+                .expect("failed repair state");
+            assert_eq!(failed.attempt, AttemptClass::AuthFailed);
+            assert_eq!(failed.generation, 1);
+            assert_eq!(failed.manifest, selected.manifest);
         }
 
         #[test]

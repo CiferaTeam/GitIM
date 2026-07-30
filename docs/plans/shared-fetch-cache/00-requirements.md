@@ -70,6 +70,9 @@ A clone is eligible when an ancestor contains a readable
 ancestor, whose `git.provider` is `github`, and whose credential-free
 `git.remote_url` and token are non-empty.
 
+The discovered `.gitim-runtime` entry must be the direct canonical directory
+under the workspace. A symlinked runtime directory is ineligible.
+
 The clone root must canonicalize to one of the Runtime-managed layouts:
 
 - `<workspace>/.gitim-runtime/human`; or
@@ -86,7 +89,8 @@ Runtime clone refspec:
 Repositories merely nested somewhere below a workspace, single-branch clones,
 and clones with custom or multiple fetch refspecs are not eligible.
 
-The raw `remote.origin.url` is read without URL rewriting and normalized
+The raw `remote.origin.url` is read without URL rewriting. Exactly one
+non-empty value without surrounding whitespace is required. It is normalized
 in-memory to a lowercased `github.com/<owner>/<repo>` identity plus its
 credential token. Both the repository identity and token must match the
 workspace configuration before any cache read or write. Raw credential-bearing
@@ -160,6 +164,13 @@ The leader uses its verified clone `origin` for remote access. The remote fetch
 writes only to a private shadow namespace in that clone. The shared bare
 repository imports the shadow refs and objects through a local filesystem path.
 
+The shared repository is a direct directory, carries the private
+`gitim.fetch-cache-schema=1` marker, uses the same `sha1` or `sha256` object
+format reported by the clone, and has no `remote.*` or `url.*` configuration.
+Missing or invalid markers, object-format mismatches, arbitrary bare
+repositories, and symlinks are quarantined and replaced without following the
+old path.
+
 Every published generation stores the credential-free `git.remote_url` from
 the workspace configuration as its remote identity. The lock holder validates
 that identity before any cache import or publication. PAT values and
@@ -200,6 +211,13 @@ namespace, then compares it with the last published manifest.
   incremented generation.
 - Unchanged manifest: advance the freshness timestamp without incrementing the
   generation.
+
+Before import, a follower validates the cache repository and requires the
+active generation to match the state manifest exactly. A stale leader performs
+the same validation even when it already applied that generation. If the
+active repository or generation is invalid, the lock holder refreshes the
+remote and publishes a repaired `N+1` generation, including when the remote
+manifest is unchanged.
 
 Published refs live under
 `refs/gitim-fetch-cache/generations/<generation>/heads/*`. State is the commit
@@ -457,10 +475,11 @@ clocks for freshness decisions and production retry hints for later cadence.
    limit suppresses them for two minutes, and both leave follower circuit state
    unchanged.
 5. Concurrent daemons either acquire the shared lock within one second or
-   neutrally skip without starting direct fetches; an actual lock I/O,
-   metadata, bare-repository, or import failure falls back to direct fetch.
-6. A credential scan of `.gitim-runtime/` cache artifacts and test logs finds
-   no PAT or credential-bearing URL added by this feature.
+   neutrally skip without starting direct fetches. Lock I/O, metadata, state,
+   or import failures retain the direct-fetch fallback; an invalid active
+   cache is rebuilt and published as the next immutable generation.
+6. A credential scan of `.gitim-runtime/` cache artifacts finds no PAT or
+   credential-bearing URL added by this feature.
 7. A workspace identity, origin identity, token, agent-handler, or fetch-refspec
    mismatch disables cache reads and writes.
 8. Current remote branches and `main-epoch-*` refs have identical object IDs in
@@ -550,7 +569,7 @@ finding above.
 
 ## Final verification
 
-- `cargo test -p gitim-sync` — pass, 204 tests across unit and integration
+- `cargo test -p gitim-sync` — pass, 213 tests across unit and integration
   targets.
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy -p gitim-sync --all-targets --no-deps --locked` — pass.

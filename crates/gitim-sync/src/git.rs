@@ -22,7 +22,34 @@ const GIT_HTTP_TIMEOUT_ARGS: &[&str] = &[
 
 const CACHE_REMOTE_HEADS: &str = "refs/gitim-fetch-cache/remote/heads";
 const CACHE_GENERATIONS: &str = "refs/gitim-fetch-cache/generations";
+const CACHE_SCHEMA_MARKER_KEY: &str = "gitim.fetch-cache-schema";
+const CACHE_SCHEMA_MARKER_VALUE: &str = "1";
 static CACHE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitObjectFormat {
+    Sha1,
+    Sha256,
+}
+
+impl GitObjectFormat {
+    fn parse(value: &str) -> Result<Self, GitError> {
+        match value {
+            "sha1" => Ok(Self::Sha1),
+            "sha256" => Ok(Self::Sha256),
+            _ => Err(GitError::CommandFailed(
+                "unsupported Git object format".to_string(),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sha1 => "sha1",
+            Self::Sha256 => "sha256",
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum GitError {
@@ -281,7 +308,7 @@ fn cache_scratch_path(path: &Path, kind: &str) -> Result<PathBuf, GitError> {
     for _ in 0..32 {
         let sequence = CACHE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(format!(".{name}.{kind}-{}-{sequence}", std::process::id()));
-        if !candidate.exists() {
+        if std::fs::symlink_metadata(&candidate).is_err() {
             return Ok(candidate);
         }
     }
@@ -299,14 +326,40 @@ fn remove_cache_path(path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn is_valid_bare_cache(path: &Path) -> bool {
-    if !path.is_dir() {
+fn object_format_at(path: &Path) -> Result<GitObjectFormat, GitError> {
+    let output = run_git(&["rev-parse", "--show-object-format"], path)?;
+    let value = std::str::from_utf8(&output.stdout)
+        .map_err(|_| GitError::CommandFailed("Git object format is not UTF-8".to_string()))?;
+    GitObjectFormat::parse(value.trim())
+}
+
+fn is_valid_bare_cache(path: &Path, expected_object_format: GitObjectFormat) -> bool {
+    if !std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|metadata| metadata.file_type().is_dir())
+    {
         return false;
     }
-    run_git_command(&["rev-parse", "--is-bare-repository"], path)
+    let is_bare = run_git_command(&["rev-parse", "--is-bare-repository"], path)
         .ok()
         .filter(|output| output.status.success())
-        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "true")
+        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "true");
+    if !is_bare || object_format_at(path).ok() != Some(expected_object_format) {
+        return false;
+    }
+    let marker = run_git_command(
+        &["config", "--null", "--get-all", CACHE_SCHEMA_MARKER_KEY],
+        path,
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .is_some_and(|output| output.stdout == format!("{CACHE_SCHEMA_MARKER_VALUE}\0").as_bytes());
+    if !marker {
+        return false;
+    }
+    run_git_command(&["config", "--get-regexp", "^(remote\\.|url\\.)"], path)
+        .ok()
+        .is_some_and(|output| output.status.code() == Some(1) && output.stdout.is_empty())
 }
 
 fn validate_cache_generation(generation: u64) -> Result<(), GitError> {
@@ -427,20 +480,38 @@ impl GitStorage {
         run_git_best_effort(&["remote", "get-url", "origin"], &self.root).is_some()
     }
 
+    pub(crate) fn object_format(&self) -> Result<GitObjectFormat, GitError> {
+        object_format_at(&self.root)
+    }
+
     pub(crate) fn raw_origin_url(&self) -> Result<String, GitError> {
-        let output = run_git_command(&["config", "--get", "remote.origin.url"], &self.root)
-            .map_err(|_| GitError::CommandFailed("failed to read raw origin URL".to_string()))?;
+        let output = run_git_command(
+            &["config", "--null", "--get-all", "remote.origin.url"],
+            &self.root,
+        )
+        .map_err(|_| GitError::CommandFailed("failed to read raw origin URL".to_string()))?;
         if !output.status.success() {
             return Err(GitError::CommandFailed(
                 "failed to read raw origin URL".to_string(),
             ));
         }
-        let value = String::from_utf8(output.stdout)
-            .map_err(|_| GitError::CommandFailed("raw origin URL is not UTF-8".to_string()))?;
-        let value = value.trim();
-        if value.is_empty() {
+        let values = output.stdout.strip_suffix(b"\0").ok_or_else(|| {
+            GitError::CommandFailed("raw origin URL list is malformed".to_string())
+        })?;
+        let mut values = values.split(|byte| *byte == 0);
+        let value = values
+            .next()
+            .ok_or_else(|| GitError::CommandFailed("raw origin URL list is empty".to_string()))?;
+        if values.next().is_some() {
             return Err(GitError::CommandFailed(
-                "raw origin URL is empty".to_string(),
+                "raw origin URL list must contain exactly one value".to_string(),
+            ));
+        }
+        let value = std::str::from_utf8(value)
+            .map_err(|_| GitError::CommandFailed("raw origin URL is not UTF-8".to_string()))?;
+        if value.is_empty() || value.trim() != value {
+            return Err(GitError::CommandFailed(
+                "raw origin URL is invalid".to_string(),
             ));
         }
         Ok(value.to_string())
@@ -525,8 +596,11 @@ impl GitStorage {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn ensure_bare_cache(path: &Path) -> Result<(), GitError> {
-        if is_valid_bare_cache(path) {
+    pub(crate) fn ensure_bare_cache(
+        path: &Path,
+        object_format: GitObjectFormat,
+    ) -> Result<(), GitError> {
+        if is_valid_bare_cache(path, object_format) {
             return Ok(());
         }
 
@@ -536,7 +610,18 @@ impl GitStorage {
         std::fs::create_dir_all(parent)?;
         let temporary = cache_scratch_path(path, "new")?;
         let temporary_arg = cache_path_argument(&temporary)?;
-        if let Err(error) = run_git(&["init", "--bare", temporary_arg], parent) {
+        let object_format_arg = format!("--object-format={}", object_format.as_str());
+        if let Err(error) = run_git(
+            &["init", "--bare", &object_format_arg, temporary_arg],
+            parent,
+        ) {
+            let _ = remove_cache_path(&temporary);
+            return Err(error);
+        }
+        if let Err(error) = run_git(
+            &["config", CACHE_SCHEMA_MARKER_KEY, CACHE_SCHEMA_MARKER_VALUE],
+            &temporary,
+        ) {
             let _ = remove_cache_path(&temporary);
             return Err(error);
         }
@@ -557,7 +642,17 @@ impl GitStorage {
             let _ = remove_cache_path(&temporary);
             return Err(GitError::Io(error));
         }
-        Ok(())
+        if is_valid_bare_cache(path, object_format) {
+            Ok(())
+        } else {
+            Err(GitError::CommandFailed(
+                "fetch-cache repository validation failed".to_string(),
+            ))
+        }
+    }
+
+    pub(crate) fn cache_repository_is_valid(path: &Path, object_format: GitObjectFormat) -> bool {
+        is_valid_bare_cache(path, object_format)
     }
 
     #[allow(dead_code)]
@@ -1333,8 +1428,16 @@ mod tests {
 
     impl CacheGitFixture {
         fn new() -> Self {
+            Self::with_object_format("sha1")
+        }
+
+        fn with_object_format(object_format: &str) -> Self {
             let origin = tempfile::TempDir::new().unwrap();
-            git_test_ok(origin.path(), &["init", "--bare", "-b", "main"]);
+            let object_format_arg = format!("--object-format={object_format}");
+            git_test_ok(
+                origin.path(),
+                &["init", "--bare", &object_format_arg, "-b", "main"],
+            );
 
             let leader = tempfile::TempDir::new().unwrap();
             git_test_ok(
@@ -1550,13 +1653,13 @@ mod tests {
         let root = tempfile::TempDir::new().unwrap();
         let cache_path = root.path().join("fetch-cache.git");
 
-        GitStorage::ensure_bare_cache(&cache_path).unwrap();
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
         assert_eq!(
             git_test_output(&cache_path, &["rev-parse", "--is-bare-repository"]),
             "true"
         );
         git_test_ok(&cache_path, &["config", "cache.test-marker", "present"]);
-        GitStorage::ensure_bare_cache(&cache_path).unwrap();
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
         assert_eq!(
             git_test_output(&cache_path, &["config", "--get", "cache.test-marker"]),
             "present"
@@ -1565,7 +1668,7 @@ mod tests {
         std::fs::remove_dir_all(&cache_path).unwrap();
         std::fs::create_dir(&cache_path).unwrap();
         std::fs::write(cache_path.join("corrupt"), "not a repository").unwrap();
-        GitStorage::ensure_bare_cache(&cache_path).unwrap();
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
 
         assert_eq!(
             git_test_output(&cache_path, &["rev-parse", "--is-bare-repository"]),
@@ -1581,6 +1684,146 @@ mod tests {
         assert!(remote_config.stdout.is_empty());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cache_repository_replaces_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let external = root.path().join("external.git");
+        git_test_ok(root.path(), &["init", "--bare", external.to_str().unwrap()]);
+        git_test_ok(
+            &external,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://secret@example.invalid/repo.git",
+            ],
+        );
+        let cache_path = root.path().join("fetch-cache.git");
+        symlink(&external, &cache_path).unwrap();
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert!(std::fs::symlink_metadata(&cache_path)
+            .unwrap()
+            .file_type()
+            .is_dir());
+        assert_eq!(
+            git_test_output(&cache_path, &["config", "--get", CACHE_SCHEMA_MARKER_KEY]),
+            CACHE_SCHEMA_MARKER_VALUE
+        );
+        assert_eq!(
+            git_test_output(&external, &["config", "--get", "remote.origin.url"]),
+            "https://secret@example.invalid/repo.git"
+        );
+    }
+
+    #[test]
+    fn cache_repository_rebuilds_arbitrary_bare_with_safe_config() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &["init", "--bare", cache_path.to_str().unwrap()],
+        );
+        git_test_ok(
+            &cache_path,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://secret@example.invalid/repo.git",
+            ],
+        );
+        git_test_ok(
+            &cache_path,
+            &[
+                "config",
+                "url.https://secret@example.invalid/.insteadOf",
+                "cache-source:",
+            ],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(&cache_path, &["config", "--get", CACHE_SCHEMA_MARKER_KEY]),
+            CACHE_SCHEMA_MARKER_VALUE
+        );
+        assert_eq!(
+            git_test_output(&cache_path, &["rev-parse", "--show-object-format"]),
+            "sha1"
+        );
+        let unsafe_config = std::process::Command::new("git")
+            .args(["config", "--get-regexp", "^(remote\\.|url\\.)"])
+            .current_dir(&cache_path)
+            .output()
+            .unwrap();
+        assert_eq!(unsafe_config.status.code(), Some(1));
+        assert!(unsafe_config.stdout.is_empty());
+    }
+
+    #[test]
+    fn cache_repository_rebuilds_object_format_mismatch() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &[
+                "init",
+                "--bare",
+                "--object-format=sha256",
+                cache_path.to_str().unwrap(),
+            ],
+        );
+        git_test_ok(
+            &cache_path,
+            &["config", CACHE_SCHEMA_MARKER_KEY, CACHE_SCHEMA_MARKER_VALUE],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(&cache_path, &["rev-parse", "--show-object-format"]),
+            "sha1"
+        );
+    }
+
+    #[test]
+    fn cache_sha256_generation_publishes_and_imports() {
+        let fixture = CacheGitFixture::with_object_format("sha256");
+        let storage = fixture.leader_storage();
+        assert_eq!(storage.object_format().unwrap(), GitObjectFormat::Sha256);
+        storage.fetch_cache_shadow().unwrap();
+        let expected_main =
+            storage.cache_shadow_manifest().unwrap()[&format!("{CACHE_REMOTE_HEADS}/main")].clone();
+        assert_eq!(expected_main.len(), 64);
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let cache_path = cache_root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha256).unwrap();
+
+        storage.publish_cache_generation(&cache_path, 1).unwrap();
+        git_test_ok(
+            fixture.follower.path(),
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+        GitStorage::new(fixture.follower.path())
+            .import_cache_generation(&cache_path, 1)
+            .unwrap();
+
+        assert_eq!(
+            git_test_output(
+                fixture.follower.path(),
+                &["rev-parse", "refs/remotes/origin/main"],
+            ),
+            expected_main
+        );
+        assert_eq!(
+            git_test_output(&cache_path, &["rev-parse", "--show-object-format"]),
+            "sha256"
+        );
+    }
+
     #[test]
     fn cache_generation_publish_and_import_preserve_follower_only_refs_and_head() {
         let fixture = CacheGitFixture::new();
@@ -1589,7 +1832,7 @@ mod tests {
         let shadow = storage.cache_shadow_manifest().unwrap();
         let cache_root = tempfile::TempDir::new().unwrap();
         let cache_path = cache_root.path().join("fetch-cache.git");
-        GitStorage::ensure_bare_cache(&cache_path).unwrap();
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
 
         storage.publish_cache_generation(&cache_path, 1).unwrap();
         let generation_refs = cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/1/heads"));
@@ -1663,7 +1906,7 @@ mod tests {
         storage.fetch_cache_shadow().unwrap();
         let cache_root = tempfile::TempDir::new().unwrap();
         let cache_path = cache_root.path().join("fetch-cache.git");
-        GitStorage::ensure_bare_cache(&cache_path).unwrap();
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
         storage.publish_cache_generation(&cache_path, 7).unwrap();
         assert_eq!(
             cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/7/heads"))
@@ -1709,7 +1952,7 @@ mod tests {
         storage.fetch_cache_shadow().unwrap();
         let cache_root = tempfile::TempDir::new().unwrap();
         let cache_path = cache_root.path().join("fetch-cache.git");
-        GitStorage::ensure_bare_cache(&cache_path).unwrap();
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
         storage.publish_cache_generation(&cache_path, 1).unwrap();
         storage.publish_cache_generation(&cache_path, 2).unwrap();
         let active_before = cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/2/heads"));
@@ -1729,7 +1972,7 @@ mod tests {
         let storage = fixture.leader_storage();
         let cache_root = tempfile::TempDir::new().unwrap();
         let cache_path = cache_root.path().join("fetch-cache.git");
-        GitStorage::ensure_bare_cache(&cache_path).unwrap();
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
 
         assert!(storage.publish_cache_generation(&cache_path, 0).is_err());
         assert!(storage.import_cache_generation(&cache_path, 0).is_err());
