@@ -1358,10 +1358,12 @@ impl SkillSyncGuard {
         }
         validate_rotation_journal(repo, &journal)?;
         let mut journal = self.capture_rotation_descendant_locked(repo, journal)?;
-        if journal.phase == RotationRecoveryPhase::Prepared
-            && (journal.upstream_oid != original_remote.oid
-                || journal.active_branch != active_remote.branch
-                || journal.active_oid != active_remote.oid)
+        if matches!(
+            journal.phase,
+            RotationRecoveryPhase::Prepared | RotationRecoveryPhase::Replayed
+        ) && (journal.upstream_oid != original_remote.oid
+            || journal.active_branch != active_remote.branch
+            || journal.active_oid != active_remote.oid)
         {
             ensure_clean_tracked_worktree(repo)?;
             if journal.upstream_oid != original_remote.oid
@@ -1400,6 +1402,7 @@ impl SkillSyncGuard {
                 journal.prior_repaired_head = journal.repaired_head.clone();
             }
             journal.repaired_head = None;
+            journal.phase = RotationRecoveryPhase::Prepared;
             self.save_rotation_journal(&journal)?;
         }
         self.resume_rotation_journal_locked(repo, journal)?;
@@ -1775,7 +1778,9 @@ fn validate_journal(repo: &GitStorage, journal: &QuarantineJournal) -> Result<()
     }
     if let Some(branch_head) = &journal.branch_head {
         validate_oid(branch_head)?;
-        repo.rev_parse(&format!("{branch_head}^{{commit}}"))?;
+        if journal.phase != QuarantinePhase::Completed {
+            repo.rev_parse(&format!("{branch_head}^{{commit}}"))?;
+        }
     }
     if let Some(replay_base) = &journal.replay_base {
         validate_oid(replay_base)?;
@@ -1972,6 +1977,13 @@ fn validate_rotation_journal(
             "unsupported rotation recovery journal schema".to_owned(),
         ));
     }
+    for branch in [
+        &journal.branch,
+        &journal.active_branch,
+        &journal.orphan_branch,
+    ] {
+        validate_branch(branch)?;
+    }
     for oid in [
         &journal.operation_id,
         &journal.upstream_oid,
@@ -1980,14 +1992,68 @@ fn validate_rotation_journal(
         &journal.tail_head,
     ] {
         validate_oid(oid)?;
-        repo.rev_parse(&format!("{oid}^{{commit}}"))?;
+    }
+    if let Some(orphan_oid) = journal.orphan_oid.as_deref() {
+        validate_oid(orphan_oid)?;
     }
     if let Some(prior_repaired) = journal.prior_repaired_head.as_deref() {
         validate_oid(prior_repaired)?;
-        repo.rev_parse(&format!("{prior_repaired}^{{commit}}"))?;
     }
     if let Some(expected_head) = journal.expected_head.as_deref() {
         validate_oid(expected_head)?;
+    }
+    if let Some(repaired) = journal.repaired_head.as_deref() {
+        validate_oid(repaired)?;
+    }
+    let initial_tail_ref = format!("{ROTATION_TAIL_REF_PREFIX}{}", journal.operation_id);
+    let captured_tail_ref = format!(
+        "{ROTATION_TAIL_REF_PREFIX}{}-capture-{}",
+        journal.operation_id, journal.tail_head
+    );
+    if journal.operation_id != journal.seal_oid
+        || (journal.tail_ref != initial_tail_ref && journal.tail_ref != captured_tail_ref)
+    {
+        return Err(SkillSyncError::LocalQuarantineBlocked(
+            "rotation recovery journal identity is invalid".to_owned(),
+        ));
+    }
+    if journal.phase == RotationRecoveryPhase::Completed {
+        if revision_oid(repo, &journal.tail_ref)?.is_some_and(|oid| oid != journal.tail_head) {
+            return Err(SkillSyncError::LocalQuarantineBlocked(
+                "completed rotation recovery tail ref changed ownership".to_owned(),
+            ));
+        }
+        let repaired = journal.repaired_head.as_deref().ok_or_else(|| {
+            SkillSyncError::LocalQuarantineBlocked(
+                "completed rotation recovery is missing its repaired head".to_owned(),
+            )
+        })?;
+        for oid in [&journal.upstream_oid, &journal.active_oid, repaired] {
+            repo.rev_parse(&format!("{oid}^{{commit}}"))?;
+        }
+        verify_managed_roots(repo, &journal.active_oid, repaired)?;
+        if repo.show_file_at_ref(&journal.active_oid, crate::rotate::EPOCH_FILE)?
+            != repo.show_file_at_ref(repaired, crate::rotate::EPOCH_FILE)?
+        {
+            return Err(SkillSyncError::LocalQuarantineBlocked(
+                "rotation recovery changed active epoch metadata".to_owned(),
+            ));
+        }
+        return Ok(());
+    }
+    for oid in [
+        &journal.operation_id,
+        &journal.upstream_oid,
+        &journal.active_oid,
+        &journal.seal_oid,
+        &journal.tail_head,
+    ] {
+        repo.rev_parse(&format!("{oid}^{{commit}}"))?;
+    }
+    if let Some(prior_repaired) = journal.prior_repaired_head.as_deref() {
+        repo.rev_parse(&format!("{prior_repaired}^{{commit}}"))?;
+    }
+    if let Some(expected_head) = journal.expected_head.as_deref() {
         repo.rev_parse(&format!("{expected_head}^{{commit}}"))?;
         if expected_head != journal.tail_head {
             let prior_repaired = journal.prior_repaired_head.as_deref().ok_or_else(|| {
@@ -2000,14 +2066,7 @@ fn validate_rotation_journal(
             }
         }
     }
-    let initial_tail_ref = format!("{ROTATION_TAIL_REF_PREFIX}{}", journal.operation_id);
-    let captured_tail_ref = format!(
-        "{ROTATION_TAIL_REF_PREFIX}{}-capture-{}",
-        journal.operation_id, journal.tail_head
-    );
-    if journal.operation_id != journal.seal_oid
-        || (journal.tail_ref != initial_tail_ref && journal.tail_ref != captured_tail_ref)
-        || !is_ancestor(repo, &journal.seal_oid, &journal.tail_head)?
+    if !is_ancestor(repo, &journal.seal_oid, &journal.tail_head)?
         || history_touches_managed_skills_between(repo, &journal.seal_oid, &journal.tail_head)?
         || history_touches_epoch_file_between(repo, &journal.seal_oid, &journal.tail_head)?
     {
@@ -2016,15 +2075,12 @@ fn validate_rotation_journal(
         ));
     }
     verify_managed_roots(repo, &journal.seal_oid, &journal.tail_head)?;
-    if journal.phase != RotationRecoveryPhase::Completed
-        && revision_oid(repo, &journal.tail_ref)?.as_deref() != Some(journal.tail_head.as_str())
-    {
+    if revision_oid(repo, &journal.tail_ref)?.as_deref() != Some(journal.tail_head.as_str()) {
         return Err(SkillSyncError::LocalQuarantineBlocked(
             "rotation recovery tail ref moved or disappeared".to_owned(),
         ));
     }
     if let Some(repaired) = journal.repaired_head.as_deref() {
-        validate_oid(repaired)?;
         repo.rev_parse(&format!("{repaired}^{{commit}}"))?;
         verify_managed_roots(repo, &journal.active_oid, repaired)?;
         if repo.show_file_at_ref(&journal.active_oid, crate::rotate::EPOCH_FILE)?

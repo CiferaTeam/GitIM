@@ -3127,7 +3127,7 @@ fn completed_quarantine_with_a_deleted_inflight_tail_ref_converges() {
             "quarantine_ref": quarantine_ref,
             "phase": "completed",
             "repaired_head": repaired,
-            "branch_head": original,
+            "branch_head": tail_head,
             "tail_ref": tail_ref,
             "tail_base": upstream,
             "tail_head": tail_head,

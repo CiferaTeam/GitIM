@@ -669,6 +669,7 @@ fn prepared_rotation_recovery_resumes_onto_a_remote_winners_active_branch() {
 fn assert_rotation_recovery_resumes_after_phase_crash(
     phase: &str,
     delete_orphan_before_resume: bool,
+    prune_tail_before_resume: bool,
 ) {
     let (_bare, clone) = setup_bare_and_clone(3);
     let storage = GitStorage::new(clone.path());
@@ -724,6 +725,19 @@ fn assert_rotation_recovery_resumes_after_phase_crash(
         .unwrap(),
     )
     .unwrap();
+    if prune_tail_before_resume {
+        git(&clone, &["update-ref", "-d", &tail_ref, &tail_head]);
+        git(&clone, &["reflog", "expire", "--expire=now", "--all"]);
+        git(&clone, &["gc", "--prune=now"]);
+        for oid in [&seal_oid, &tail_head] {
+            let status = Command::new("git")
+                .args(["cat-file", "-e", &format!("{oid}^{{commit}}")])
+                .current_dir(clone.path())
+                .status()
+                .unwrap();
+            assert!(!status.success(), "{oid} must be pruned before restart");
+        }
+    }
 
     let guard = gitim_sync::skill::guard::SkillSyncGuard::new(clone.path()).unwrap();
     guard
@@ -762,17 +776,22 @@ fn assert_rotation_recovery_resumes_after_phase_crash(
 
 #[test]
 fn rotation_recovery_advances_prepared_after_branch_move_before_phase_save() {
-    assert_rotation_recovery_resumes_after_phase_crash("prepared", false);
+    assert_rotation_recovery_resumes_after_phase_crash("prepared", false, false);
 }
 
 #[test]
 fn rotation_recovery_resumes_after_moved_phase_save() {
-    assert_rotation_recovery_resumes_after_phase_crash("moved", false);
+    assert_rotation_recovery_resumes_after_phase_crash("moved", false, false);
 }
 
 #[test]
 fn rotation_recovery_resumes_after_completed_phase_save() {
-    assert_rotation_recovery_resumes_after_phase_crash("completed", true);
+    assert_rotation_recovery_resumes_after_phase_crash("completed", true, false);
+}
+
+#[test]
+fn completed_rotation_cleanup_resumes_after_tail_objects_are_pruned() {
+    assert_rotation_recovery_resumes_after_phase_crash("completed", true, true);
 }
 
 fn assert_rotation_cleanup_preserves_a_switched_branch(phase: &str) {
@@ -957,6 +976,201 @@ fn prepared_rotation_recovery_replays_again_after_the_active_remote_advances() {
             1
         );
     }
+}
+
+#[test]
+fn replayed_rotation_recovery_replays_again_after_the_active_remote_advances() {
+    let (bare, clone) = setup_bare_and_clone(3);
+    let writer = clone_from(&bare);
+    let storage = GitStorage::new(clone.path());
+    let active_oid = storage.rev_parse("origin/main").unwrap();
+    git(&clone, &["branch", "main-epoch-2", "HEAD"]);
+    let orphan_oid = storage.rev_parse("main-epoch-2").unwrap();
+
+    std::fs::write(
+        clone.path().join("gitim.epoch.yaml"),
+        "epoch: 1\nbranch: main\nstatus: redirected\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "gitim.epoch.yaml"]);
+    git(
+        &clone,
+        &["commit", "-m", "seal: redirect replayed remote advance"],
+    );
+    let seal_oid = storage.rev_parse("HEAD").unwrap();
+    commit_file(
+        &clone,
+        "replayed-local-tail.thread",
+        "[L000001][P000000][@handler][20260731T031500Z] replayed durable local tail\n",
+    );
+    let tail_head = storage.rev_parse("HEAD").unwrap();
+    let tail_ref = format!("refs/gitim/rotation-tail/{seal_oid}");
+    git(&clone, &["update-ref", &tail_ref, &tail_head]);
+    git(&clone, &["reset", "--hard", &active_oid]);
+    git(&clone, &["cherry-pick", &tail_head]);
+    let stale_repaired_head = storage.rev_parse("HEAD").unwrap();
+
+    std::fs::create_dir_all(clone.path().join(".gitim")).unwrap();
+    std::fs::write(
+        clone.path().join(".gitim/rotation-recovery.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": seal_oid,
+            "branch": "main",
+            "upstream_oid": active_oid,
+            "active_branch": "main",
+            "active_oid": active_oid,
+            "seal_oid": seal_oid,
+            "tail_ref": tail_ref,
+            "tail_head": tail_head,
+            "orphan_branch": "main-epoch-2",
+            "orphan_oid": orphan_oid,
+            "phase": "replayed",
+            "repaired_head": stale_repaired_head
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    commit_file(
+        &writer,
+        "replayed-remote-advance.thread",
+        "remote advance after replay\n",
+    );
+    git(&writer, &["push", "origin", "main"]);
+
+    let guard = gitim_sync::skill::guard::SkillSyncGuard::new(clone.path()).unwrap();
+    guard
+        .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+        .unwrap();
+
+    assert_eq!(head_branch(&clone), "main");
+    assert_ne!(storage.rev_parse("HEAD").unwrap(), stale_repaired_head);
+    assert_eq!(
+        std::fs::read_to_string(clone.path().join("replayed-remote-advance.thread")).unwrap(),
+        "remote advance after replay\n"
+    );
+    assert!(clone.path().join("replayed-local-tail.thread").exists());
+    assert!(!clone.path().join(".gitim/rotation-recovery.json").exists());
+
+    storage.push().unwrap();
+    git(&clone, &["fetch", "origin"]);
+    for path in [
+        "replayed-remote-advance.thread",
+        "replayed-local-tail.thread",
+    ] {
+        let status = Command::new("git")
+            .args(["cat-file", "-e", &format!("origin/main:{path}")])
+            .current_dir(clone.path())
+            .status()
+            .unwrap();
+        assert!(status.success(), "{path} must publish");
+    }
+}
+
+#[test]
+fn replayed_rotation_recovery_replays_onto_a_remote_epoch_winner() {
+    let (bare, clone) = setup_bare_and_clone(3);
+    let writer = clone_from(&bare);
+    let storage = GitStorage::new(clone.path());
+    let active_oid = storage.rev_parse("origin/main").unwrap();
+    git(&clone, &["branch", "main-epoch-2", "HEAD"]);
+    let orphan_oid = storage.rev_parse("main-epoch-2").unwrap();
+
+    std::fs::write(
+        clone.path().join("gitim.epoch.yaml"),
+        "epoch: 1\nbranch: main\nstatus: redirected\n",
+    )
+    .unwrap();
+    git(&clone, &["add", "gitim.epoch.yaml"]);
+    git(
+        &clone,
+        &["commit", "-m", "seal: redirect replayed epoch winner"],
+    );
+    let seal_oid = storage.rev_parse("HEAD").unwrap();
+    commit_file(
+        &clone,
+        "replayed-epoch-tail.thread",
+        "[L000001][P000000][@handler][20260731T031600Z] replay onto epoch winner\n",
+    );
+    let tail_head = storage.rev_parse("HEAD").unwrap();
+    let tail_ref = format!("refs/gitim/rotation-tail/{seal_oid}");
+    git(&clone, &["update-ref", &tail_ref, &tail_head]);
+    git(&clone, &["reset", "--hard", &active_oid]);
+    git(&clone, &["cherry-pick", &tail_head]);
+    let stale_repaired_head = storage.rev_parse("HEAD").unwrap();
+
+    std::fs::create_dir_all(clone.path().join(".gitim")).unwrap();
+    std::fs::write(
+        clone.path().join(".gitim/rotation-recovery.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": seal_oid,
+            "branch": "main",
+            "upstream_oid": active_oid,
+            "active_branch": "main",
+            "active_oid": active_oid,
+            "seal_oid": seal_oid,
+            "tail_ref": tail_ref,
+            "tail_head": tail_head,
+            "orphan_branch": "main-epoch-2",
+            "orphan_oid": orphan_oid,
+            "phase": "replayed",
+            "repaired_head": stale_repaired_head
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let writer_storage = GitStorage::new(writer.path());
+    let archive = tempfile::TempDir::new().unwrap();
+    assert!(matches!(
+        try_fire_rotation(
+            &writer_storage,
+            "main",
+            1,
+            archive.path(),
+            ("winner", "winner@example.com"),
+            "2026-07-31T03:16:30Z",
+        )
+        .unwrap(),
+        RotationOutcome::Won { .. }
+    ));
+
+    let guard = gitim_sync::skill::guard::SkillSyncGuard::new(clone.path()).unwrap();
+    guard
+        .resume_pending_recoveries(&storage, &std::sync::Mutex::new(()))
+        .unwrap();
+
+    assert_eq!(head_branch(&clone), "main-epoch-2");
+    assert_ne!(storage.rev_parse("HEAD").unwrap(), stale_repaired_head);
+    assert!(clone.path().join("replayed-epoch-tail.thread").exists());
+    assert_eq!(
+        storage
+            .show_file_at_ref("HEAD", "gitim.epoch.yaml")
+            .unwrap(),
+        storage
+            .show_file_at_ref("origin/main-epoch-2", "gitim.epoch.yaml")
+            .unwrap()
+    );
+    assert_eq!(
+        storage.rev_parse("main").unwrap(),
+        storage.rev_parse("origin/main").unwrap()
+    );
+    assert!(!clone.path().join(".gitim/rotation-recovery.json").exists());
+
+    storage.push().unwrap();
+    git(&clone, &["fetch", "origin"]);
+    let status = Command::new("git")
+        .args([
+            "cat-file",
+            "-e",
+            "origin/main-epoch-2:replayed-epoch-tail.thread",
+        ])
+        .current_dir(clone.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 #[test]
