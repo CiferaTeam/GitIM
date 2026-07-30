@@ -139,11 +139,21 @@ struct WorkspaceSemaphore {
     changed: Condvar,
 }
 
-type WorkspaceSemaphoreKey = (PathBuf, usize);
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+enum WorkspaceSemaphoreKey {
+    Production(String),
+    Configured(String, usize),
+}
+
 type WorkspaceSemaphores = Mutex<HashMap<WorkspaceSemaphoreKey, Weak<WorkspaceSemaphore>>>;
 
 struct WorkspacePermit {
     semaphore: Arc<WorkspaceSemaphore>,
+}
+
+struct WorkspacePermits {
+    _production: WorkspacePermit,
+    _configured: Option<WorkspacePermit>,
 }
 
 impl Drop for WorkspacePermit {
@@ -194,6 +204,32 @@ pub fn execute_remote_skill_transaction(
     )
 }
 
+pub fn recover_remote_skill_transactions(
+    repo: &GitStorage,
+    guard: &SkillSyncGuard,
+) -> Result<Vec<RemoteSkillTransactionResult>, SkillSyncError> {
+    let config = SkillTransactionTestConfig::default();
+    let deadline = Instant::now()
+        .checked_add(config.transaction_timeout)
+        .ok_or_else(|| checkpoint_error("transaction deadline overflow"))?;
+    let context = TransactionContext {
+        deadline,
+        git_timeout: config.git_command_timeout,
+        max_concurrency: config.max_concurrency,
+        git_program: config.git_program.unwrap_or_else(|| PathBuf::from("git")),
+        crash_after: None,
+        after_built: None,
+    };
+    let result = recover_transaction_journals(repo, guard, &context);
+    if result
+        .as_ref()
+        .is_err_and(skill_transaction_error_is_retryable)
+    {
+        SKILL_TRANSPORT_FAILURES.fetch_add(1, Ordering::Relaxed);
+    }
+    result
+}
+
 #[doc(hidden)]
 pub fn execute_remote_skill_transaction_with_test_config(
     repo: &GitStorage,
@@ -209,15 +245,19 @@ pub fn skill_transport_failure_count() -> u64 {
     SKILL_TRANSPORT_FAILURES.load(Ordering::Relaxed)
 }
 
+pub const fn skill_transaction_error_is_retryable(error: &SkillSyncError) -> bool {
+    matches!(error, SkillSyncError::Git(GitError::Timeout(_)))
+}
+
 fn execute_remote_skill_transaction_with_config(
     repo: &GitStorage,
     guard: &SkillSyncGuard,
     request: RemoteSkillTransactionRequest,
     config: SkillTransactionTestConfig,
 ) -> Result<RemoteSkillTransactionResult, SkillSyncError> {
-    if config.max_concurrency == 0 {
+    if config.max_concurrency == 0 || config.max_concurrency > SKILL_GIT_MAX_CONCURRENCY {
         return Err(checkpoint_error(
-            "transaction concurrency must be greater than zero",
+            "transaction concurrency must be between one and four",
         ));
     }
     let deadline = Instant::now()
@@ -244,15 +284,16 @@ fn execute_transaction(
     request: RemoteSkillTransactionRequest,
     context: &TransactionContext,
 ) -> Result<RemoteSkillTransactionResult, SkillSyncError> {
-    if !repo.has_remote() {
-        return Err(SkillError::RemoteRequired.into());
-    }
     guard.quarantine_resolved()?;
-    let _permit = acquire_workspace_permit(repo.root(), context.deadline, context.max_concurrency)?;
-    if let Some(recovered) = recover_current_transaction(repo, &request, context)? {
-        return Ok(recovered);
+    workspace_identity(repo.root())?;
+    let (mut journal, needs_recovery) = prepare_journal(repo, request)?;
+    let _permits =
+        acquire_workspace_permits(repo.root(), context.deadline, context.max_concurrency)?;
+    if needs_recovery {
+        if let Some(recovered) = recover_current_transaction(repo, &mut journal, context)? {
+            return Ok(recovered);
+        }
     }
-    let mut journal = prepare_journal(repo, request)?;
     let package = load_snapshotted_package(&journal)?;
     maybe_crash(context, SkillTransactionCrashPoint::AfterPrepared)?;
 
@@ -278,9 +319,12 @@ fn execute_transaction(
         let plan = plan_skill_mutation(&snapshot, &mutation_context, &journal.request)?;
         if plan.edits.is_empty() {
             let commit_id = find_receipt_commit(repo, &remote_tip, &journal.receipt_path, context)?;
+            journal.phase = SkillTransactionPhase::Pushed;
+            journal.candidate_commit = Some(commit_id.clone());
+            journal.result = Some(plan.result.clone());
+            save_journal(&journal)?;
             let local_state =
-                record_accepted_view(repo, &remote_branch, &remote_tip, &remote_tip, context)
-                    .unwrap_or(SkillLocalState::PendingSync);
+                record_published_view(repo, &remote_branch, &remote_tip, &remote_tip, context)?;
             complete_journal(&mut journal)?;
             return Ok(RemoteSkillTransactionResult {
                 commit_id,
@@ -325,8 +369,7 @@ fn execute_transaction(
                 save_journal(&journal)?;
                 maybe_crash(context, SkillTransactionCrashPoint::AfterPushed)?;
                 let local_state =
-                    record_accepted_view(repo, &remote_branch, &remote_tip, &candidate, context)
-                        .unwrap_or(SkillLocalState::PendingSync);
+                    record_published_view(repo, &remote_branch, &remote_tip, &candidate, context)?;
                 complete_journal(&mut journal)?;
                 return Ok(RemoteSkillTransactionResult {
                     commit_id: candidate,
@@ -357,9 +400,17 @@ fn execute_transaction(
                     Ok(duplicate) if duplicate.edits.is_empty() => {
                         let commit_id =
                             find_receipt_commit(repo, &next_tip, &journal.receipt_path, context)?;
-                        let local_state =
-                            record_accepted_view(repo, &next_branch, &next_tip, &next_tip, context)
-                                .unwrap_or(SkillLocalState::PendingSync);
+                        journal.phase = SkillTransactionPhase::Pushed;
+                        journal.candidate_commit = Some(commit_id.clone());
+                        journal.result = Some(duplicate.result.clone());
+                        save_journal(&journal)?;
+                        let local_state = record_published_view(
+                            repo,
+                            &next_branch,
+                            &next_tip,
+                            &next_tip,
+                            context,
+                        )?;
                         complete_journal(&mut journal)?;
                         return Ok(RemoteSkillTransactionResult {
                             commit_id,
@@ -390,20 +441,10 @@ fn execute_transaction(
 
 fn recover_current_transaction(
     repo: &GitStorage,
-    request: &RemoteSkillTransactionRequest,
+    journal: &mut TransactionJournal,
     context: &TransactionContext,
 ) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
-    let root = transaction_root(repo.root(), request.request.request_id())?;
-    let journal_path = root.join("transaction.yaml");
-    if !journal_path.exists() {
-        return Ok(None);
-    }
-    let mut journal = load_journal(&journal_path)?;
-    let fingerprint =
-        request_fingerprint(&request.request, &request.actor, request.package.as_ref())?;
-    if journal.request_fingerprint != fingerprint {
-        return Err(SkillError::RequestIdConflict.into());
-    }
+    let root = transaction_root(repo.root(), journal.request.request_id())?;
     if journal.phase == SkillTransactionPhase::Completed {
         fs::remove_dir_all(&root)
             .map_err(|error| checkpoint_io("remove completed transaction", error))?;
@@ -414,7 +455,7 @@ fn recover_current_transaction(
     let start_branch = current_branch(repo, context)?;
     let (remote_branch, remote_tip) = resolve_active_remote(repo, &start_branch, context)?;
     if read_optional_blob(repo, &remote_tip, &journal.receipt_path, context)?.is_some() {
-        let package = load_snapshotted_package(&journal)?;
+        let package = load_snapshotted_package(journal)?;
         let snapshot = load_snapshot(repo, &remote_tip, &journal.active_users, context)?;
         let duplicate = plan_skill_mutation(
             &snapshot,
@@ -438,10 +479,13 @@ fn recover_current_transaction(
                 "published receipt does not match the journal candidate",
             ));
         }
+        journal.phase = SkillTransactionPhase::Pushed;
+        journal.candidate_commit = Some(commit_id.clone());
+        journal.result = Some(duplicate.result.clone());
+        save_journal(journal)?;
         let local_state =
-            record_accepted_view(repo, &remote_branch, &remote_tip, &remote_tip, context)
-                .unwrap_or(SkillLocalState::PendingSync);
-        complete_journal(&mut journal)?;
+            record_published_view(repo, &remote_branch, &remote_tip, &remote_tip, context)?;
+        complete_journal(journal)?;
         return Ok(Some(RemoteSkillTransactionResult {
             commit_id,
             result: duplicate.result,
@@ -454,16 +498,73 @@ fn recover_current_transaction(
             "pushed transaction has no authoritative receipt",
         ));
     }
-    remove_recorded_scratch(&journal)?;
+    remove_recorded_scratch(journal)?;
     fs::remove_dir_all(&root)
         .map_err(|error| checkpoint_io("remove unpublished transaction", error))?;
     Ok(None)
 }
 
+fn recover_transaction_journals(
+    repo: &GitStorage,
+    guard: &SkillSyncGuard,
+    context: &TransactionContext,
+) -> Result<Vec<RemoteSkillTransactionResult>, SkillSyncError> {
+    guard.quarantine_resolved()?;
+    workspace_identity(repo.root())?;
+    let _permits =
+        acquire_workspace_permits(repo.root(), context.deadline, context.max_concurrency)?;
+    let root = transactions_root(repo.root())?;
+    let mut journal_paths = Vec::new();
+    for entry in
+        fs::read_dir(&root).map_err(|error| checkpoint_io("list transaction journals", error))?
+    {
+        let entry =
+            entry.map_err(|error| checkpoint_io("read transaction journal entry", error))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| checkpoint_io("inspect transaction journal entry", error))?;
+        if file_type.is_symlink() || !file_type.is_dir() {
+            return Err(checkpoint_error(format!(
+                "{} must be a real transaction directory",
+                entry.path().display()
+            )));
+        }
+        let request_id = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| checkpoint_error("transaction directory name is not UTF-8"))
+            .and_then(|value| {
+                RequestId::new(&value)
+                    .map_err(|_| checkpoint_error("invalid transaction directory name"))
+            })?;
+        journal_paths.push((request_id, entry.path().join("transaction.yaml")));
+    }
+    journal_paths.sort_by(|left, right| left.0.as_str().cmp(right.0.as_str()));
+
+    let mut recovered = Vec::new();
+    for (request_id, journal_path) in journal_paths {
+        let mut journal = load_journal(&journal_path)?;
+        if journal.request.request_id() != &request_id {
+            return Err(checkpoint_error(
+                "transaction directory does not match journal request",
+            ));
+        }
+        let package = load_snapshotted_package(&journal)?;
+        let fingerprint = request_fingerprint(&journal.request, &journal.actor, package.as_ref())?;
+        if journal.request_fingerprint != fingerprint {
+            return Err(checkpoint_error("transaction journal fingerprint mismatch"));
+        }
+        if let Some(result) = recover_current_transaction(repo, &mut journal, context)? {
+            recovered.push(result);
+        }
+    }
+    Ok(recovered)
+}
+
 fn prepare_journal(
     repo: &GitStorage,
     request: RemoteSkillTransactionRequest,
-) -> Result<TransactionJournal, SkillSyncError> {
+) -> Result<(TransactionJournal, bool), SkillSyncError> {
     let request_id = request.request.request_id().clone();
     let root = transaction_root(repo.root(), &request_id)?;
     let journal_path = root.join("transaction.yaml");
@@ -480,7 +581,7 @@ fn prepare_journal(
                 fs::remove_dir_all(&root)
                     .map_err(|error| checkpoint_io("remove incomplete transaction", error))?;
             }
-            SkillTransactionPhase::Pushed => return Ok(existing),
+            SkillTransactionPhase::Pushed => return Ok((existing, true)),
             SkillTransactionPhase::Completed => {
                 fs::remove_dir_all(&root)
                     .map_err(|error| checkpoint_io("remove completed transaction", error))?;
@@ -515,7 +616,7 @@ fn prepare_journal(
         result: None,
     };
     save_journal(&journal)?;
-    Ok(journal)
+    Ok((journal, false))
 }
 
 fn request_fingerprint(
@@ -548,12 +649,16 @@ fn clear_source_directory(value: &mut serde_json::Value) {
 }
 
 fn transaction_root(root: &Path, request_id: &RequestId) -> Result<PathBuf, SkillSyncError> {
+    Ok(transactions_root(root)?.join(request_id.as_str()))
+}
+
+fn transactions_root(root: &Path) -> Result<PathBuf, SkillSyncError> {
     let root = root
         .canonicalize()
         .map_err(|error| checkpoint_io("canonicalize repository", error))?;
     let transactions = root.join(".gitim").join("skill-transactions");
     create_real_directory(&transactions)?;
-    Ok(transactions.join(request_id.as_str()))
+    Ok(transactions)
 }
 
 fn create_real_directory(path: &Path) -> Result<(), SkillSyncError> {
@@ -1255,6 +1360,20 @@ fn record_accepted_view(
     })
 }
 
+fn record_published_view(
+    repo: &GitStorage,
+    branch: &str,
+    prior_tip: &str,
+    commit: &str,
+    context: &TransactionContext,
+) -> Result<SkillLocalState, SkillSyncError> {
+    match record_accepted_view(repo, branch, prior_tip, commit, context) {
+        Ok(local_state) => Ok(local_state),
+        Err(error) if skill_transaction_error_is_retryable(&error) => Err(error),
+        Err(_) => Ok(SkillLocalState::PendingSync),
+    }
+}
+
 fn find_receipt_commit(
     repo: &GitStorage,
     tip: &str,
@@ -1613,19 +1732,43 @@ fn rev_parse(
     parse_oid(&output.stdout).map_err(Into::into)
 }
 
-fn acquire_workspace_permit(
+fn acquire_workspace_permits(
     root: &Path,
     deadline: Instant,
-    capacity: usize,
-) -> Result<WorkspacePermit, SkillSyncError> {
+    configured_capacity: usize,
+) -> Result<WorkspacePermits, SkillSyncError> {
     static SEMAPHORES: OnceLock<WorkspaceSemaphores> = OnceLock::new();
-    let key = (
-        root.canonicalize()
-            .map_err(|error| checkpoint_io("canonicalize workspace", error))?,
-        capacity,
-    );
+    let identity = workspace_identity(root)?;
+    let production = acquire_workspace_permit(
+        &SEMAPHORES,
+        WorkspaceSemaphoreKey::Production(identity.clone()),
+        SKILL_GIT_MAX_CONCURRENCY,
+        deadline,
+    )?;
+    let configured = if configured_capacity < SKILL_GIT_MAX_CONCURRENCY {
+        Some(acquire_workspace_permit(
+            &SEMAPHORES,
+            WorkspaceSemaphoreKey::Configured(identity, configured_capacity),
+            configured_capacity,
+            deadline,
+        )?)
+    } else {
+        None
+    };
+    Ok(WorkspacePermits {
+        _production: production,
+        _configured: configured,
+    })
+}
+
+fn acquire_workspace_permit(
+    semaphores: &'static OnceLock<WorkspaceSemaphores>,
+    key: WorkspaceSemaphoreKey,
+    capacity: usize,
+    deadline: Instant,
+) -> Result<WorkspacePermit, SkillSyncError> {
     let semaphore = {
-        let mut semaphores = SEMAPHORES
+        let mut semaphores = semaphores
             .get_or_init(|| Mutex::new(HashMap::new()))
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1660,6 +1803,99 @@ fn acquire_workspace_permit(
     *available -= 1;
     drop(available);
     Ok(WorkspacePermit { semaphore })
+}
+
+fn workspace_identity(root: &Path) -> Result<String, SkillSyncError> {
+    let root = root
+        .canonicalize()
+        .map_err(|error| checkpoint_io("canonicalize workspace", error))?;
+    let config = git_config_path(&root)?;
+    let bytes =
+        fs::read_to_string(&config).map_err(|error| checkpoint_io("read Git config", error))?;
+    let mut in_origin = false;
+    for raw_line in bytes.lines() {
+        let line = raw_line.trim();
+        if line.starts_with('[') && line.ends_with(']') {
+            let section = line[1..line.len() - 1].trim().to_ascii_lowercase();
+            in_origin = section == "remote \"origin\"";
+            continue;
+        }
+        if !in_origin || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim().eq_ignore_ascii_case("url") {
+            return normalize_workspace_remote(&root, value.trim());
+        }
+    }
+    Err(SkillError::RemoteRequired.into())
+}
+
+fn git_config_path(root: &Path) -> Result<PathBuf, SkillSyncError> {
+    let dot_git = root.join(".git");
+    if dot_git.is_dir() {
+        return Ok(dot_git.join("config"));
+    }
+    let pointer =
+        fs::read_to_string(&dot_git).map_err(|error| checkpoint_io("read .git pointer", error))?;
+    let git_dir = pointer
+        .trim()
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .ok_or_else(|| checkpoint_error("malformed .git pointer"))?;
+    let git_dir = if Path::new(git_dir).is_absolute() {
+        PathBuf::from(git_dir)
+    } else {
+        root.join(git_dir)
+    };
+    let common_dir_path = git_dir.join("commondir");
+    let common_dir = match fs::read_to_string(&common_dir_path) {
+        Ok(value) => {
+            let value = value.trim();
+            if Path::new(value).is_absolute() {
+                PathBuf::from(value)
+            } else {
+                git_dir.join(value)
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => git_dir,
+        Err(error) => return Err(checkpoint_io("read Git common directory", error)),
+    };
+    Ok(common_dir.join("config"))
+}
+
+fn normalize_workspace_remote(root: &Path, remote: &str) -> Result<String, SkillSyncError> {
+    if let Some(path) = remote.strip_prefix("file://") {
+        let path = Path::new(path)
+            .canonicalize()
+            .map_err(|error| checkpoint_io("canonicalize file remote", error))?;
+        return Ok(format!("file:{}", path.display()));
+    }
+    if !remote.contains("://") && !remote.contains(':') {
+        let path = {
+            let path = Path::new(remote);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                root.join(path)
+            }
+        }
+        .canonicalize()
+        .map_err(|error| checkpoint_io("canonicalize local remote", error))?;
+        return Ok(format!("file:{}", path.display()));
+    }
+    let normalized = if let Some((scheme, remainder)) = remote.split_once("://") {
+        if let Some((_, host_and_path)) = remainder.split_once('@') {
+            format!("{scheme}://{host_and_path}")
+        } else {
+            remote.to_owned()
+        }
+    } else {
+        remote.to_owned()
+    };
+    Ok(format!("remote:{normalized}"))
 }
 
 fn run_git(

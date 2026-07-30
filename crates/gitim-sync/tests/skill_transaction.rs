@@ -21,6 +21,7 @@ use gitim_sync::skill::checkpoint::{
 use gitim_sync::skill::guard::SkillSyncGuard;
 use gitim_sync::skill::transaction::{
     execute_remote_skill_transaction, execute_remote_skill_transaction_with_test_config,
+    recover_remote_skill_transactions, skill_transaction_error_is_retryable,
     skill_transport_failure_count, RemoteSkillTransactionRequest, SkillLocalState,
     SkillTransactionCrashPoint, SkillTransactionTestConfig, SKILL_GIT_COMMAND_TIMEOUT,
     SKILL_GIT_MAX_CONCURRENCY, SKILL_TRANSACTION_TIMEOUT,
@@ -162,6 +163,20 @@ impl Fixture {
             )
             .unwrap();
         created.result.current_revision.unwrap().as_str().to_owned()
+    }
+
+    fn clone_remote(&self) -> TempDir {
+        let clone = TempDir::new().unwrap();
+        git(
+            clone.path(),
+            [
+                OsStr::new("clone"),
+                self._remote.path().as_os_str(),
+                OsStr::new("."),
+            ],
+        );
+        configure(clone.path());
+        clone
     }
 }
 
@@ -709,6 +724,88 @@ fn crash_journal_recovers_prepared_built_and_pushed_transactions() {
     }
 }
 
+#[test]
+fn startup_recovery_enumerates_published_and_unpublished_journals() {
+    let fixture = Fixture::new();
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let published_id = RequestId::generate();
+    let published = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: published_id.clone(),
+    });
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(published, None),
+        SkillTransactionTestConfig {
+            crash_after: Some(SkillTransactionCrashPoint::AfterPushed),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        gitim_sync::skill::checkpoint::SkillSyncError::Checkpoint(_)
+    ));
+
+    let slug = SkillSlug::new("startup-recovery").unwrap();
+    let unpublished_id = RequestId::generate();
+    let unpublished = SkillMutationRequest::Create(SkillCreateRequest {
+        request_id: unpublished_id.clone(),
+        slug: slug.clone(),
+        display_name: "Startup recovery".to_owned(),
+        description: "Prepared candidate cleanup".to_owned(),
+        source_directory: fixture.first.path().join("unused"),
+    });
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(unpublished, Some(package(&slug, "candidate"))),
+        SkillTransactionTestConfig {
+            crash_after: Some(SkillTransactionCrashPoint::AfterBuilt),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        gitim_sync::skill::checkpoint::SkillSyncError::Checkpoint(_)
+    ));
+
+    let transaction_root = fixture.first.path().join(".gitim/skill-transactions");
+    assert!(transaction_root.join(published_id.as_str()).exists());
+    assert!(transaction_root.join(unpublished_id.as_str()).exists());
+    assert!(!fixture
+        .first
+        .path()
+        .join(".gitim/skill-validation.json")
+        .exists());
+
+    let recovered = recover_remote_skill_transactions(&repo, &guard).unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].result.control_revision, Some(1));
+    assert!(!transaction_root.join(published_id.as_str()).exists());
+    assert!(!transaction_root.join(unpublished_id.as_str()).exists());
+    let checkpoint = SkillCheckpointStore::new(fixture.first.path())
+        .unwrap()
+        .load()
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.last_scanned_tip, recovered[0].commit_id);
+    git(fixture.first.path(), ["fetch", "origin"]);
+    let tree = String::from_utf8(
+        git(
+            fixture.first.path(),
+            ["ls-tree", "-r", "--name-only", "origin/main"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert!(!tree
+        .lines()
+        .any(|path| path.starts_with(&format!("skills/{}/", slug.as_str()))));
+}
+
 #[cfg(unix)]
 #[test]
 fn hanging_git_child_times_out_retains_journal_and_releases_permit() {
@@ -724,11 +821,14 @@ fn hanging_git_child_times_out_retains_journal_and_releases_permit() {
     )
     .unwrap();
     let wrapper = fixture.first.path().join("hanging-git");
+    let marker = fixture.first.path().join("hanging-git-fired");
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nif [ \"$1\" = \"-c\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"fetch\" ]; then sleep 10; fi\n  done\nfi\nexec {} \"$@\"\n",
-            real_git.trim()
+            "#!/bin/sh\nif [ ! -e '{}' ] && [ \"$1\" = \"-c\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"fetch\" ]; then touch '{}'; sleep 10; fi\n  done\nfi\nexec '{}' \"$@\"\n",
+            marker.display(),
+            marker.display(),
+            real_git.trim(),
         ),
     )
     .unwrap();
@@ -740,25 +840,27 @@ fn hanging_git_child_times_out_retains_journal_and_releases_permit() {
     });
     let repo = GitStorage::new(fixture.first.path());
     let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let config = SkillTransactionTestConfig {
+        transaction_timeout: Duration::from_secs(8),
+        git_command_timeout: Duration::from_secs(2),
+        git_program: Some(wrapper),
+        max_concurrency: 1,
+        ..SkillTransactionTestConfig::default()
+    };
     let failures_before = skill_transport_failure_count();
     let error = execute_remote_skill_transaction_with_test_config(
         &repo,
         &guard,
         transaction_request(request.clone(), None),
-        SkillTransactionTestConfig {
-            transaction_timeout: Duration::from_secs(2),
-            git_command_timeout: Duration::from_millis(100),
-            git_program: Some(wrapper),
-            max_concurrency: 1,
-            ..SkillTransactionTestConfig::default()
-        },
+        config.clone(),
     )
     .unwrap_err();
     assert!(matches!(
         error,
         gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::Timeout(_))
     ));
-    assert_eq!(skill_transport_failure_count(), failures_before + 1);
+    assert!(skill_transaction_error_is_retryable(&error));
+    assert!(skill_transport_failure_count() > failures_before);
     assert!(fixture
         .first
         .path()
@@ -772,10 +874,160 @@ fn hanging_git_child_times_out_retains_journal_and_releases_permit() {
         .join(".gitim/skill-validation.json")
         .exists());
 
-    let recovered = fixture
-        .transaction(fixture.first.path(), request, None)
-        .unwrap();
+    let recovered = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        config,
+    )
+    .unwrap();
     assert_eq!(recovered.result.control_revision, Some(1));
+}
+
+#[cfg(unix)]
+#[test]
+fn post_push_timeout_is_retryable_and_keeps_the_pushed_journal() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let real_git = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let wrapper = fixture.first.path().join("post-push-timeout-git");
+    let marker = fixture.first.path().join("post-push-timeout-fired");
+    let armed = fixture.first.path().join("post-push-timeout-armed");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nif [ -e '{}' ] && [ ! -e '{}' ] && [ \"$1\" = \"update-ref\" ]; then\n  touch '{}'; sleep 10\nfi\nexec '{}' \"$@\"\n",
+            armed.display(),
+            marker.display(),
+            marker.display(),
+            real_git.trim(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let config = SkillTransactionTestConfig {
+        transaction_timeout: Duration::from_secs(8),
+        git_command_timeout: Duration::from_secs(2),
+        git_program: Some(wrapper),
+        max_concurrency: 1,
+        after_built: Some(Arc::new(move || {
+            fs::write(&armed, b"armed").unwrap();
+        })),
+        ..SkillTransactionTestConfig::default()
+    };
+    let failures_before = skill_transport_failure_count();
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request.clone(), None),
+        config.clone(),
+    )
+    .unwrap_err();
+
+    assert!(skill_transaction_error_is_retryable(&error));
+    assert!(skill_transport_failure_count() > failures_before);
+    let journal = fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str())
+        .join("transaction.yaml");
+    assert!(journal.exists());
+    let journal_text = fs::read_to_string(&journal).unwrap();
+    assert!(
+        journal_text.contains("phase: pushed"),
+        "unexpected journal after {error:?}; armed={}, fired={}: {journal_text}",
+        fixture
+            .first
+            .path()
+            .join("post-push-timeout-armed")
+            .exists(),
+        fixture
+            .first
+            .path()
+            .join("post-push-timeout-fired")
+            .exists(),
+    );
+    assert!(!fixture
+        .first
+        .path()
+        .join(".gitim/skill-validation.json")
+        .exists());
+    git(fixture.first.path(), ["fetch", "origin"]);
+    assert!(String::from_utf8(
+        git(
+            fixture.first.path(),
+            ["show", "origin/main:skills/workspace.meta.yaml",],
+        )
+        .stdout,
+    )
+    .is_ok());
+
+    let recovered = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        config,
+    )
+    .unwrap();
+    assert_eq!(recovered.result.control_revision, Some(1));
+    assert!(!journal.exists());
+    assert!(fixture
+        .first
+        .path()
+        .join(".gitim/skill-validation.json")
+        .exists());
+}
+
+#[test]
+fn post_push_checkpoint_failure_returns_pending_sync_and_completes_the_journal() {
+    let fixture = Fixture::new();
+    let request_id = RequestId::generate();
+    let checkpoint_path = fixture.first.path().join(".gitim/skill-validation.json");
+    let callback_path = checkpoint_path.clone();
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let result = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                request_id: request_id.clone(),
+            }),
+            None,
+        ),
+        SkillTransactionTestConfig {
+            after_built: Some(Arc::new(move || {
+                fs::create_dir(&callback_path).unwrap();
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+
+    assert_eq!(result.local_state, SkillLocalState::PendingSync);
+    assert!(checkpoint_path.is_dir());
+    assert!(!fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str())
+        .exists());
 }
 
 #[test]
@@ -839,13 +1091,173 @@ fn saturated_workspace_semaphore_obeys_the_overall_deadline() {
         gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::Timeout(_))
     ));
     assert!(!root.join(".gitim/skill-validation.json").exists());
-    assert!(!root
+    let blocked_transaction = root
+        .join(".gitim/skill-transactions")
+        .join(blocked_id.as_str());
+    assert!(blocked_transaction.join("source").is_dir());
+    assert!(
+        fs::read_to_string(blocked_transaction.join("transaction.yaml"))
+            .unwrap()
+            .contains("phase: prepared")
+    );
+
+    let (lock, changed) = &*gate;
+    *lock.lock().unwrap() = true;
+    changed.notify_all();
+    assert!(first.join().unwrap().is_ok());
+}
+
+#[test]
+fn configured_one_permit_is_shared_by_clones_of_the_same_workspace() {
+    let fixture = Fixture::new();
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let ready = Arc::new(Barrier::new(2));
+    let worker_gate = Arc::clone(&gate);
+    let worker_ready = Arc::clone(&ready);
+    let first_root = fixture.first.path().to_path_buf();
+    let first = std::thread::spawn(move || {
+        let repo = GitStorage::new(&first_root);
+        let guard = SkillSyncGuard::new(&first_root).unwrap();
+        execute_remote_skill_transaction_with_test_config(
+            &repo,
+            &guard,
+            transaction_request(
+                SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                    request_id: RequestId::generate(),
+                }),
+                None,
+            ),
+            SkillTransactionTestConfig {
+                max_concurrency: 1,
+                after_built: Some(Arc::new(move || {
+                    worker_ready.wait();
+                    let (lock, changed) = &*worker_gate;
+                    let mut released = lock.lock().unwrap();
+                    while !*released {
+                        released = changed.wait(released).unwrap();
+                    }
+                })),
+                ..SkillTransactionTestConfig::default()
+            },
+        )
+    });
+    ready.wait();
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let callback_entered = Arc::clone(&entered);
+    let repo = GitStorage::new(fixture.second.path());
+    let guard = SkillSyncGuard::new(fixture.second.path()).unwrap();
+    let blocked_id = RequestId::generate();
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                request_id: blocked_id.clone(),
+            }),
+            None,
+        ),
+        SkillTransactionTestConfig {
+            transaction_timeout: Duration::from_millis(500),
+            max_concurrency: 1,
+            after_built: Some(Arc::new(move || {
+                callback_entered.store(true, Ordering::SeqCst);
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(skill_transaction_error_is_retryable(&error));
+    assert!(!entered.load(Ordering::SeqCst));
+    assert!(fixture
+        .second
+        .path()
         .join(".gitim/skill-transactions")
         .join(blocked_id.as_str())
+        .join("transaction.yaml")
         .exists());
 
     let (lock, changed) = &*gate;
     *lock.lock().unwrap() = true;
     changed.notify_all();
     assert!(first.join().unwrap().is_ok());
+}
+
+#[test]
+fn production_workspace_pool_allows_exactly_four_clone_transactions() {
+    let fixture = Fixture::new();
+    let clones: Vec<_> = (0..5).map(|_| fixture.clone_remote()).collect();
+    let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let mut workers = Vec::new();
+
+    for clone in clones.iter().take(SKILL_GIT_MAX_CONCURRENCY) {
+        let root = clone.path().to_path_buf();
+        let worker_gate = Arc::clone(&gate);
+        let worker_ready = ready_tx.clone();
+        workers.push(std::thread::spawn(move || {
+            let repo = GitStorage::new(&root);
+            let guard = SkillSyncGuard::new(&root).unwrap();
+            execute_remote_skill_transaction_with_test_config(
+                &repo,
+                &guard,
+                transaction_request(
+                    SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                        request_id: RequestId::generate(),
+                    }),
+                    None,
+                ),
+                SkillTransactionTestConfig {
+                    after_built: Some(Arc::new(move || {
+                        worker_ready.send(()).unwrap();
+                        let (lock, changed) = &*worker_gate;
+                        let mut released = lock.lock().unwrap();
+                        while !*released {
+                            released = changed.wait(released).unwrap();
+                        }
+                    })),
+                    ..SkillTransactionTestConfig::default()
+                },
+            )
+        }));
+    }
+    drop(ready_tx);
+    for _ in 0..SKILL_GIT_MAX_CONCURRENCY {
+        ready_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    }
+
+    let entered = Arc::new(AtomicBool::new(false));
+    let callback_entered = Arc::clone(&entered);
+    let fifth_root = clones[SKILL_GIT_MAX_CONCURRENCY].path();
+    let repo = GitStorage::new(fifth_root);
+    let guard = SkillSyncGuard::new(fifth_root).unwrap();
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                request_id: RequestId::generate(),
+            }),
+            None,
+        ),
+        SkillTransactionTestConfig {
+            transaction_timeout: Duration::from_millis(500),
+            after_built: Some(Arc::new(move || {
+                callback_entered.store(true, Ordering::SeqCst);
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(skill_transaction_error_is_retryable(&error));
+    assert!(!entered.load(Ordering::SeqCst));
+
+    let (lock, changed) = &*gate;
+    *lock.lock().unwrap() = true;
+    changed.notify_all();
+    for worker in workers {
+        let _ = worker.join().unwrap();
+    }
 }
