@@ -193,19 +193,43 @@ pub struct SkillMutationResult {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SkillMutationRequest {
+    WorkspaceBootstrap(SkillWorkspaceBootstrapRequest),
     Create(SkillCreateRequest),
     Propose(SkillProposeRequest),
     ProposalTransition(SkillProposalTransitionRequest),
+    Repair(SkillRepairRequest),
 }
 
 impl SkillMutationRequest {
     pub fn request_id(&self) -> &RequestId {
         match self {
+            Self::WorkspaceBootstrap(request) => &request.request_id,
             Self::Create(request) => &request.request_id,
             Self::Propose(request) => &request.request_id,
             Self::ProposalTransition(request) => &request.request_id,
+            Self::Repair(request) => &request.request_id,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillWorkspaceBootstrapRequest {
+    pub request_id: RequestId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillRepairScope {
+    Workspace,
+    Skill(SkillSlug),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillRepairRequest {
+    pub request_id: RequestId,
+    pub scope: SkillRepairScope,
+    pub conflict_tip: String,
+    pub accepted_tree: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -2,6 +2,7 @@ mod error;
 mod id;
 mod package;
 mod reference;
+mod transition;
 mod types;
 
 pub use error::SkillError;
@@ -12,13 +13,19 @@ pub use package::{
     MAX_PACKAGE_FILE_BYTES, MAX_SKILL_MD_BYTES,
 };
 pub use reference::{parse_skill_reference, scan_skill_references, SkillReference};
+pub use transition::{
+    plan_skill_mutation, validate_skill_commit, SkillCommitEvidence, SkillConflictCheckpoint,
+    SkillMutationContext, SkillMutationPlan, SkillObjectSnapshot, SkillProposalSnapshot,
+    SkillRepairAcceptedState, SkillRepositorySnapshot, SkillRevisionSnapshot,
+    SkillTransitionOutcome, SkillTreeEdit,
+};
 pub use types::{
     ProposalStatus, ResourceDescriptor, SkillCatalogEntry, SkillCreateRequest, SkillListQuery,
     SkillListResponse, SkillLoadResponse, SkillMeta, SkillMutationRequest, SkillMutationResult,
     SkillOperation, SkillProposalMeta, SkillProposalTransitionRequest, SkillProposeRequest,
-    SkillPublicationMeta, SkillReceipt, SkillReceiptRequest, SkillReceiptScope, SkillResourceQuery,
-    SkillResourceResponse, SkillRevisionMeta, SkillShowQuery, SkillShowResponse,
-    WorkspaceSkillMeta,
+    SkillPublicationMeta, SkillReceipt, SkillReceiptRequest, SkillReceiptScope, SkillRepairRequest,
+    SkillRepairScope, SkillResourceQuery, SkillResourceResponse, SkillRevisionMeta, SkillShowQuery,
+    SkillShowResponse, SkillWorkspaceBootstrapRequest, WorkspaceSkillMeta,
 };
 
 pub const SKILL_SCHEMA_VERSION: u32 = 1;
