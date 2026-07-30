@@ -802,3 +802,25 @@ fn cross_worktree_index_aliases_are_rejected() {
         "linked-symlink-target",
     );
 }
+
+#[test]
+fn missing_linked_worktree_index_path_remains_protected() {
+    let fixture = three_worktrees();
+    fs::remove_file(&fixture.linked_b_index).unwrap();
+    assert!(!fixture.linked_b_index.exists());
+
+    let result = build_private_index_commit(
+        &GitStorage::new(&fixture.main),
+        &request(
+            &fixture.base,
+            &fixture.linked_b_index,
+            "missing-linked-index",
+        ),
+    );
+
+    assert!(
+        !fixture.linked_b_index.exists(),
+        "private-index plumbing created a missing linked-worktree index"
+    );
+    assert!(result.is_err(), "missing protected index path was accepted");
+}

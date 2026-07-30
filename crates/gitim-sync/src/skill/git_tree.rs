@@ -376,13 +376,17 @@ fn protected_index_paths(repo: &GitStorage) -> Result<Vec<ProtectedIndex>, GitEr
                 Err(error) => return Err(error.into()),
             };
             let candidate = entry.path().join("index");
-            match fs::symlink_metadata(&candidate) {
-                Ok(_) => candidates.push(candidate),
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => candidates.push(candidate),
+                Ok(_) => {}
                 Err(error)
                     if matches!(
                         error.kind(),
                         std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                    ) => {}
+                    ) =>
+                {
+                    candidates.push(candidate);
+                }
                 Err(error) => return Err(error.into()),
             }
         }
