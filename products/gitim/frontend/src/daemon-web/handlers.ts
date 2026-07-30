@@ -2252,7 +2252,6 @@ function parseYaml(yaml: string): Record<string, unknown> {
     // Save previous list if any
     if (currentKey && currentList) {
       result[currentKey] = currentList;
-      currentList = null;
     }
 
     const key = trimmed.slice(0, colonIdx).trim();
