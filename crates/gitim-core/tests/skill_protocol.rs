@@ -255,6 +255,26 @@ fn scanner_ignores_code_delimiters_inside_link_destinations() {
 }
 
 #[test]
+fn scanner_keeps_escaped_parentheses_inside_link_destinations_literal() {
+    let refs = scan_skill_references(
+        "[x](foo\\) skill:still-hidden@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N) skill:visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N [y](foo\\(bar) skill:also-visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N",
+    );
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs[0].slug.as_str(), "visible");
+    assert_eq!(refs[1].slug.as_str(), "also-visible");
+}
+
+#[test]
+fn scanner_does_not_treat_an_escaped_label_closer_as_a_link() {
+    let refs = scan_skill_references(
+        "[x\\](skill:literal@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N) skill:visible@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N",
+    );
+    assert_eq!(refs.len(), 2);
+    assert_eq!(refs[0].slug.as_str(), "literal");
+    assert_eq!(refs[1].slug.as_str(), "visible");
+}
+
+#[test]
 fn local_request_dtos_round_trip_and_expose_request_ids() {
     let request = SkillMutationRequest::Create(SkillCreateRequest {
         request_id: RequestId::new("q-01K1D8QG2S8RX4T9M9BDKQ9Z7N").unwrap(),

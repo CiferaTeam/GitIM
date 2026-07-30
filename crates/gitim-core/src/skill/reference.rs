@@ -64,6 +64,11 @@ pub fn scan_skill_references(markdown: &str) -> Vec<SkillReference> {
         }
 
         if link_destination_depth > 0 {
+            if bytes[index] == b'\\' {
+                index += '\\'.len_utf8();
+                index += markdown[index..].chars().next().map_or(0, char::len_utf8);
+                continue;
+            }
             match bytes[index] {
                 b'(' => link_destination_depth += 1,
                 b')' => link_destination_depth -= 1,
@@ -94,7 +99,11 @@ pub fn scan_skill_references(markdown: &str) -> Vec<SkillReference> {
             continue;
         }
 
-        if bytes[index] == b'(' && index > 0 && bytes[index - 1] == b']' {
+        if bytes[index] == b'('
+            && index > 0
+            && bytes[index - 1] == b']'
+            && !is_escaped(markdown, index - 1)
+        {
             link_destination_depth = 1;
             index += 1;
             continue;
@@ -158,6 +167,16 @@ fn has_valid_right_boundary(value: &str, end: usize) -> bool {
 
 fn is_reference_boundary_character(character: char) -> bool {
     character.is_alphanumeric() || matches!(character, '_' | '/' | '\\' | '-')
+}
+
+fn is_escaped(markdown: &str, index: usize) -> bool {
+    markdown.as_bytes()[..index]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b'\\')
+        .count()
+        % 2
+        == 1
 }
 
 fn is_fence_opener(markdown: &str, index: usize, delimiter: u8, run_length: usize) -> bool {
