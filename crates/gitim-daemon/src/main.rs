@@ -151,7 +151,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     (subjects + dirty-tree verification inside refuse unsafe resets).
     //   - origin redirected               → a rotation completed (ours or
     //     another daemon's) while we were down. Follow it now.
-    // Holds commit_lock — handlers racing boot serialize behind it.
+    // Guarded cleanup/follow fetches outside commit_lock and acquires it only
+    // for the exact local ref rewrite, serializing that mutation with handlers.
     {
         let storage = gitim_sync::git::GitStorage::new(&app_state.repo_root);
         if storage.has_remote() {
@@ -171,22 +172,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .flatten()
                         .and_then(|f| f.redirect.map(|r| r.target_branch))
                         .unwrap_or_default();
-                    let _guard = app_state
-                        .commit_lock
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    if let Err(e) =
-                        gitim_sync::rotate::cleanup_failed_fire(&storage, &branch, &orphan)
-                    {
+                    if let Err(e) = gitim_sync::rotate::cleanup_failed_fire(
+                        &storage,
+                        &app_state.commit_lock,
+                        &branch,
+                        &orphan,
+                    ) {
                         tracing::warn!("boot: partial-fire cleanup failed: {}", e);
                     } else {
                         let _ = app_state.refresh_epoch_status();
                     }
                 } else if origin_redirected {
-                    let _guard = app_state
-                        .commit_lock
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     match app_state.integrate_working_branch(
                         gitim_sync::skill::guard::IntegrationOperation::FollowEpochRedirect,
                     ) {

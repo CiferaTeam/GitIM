@@ -222,7 +222,11 @@ impl AppState {
         &self,
         operation: IntegrationOperation,
     ) -> Result<gitim_sync::skill::checkpoint::IncomingSkillValidation, SkillSyncError> {
-        SkillSyncGuard::new(&self.repo_root)?.guarded_integrate(&self.git_storage, operation)
+        SkillSyncGuard::new(&self.repo_root)?.guarded_integrate(
+            &self.git_storage,
+            &self.commit_lock,
+            operation,
+        )
     }
 
     pub fn push_working_branch_with_retry(&self, operation: &str) -> Result<(), SkillSyncError> {
@@ -234,6 +238,9 @@ impl AppState {
                     tracing::warn!(
                         "{operation}: guarded push conflict (attempt {attempt}/{MAX_ATTEMPTS})"
                     );
+                    if SkillSyncGuard::new(&self.repo_root)?.quarantine_pending()? {
+                        continue;
+                    }
                     self.integrate_working_branch(IntegrationOperation::RebaseOntoOrigin)?;
                 }
                 Err(error) => return Err(error),
@@ -288,14 +295,10 @@ impl AppState {
         self.try_rotate_inner(threshold).map_err(|e| e.to_string())
     }
 
-    /// Acquire commit_lock and run the fire/follow state machine once.
+    /// Run the fire/follow state machine once.
     /// Blocking (git shell-outs throughout) — async callers go through
     /// `tokio::task::spawn_blocking`.
     fn try_rotate_inner(&self, threshold: u64) -> Result<bool, gitim_sync::rotate::RotationError> {
-        let _guard = self
-            .commit_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let storage = GitStorage::new(&self.repo_root);
         let branch = storage.current_branch()?;
         // Per-clone, git-ignored archive landing zone for epoch bundles.
@@ -305,6 +308,7 @@ impl AppState {
 
         let outcome = gitim_sync::rotate::try_fire_rotation(
             &storage,
+            &self.commit_lock,
             &branch,
             threshold,
             &archive_dir,

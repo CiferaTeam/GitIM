@@ -24,12 +24,13 @@ pub struct SkillSyncGuard {
     journal_path: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum IntegrationOperation {
     RebaseOntoOrigin,
     HardDivergenceRecovery,
     FollowEpochRedirect,
     FollowEpochRedirectAfterDiscard,
+    CleanupFailedFire { orphan_branch: String },
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -59,6 +60,8 @@ struct QuarantineJournal {
     phase: QuarantinePhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repaired_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    branch_head: Option<String>,
 }
 
 impl SkillSyncGuard {
@@ -115,7 +118,8 @@ impl SkillSyncGuard {
         self.validate_and_store(repo, &upstream_oid, &branch)?;
 
         if let Some(journal) = self.load_journal()? {
-            return self.resume_quarantine(repo, commit_lock, author, journal);
+            validate_user_archive_preconditions(repo, &upstream_oid, &journal.original_head)?;
+            return self.resume_quarantine(repo, commit_lock, author, journal, &upstream_oid);
         }
 
         let original_head = repo.rev_parse("HEAD")?;
@@ -129,11 +133,11 @@ impl SkillSyncGuard {
         }
         validate_user_archive_preconditions(repo, &upstream_oid, &original_head)?;
 
-        if changed_paths.iter().any(|path| is_managed_skill_path(path)) {
+        if history_touches_managed_skills_between(repo, &upstream_oid, &original_head)? {
             let journal = QuarantineJournal::prepared(&branch, &upstream_oid, &original_head)?;
             self.save_journal(&journal)?;
             ensure_quarantine_ref(repo, &journal)?;
-            return self.resume_quarantine(repo, commit_lock, author, journal);
+            return self.resume_quarantine(repo, commit_lock, author, journal, &upstream_oid);
         }
 
         repo.push_working_branch_unchecked(&branch, &original_head)?;
@@ -143,15 +147,17 @@ impl SkillSyncGuard {
     pub fn guarded_integrate(
         &self,
         repo: &GitStorage,
+        commit_lock: &Mutex<()>,
         operation: IntegrationOperation,
     ) -> Result<IncomingSkillValidation, SkillSyncError> {
         let journal = self.load_journal()?;
         if journal.is_some()
             && matches!(
-                operation,
+                &operation,
                 IntegrationOperation::HardDivergenceRecovery
                     | IntegrationOperation::FollowEpochRedirect
                     | IntegrationOperation::FollowEpochRedirectAfterDiscard
+                    | IntegrationOperation::CleanupFailedFire { .. }
             )
         {
             return Err(SkillSyncError::LocalQuarantineBlocked(
@@ -169,42 +175,85 @@ impl SkillSyncGuard {
 
         repo.fetch()?;
         let current_branch = repo.current_branch()?;
-        let validation_branch = if matches!(
-            operation,
+        let follows_redirect = matches!(
+            &operation,
             IntegrationOperation::FollowEpochRedirect
                 | IntegrationOperation::FollowEpochRedirectAfterDiscard
-        ) {
-            crate::rotate::resolve_active_branch(repo, &current_branch)
-                .map_err(|error| SkillSyncError::EpochValidationBlocked(error.to_string()))?
+        );
+        let captured_refs = if follows_redirect {
+            capture_epoch_chain(repo, &current_branch)?
         } else {
-            current_branch.clone()
+            vec![capture_remote_ref(repo, &current_branch)?]
         };
-        let fetched_tip = repo.rev_parse(&format!("origin/{validation_branch}"))?;
-        let validation = self.validate_and_store(repo, &fetched_tip, &validation_branch)?;
+        let current_upstream = captured_refs.first().ok_or_else(|| {
+            SkillSyncError::EpochValidationBlocked("empty epoch ref capture".to_owned())
+        })?;
+        let current_upstream_oid = current_upstream.oid.clone();
+        let validation_ref = captured_refs.last().ok_or_else(|| {
+            SkillSyncError::EpochValidationBlocked("empty epoch ref capture".to_owned())
+        })?;
+        let validation_branch = validation_ref.branch.clone();
+        let validated_tip = validation_ref.oid.clone();
+        let validation = self.validate_and_store(repo, &validated_tip, &validation_branch)?;
+
+        let _guard = commit_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for captured in &captured_refs {
+            ensure_ref_equals(repo, &captured.reference, &captured.oid)?;
+        }
 
         match operation {
             IntegrationOperation::RebaseOntoOrigin => {
-                repo.rebase_onto_origin()?;
+                repo.rebase_onto_exact(&current_upstream_oid)?;
                 if let Some(mut journal) = journal {
-                    journal.upstream_oid = fetched_tip.clone();
+                    journal.upstream_oid = current_upstream_oid.clone();
                     journal.repaired_head = Some(repo.rev_parse("HEAD")?);
                     self.save_journal(&journal)?;
                 }
             }
-            IntegrationOperation::HardDivergenceRecovery => repo.discard_unpushed()?,
+            IntegrationOperation::HardDivergenceRecovery => {
+                repo.discard_unpushed_to(&current_upstream_oid)?;
+            }
             IntegrationOperation::FollowEpochRedirect => {
-                crate::rotate::follow_redirect(repo, &current_branch)
-                    .map_err(|error| SkillSyncError::EpochValidationBlocked(error.to_string()))?;
+                crate::rotate::follow_redirect_exact(
+                    repo,
+                    &current_branch,
+                    &current_upstream_oid,
+                    &validation_branch,
+                    &validated_tip,
+                )
+                .map_err(|error| SkillSyncError::EpochValidationBlocked(error.to_string()))?;
             }
             IntegrationOperation::FollowEpochRedirectAfterDiscard => {
-                repo.discard_unpushed()?;
-                let followed = crate::rotate::follow_redirect(repo, &current_branch)
-                    .map_err(|error| SkillSyncError::EpochValidationBlocked(error.to_string()))?;
+                repo.discard_unpushed_to(&current_upstream_oid)?;
+                let followed = crate::rotate::follow_redirect_exact(
+                    repo,
+                    &current_branch,
+                    &current_upstream_oid,
+                    &validation_branch,
+                    &validated_tip,
+                )
+                .map_err(|error| SkillSyncError::EpochValidationBlocked(error.to_string()))?;
                 if !followed {
                     return Err(SkillSyncError::EpochValidationBlocked(
                         "epoch redirect follow was a no-op after discard".to_owned(),
                     ));
                 }
+            }
+            IntegrationOperation::CleanupFailedFire { orphan_branch } => {
+                let ahead = repo.subjects_ahead_of(&current_branch, &current_upstream_oid)?;
+                if ahead
+                    .iter()
+                    .any(|subject| !subject.starts_with(crate::rotate::SEAL_SUBJECT_PREFIX))
+                {
+                    return Ok(validation);
+                }
+                if repo.has_dirty_tracked_files()? {
+                    return Ok(validation);
+                }
+                repo.discard_unpushed_to(&current_upstream_oid)?;
+                let _ = repo.delete_local_branch(&orphan_branch);
             }
         }
         Ok(validation)
@@ -231,6 +280,10 @@ impl SkillSyncGuard {
         Ok(())
     }
 
+    pub fn quarantine_pending(&self) -> Result<bool, SkillSyncError> {
+        Ok(self.load_journal()?.is_some())
+    }
+
     fn validate_and_store(
         &self,
         repo: &GitStorage,
@@ -255,12 +308,31 @@ impl SkillSyncGuard {
         commit_lock: &Mutex<()>,
         author: (&str, &str),
         mut journal: QuarantineJournal,
+        captured_upstream_oid: &str,
     ) -> Result<GuardedPushOutcome, SkillSyncError> {
         validate_journal(repo, &journal)?;
         ensure_quarantine_ref(repo, &journal)?;
         let _guard = commit_lock
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let upstream_ref = format!("origin/{}", journal.branch);
+        ensure_ref_equals(repo, &upstream_ref, captured_upstream_oid)?;
+
+        if journal.upstream_oid != captured_upstream_oid {
+            let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
+            let expected = journal.expected_branch_head();
+            let previous_repaired = journal.repaired_head.as_deref();
+            if current != expected && previous_repaired != Some(current.as_str()) {
+                return Err(SkillSyncError::LocalQuarantineBlocked(
+                    "working branch changed while quarantine awaited a new upstream".to_owned(),
+                ));
+            }
+            journal.upstream_oid = captured_upstream_oid.to_owned();
+            journal.branch_head = Some(current);
+            journal.repaired_head = None;
+            journal.phase = QuarantinePhase::Prepared;
+            self.save_journal(&journal)?;
+        }
 
         if journal.phase == QuarantinePhase::Prepared {
             let repaired = replay_without_managed_skills(repo, &journal, author)?;
@@ -277,12 +349,16 @@ impl SkillSyncGuard {
             })?;
             verify_replayed_result(repo, &journal, repaired)?;
             let current = repo.rev_parse(&format!("refs/heads/{}", journal.branch))?;
-            if current != journal.original_head {
+            let expected = journal.expected_branch_head();
+            if current == expected {
+                update_working_branch(repo, &journal.branch, repaired, expected)?;
+            } else if current == repaired {
+                repo.reset_hard_to(repaired)?;
+            } else {
                 return Err(SkillSyncError::LocalQuarantineBlocked(
                     "working branch changed during quarantine replay".to_owned(),
                 ));
             }
-            update_working_branch(repo, &journal.branch, repaired, &journal.original_head)?;
             journal.phase = QuarantinePhase::Moved;
             self.save_journal(&journal)?;
         }
@@ -413,7 +489,14 @@ impl QuarantineJournal {
             quarantine_ref,
             phase: QuarantinePhase::Prepared,
             repaired_head: None,
+            branch_head: Some(original_head.to_owned()),
         })
+    }
+
+    fn expected_branch_head(&self) -> &str {
+        self.branch_head
+            .as_deref()
+            .unwrap_or(self.original_head.as_str())
     }
 }
 
@@ -441,6 +524,10 @@ fn validate_journal(repo: &GitStorage, journal: &QuarantineJournal) -> Result<()
     if let Some(repaired) = &journal.repaired_head {
         validate_oid(repaired)?;
         repo.rev_parse(&format!("{repaired}^{{commit}}"))?;
+    }
+    if let Some(branch_head) = &journal.branch_head {
+        validate_oid(branch_head)?;
+        repo.rev_parse(&format!("{branch_head}^{{commit}}"))?;
     }
     repo.rev_parse(&format!("{}^{{commit}}", journal.original_head))?;
     repo.rev_parse(&format!("{}^{{commit}}", journal.upstream_oid))?;
@@ -887,6 +974,70 @@ fn revision_oid(repo: &GitStorage, revision: &str) -> Result<Option<String>, Ski
     }
 }
 
+fn ensure_ref_equals(
+    repo: &GitStorage,
+    reference: &str,
+    expected_oid: &str,
+) -> Result<(), SkillSyncError> {
+    if revision_oid(repo, reference)?.as_deref() != Some(expected_oid) {
+        return Err(SkillSyncError::Git(GitError::PushConflict));
+    }
+    Ok(())
+}
+
+struct CapturedRemoteRef {
+    branch: String,
+    reference: String,
+    oid: String,
+}
+
+fn capture_remote_ref(
+    repo: &GitStorage,
+    branch: &str,
+) -> Result<CapturedRemoteRef, SkillSyncError> {
+    let reference = format!("origin/{branch}");
+    let oid = repo.rev_parse(&reference)?;
+    Ok(CapturedRemoteRef {
+        branch: branch.to_owned(),
+        reference,
+        oid,
+    })
+}
+
+fn capture_epoch_chain(
+    repo: &GitStorage,
+    start_branch: &str,
+) -> Result<Vec<CapturedRemoteRef>, SkillSyncError> {
+    let mut branch = start_branch.to_owned();
+    let mut captured = Vec::new();
+    for _ in 0..crate::rotate::MAX_FOLLOW_HOPS {
+        let remote_ref = capture_remote_ref(repo, &branch)?;
+        let epoch = crate::rotate::epoch_file_at_ref(repo, &remote_ref.oid)
+            .map_err(|error| SkillSyncError::EpochValidationBlocked(error.to_string()))?;
+        let next = match epoch {
+            Some(file) if file.status == gitim_core::epoch::EpochStatus::Redirected => Some(
+                file.redirect
+                    .ok_or_else(|| {
+                        SkillSyncError::EpochValidationBlocked(
+                            "redirected epoch has no redirect block".to_owned(),
+                        )
+                    })?
+                    .target_branch,
+            ),
+            _ => None,
+        };
+        captured.push(remote_ref);
+        match next {
+            Some(target) => branch = target,
+            None => return Ok(captured),
+        }
+    }
+    Err(SkillSyncError::EpochValidationBlocked(format!(
+        "redirect chain exceeded {} hops from {start_branch}",
+        crate::rotate::MAX_FOLLOW_HOPS
+    )))
+}
+
 fn history_touches_managed_skills(
     repo: &GitStorage,
     revision: &str,
@@ -904,6 +1055,40 @@ fn history_touches_managed_skills(
         repo.root(),
     )?;
     Ok(output.stdout.iter().any(|byte| !byte.is_ascii_whitespace()))
+}
+
+fn history_touches_managed_skills_between(
+    repo: &GitStorage,
+    upstream_oid: &str,
+    validated_head: &str,
+) -> Result<bool, SkillSyncError> {
+    validate_oid(upstream_oid)?;
+    validate_oid(validated_head)?;
+    let range = format!("{upstream_oid}..{validated_head}");
+    let commits = repo.run_git_capture(&["rev-list", "--topo-order", &range])?;
+    for commit in commits.lines().filter(|line| !line.is_empty()) {
+        validate_oid(commit)?;
+        let paths = run_git(
+            &[
+                "diff-tree",
+                "--root",
+                "-m",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                "-z",
+                commit,
+                "--",
+                "skills",
+                "archive/skills",
+            ],
+            repo.root(),
+        )?;
+        if paths.stdout.iter().any(|byte| *byte != 0) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn index_is_clean(repo: &GitStorage) -> Result<bool, SkillSyncError> {

@@ -6,6 +6,7 @@
 use crate::git::{GitError, GitStorage};
 use gitim_core::epoch::{EpochFile, EpochStatus};
 use std::path::Path;
+use std::sync::Mutex;
 
 pub const EPOCH_FILE: &str = "gitim.epoch.yaml";
 /// Multi-hop follow guard (design scenario 6). 32 is unreachable in
@@ -70,50 +71,38 @@ pub fn epoch_status_at_ref(
 /// Remove every local trace of a failed fire so the next cycle starts
 /// clean: reset old branch onto origin, drop the never-published orphan
 /// branch. Also the boot-time cleanup for crash residue (scenario 7).
-/// Caller must hold `commit_lock` — this runs `checkout -f` + `reset --hard`.
-///
 /// Zero-loss guard (review I3): reset only when everything ahead of origin
 /// is rotation-self-produced. A foreign commit in that range means messages
 /// would die — leave the residue in place (the push fence keeps it
 /// unpublished; delayed, never lost) and let a human look.
 pub fn cleanup_failed_fire(
     storage: &GitStorage,
+    commit_lock: &Mutex<()>,
     old_branch: &str,
     orphan_branch: &str,
 ) -> Result<(), RotationError> {
+    if storage.current_branch()? != old_branch {
+        return Err(RotationError::Epoch(format!(
+            "cleanup branch changed before guarded reset: expected {old_branch}"
+        )));
+    }
     crate::skill::guard::SkillSyncGuard::new(storage.root())
         .map_err(|error| RotationError::Epoch(error.to_string()))?
-        .quarantine_resolved()
+        .guarded_integrate(
+            storage,
+            commit_lock,
+            crate::skill::guard::IntegrationOperation::CleanupFailedFire {
+                orphan_branch: orphan_branch.to_owned(),
+            },
+        )
         .map_err(|error| RotationError::Epoch(error.to_string()))?;
-    let ahead = storage.subjects_ahead_of_origin(old_branch)?;
-    if ahead.iter().any(|s| !s.starts_with(SEAL_SUBJECT_PREFIX)) {
-        tracing::warn!(
-            "cleanup_failed_fire: non-rotation commits ahead of origin/{old_branch} \
-             ({ahead:?}); refusing to reset — residue stays fenced until resolved"
-        );
-        return Ok(());
-    }
-    // Same zero-loss posture for UNCOMMITTED state: a deferred-send dirty
-    // file (handler commit failed; sync picks it up later) would be eaten by
-    // the reset. The fire path never reaches here dirty (its own guard), so
-    // this only triggers on the boot / fence-self-heal entries — refuse and
-    // let a later attempt run once the file has been committed.
-    if storage.has_dirty_tracked_files()? {
-        tracing::warn!(
-            "cleanup_failed_fire: dirty tracked files present; refusing to reset \
-             — residue stays fenced until the working tree is committed"
-        );
-        return Ok(());
-    }
-    storage.reset_branch_to_origin(old_branch)?;
-    // Branch may not exist if we crashed before creating it — best-effort.
-    let _ = storage.delete_local_branch(orphan_branch);
     Ok(())
 }
 
-/// Attempt to fire an epoch rotation. Caller must hold `commit_lock`.
+/// Attempt to fire an epoch rotation.
 pub fn try_fire_rotation(
     storage: &GitStorage,
+    commit_lock: &Mutex<()>,
     current_branch: &str,
     threshold: u64,
     archive_dir: &Path,
@@ -125,6 +114,30 @@ pub fn try_fire_rotation(
     skill_guard
         .quarantine_resolved()
         .map_err(|error| RotationError::Epoch(error.to_string()))?;
+    storage.fetch()?;
+    let origin_ref = format!("origin/{current_branch}");
+    let fetched_origin_oid = storage.rev_parse(&origin_ref)?;
+    if matches!(
+        epoch_file_at_ref(storage, &fetched_origin_oid)?,
+        Some(file) if file.status == EpochStatus::Redirected
+    ) {
+        return Ok(RotationOutcome::Lost);
+    }
+    skill_guard
+        .rotation_allowed(storage)
+        .map_err(|error| RotationError::Epoch(error.to_string()))?;
+    let captured_origin_oid = storage.rev_parse(&origin_ref)?;
+    let origin_epoch = epoch_file_at_ref(storage, &captured_origin_oid)?;
+    if matches!(&origin_epoch, Some(f) if f.status == EpochStatus::Redirected) {
+        return Ok(RotationOutcome::Lost);
+    }
+
+    let mutation_guard = commit_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if storage.rev_parse(&origin_ref)? != captured_origin_oid {
+        return Ok(RotationOutcome::Lost);
+    }
     // Zero-loss guard (review I3): the Lost path resets hard onto origin, so
     // fire may only proceed from a clean local == origin state. Any backlog
     // (messages committed between push-success and our lock acquisition)
@@ -154,18 +167,6 @@ pub fn try_fire_rotation(
         return Ok(RotationOutcome::NotReady);
     }
 
-    storage.fetch()?;
-
-    // Invariant 3: read epoch state from origin, not the working tree.
-    let origin_ref = format!("origin/{current_branch}");
-    let origin_epoch = epoch_file_at_ref(storage, &origin_ref)?;
-    if matches!(&origin_epoch, Some(f) if f.status == EpochStatus::Redirected) {
-        // Someone already rotated this branch — we are a follower, not a firer.
-        return Ok(RotationOutcome::Lost);
-    }
-    skill_guard
-        .rotation_allowed(storage)
-        .map_err(|error| RotationError::Epoch(error.to_string()))?;
     let current_epoch = origin_epoch.as_ref().map(|f| f.epoch).unwrap_or(1);
     let new_epoch = current_epoch + 1;
     let new_branch = format!("main-epoch-{new_epoch}");
@@ -215,10 +216,23 @@ pub fn try_fire_rotation(
         &seal_commit_message(current_epoch, &new_branch, orphan_short),
         author,
     )?;
+    let redirect_commit_sha = storage.rev_parse(current_branch)?;
+    drop(mutation_guard);
 
-    match storage.atomic_push_two_refs(current_branch, &new_branch) {
+    match storage.atomic_push_two_refs_exact(
+        current_branch,
+        &redirect_commit_sha,
+        &new_branch,
+        &orphan_commit_sha,
+    ) {
         Ok(()) => {
-            storage.checkout_branch(&new_branch)?;
+            let local_guard = commit_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let local_old_tip = storage.rev_parse(&format!("refs/heads/{current_branch}"))?;
+            if local_old_tip == redirect_commit_sha {
+                storage.checkout_branch(&new_branch)?;
+            }
             // The orphan branch was born via update-ref and carries no
             // upstream config; run_sync_cycle's TOP-of-cycle `@{upstream}`
             // probe bails the whole cycle on an upstream-less branch —
@@ -240,9 +254,11 @@ pub fn try_fire_rotation(
                     );
                 }
             }
+            let tag_result = storage.tag_archive(&archive_tag, &sealed_commit_sha);
+            drop(local_guard);
             // Best-effort archive: tag + push + bundle. Failure warns, never
             // blocks — the rotation itself is already durable on origin.
-            if let Err(e) = storage.tag_archive(&archive_tag, &sealed_commit_sha) {
+            if let Err(e) = tag_result {
                 tracing::warn!("rotation: tag_archive failed (non-fatal): {e}");
             } else if let Err(e) = storage.push_tag(&archive_tag) {
                 tracing::warn!("rotation: push_tag failed (non-fatal): {e}");
@@ -262,13 +278,13 @@ pub fn try_fire_rotation(
         Err(GitError::PushConflict) => {
             // Lost the race (to another firer OR to a plain message push —
             // design scenarios 1 and 2; we don't need to know which).
-            cleanup_failed_fire(storage, current_branch, &new_branch)?;
+            cleanup_failed_fire(storage, commit_lock, current_branch, &new_branch)?;
             Ok(RotationOutcome::Lost)
         }
         Err(e) => {
             // Auth / rate-limit / network (review C1 follow-through): nobody
             // won; restore the clean state and let a later push retry.
-            cleanup_failed_fire(storage, current_branch, &new_branch)?;
+            cleanup_failed_fire(storage, commit_lock, current_branch, &new_branch)?;
             Err(RotationError::Git(e))
         }
     }
@@ -401,6 +417,39 @@ pub fn follow_redirect(storage: &GitStorage, current_branch: &str) -> Result<boo
         tracing::warn!("follow: aligning {current_branch} to origin failed (non-fatal): {e}");
     }
 
+    Ok(true)
+}
+
+pub(crate) fn follow_redirect_exact(
+    storage: &GitStorage,
+    current_branch: &str,
+    current_upstream_oid: &str,
+    target_branch: &str,
+    target_oid: &str,
+) -> Result<bool, RotationError> {
+    if target_branch == current_branch {
+        return Ok(false);
+    }
+
+    let has_unpushed = !storage
+        .subjects_ahead_of(current_branch, current_upstream_oid)?
+        .is_empty();
+    storage.create_or_repoint_branch_to(target_branch, target_oid)?;
+    storage.set_upstream_to_origin(target_branch)?;
+
+    if has_unpushed {
+        if let Err(error) = storage.rebase_onto(target_oid, current_upstream_oid) {
+            if let Err(abort_error) = storage.abort_rebase() {
+                tracing::error!(
+                    "follow: abort after failed exact migrate also failed: {abort_error}"
+                );
+            }
+            return Err(error.into());
+        }
+        storage.repoint_branch_to_head(target_branch)?;
+    }
+    storage.checkout_branch(target_branch)?;
+    storage.reset_without_checkout_to(current_branch, current_upstream_oid)?;
     Ok(true)
 }
 

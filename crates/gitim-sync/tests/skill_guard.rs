@@ -4,7 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use gitim_core::epoch::EpochFile;
 use gitim_core::skill::{
@@ -14,7 +16,9 @@ use gitim_core::skill::{
     SkillRepairRequest, SkillRepairScope, SkillRepositorySnapshot, SkillWorkspaceBootstrapRequest,
 };
 use gitim_sync::git::GitStorage;
-use gitim_sync::rotate::{try_fire_rotation, RotationOutcome};
+use gitim_sync::rotate::{
+    try_fire_rotation as try_fire_rotation_impl, RotationError, RotationOutcome,
+};
 use gitim_sync::skill::checkpoint::{
     validate_incoming_skill_history, SkillCheckpointStore, SkillConflict, SkillValidationCheckpoint,
 };
@@ -22,10 +26,30 @@ use gitim_sync::skill::git_tree::{
     build_private_index_commit, tree_oid_at, PrivateIndexCommitRequest,
 };
 use gitim_sync::skill::guard::{GuardedPushOutcome, IntegrationOperation, SkillSyncGuard};
+use gitim_sync::sync_loop::{run_sync_cycle, AuthCircuit};
 use tempfile::TempDir;
 
 const ALICE: &str = "alice";
 const NOW: &str = "2026-07-30T10:00:00Z";
+
+fn try_fire_rotation(
+    storage: &GitStorage,
+    current_branch: &str,
+    threshold: u64,
+    archive_dir: &Path,
+    author: (&str, &str),
+    created_at: &str,
+) -> Result<RotationOutcome, RotationError> {
+    try_fire_rotation_impl(
+        storage,
+        &Mutex::new(()),
+        current_branch,
+        threshold,
+        archive_dir,
+        author,
+        created_at,
+    )
+}
 
 struct Repository {
     directory: TempDir,
@@ -2492,6 +2516,59 @@ fn guarded_push_quarantines_bypassed_skill_history_and_replays_every_ordinary_de
 }
 
 #[test]
+fn guarded_push_quarantines_transient_skill_touches_hidden_by_the_final_tree() {
+    let fixture = RemoteRepository::new();
+    let storage = GitStorage::new(fixture.clone_root());
+    let guard = SkillSyncGuard::new(fixture.clone_root()).unwrap();
+
+    fs::create_dir_all(fixture.clone_root().join("skills/transient")).unwrap();
+    fs::write(
+        fixture.clone_root().join("skills/transient/SKILL.md"),
+        "# invalid transient Skill\n",
+    )
+    .unwrap();
+    commit_all(fixture.clone_root(), "invalid transient Skill add", ALICE);
+    fs::remove_dir_all(fixture.clone_root().join("skills/transient")).unwrap();
+    commit_all(
+        fixture.clone_root(),
+        "hide invalid Skill by deleting it",
+        ALICE,
+    );
+    fs::write(
+        fixture.clone_root().join("ordinary.txt"),
+        "ordinary delta\n",
+    )
+    .unwrap();
+    commit_all(
+        fixture.clone_root(),
+        "ordinary after transient bypass",
+        ALICE,
+    );
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        GuardedPushOutcome::RepairedAndPushed { .. }
+    ));
+    assert_eq!(
+        git_output(
+            fixture.clone_root(),
+            &["show", "refs/remotes/origin/main:ordinary.txt"]
+        ),
+        "ordinary delta"
+    );
+    let published_messages = git_output(
+        fixture.clone_root(),
+        &["log", "--format=%s", "refs/remotes/origin/main"],
+    );
+    assert!(!published_messages.contains("invalid transient Skill add"));
+    assert!(!published_messages.contains("hide invalid Skill by deleting it"));
+}
+
+#[test]
 fn guarded_push_publishes_first_ordinary_history_to_an_empty_remote() {
     let directory = tempfile::tempdir().unwrap();
     let remote = directory.path().join("origin.git");
@@ -2535,6 +2612,176 @@ fn guarded_push_publishes_first_ordinary_history_to_an_empty_remote() {
 }
 
 #[test]
+fn quarantine_resume_accepts_a_branch_already_moved_to_the_repaired_head() {
+    let fixture = RemoteRepository::new();
+    let storage = GitStorage::new(fixture.clone_root());
+    let guard = SkillSyncGuard::new(fixture.clone_root()).unwrap();
+    let upstream = git_output(fixture.clone_root(), &["rev-parse", "origin/main"]);
+
+    fs::create_dir_all(fixture.clone_root().join("skills/poison")).unwrap();
+    fs::write(
+        fixture.clone_root().join("skills/poison/SKILL.md"),
+        "# invalid\n",
+    )
+    .unwrap();
+    fs::write(fixture.clone_root().join("ordinary.txt"), "preserved\n").unwrap();
+    commit_all(fixture.clone_root(), "mixed bypass", ALICE);
+    let original = git_output(fixture.clone_root(), &["rev-parse", "HEAD"]);
+    let quarantine_ref = format!("refs/gitim/quarantine/skill-{original}");
+    git(
+        fixture.clone_root(),
+        &["update-ref", &quarantine_ref, &original],
+    );
+
+    git(fixture.clone_root(), &["reset", "--hard", &upstream]);
+    fs::write(fixture.clone_root().join("ordinary.txt"), "preserved\n").unwrap();
+    commit_all(fixture.clone_root(), "sanitized ordinary replay", ALICE);
+    let repaired = git_output(fixture.clone_root(), &["rev-parse", "HEAD"]);
+    fs::create_dir_all(fixture.clone_root().join(".gitim")).unwrap();
+    fs::write(
+        fixture.clone_root().join(".gitim/skill-quarantine.json"),
+        serde_json::json!({
+            "schema_version": 1,
+            "operation_id": original,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "original_head": original,
+            "quarantine_ref": quarantine_ref,
+            "phase": "replayed",
+            "repaired_head": repaired
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        GuardedPushOutcome::RepairedAndPushed { .. }
+    ));
+    assert!(!fixture
+        .clone_root()
+        .join(".gitim/skill-quarantine.json")
+        .exists());
+    assert_eq!(
+        git_output(
+            fixture.clone_root(),
+            &["show", "refs/remotes/origin/main:ordinary.txt"]
+        ),
+        "preserved"
+    );
+}
+
+#[test]
+fn quarantine_resume_replays_the_original_ref_after_remote_advance_and_thread_conflict() {
+    let fixture = RemoteRepository::new();
+    let storage = GitStorage::new(fixture.clone_root());
+    let guard = SkillSyncGuard::new(fixture.clone_root()).unwrap();
+    let base_thread = "[L000001][P000000][@alice][20260730T120000Z] base\n";
+
+    fs::write(
+        fixture.writer_root().join("channels/general.thread"),
+        base_thread,
+    )
+    .unwrap();
+    commit_all(fixture.writer_root(), "seed shared thread", "bob");
+    git(fixture.writer_root(), &["push"]);
+    git(fixture.clone_root(), &["fetch", "origin"]);
+    git(fixture.clone_root(), &["rebase", "origin/main"]);
+
+    fs::create_dir_all(fixture.clone_root().join("skills/poison")).unwrap();
+    fs::write(
+        fixture.clone_root().join("skills/poison/SKILL.md"),
+        "# invalid\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.clone_root().join("channels/general.thread"),
+        format!("{base_thread}[L000002][P000000][@alice][20260730T120100Z] local survives\n"),
+    )
+    .unwrap();
+    commit_all(fixture.clone_root(), "local mixed bypass", ALICE);
+    let original = git_output(fixture.clone_root(), &["rev-parse", "HEAD"]);
+    let quarantine_ref = format!("refs/gitim/quarantine/skill-{original}");
+
+    fs::write(
+        fixture.writer_root().join("channels/general.thread"),
+        format!("{base_thread}[L000002][P000000][@bob][20260730T120200Z] remote survives\n"),
+    )
+    .unwrap();
+    commit_all(fixture.writer_root(), "concurrent remote message", "bob");
+
+    let hook = fixture.clone_root().join(".git/hooks/pre-push");
+    let marker = fixture.clone_root().join(".gitim/remote-advanced");
+    fs::create_dir_all(marker.parent().unwrap()).unwrap();
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nif [ ! -f '{}' ]; then\n  touch '{}'\n  git -C '{}' push origin HEAD:main\nfi\n",
+            marker.display(),
+            marker.display(),
+            fixture.writer_root().display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&hook).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&hook, permissions).unwrap();
+    }
+
+    let first = guard.guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"));
+    assert!(matches!(
+        first,
+        Err(gitim_sync::skill::checkpoint::SkillSyncError::Git(
+            gitim_sync::git::GitError::PushConflict
+        ))
+    ));
+    assert!(fixture
+        .clone_root()
+        .join(".gitim/skill-quarantine.json")
+        .exists());
+    fs::remove_file(&hook).unwrap();
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+
+    assert!(matches!(
+        outcome,
+        GuardedPushOutcome::RepairedAndPushed { .. }
+    ));
+    assert_eq!(
+        git_output(fixture.clone_root(), &["rev-parse", &quarantine_ref]),
+        original
+    );
+    assert!(!fixture
+        .clone_root()
+        .join(".gitim/skill-quarantine.json")
+        .exists());
+    let published = git_output(
+        fixture.clone_root(),
+        &["show", "refs/remotes/origin/main:channels/general.thread"],
+    );
+    assert!(published.contains("local survives"));
+    assert!(published.contains("remote survives"));
+    assert!(git_status(
+        fixture.clone_root(),
+        &[
+            "cat-file",
+            "-e",
+            "refs/remotes/origin/main:skills/poison/SKILL.md"
+        ]
+    )
+    .is_none());
+}
+
+#[test]
 fn unresolved_quarantine_blocks_destructive_integration_and_rotation() {
     let fixture = RemoteRepository::new();
     let storage = GitStorage::new(fixture.clone_root());
@@ -2560,7 +2807,11 @@ fn unresolved_quarantine_blocks_destructive_integration_and_rotation() {
 
     let before = git_output(fixture.clone_root(), &["rev-parse", "HEAD"]);
     let error = guard
-        .guarded_integrate(&storage, IntegrationOperation::HardDivergenceRecovery)
+        .guarded_integrate(
+            &storage,
+            &Mutex::new(()),
+            IntegrationOperation::HardDivergenceRecovery,
+        )
         .unwrap_err();
     assert_eq!(error.code(), "skill_local_quarantine_blocked");
     assert_eq!(
@@ -2590,13 +2841,136 @@ fn guarded_integrate_rejects_invalid_fetched_skill_history_before_branch_movemen
     git(fixture.writer_root(), &["push", "origin", "HEAD:main"]);
 
     let error = guard
-        .guarded_integrate(&local, IntegrationOperation::RebaseOntoOrigin)
+        .guarded_integrate(
+            &local,
+            &Mutex::new(()),
+            IntegrationOperation::RebaseOntoOrigin,
+        )
         .unwrap_err();
     assert_eq!(error.code(), "skill_sync_conflict");
     assert_eq!(
         git_output(fixture.clone_root(), &["rev-parse", "HEAD"]),
         before
     );
+}
+
+#[test]
+fn guarded_integrate_rejects_a_remote_ref_move_between_validation_and_local_rewrite() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root().to_path_buf();
+    let before = git_output(&local_root, &["rev-parse", "HEAD"]);
+
+    fs::write(fixture.writer_root().join("remote-first.txt"), "first\n").unwrap();
+    commit_all(fixture.writer_root(), "first remote advance", "bob");
+    git(fixture.writer_root(), &["push"]);
+    let first_remote = git_output(fixture.writer_root(), &["rev-parse", "HEAD"]);
+
+    let commit_lock = Arc::new(Mutex::new(()));
+    let held = commit_lock.lock().unwrap();
+    let worker_lock = commit_lock.clone();
+    let worker_root = local_root.clone();
+    let worker = std::thread::spawn(move || {
+        SkillSyncGuard::new(&worker_root)
+            .unwrap()
+            .guarded_integrate(
+                &GitStorage::new(&worker_root),
+                &worker_lock,
+                IntegrationOperation::RebaseOntoOrigin,
+            )
+    });
+
+    let checkpoint = local_root.join(".gitim/skill-validation.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&checkpoint).is_ok_and(|contents| contents.contains(&first_remote)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        fs::read_to_string(&checkpoint)
+            .unwrap_or_default()
+            .contains(&first_remote),
+        "integration did not finish validating the captured remote tip"
+    );
+
+    fs::write(fixture.writer_root().join("remote-second.txt"), "second\n").unwrap();
+    commit_all(fixture.writer_root(), "second remote advance", "bob");
+    git(fixture.writer_root(), &["push"]);
+    GitStorage::new(&local_root).fetch().unwrap();
+    drop(held);
+
+    let error = worker.join().unwrap().unwrap_err();
+    assert!(matches!(
+        error,
+        gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::PushConflict)
+    ));
+    assert_eq!(git_output(&local_root, &["rev-parse", "HEAD"]), before);
+}
+
+#[test]
+fn cleanup_failed_fire_does_not_reset_when_the_validated_remote_ref_moves() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root().to_path_buf();
+
+    fs::write(fixture.writer_root().join("remote-first.txt"), "first\n").unwrap();
+    commit_all(fixture.writer_root(), "first cleanup target", "bob");
+    git(fixture.writer_root(), &["push"]);
+    let first_remote = git_output(fixture.writer_root(), &["rev-parse", "HEAD"]);
+
+    fs::write(local_root.join("gitim.epoch.yaml"), "status: redirected\n").unwrap();
+    commit_all(&local_root, "seal: redirect local losing rotation", ALICE);
+    let sealed_local = git_output(&local_root, &["rev-parse", "HEAD"]);
+    git(&local_root, &["branch", "main-epoch-2", &sealed_local]);
+
+    let commit_lock = Arc::new(Mutex::new(()));
+    let held = commit_lock.lock().unwrap();
+    let worker_lock = commit_lock.clone();
+    let worker_root = local_root.clone();
+    let worker = std::thread::spawn(move || {
+        SkillSyncGuard::new(&worker_root)
+            .unwrap()
+            .guarded_integrate(
+                &GitStorage::new(&worker_root),
+                &worker_lock,
+                IntegrationOperation::CleanupFailedFire {
+                    orphan_branch: "main-epoch-2".to_owned(),
+                },
+            )
+    });
+
+    let checkpoint = local_root.join(".gitim/skill-validation.json");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if fs::read_to_string(&checkpoint).is_ok_and(|contents| contents.contains(&first_remote)) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(fs::read_to_string(&checkpoint)
+        .unwrap_or_default()
+        .contains(&first_remote));
+
+    fs::write(fixture.writer_root().join("remote-second.txt"), "second\n").unwrap();
+    commit_all(fixture.writer_root(), "second cleanup target", "bob");
+    git(fixture.writer_root(), &["push"]);
+    GitStorage::new(&local_root).fetch().unwrap();
+    drop(held);
+
+    let error = worker.join().unwrap().unwrap_err();
+    assert!(matches!(
+        error,
+        gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::PushConflict)
+    ));
+    assert_eq!(
+        git_output(&local_root, &["rev-parse", "HEAD"]),
+        sealed_local
+    );
+    assert!(git_status(
+        &local_root,
+        &["show-ref", "--verify", "refs/heads/main-epoch-2"]
+    )
+    .is_some());
 }
 
 #[test]
@@ -2657,6 +3031,65 @@ fn user_archive_semantic_precondition_rejects_a_concurrent_workspace_admin_boots
 }
 
 #[test]
+fn sync_initial_push_publishes_ordinary_work_through_quarantine_replay() {
+    let fixture = RemoteRepository::new();
+    let storage = GitStorage::new(fixture.clone_root());
+
+    fs::create_dir_all(fixture.clone_root().join("skills/invalid")).unwrap();
+    fs::write(
+        fixture.clone_root().join("skills/invalid/SKILL.md"),
+        "# bypass\n",
+    )
+    .unwrap();
+    commit_all(fixture.clone_root(), "invalid Skill bypass", ALICE);
+    fs::write(
+        fixture.clone_root().join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260730T120000Z] sync ordinary\n",
+    )
+    .unwrap();
+    commit_all(fixture.clone_root(), "sync ordinary message", ALICE);
+
+    let mut circuit = AuthCircuit::new(Arc::new(AtomicBool::new(false)));
+    run_sync_cycle(
+        &storage,
+        &mut circuit,
+        &Mutex::new(()),
+        &|_, _| {},
+        &|_, _, _| {},
+        &|_| {},
+        &|| {},
+        Some(&(ALICE.to_owned(), "alice@example.com".to_owned())),
+    );
+
+    assert_eq!(
+        git_output(
+            fixture.clone_root(),
+            &["show", "refs/remotes/origin/main:channels/general.thread"]
+        ),
+        "[L000001][P000000][@alice][20260730T120000Z] sync ordinary"
+    );
+    assert!(git_status(
+        fixture.clone_root(),
+        &[
+            "cat-file",
+            "-e",
+            "refs/remotes/origin/main:skills/invalid/SKILL.md"
+        ]
+    )
+    .is_none());
+    assert!(git_output(
+        fixture.clone_root(),
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/gitim/quarantine"
+        ]
+    )
+    .lines()
+    .any(|reference| reference.starts_with("refs/gitim/quarantine/skill-")));
+}
+
+#[test]
 fn sync_loop_routes_destructive_epoch_fallback_through_the_skill_guard() {
     let source = fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2671,6 +3104,40 @@ fn sync_loop_routes_destructive_epoch_fallback_through_the_skill_guard() {
     assert!(
         !source.contains("crate::rotate::follow_redirect(repo"),
         "sync loop must not follow epoch redirects outside SkillSyncGuard"
+    );
+    for guarded_path in [
+        "guard.guarded_push(repo, commit_lock",
+        "IntegrationOperation::RebaseOntoOrigin",
+        "IntegrationOperation::HardDivergenceRecovery",
+        "IntegrationOperation::FollowEpochRedirect",
+        "IntegrationOperation::FollowEpochRedirectAfterDiscard",
+    ] {
+        assert!(
+            source.contains(guarded_path),
+            "sync path is missing guarded transition {guarded_path}"
+        );
+    }
+    assert!(
+        source
+            .matches("guard.guarded_push(repo, commit_lock")
+            .count()
+            >= 3,
+        "initial, post-rebase, and post-resolve pushes must all use the guard"
+    );
+
+    let rotate_source = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("rotate.rs"),
+    )
+    .unwrap();
+    assert!(
+        rotate_source.contains("IntegrationOperation::CleanupFailedFire"),
+        "failed-fire cleanup must use the guarded exact-ref operation"
+    );
+    assert!(
+        !rotate_source.contains(".reset_branch_to_origin("),
+        "failed-fire cleanup must not reset through a symbolic remote ref"
     );
 }
 

@@ -491,6 +491,10 @@ impl GitStorage {
         Ok(())
     }
 
+    pub(crate) fn rebase_onto_exact(&self, upstream_oid: &str) -> Result<(), GitError> {
+        run_git(&["rebase", upstream_oid], &self.root).map(|_| ())
+    }
+
     /// List files changed between upstream and HEAD, matching a pattern.
     /// Returns relative paths (e.g. "channels/general.meta.yaml").
     pub fn changed_files_unpushed(&self, pattern: &str) -> Result<Vec<PathBuf>, GitError> {
@@ -557,6 +561,11 @@ impl GitStorage {
         // Reset to upstream state
         run_git(&["reset", "--hard", "@{upstream}"], &self.root)?;
         Ok(())
+    }
+
+    pub(crate) fn discard_unpushed_to(&self, upstream_oid: &str) -> Result<(), GitError> {
+        let _ = run_git_best_effort(&["rebase", "--abort"], &self.root);
+        run_git(&["reset", "--hard", upstream_oid], &self.root).map(|_| ())
     }
 
     /// `git reset --hard <rev>` — restore a previously snapshotted state.
@@ -823,6 +832,35 @@ impl GitStorage {
         Ok(())
     }
 
+    pub(crate) fn atomic_push_two_refs_exact(
+        &self,
+        old_branch: &str,
+        old_oid: &str,
+        new_branch: &str,
+        new_oid: &str,
+    ) -> Result<(), GitError> {
+        let new_spec = format!("{new_oid}:refs/heads/{new_branch}");
+        let old_spec = format!("{old_oid}:refs/heads/{old_branch}");
+        let args = [
+            GIT_HTTP_TIMEOUT_ARGS[0],
+            GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2],
+            GIT_HTTP_TIMEOUT_ARGS[3],
+            "push",
+            "--atomic",
+            "origin",
+            &new_spec,
+            &old_spec,
+        ];
+        let output = run_git_command(&args, &self.root)?;
+        if !output.status.success() {
+            return Err(classify_remote_error(&String::from_utf8_lossy(
+                &output.stderr,
+            )));
+        }
+        Ok(())
+    }
+
     /// `git rebase --onto <new_base> <old_base>` — transplant the commits in
     /// `<old_base>..HEAD` onto `<new_base>`. The migrate primitive: snapshot
     /// carries the full tree, so thread appends apply cleanly; conflicts
@@ -908,6 +946,14 @@ impl GitStorage {
         run_git(&["branch", "-f", branch, &origin_ref], &self.root).map(|_| ())
     }
 
+    pub(crate) fn create_or_repoint_branch_to(
+        &self,
+        branch: &str,
+        oid: &str,
+    ) -> Result<(), GitError> {
+        run_git(&["branch", "-f", branch, oid], &self.root).map(|_| ())
+    }
+
     /// `git branch -f <branch> HEAD` — after a rebase leaves HEAD detached,
     /// stamp the branch there.
     pub fn repoint_branch_to_head(&self, branch: &str) -> Result<(), GitError> {
@@ -936,11 +982,33 @@ impl GitStorage {
         run_git(&["update-ref", &refname, &origin_sha], &self.root).map(|_| ())
     }
 
+    pub(crate) fn reset_without_checkout_to(
+        &self,
+        branch: &str,
+        oid: &str,
+    ) -> Result<(), GitError> {
+        let refname = format!("refs/heads/{branch}");
+        run_git(&["update-ref", &refname, oid], &self.root).map(|_| ())
+    }
+
     /// Subjects of commits in `origin/<branch>..<branch>` (oldest first).
     /// Empty when the branch is in sync with origin. Cleanup logic gates
     /// `reset --hard` on what these unpushed commits actually are.
     pub fn subjects_ahead_of_origin(&self, branch: &str) -> Result<Vec<String>, GitError> {
         let range = format!("origin/{branch}..{branch}");
+        let out = run_git(&["log", "--reverse", "--format=%s", &range], &self.root)?;
+        Ok(String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect())
+    }
+
+    pub(crate) fn subjects_ahead_of(
+        &self,
+        branch: &str,
+        upstream_oid: &str,
+    ) -> Result<Vec<String>, GitError> {
+        let range = format!("{upstream_oid}..{branch}");
         let out = run_git(&["log", "--reverse", "--format=%s", &range], &self.root)?;
         Ok(String::from_utf8_lossy(&out.stdout)
             .lines()

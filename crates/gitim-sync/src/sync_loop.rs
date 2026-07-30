@@ -402,7 +402,13 @@ pub fn run_sync_cycle(
     // so the rest of the loop can run normally.
     if repo.has_stale_rebase_state() {
         warn!("sync: stale rebase state detected at cycle start, recovering");
-        if let Err(e) = repo.recover_from_stale_rebase() {
+        let recovery = {
+            let _guard = commit_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            repo.recover_from_stale_rebase()
+        };
+        if let Err(e) = recovery {
             error!("sync: stale rebase recovery failed: {}", e);
             on_cycle_done();
             return SyncOutcome::Normal;
@@ -417,7 +423,13 @@ pub fn run_sync_cycle(
             // killed mid-op) left us off-branch. Reattach and retry once;
             // bail this cycle if the second probe still fails.
             warn!("sync: detached HEAD outside rebase, attempting reattach");
-            if let Err(e) = repo.recover_from_stale_rebase() {
+            let recovery = {
+                let _guard = commit_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                repo.recover_from_stale_rebase()
+            };
+            if let Err(e) = recovery {
                 error!("sync: detached-HEAD recovery failed: {}", e);
                 on_cycle_done();
                 return SyncOutcome::Normal;
@@ -473,14 +485,16 @@ struct QuickSessionResolutions {
 
 struct ConflictReplayRollback<'a> {
     repo: &'a GitStorage,
+    commit_lock: &'a Mutex<()>,
     saved_head: String,
     armed: bool,
 }
 
 impl<'a> ConflictReplayRollback<'a> {
-    fn new(repo: &'a GitStorage, saved_head: String) -> Self {
+    fn new(repo: &'a GitStorage, commit_lock: &'a Mutex<()>, saved_head: String) -> Self {
         Self {
             repo,
+            commit_lock,
             saved_head,
             armed: false,
         }
@@ -500,6 +514,10 @@ impl Drop for ConflictReplayRollback<'_> {
         if !self.armed {
             return;
         }
+        let _guard = self
+            .commit_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         match self.repo.reset_hard_to(&self.saved_head) {
             Ok(()) => warn!(
                 "sync: conflict replay failed; restored pre-rebase HEAD {}",
@@ -802,9 +820,6 @@ fn enforce_divergence_threshold(
          to upstream. Likely cause: an untracked working-tree file is blocking rebase.",
         behind, ahead, threshold
     );
-    let _guard = commit_lock
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let guard = match SkillSyncGuard::new(repo.root()) {
         Ok(guard) => guard,
         Err(error) => {
@@ -812,7 +827,11 @@ fn enforce_divergence_threshold(
             return false;
         }
     };
-    if let Err(e) = guard.guarded_integrate(repo, IntegrationOperation::HardDivergenceRecovery) {
+    if let Err(e) = guard.guarded_integrate(
+        repo,
+        commit_lock,
+        IntegrationOperation::HardDivergenceRecovery,
+    ) {
         error!("sync: divergence safety net hard reset failed: {}", e);
         return false;
     }
@@ -887,9 +906,6 @@ fn epoch_fence_and_follow(
     if !head_fenced && !origin_is_fenced {
         return false;
     }
-    let _guard = commit_lock
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let branch = match repo.current_branch() {
         Ok(b) => b,
         Err(e) => {
@@ -909,7 +925,7 @@ fn epoch_fence_and_follow(
             .flatten()
             .and_then(|f| f.redirect.map(|r| r.target_branch))
             .unwrap_or_default();
-        if let Err(e) = crate::rotate::cleanup_failed_fire(repo, &branch, &orphan) {
+        if let Err(e) = crate::rotate::cleanup_failed_fire(repo, commit_lock, &branch, &orphan) {
             warn!("epoch fence: residue cleanup failed: {e}");
         }
         return true; // don't push this cycle either way; next cycle re-evaluates
@@ -922,7 +938,7 @@ fn epoch_fence_and_follow(
             return true;
         }
     };
-    match guard.guarded_integrate(repo, IntegrationOperation::FollowEpochRedirect) {
+    match guard.guarded_integrate(repo, commit_lock, IntegrationOperation::FollowEpochRedirect) {
         Ok(_) => {
             info!("epoch fence: followed redirect off sealed branch {branch}");
             true
@@ -934,7 +950,7 @@ fn epoch_fence_and_follow(
             // fence would re-follow and re-conflict every cycle, never
             // publishing again (bricked, though lossless).
             warn!("epoch fence: follow_redirect failed ({e}); trying content replay");
-            migrate_via_content_replay(repo, &guard, rebase_author);
+            migrate_via_content_replay(repo, &guard, commit_lock, rebase_author);
             // Whether or not the replay succeeded, never push this cycle;
             // the next cycle re-evaluates from the (possibly new) branch.
             true
@@ -956,6 +972,7 @@ fn epoch_fence_and_follow(
 fn migrate_via_content_replay(
     repo: &GitStorage,
     skill_guard: &SkillSyncGuard,
+    commit_lock: &Mutex<()>,
     rebase_author: Option<&(String, String)>,
 ) {
     let additions = match repo.diff_unpushed("*.thread") {
@@ -983,12 +1000,21 @@ fn migrate_via_content_replay(
             return;
         }
     };
-    match skill_guard.guarded_integrate(repo, IntegrationOperation::FollowEpochRedirectAfterDiscard)
-    {
+    match skill_guard.guarded_integrate(
+        repo,
+        commit_lock,
+        IntegrationOperation::FollowEpochRedirectAfterDiscard,
+    ) {
         Ok(_) => {}
         Err(e) => {
             warn!("epoch migrate replay: clean follow failed ({e}); restoring");
-            if let Err(e) = repo.reset_hard_to(&saved_sha) {
+            let restore = {
+                let _guard = commit_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                repo.reset_hard_to(&saved_sha)
+            };
+            if let Err(e) = restore {
                 warn!("epoch migrate replay: restore failed: {e} (recover via reflog {saved_sha})");
             }
             return;
@@ -997,6 +1023,9 @@ fn migrate_via_content_replay(
     if additions.is_empty() {
         return;
     }
+    let _rewrite_guard = commit_lock
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (resolved_files, mappings) = match conflict::resolve_content(&additions, repo.root()) {
         Ok(r) => r,
         Err(e) => {
@@ -1094,9 +1123,14 @@ fn sync_with_push(
                 }
                 return SyncOutcome::Normal;
             }
-            Err(SkillSyncError::Git(GitError::PushConflict)) => {
-                // Remote has diverged, need to sync
-            }
+            Err(SkillSyncError::Git(GitError::PushConflict)) => match guard.quarantine_pending() {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => {
+                    warn!("sync: failed to inspect quarantine journal: {error}");
+                    return SyncOutcome::Normal;
+                }
+            },
             Err(e) => {
                 warn!("sync: push failed (non-conflict): {}", e);
                 return SyncOutcome::Normal;
@@ -1203,13 +1237,13 @@ fn sync_with_push(
                 local_boards.insert(rel_path.clone(), content);
             }
         }
+        drop(rebase_guard);
 
         // Try rebase (fast path: no .thread conflicts)
-        match guard.guarded_integrate(repo, IntegrationOperation::RebaseOntoOrigin) {
+        match guard.guarded_integrate(repo, commit_lock, IntegrationOperation::RebaseOntoOrigin) {
             Ok(_) => {
                 included_head_before_rewrite
                     .get_or_insert_with(|| local_head_before_rebase.clone());
-                drop(rebase_guard);
                 // Epoch fence, checkpoint (3) — backstop: the rebase may have
                 // replayed local messages on top of a just-pulled R. Never
                 // publish that chain (invariant 1); follow migrates instead.
@@ -1263,6 +1297,9 @@ fn sync_with_push(
                 }
             }
             Err(_) => {
+                let rebase_guard = commit_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if let Err(error) = repo.abort_rebase() {
                     warn!("sync: failed to abort conflicted rebase: {}", error);
                     return SyncOutcome::Normal;
@@ -1324,17 +1361,26 @@ fn sync_with_push(
                     return SyncOutcome::Normal;
                 }
 
-                let mut replay_rollback =
-                    ConflictReplayRollback::new(repo, local_head_before_rebase.clone());
+                let mut replay_rollback = ConflictReplayRollback::new(
+                    repo,
+                    commit_lock,
+                    local_head_before_rebase.clone(),
+                );
 
                 // SyncLoop manages git state; resolve_content does pure content transform
-                if let Err(e) =
-                    guard.guarded_integrate(repo, IntegrationOperation::HardDivergenceRecovery)
-                {
+                drop(rebase_guard);
+                if let Err(e) = guard.guarded_integrate(
+                    repo,
+                    commit_lock,
+                    IntegrationOperation::HardDivergenceRecovery,
+                ) {
                     warn!("sync: discard_unpushed failed: {}", e);
                     return SyncOutcome::Normal;
                 }
                 replay_rollback.arm();
+                let rebase_guard = commit_lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
 
                 let mut modified_paths: Vec<String> = Vec::new();
 
@@ -1649,18 +1695,18 @@ fn sync_pull_only(
         return SyncOutcome::Normal;
     }
 
-    // Rebase mutates the local commit tree; hold commit_lock so it can't
-    // interleave with a handler's read-append-commit window.
-    let _rebase_guard = commit_lock
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Err(e) = guard.guarded_integrate(repo, IntegrationOperation::RebaseOntoOrigin) {
+    if let Err(e) =
+        guard.guarded_integrate(repo, commit_lock, IntegrationOperation::RebaseOntoOrigin)
+    {
         // Emit the error to daemon log so the first failure is always
         // visible, then return RebaseFailed so the loop can throttle
         // subsequent warnings and apply backoff instead of retrying at
         // full 5-second cadence (which produces 720 warn lines/hour
         // when the working tree stays dirty for extended periods).
         warn!("sync: rebase failed after fetch: {}", e);
+        let _guard = commit_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let _ = repo.abort_rebase();
         return SyncOutcome::RebaseFailed;
     }

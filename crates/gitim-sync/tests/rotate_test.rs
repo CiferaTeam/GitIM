@@ -1,11 +1,32 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use gitim_sync::git::GitStorage;
-use gitim_sync::rotate::{check_push_fence, follow_redirect, try_fire_rotation, RotationOutcome};
+use gitim_sync::rotate::{
+    check_push_fence, follow_redirect, try_fire_rotation as try_fire_rotation_impl, RotationOutcome,
+};
 use std::process::Command;
 
 mod support;
 use support::TestWorkingBranchPush;
+
+fn try_fire_rotation(
+    storage: &GitStorage,
+    current_branch: &str,
+    threshold: u64,
+    archive_dir: &std::path::Path,
+    author: (&str, &str),
+    created_at: &str,
+) -> Result<RotationOutcome, gitim_sync::rotate::RotationError> {
+    try_fire_rotation_impl(
+        storage,
+        &std::sync::Mutex::new(()),
+        current_branch,
+        threshold,
+        archive_dir,
+        author,
+        created_at,
+    )
+}
 
 // === helpers (shared by later tasks in this file) ===
 fn git(dir: &tempfile::TempDir, args: &[&str]) {
@@ -192,7 +213,13 @@ fn cleanup_refuses_when_foreign_commits_ahead() {
     commit_file(&clone, "user-msg.thread", "[L1][@x][t] precious");
     let storage = GitStorage::new(clone.path());
 
-    gitim_sync::rotate::cleanup_failed_fire(&storage, "main", "main-epoch-2").unwrap();
+    gitim_sync::rotate::cleanup_failed_fire(
+        &storage,
+        &std::sync::Mutex::new(()),
+        "main",
+        "main-epoch-2",
+    )
+    .unwrap();
     assert!(
         clone.path().join("user-msg.thread").exists(),
         "foreign commit must not be reset away"
@@ -552,7 +579,13 @@ fn boot_cleanup_resets_partial_fire_residue() {
         )
         .unwrap();
 
-    gitim_sync::rotate::cleanup_failed_fire(&storage, "main", "main-epoch-2").unwrap();
+    gitim_sync::rotate::cleanup_failed_fire(
+        &storage,
+        &std::sync::Mutex::new(()),
+        "main",
+        "main-epoch-2",
+    )
+    .unwrap();
 
     assert_eq!(head_branch(&clone), "main");
     assert!(!clone.path().join("gitim.epoch.yaml").exists());
@@ -701,7 +734,13 @@ fn cleanup_refuses_when_tracked_files_dirty() {
     // Dirty a TRACKED file after the residue commit (f0.txt exists from setup).
     std::fs::write(clone.path().join("f0.txt"), "deferred message content").unwrap();
 
-    gitim_sync::rotate::cleanup_failed_fire(&storage, "main", "main-epoch-2").unwrap();
+    gitim_sync::rotate::cleanup_failed_fire(
+        &storage,
+        &std::sync::Mutex::new(()),
+        "main",
+        "main-epoch-2",
+    )
+    .unwrap();
 
     let dirty = std::fs::read_to_string(clone.path().join("f0.txt")).unwrap();
     assert_eq!(dirty, "deferred message content", "dirty file must survive");
