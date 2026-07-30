@@ -102,21 +102,19 @@ pub fn build_private_index_commit(
     repo: &GitStorage,
     request: &PrivateIndexCommitRequest,
 ) -> Result<BuiltPrivateCommit, GitError> {
+    let private_index = normalize_private_index(repo, &request.private_index)?;
     let base_commit = resolve_commit(repo, &request.base_commit)?;
     validate_identity("author name", &request.author_name)?;
     validate_identity("author email", &request.author_email)?;
     validate_message(&request.message)?;
-    prepare_private_index(repo, &request.private_index)?;
 
-    let index = request
-        .private_index
+    let index = private_index
         .to_str()
         .ok_or_else(|| invalid_input("private index path is not UTF-8"))?;
     let index_env = [("GIT_INDEX_FILE", index)];
     run_skill_git_with_env(repo, &["read-tree", "--reset", &base_commit], &index_env)?;
 
-    let temp_dir = request
-        .private_index
+    let temp_dir = private_index
         .parent()
         .ok_or_else(|| invalid_input("private index path has no parent"))?;
     for edit in &request.edits {
@@ -284,37 +282,126 @@ fn parse_ls_tree(bytes: &[u8]) -> Result<Vec<GitTreeEntry>, GitError> {
         .collect()
 }
 
-fn prepare_private_index(repo: &GitStorage, private_index: &Path) -> Result<(), GitError> {
+fn normalize_private_index(repo: &GitStorage, private_index: &Path) -> Result<PathBuf, GitError> {
+    if !private_index.is_absolute() {
+        return Err(invalid_input("private index path must be absolute"));
+    }
     let parent = private_index
         .parent()
         .ok_or_else(|| invalid_input("private index path has no parent"))?;
-    fs::create_dir_all(parent)?;
-    if fs::symlink_metadata(private_index).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Err(invalid_input("private index must not be a symbolic link"));
+    let parent_metadata = fs::metadata(parent)?;
+    if !parent_metadata.is_dir() {
+        return Err(invalid_input(
+            "private index parent must be an existing directory",
+        ));
     }
-
-    let private_parent = parent.canonicalize()?;
+    let normalized_parent = parent.canonicalize()?;
     let private_name = private_index
         .file_name()
         .ok_or_else(|| invalid_input("private index path has no file name"))?;
-    let normalized_private = private_parent.join(private_name);
+    let normalized_private = normalized_parent.join(private_name);
+    if normalized_private.to_str().is_none() {
+        return Err(invalid_input("private index path is not UTF-8"));
+    }
 
-    let active_output = run_skill_git(repo, &["rev-parse", "--git-path", "index"])?;
-    let active_text = std::str::from_utf8(&active_output.stdout)
-        .map_err(|error| invalid_input(format!("active index path is not UTF-8: {error}")))?;
-    let active_path = PathBuf::from(active_text.trim());
-    let active_path = if active_path.is_absolute() {
-        active_path
-    } else {
-        repo.root().join(active_path)
-    };
-    let normalized_active = active_path.canonicalize()?;
+    let private_metadata = symlink_metadata_if_exists(&normalized_private)?;
+    if private_metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.file_type().is_symlink())
+    {
+        return Err(invalid_input("private index must not be a symbolic link"));
+    }
+    if private_metadata
+        .as_ref()
+        .is_some_and(|metadata| !metadata.is_file())
+    {
+        return Err(invalid_input(
+            "existing private index must be a regular file",
+        ));
+    }
+
+    let normalized_active = active_index_path(repo)?;
     if normalized_private == normalized_active {
         return Err(invalid_input(
             "private index path resolves to the active Git index",
         ));
     }
-    Ok(())
+    if let Some(private_metadata) = private_metadata {
+        let active_metadata = metadata_if_exists(&normalized_active)?;
+        if active_metadata
+            .as_ref()
+            .is_some_and(|active| same_file(&private_metadata, active))
+        {
+            return Err(invalid_input("private index aliases the active Git index"));
+        }
+    }
+    Ok(normalized_private)
+}
+
+fn active_index_path(repo: &GitStorage) -> Result<PathBuf, GitError> {
+    let output = run_skill_git(
+        repo,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--absolute-git-dir",
+            "--git-common-dir",
+        ],
+    )?;
+    let paths = std::str::from_utf8(&output.stdout)
+        .map_err(|error| invalid_input(format!("Git directory path is not UTF-8: {error}")))?;
+    let mut paths = paths.lines();
+    let git_dir = paths
+        .next()
+        .ok_or_else(|| invalid_input("Git did not return an active Git directory"))?;
+    let common_dir = paths
+        .next()
+        .ok_or_else(|| invalid_input("Git did not return a common Git directory"))?;
+    if paths.next().is_some() {
+        return Err(invalid_input("Git returned unexpected directory paths"));
+    }
+
+    let normalized_git_dir = Path::new(git_dir).canonicalize()?;
+    let normalized_common_dir = Path::new(common_dir).canonicalize()?;
+    let active_admin_dir = if normalized_git_dir == normalized_common_dir {
+        normalized_common_dir
+    } else {
+        normalized_git_dir
+    };
+    let active_index = active_admin_dir.join("index");
+    if symlink_metadata_if_exists(&active_index)?.is_some() {
+        active_index.canonicalize().map_err(GitError::from)
+    } else {
+        Ok(active_index)
+    }
+}
+
+fn symlink_metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>, GitError> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn metadata_if_exists(path: &Path) -> Result<Option<fs::Metadata>, GitError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(unix)]
+fn same_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file(_left: &fs::Metadata, _right: &fs::Metadata) -> bool {
+    false
 }
 
 fn validate_revision_argument(value: &str) -> Result<(), GitError> {

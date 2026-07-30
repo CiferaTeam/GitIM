@@ -357,16 +357,36 @@ fn plumbing_rejects_option_like_revisions_refs_and_active_index() {
     invalid_base.private_index = fixture.clone.path().join(".git/index");
     assert!(build_private_index_commit(&fixture.repo, &invalid_base).is_err());
 
+    let missing_parent = transaction.path().join("missing/private-index");
+    assert!(!missing_parent.parent().unwrap().exists());
+    let missing_parent_request = request(&fixture.base, &missing_parent, "missing-parent");
+    assert!(build_private_index_commit(&fixture.repo, &missing_parent_request).is_err());
+    assert!(!missing_parent.parent().unwrap().exists());
+
+    let directory_index = transaction.path().join("directory-index");
+    fs::create_dir(&directory_index).unwrap();
+    let directory_request = request(&fixture.base, &directory_index, "directory-index");
+    assert!(build_private_index_commit(&fixture.repo, &directory_request).is_err());
+
+    #[cfg(unix)]
+    {
+        let symlinked_index = transaction.path().join("symlinked-index");
+        std::os::unix::fs::symlink(fixture.clone.path().join(".git/index"), &symlinked_index)
+            .unwrap();
+        let symlink_request = request(&fixture.base, &symlinked_index, "symlink");
+        assert!(build_private_index_commit(&fixture.repo, &symlink_request).is_err());
+    }
+
     let hard_linked_index = transaction.path().join("hard-linked-index");
     let active_index = fixture.clone.path().join(".git/index");
     let active_index_before = fs::read(&active_index).unwrap();
     fs::hard_link(&active_index, &hard_linked_index).unwrap();
     let hard_link_request = request(&fixture.base, &hard_linked_index, "hard-link");
-    build_private_index_commit(&fixture.repo, &hard_link_request).unwrap();
+    assert!(build_private_index_commit(&fixture.repo, &hard_link_request).is_err());
     assert_eq!(
         fs::read(active_index).unwrap(),
         active_index_before,
-        "rebuilding a pre-existing private index must not follow a hard link to the active index"
+        "a hard-link alias must not modify the active index"
     );
 
     let built = build_private_index_commit(
@@ -404,4 +424,221 @@ fn commit_message_rejects_semantic_request_id_trailer_variants() {
             "message containing {trailer:?} must be rejected"
         );
     }
+}
+
+#[test]
+fn relative_private_index_is_rejected_before_git_can_mutate_the_active_index() {
+    let fixture = fixture();
+    fs::write(
+        fixture.clone.path().join("tracked.txt"),
+        b"relative staged bytes\n",
+    )
+    .unwrap();
+    git(fixture.clone.path(), ["add", "--", "tracked.txt"]);
+    let active_index = fixture.clone.path().join(".git/index");
+    let index_before = fs::read(&active_index).unwrap();
+    let staged_before = git(fixture.clone.path(), ["diff", "--cached", "--binary", "--"]).stdout;
+
+    let separate_cwd = TempDir::new().unwrap();
+    git(separate_cwd.path(), ["init"]);
+    git(separate_cwd.path(), ["config", "user.name", "Other Repo"]);
+    git(
+        separate_cwd.path(),
+        ["config", "user.email", "other@example.com"],
+    );
+    git(separate_cwd.path(), ["config", "commit.gpgsign", "false"]);
+    fs::write(separate_cwd.path().join("seed"), b"other index\n").unwrap();
+    git(separate_cwd.path(), ["add", "--", "seed"]);
+    git(separate_cwd.path(), ["commit", "-m", "other"]);
+
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "relative_private_index_child", "--nocapture"])
+        .current_dir(separate_cwd.path())
+        .env("GITIM_TEST_PRIVATE_INDEX_REPO", fixture.clone.path())
+        .env("GITIM_TEST_PRIVATE_INDEX_BASE", &fixture.base)
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        fs::read(&active_index).unwrap(),
+        index_before,
+        "relative GIT_INDEX_FILE=.git/index modified the target repository's active index"
+    );
+    assert_eq!(
+        git(fixture.clone.path(), ["diff", "--cached", "--binary", "--"]).stdout,
+        staged_before,
+        "relative private index changed the target repository's staged diff"
+    );
+    assert!(
+        child.status.success(),
+        "child assertion failed: {}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+}
+
+#[test]
+fn relative_private_index_child() {
+    let Some(repo_root) = std::env::var_os("GITIM_TEST_PRIVATE_INDEX_REPO") else {
+        return;
+    };
+    let base = std::env::var("GITIM_TEST_PRIVATE_INDEX_BASE").unwrap();
+    let repo = GitStorage::new(Path::new(&repo_root));
+    let candidate = request(&base, Path::new(".git/index"), "relative-index");
+    assert!(
+        build_private_index_commit(&repo, &candidate).is_err(),
+        "relative private index must be rejected before any Git child runs"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn every_index_child_uses_one_normalized_absolute_private_index() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = fixture();
+    let transaction = TempDir::new().unwrap();
+    let normalized_parent = transaction.path().join("normalized parent");
+    fs::create_dir(&normalized_parent).unwrap();
+    let parent_alias = transaction.path().join("parent-alias");
+    std::os::unix::fs::symlink(&normalized_parent, &parent_alias).unwrap();
+    let requested_index = parent_alias.join("private-index");
+    let expected_index = normalized_parent
+        .canonicalize()
+        .unwrap()
+        .join("private-index");
+
+    let real_git = std::env::split_paths(&std::env::var_os("PATH").unwrap())
+        .map(|directory| directory.join("git"))
+        .find(|candidate| candidate.is_file())
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    let wrapper_dir = transaction.path().join("wrapper");
+    fs::create_dir(&wrapper_dir).unwrap();
+    let wrapper = wrapper_dir.join("git");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\n\
+         if [ -n \"${GIT_INDEX_FILE+x}\" ]; then\n\
+           printf '%s\\t%s\\n' \"$1\" \"$GIT_INDEX_FILE\" >> \"$GITIM_TEST_INDEX_ENV_LOG\"\n\
+         fi\n\
+         exec \"$GITIM_TEST_REAL_GIT\" \"$@\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let log = transaction.path().join("index-env.log");
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "every_index_child_uses_one_normalized_absolute_private_index_child",
+            "--nocapture",
+        ])
+        .env(
+            "PATH",
+            std::env::join_paths(
+                std::iter::once(wrapper_dir)
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap(),
+        )
+        .env_remove("GIT_INDEX_FILE")
+        .env("GITIM_TEST_INDEX_ENV_REPO", fixture.clone.path())
+        .env("GITIM_TEST_INDEX_ENV_BASE", &fixture.base)
+        .env("GITIM_TEST_INDEX_ENV_PRIVATE", &requested_index)
+        .env("GITIM_TEST_INDEX_ENV_LOG", &log)
+        .env("GITIM_TEST_REAL_GIT", real_git)
+        .output()
+        .unwrap();
+    assert!(
+        child.status.success(),
+        "child assertion failed: {}",
+        String::from_utf8_lossy(&child.stderr)
+    );
+
+    let log_contents = fs::read_to_string(log).unwrap();
+    let entries = log_contents
+        .lines()
+        .map(|line| line.split_once('\t').unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entries
+            .iter()
+            .map(|(command, _)| *command)
+            .collect::<Vec<_>>(),
+        [
+            "read-tree",
+            "update-index",
+            "update-index",
+            "update-index",
+            "write-tree"
+        ]
+    );
+    for (_, index) in entries {
+        let index = Path::new(index);
+        assert!(index.is_absolute());
+        assert_eq!(index, expected_index);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn every_index_child_uses_one_normalized_absolute_private_index_child() {
+    let Some(repo_root) = std::env::var_os("GITIM_TEST_INDEX_ENV_REPO") else {
+        return;
+    };
+    let base = std::env::var("GITIM_TEST_INDEX_ENV_BASE").unwrap();
+    let private_index = std::env::var_os("GITIM_TEST_INDEX_ENV_PRIVATE").unwrap();
+    let repo = GitStorage::new(Path::new(&repo_root));
+    build_private_index_commit(
+        &repo,
+        &request(&base, Path::new(&private_index), "normalized-env"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn linked_worktree_active_index_alias_is_rejected() {
+    let root = TempDir::new().unwrap();
+    let main = root.path().join("main");
+    fs::create_dir(&main).unwrap();
+    git(&main, ["init", "-b", "main"]);
+    git(&main, ["config", "user.name", "Worktree User"]);
+    git(&main, ["config", "user.email", "worktree@example.com"]);
+    git(&main, ["config", "commit.gpgsign", "false"]);
+    fs::write(main.join("tracked"), b"base\n").unwrap();
+    git(&main, ["add", "--", "tracked"]);
+    git(&main, ["commit", "-m", "base"]);
+
+    let linked = root.path().join("linked");
+    git(
+        &main,
+        [
+            OsStr::new("worktree"),
+            OsStr::new("add"),
+            OsStr::new("-b"),
+            OsStr::new("linked"),
+            linked.as_os_str(),
+        ],
+    );
+    fs::write(linked.join("tracked"), b"linked staged\n").unwrap();
+    git(&linked, ["add", "--", "tracked"]);
+
+    let git_dir = git_stdout(&linked, ["rev-parse", "--absolute-git-dir"]);
+    let active_index = Path::new(&git_dir).join("index");
+    let index_before = fs::read(&active_index).unwrap();
+    let staged_before = git(&linked, ["diff", "--cached", "--binary", "--"]).stdout;
+    let base = git_stdout(&linked, ["rev-parse", "HEAD"]);
+    let repo = GitStorage::new(&linked);
+
+    assert!(build_private_index_commit(
+        &repo,
+        &request(&base, &active_index, "linked-worktree-active-index")
+    )
+    .is_err());
+    assert_eq!(fs::read(active_index).unwrap(), index_before);
+    assert_eq!(
+        git(&linked, ["diff", "--cached", "--binary", "--"]).stdout,
+        staged_before
+    );
 }
