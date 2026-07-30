@@ -3560,10 +3560,15 @@ fn user_archive_semantic_precondition_rejects_a_concurrent_workspace_admin_boots
         error,
         gitim_sync::skill::checkpoint::SkillSyncError::Git(gitim_sync::git::GitError::PushConflict)
     ));
+    assert!(fixture.clone_root().join("users/alice.meta.yaml").exists());
+    assert!(!fixture
+        .clone_root()
+        .join("archive/users/alice.meta.yaml")
+        .exists());
+    let audit_ref = format!("refs/gitim/quarantine/user-archive-{archive_head}");
     assert_eq!(
-        git_output(fixture.clone_root(), &["rev-parse", "HEAD"]),
-        archive_head,
-        "the archive branch must remain available for a semantic retry"
+        git_output(fixture.clone_root(), &["rev-parse", &audit_ref]),
+        archive_head
     );
     assert!(
         git_status(
@@ -3577,6 +3582,156 @@ fn user_archive_semantic_precondition_rejects_a_concurrent_workspace_admin_boots
         .is_some(),
         "the winning administrator bootstrap keeps the target user active"
     );
+}
+
+#[test]
+fn stale_user_archive_is_quarantined_while_its_descendant_message_remains_publishable() {
+    let fixture = RemoteRepository::new();
+    let local_root = fixture.clone_root();
+    let storage = GitStorage::new(local_root);
+    let guard = SkillSyncGuard::new(local_root).unwrap();
+
+    fs::create_dir_all(local_root.join("archive/users")).unwrap();
+    git(
+        local_root,
+        &[
+            "mv",
+            "users/alice.meta.yaml",
+            "archive/users/alice.meta.yaml",
+        ],
+    );
+    commit_all(
+        local_root,
+        "archive: depart user @alice\n\nGitim-Skills-Tree: absent",
+        ALICE,
+    );
+    let archive_commit = git_output(local_root, &["rev-parse", "HEAD"]);
+    fs::write(
+        local_root.join("channels/general.thread"),
+        "[L000001][P000000][@alice][20260730T231000Z] message after stale archive\n",
+    )
+    .unwrap();
+    commit_all(local_root, "message after stale archive", ALICE);
+    let stale_head = git_output(local_root, &["rev-parse", "HEAD"]);
+
+    let before = SkillRepositorySnapshot {
+        active_users: BTreeSet::from([ALICE.to_owned()]),
+        ..Default::default()
+    };
+    let bootstrap = bootstrap_plan(&before, 'S');
+    apply_plan(fixture.writer_root(), &bootstrap);
+    commit_all(fixture.writer_root(), &bootstrap.commit_message, ALICE);
+    git(fixture.writer_root(), &["push", "origin", "HEAD:main"]);
+    storage.fetch().unwrap();
+    let upstream = git_output(local_root, &["rev-parse", "origin/main"]);
+    let audit_ref = format!("refs/gitim/quarantine/user-archive-{stale_head}");
+    git(local_root, &["update-ref", &audit_ref, &stale_head]);
+    fs::create_dir_all(local_root.join(".gitim")).unwrap();
+    fs::write(
+        local_root.join(".gitim/skill-quarantine.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema_version": 1,
+            "operation_id": stale_head,
+            "branch": "main",
+            "upstream_oid": upstream,
+            "original_head": stale_head,
+            "quarantine_ref": audit_ref,
+            "phase": "prepared",
+            "branch_head": stale_head,
+            "kind": "user_archive",
+            "excluded_commits": [archive_commit],
+            "semantic_error_code": "skill_tree_changed"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let error = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap_err();
+    assert!(
+        matches!(
+            error,
+            gitim_sync::skill::checkpoint::SkillSyncError::Git(
+                gitim_sync::git::GitError::PushConflict
+            )
+        ),
+        "unexpected semantic archive error: {error}"
+    );
+
+    assert!(local_root.join("users/alice.meta.yaml").exists());
+    assert!(!local_root.join("archive/users/alice.meta.yaml").exists());
+    assert_eq!(
+        fs::read_to_string(local_root.join("channels/general.thread")).unwrap(),
+        "[L000001][P000000][@alice][20260730T231000Z] message after stale archive\n"
+    );
+    assert!(
+        !local_root.join(".gitim/skill-quarantine.json").exists(),
+        "completed semantic rollback must not leave a journal"
+    );
+    assert!(
+        git_output(local_root, &["status", "--porcelain"]).is_empty(),
+        "semantic rollback must leave a clean working tree"
+    );
+
+    let audit_refs = git_output(
+        local_root,
+        &[
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/gitim/quarantine",
+        ],
+    );
+    let matching: Vec<_> = audit_refs
+        .lines()
+        .filter(|reference| reference.starts_with("refs/gitim/quarantine/user-archive-"))
+        .collect();
+    let audit_ref = matching.first().unwrap();
+    assert_eq!(matching.len(), 1);
+    assert_eq!(
+        git_output(local_root, &["rev-parse", audit_ref]),
+        stale_head
+    );
+    assert!(
+        git_status(
+            local_root,
+            &[
+                "cat-file",
+                "-e",
+                &format!("{audit_ref}:archive/users/alice.meta.yaml")
+            ]
+        )
+        .is_some(),
+        "stale archive must remain available under its audit ref"
+    );
+
+    let outcome = guard
+        .guarded_push(&storage, &Mutex::new(()), (ALICE, "alice@example.com"))
+        .unwrap();
+    assert!(matches!(outcome, GuardedPushOutcome::Pushed));
+    let published = git_output(
+        local_root,
+        &["show", "refs/remotes/origin/main:channels/general.thread"],
+    );
+    assert_eq!(published.matches("message after stale archive").count(), 1);
+    assert!(git_status(
+        local_root,
+        &[
+            "cat-file",
+            "-e",
+            "refs/remotes/origin/main:users/alice.meta.yaml"
+        ]
+    )
+    .is_some());
+    assert!(git_status(
+        local_root,
+        &[
+            "cat-file",
+            "-e",
+            "refs/remotes/origin/main:archive/users/alice.meta.yaml"
+        ]
+    )
+    .is_none());
 }
 
 #[test]

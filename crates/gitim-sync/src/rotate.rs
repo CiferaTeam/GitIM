@@ -81,13 +81,20 @@ pub fn cleanup_failed_fire(
     old_branch: &str,
     orphan_branch: &str,
 ) -> Result<(), RotationError> {
+    let guard = crate::skill::guard::SkillSyncGuard::new(storage.root())
+        .map_err(|error| RotationError::Epoch(error.to_string()))?;
+    if guard
+        .resume_rotation_recovery(storage, commit_lock, old_branch, orphan_branch)
+        .map_err(|error| RotationError::Epoch(error.to_string()))?
+    {
+        return Ok(());
+    }
     if storage.current_branch()? != old_branch {
         return Err(RotationError::Epoch(format!(
             "cleanup branch changed before guarded reset: expected {old_branch}"
         )));
     }
-    crate::skill::guard::SkillSyncGuard::new(storage.root())
-        .map_err(|error| RotationError::Epoch(error.to_string()))?
+    guard
         .guarded_integrate(
             storage,
             commit_lock,
