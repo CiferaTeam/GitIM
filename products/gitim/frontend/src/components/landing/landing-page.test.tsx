@@ -5,10 +5,13 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { LandingPage } from "./landing-page";
 import { incidentScenario } from "@/lib/demo-story";
+import messageGraphicSource from "@/assets/gitim-hero-a-message-is-commit.svg?raw";
+import repositoryGraphicSource from "@/assets/gitim-hero-b-repo-is-organization.svg?raw";
 
 const mocks = vi.hoisted(() => ({
   setMode: vi.fn(),
   navigate: vi.fn(),
+  scrollTo: vi.fn(),
 }));
 
 vi.mock("@/hooks/use-connection-store", () => ({
@@ -49,6 +52,11 @@ describe("LandingPage PPT demo", () => {
   beforeEach(() => {
     mocks.setMode.mockClear();
     mocks.navigate.mockClear();
+    mocks.scrollTo.mockClear();
+    Object.defineProperty(HTMLElement.prototype, "scrollTo", {
+      configurable: true,
+      value: mocks.scrollTo,
+    });
   });
 
   afterEach(() => {
@@ -90,8 +98,6 @@ describe("LandingPage PPT demo", () => {
       '[data-testid="landing-first-stage"]',
     );
     expect(overview).not.toBeNull();
-    expect(overview?.className).toContain("items-start");
-    expect(overview?.className).toContain("md:items-center");
     expect(container.querySelector('[data-testid="landing-process"]')).not.toBeNull();
     expect(container.querySelector('[data-testid="demo-stage"]')).toBeNull();
 
@@ -137,6 +143,161 @@ describe("LandingPage PPT demo", () => {
     expect(eyebrow).not.toBeNull();
     expect(eyebrow?.className).toContain("text-lg");
     expect(eyebrow?.className).toContain("tracking-normal");
+  });
+
+  it("renders the six-screen product story", async () => {
+    const container = await render();
+    const screens = container.querySelectorAll(
+      '[data-testid^="landing-screen-"]',
+    );
+    const messageDiagram = container.querySelector<HTMLImageElement>(
+      '[data-testid="landing-product-message"]',
+    );
+    const repositoryDiagram = container.querySelector<HTMLImageElement>(
+      '[data-testid="landing-product-repository"]',
+    );
+    const messageGrid = container.querySelector<HTMLElement>(
+      '[data-testid="landing-product-grid-message"]',
+    );
+    const repositoryGrid = container.querySelector<HTMLElement>(
+      '[data-testid="landing-product-grid-repository"]',
+    );
+    const messageFrame = container.querySelector<HTMLElement>(
+      '[data-testid="landing-product-frame-message"]',
+    );
+
+    expect(screens).toHaveLength(6);
+    expect(container.querySelector('[data-testid="landing-screen-intro"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-screen-messages"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-screen-repository"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-screen-cards"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-screen-workflow"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-screen-distributed"]')).not.toBeNull();
+    expect(messageDiagram?.alt).toBe(
+      "A GitIM conversation represented as plain text and Git commits",
+    );
+    expect(messageDiagram?.getAttribute("src")).toContain(
+      "gitim-hero-a-message-is-commit.svg",
+    );
+    expect(messageDiagram?.getAttribute("loading")).toBe("eager");
+    expect(messageDiagram?.className).toContain("h-full");
+    expect(messageDiagram?.className).toContain("object-contain");
+    expect(repositoryDiagram?.alt).toBe(
+      "A GitIM organization represented as a repository of agents, channels, cards, and flows",
+    );
+    expect(repositoryDiagram?.getAttribute("src")).toContain(
+      "gitim-hero-b-repo-is-organization.svg",
+    );
+    expect(repositoryDiagram?.getAttribute("loading")).toBe("eager");
+    expect(repositoryDiagram?.className).toContain("h-full");
+    expect(messageGrid?.className).toContain("max-w-[112rem]");
+    expect(messageGrid?.className).toContain("xl:grid-cols-[0.5fr_1.5fr]");
+    expect(repositoryGrid?.className).toContain("max-w-[112rem]");
+    expect(repositoryGrid?.className).toContain("xl:grid-cols-[1.5fr_0.5fr]");
+    expect(messageFrame?.className).toContain("aspect-video");
+    expect(messageFrame?.className).toContain("w-full");
+    expect(container.querySelector('[data-testid="landing-card-board"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-card-wh-3a90"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-card-wh-3a91"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-card-wh-3a92"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-workflow"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-flow-node-coordinator"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-flow-node-verify"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-distributed-network"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-node-server"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-node-browser"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="landing-node-phone"]')).not.toBeNull();
+    expect(container.textContent).toContain("Mobile WASM");
+    expect(container.textContent).toContain("Start locally by choosing a folder");
+    expect(container.textContent).toContain("No GitIM service to deploy");
+    expect(
+      container.querySelector('[data-testid="landing-local-setup"]')?.textContent,
+    ).toContain("choose a folder");
+    expect(
+      container.querySelector('[data-testid="landing-distributed-setup"]')
+        ?.textContent,
+    ).toContain("repo + agent env");
+    const distributedMap = container.querySelector<HTMLElement>(
+      '[data-testid="landing-distributed-map"]',
+    );
+    const distributedMapClasses = distributedMap?.className.split(/\s+/) ?? [];
+    expect(distributedMapClasses).toContain("h-56");
+    expect(distributedMapClasses).toContain("lg:h-72");
+  });
+
+  it("uses a stronger brand header and a six-step story navigator", async () => {
+    const container = await render();
+    const header = container.querySelector<HTMLElement>(
+      '[data-testid="landing-header"]',
+    );
+    const brand = container.querySelector<HTMLElement>(
+      '[data-testid="landing-brand"]',
+    );
+    const progress = container.querySelectorAll(
+      '[data-testid^="landing-progress-"]',
+    );
+    const intro = container.querySelector<HTMLElement>(
+      '[data-testid="landing-progress-intro"]',
+    );
+    const distributed = container.querySelector<HTMLButtonElement>(
+      '[data-testid="landing-progress-distributed"]',
+    );
+    const storyScroll = container.querySelector<HTMLElement>(
+      '[data-testid="landing-story-scroll"]',
+    );
+
+    expect(header?.className).toContain("h-[4.5rem]");
+    expect(container.querySelector('[data-testid="landing-logo"]')).not.toBeNull();
+    expect(brand?.className).toContain("text-2xl");
+    expect(progress).toHaveLength(6);
+    expect(intro?.getAttribute("aria-current")).toBe("step");
+    expect(storyScroll).not.toBeNull();
+    expect(storyScroll?.className).not.toContain("scroll-smooth");
+    Object.defineProperty(storyScroll, "clientHeight", {
+      configurable: true,
+      value: 720,
+    });
+
+    await act(async () => {
+      distributed?.click();
+    });
+
+    expect(mocks.scrollTo).toHaveBeenCalledWith({
+      behavior: "auto",
+      top: 3600,
+    });
+    expect(distributed?.getAttribute("aria-current")).toBe("step");
+  });
+
+  it("uses readable typography throughout the product story", async () => {
+    const container = await render();
+    const expectedScale = [
+      ["landing-value-card-title", "text-lg"],
+      ["landing-value-card-body", "text-base"],
+      ["landing-story-body", "text-xl"],
+      ["landing-proof-row", "text-lg"],
+      ["landing-card-title", "text-lg"],
+      ["landing-card-owner", "text-base"],
+      ["landing-flow-node-title", "text-base"],
+      ["landing-flow-node-owner", "text-sm"],
+    ] as const;
+
+    for (const [testId, className] of expectedScale) {
+      const elements = container.querySelectorAll<HTMLElement>(
+        `[data-testid="${testId}"]`,
+      );
+      expect(elements.length, testId).toBeGreaterThan(0);
+      for (const element of elements) {
+        expect(element.className, testId).toContain(className);
+      }
+    }
+
+    for (const source of [messageGraphicSource, repositoryGraphicSource]) {
+      const fontSizes = [...source.matchAll(/font-size="(\d+)"/g)].map(
+        (match) => Number(match[1]),
+      );
+      expect(Math.min(...fontSizes)).toBeGreaterThanOrEqual(14);
+    }
   });
 
   it("connect CTA enters existing Desktop Runtime setup flow", async () => {
