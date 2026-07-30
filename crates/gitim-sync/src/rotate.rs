@@ -252,6 +252,7 @@ pub fn try_fire_rotation(
             if matches!(storage.current_branch(), Ok(branch) if branch == current_branch)
                 && local_head == redirect_commit_sha
                 && local_old_tip == redirect_commit_sha
+                && !storage.has_dirty_tracked_files()?
             {
                 storage.checkout_branch(&new_branch)?;
             }

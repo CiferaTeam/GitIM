@@ -283,6 +283,62 @@ fn won_fire_preserves_a_branch_switched_by_the_atomic_push_hook() {
 }
 
 #[test]
+fn won_fire_preserves_dirty_tracked_bytes_written_during_atomic_push() {
+    let (_bare, clone) = setup_bare_and_clone(5);
+    let marker = clone.path().join(".git/post-atomic-dirty");
+    let hook = clone.path().join(".git/hooks/pre-push");
+    let deferred = "deferred handler bytes during atomic push\n";
+    std::fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nif [ ! -f '{}' ]; then\n  touch '{}'\n  printf '%s' '{}' > '{}'\nfi\n",
+            marker.display(),
+            marker.display(),
+            deferred,
+            clone.path().join("f0.txt").display(),
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let storage = GitStorage::new(clone.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    let outcome = try_fire_rotation(
+        &storage,
+        "main",
+        3,
+        arch.path(),
+        ("d", "d@g"),
+        "2026-07-31T02:20:00Z",
+    )
+    .unwrap();
+
+    assert!(matches!(outcome, RotationOutcome::Won { .. }));
+    assert_eq!(head_branch(&clone), "main");
+    assert_eq!(
+        storage.rev_parse("HEAD").unwrap(),
+        storage.rev_parse("origin/main").unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.path().join("f0.txt")).unwrap(),
+        deferred
+    );
+    assert!(storage.has_dirty_tracked_files().unwrap());
+    assert_eq!(
+        storage.rev_parse("main-epoch-2").unwrap(),
+        storage.rev_parse("origin/main-epoch-2").unwrap()
+    );
+
+    git(&clone, &["restore", "--", "f0.txt"]);
+    assert!(follow_redirect(&storage, "main").unwrap());
+    assert_eq!(head_branch(&clone), "main-epoch-2");
+}
+
+#[test]
 fn fire_with_unpushed_backlog_returns_not_ready() {
     // Zero-loss guard I3: messages committed between push-success and lock
     // acquisition must defer rotation — a Lost reset would destroy them.

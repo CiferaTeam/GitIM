@@ -88,6 +88,16 @@ struct QuarantineJournal {
     semantic_error_code: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replay_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_branch_head: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_tail_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_tail_base: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    active_tail_head: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -826,6 +836,29 @@ impl SkillSyncGuard {
                 repaired,
                 journal.expected_branch_head(),
             )?;
+        } else if journal.phase == QuarantinePhase::Replayed
+            && active_remote.branch != journal.branch
+            && captured_checkout_branch == active_remote.branch
+            && journal.active_branch.as_deref() == Some(active_remote.branch.as_str())
+        {
+            let repaired = journal.repaired_head.as_deref().ok_or_else(|| {
+                SkillSyncError::LocalQuarantineBlocked(
+                    "semantic archive recovery is missing its repaired head".to_owned(),
+                )
+            })?;
+            let expected = journal.active_branch_head.as_deref().ok_or_else(|| {
+                SkillSyncError::LocalQuarantineBlocked(
+                    "checked-out semantic destination has no expected head".to_owned(),
+                )
+            })?;
+            let current = repo.rev_parse(&format!("refs/heads/{}", active_remote.branch))?;
+            reconcile_update_ref_only_residue(
+                repo,
+                &active_remote.branch,
+                &current,
+                repaired,
+                expected,
+            )?;
         }
         ensure_clean_tracked_worktree(repo)?;
 
@@ -859,6 +892,17 @@ impl SkillSyncGuard {
             self.save_journal(&journal)?;
         }
 
+        if active_remote.branch != journal.branch {
+            bind_semantic_active_destination(
+                repo,
+                &mut journal,
+                &active_remote.branch,
+                &active_remote.oid,
+                captured_active_local.as_deref(),
+            )?;
+            self.save_journal(&journal)?;
+        }
+
         if journal.phase == QuarantinePhase::Prepared {
             let repaired = replay_without_managed_skills(repo, &journal, author)?;
             journal.repaired_head = Some(repaired);
@@ -885,10 +929,14 @@ impl SkillSyncGuard {
                 }
             } else {
                 let active_ref = format!("refs/heads/{}", active_remote.branch);
+                if journal.active_branch.as_deref() != Some(active_remote.branch.as_str()) {
+                    return Err(SkillSyncError::Git(GitError::PushConflict));
+                }
+                let expected_active = journal.active_branch_head.as_deref();
                 let mut active_ref_changed = false;
                 match revision_oid(repo, &active_ref)? {
                     Some(oid) if oid == repaired => {}
-                    Some(oid) if Some(oid.as_str()) == captured_active_local.as_deref() => {
+                    Some(oid) if Some(oid.as_str()) == expected_active => {
                         repo.create_or_repoint_branch_to_exact(
                             &active_remote.branch,
                             repaired,
@@ -896,8 +944,7 @@ impl SkillSyncGuard {
                         )?;
                         active_ref_changed = true;
                     }
-                    Some(_) => return Err(SkillSyncError::Git(GitError::PushConflict)),
-                    None if captured_active_local.is_none() => {
+                    None if expected_active.is_none() => {
                         repo.create_or_repoint_branch_to_exact(
                             &active_remote.branch,
                             repaired,
@@ -905,7 +952,7 @@ impl SkillSyncGuard {
                         )?;
                         active_ref_changed = true;
                     }
-                    None => return Err(SkillSyncError::Git(GitError::PushConflict)),
+                    Some(_) | None => return Err(SkillSyncError::Git(GitError::PushConflict)),
                 }
                 repo.set_upstream_to_origin(&active_remote.branch)?;
                 match repo.current_branch()?.as_str() {
@@ -1556,6 +1603,11 @@ impl QuarantineJournal {
             excluded_commits: Vec::new(),
             semantic_error_code: None,
             replay_base: None,
+            active_branch: None,
+            active_branch_head: None,
+            active_tail_ref: None,
+            active_tail_base: None,
+            active_tail_head: None,
         })
     }
 
@@ -1633,13 +1685,66 @@ fn validate_journal(repo: &GitStorage, journal: &QuarantineJournal) -> Result<()
             ));
         }
     }
-    match journal.kind {
-        QuarantineKind::SkillHistory
-            if !journal.excluded_commits.is_empty() || journal.semantic_error_code.is_some() =>
-        {
+    if let Some(active_branch) = &journal.active_branch {
+        validate_branch(active_branch)?;
+    } else if journal.active_branch_head.is_some() {
+        return Err(SkillSyncError::LocalQuarantineBlocked(
+            "semantic archive active branch metadata is incomplete".to_owned(),
+        ));
+    }
+    if let Some(active_branch_head) = &journal.active_branch_head {
+        validate_oid(active_branch_head)?;
+        repo.rev_parse(&format!("{active_branch_head}^{{commit}}"))?;
+    }
+    match (
+        &journal.active_tail_ref,
+        &journal.active_tail_base,
+        &journal.active_tail_head,
+    ) {
+        (None, None, None) => {}
+        (Some(tail_ref), Some(tail_base), Some(tail_head)) => {
+            validate_oid(tail_base)?;
+            validate_oid(tail_head)?;
+            let expected_tail_ref = format!(
+                "{QUARANTINE_TAIL_REF_PREFIX}{}-active-{tail_head}",
+                journal.operation_id
+            );
+            if tail_ref != &expected_tail_ref
+                || repo.rev_parse(tail_ref)? != *tail_head
+                || journal.active_branch_head.as_deref() != Some(tail_head.as_str())
+                || !is_ancestor(repo, tail_base, tail_head)?
+            {
+                return Err(SkillSyncError::LocalQuarantineBlocked(
+                    "semantic archive active tail metadata is invalid".to_owned(),
+                ));
+            }
+            verify_managed_roots(repo, tail_base, tail_head)?;
+            if history_touches_managed_skills_between(repo, tail_base, tail_head)? {
+                return Err(SkillSyncError::LocalQuarantineBlocked(
+                    "semantic archive active tail touches managed Skill paths".to_owned(),
+                ));
+            }
+        }
+        _ => {
             return Err(SkillSyncError::LocalQuarantineBlocked(
-                "Skill quarantine contains semantic archive metadata".to_owned(),
+                "semantic archive active tail metadata is incomplete".to_owned(),
             ));
+        }
+    }
+    match journal.kind {
+        QuarantineKind::SkillHistory => {
+            if !journal.excluded_commits.is_empty()
+                || journal.semantic_error_code.is_some()
+                || journal.active_branch.is_some()
+                || journal.active_branch_head.is_some()
+                || journal.active_tail_ref.is_some()
+                || journal.active_tail_base.is_some()
+                || journal.active_tail_head.is_some()
+            {
+                return Err(SkillSyncError::LocalQuarantineBlocked(
+                    "Skill quarantine contains semantic archive metadata".to_owned(),
+                ));
+            }
         }
         QuarantineKind::UserArchive => {
             if journal.excluded_commits.is_empty() || journal.semantic_error_code.is_none() {
@@ -1656,7 +1761,6 @@ fn validate_journal(repo: &GitStorage, journal: &QuarantineJournal) -> Result<()
                 }
             }
         }
-        QuarantineKind::SkillHistory => {}
     }
     match (&journal.tail_ref, &journal.tail_base, &journal.tail_head) {
         (None, None, None) => {}
@@ -2044,6 +2148,77 @@ fn capture_quarantine_tail(
     Ok(())
 }
 
+fn bind_semantic_active_destination(
+    repo: &GitStorage,
+    journal: &mut QuarantineJournal,
+    active_branch: &str,
+    active_oid: &str,
+    captured_active_head: Option<&str>,
+) -> Result<(), SkillSyncError> {
+    let active_ref = format!("refs/heads/{active_branch}");
+    ensure_optional_ref_equals(repo, &active_ref, captured_active_head)?;
+
+    if journal.active_branch.as_deref() == Some(active_branch) {
+        let current = revision_oid(repo, &active_ref)?;
+        if current.as_deref() != journal.active_branch_head.as_deref()
+            && current.as_deref() != journal.repaired_head.as_deref()
+        {
+            return Err(SkillSyncError::Git(GitError::PushConflict));
+        }
+        return Ok(());
+    }
+
+    if let Some(active_head) = captured_active_head {
+        if active_head != active_oid && journal.repaired_head.as_deref() != Some(active_head) {
+            if !is_ancestor(repo, active_oid, active_head)?
+                || history_touches_managed_skills_between(repo, active_oid, active_head)?
+            {
+                return Err(SkillSyncError::LocalQuarantineBlocked(
+                    "active epoch branch has an unsafe local tail".to_owned(),
+                ));
+            }
+            verify_managed_roots(repo, active_oid, active_head)?;
+            match journal.active_tail_head.as_deref() {
+                Some(existing) if existing == active_head => {}
+                Some(_) => {
+                    return Err(SkillSyncError::LocalQuarantineBlocked(
+                        "semantic archive already owns a different active tail".to_owned(),
+                    ));
+                }
+                None => {
+                    let tail_ref = format!(
+                        "{QUARANTINE_TAIL_REF_PREFIX}{}-active-{active_head}",
+                        journal.operation_id
+                    );
+                    match revision_oid(repo, &tail_ref)? {
+                        Some(existing) if existing == active_head => {}
+                        Some(_) => {
+                            return Err(SkillSyncError::LocalQuarantineBlocked(
+                                "semantic archive active tail ref collides with another operation"
+                                    .to_owned(),
+                            ));
+                        }
+                        None => {
+                            let zero_oid = "0".repeat(active_head.len());
+                            run_git(
+                                &["update-ref", &tail_ref, active_head, &zero_oid],
+                                repo.root(),
+                            )?;
+                        }
+                    }
+                    journal.active_tail_ref = Some(tail_ref);
+                    journal.active_tail_base = Some(active_oid.to_owned());
+                    journal.active_tail_head = Some(active_head.to_owned());
+                }
+            }
+        }
+    }
+
+    journal.active_branch = Some(active_branch.to_owned());
+    journal.active_branch_head = captured_active_head.map(str::to_owned);
+    Ok(())
+}
+
 fn cleanup_quarantine_tail_refs(
     repo: &GitStorage,
     journal: &QuarantineJournal,
@@ -2100,11 +2275,14 @@ fn replay_without_managed_skills(
         repo.root(),
     )?;
     let replay_repo = GitStorage::new(&worktree);
-    let result = if journal.tail_head.is_some() {
-        replay_quarantine_tail(repo, &replay_repo, journal, author)
-    } else {
-        replay_commits(repo, &replay_repo, journal, author)
-    };
+    let result = (|| {
+        if journal.tail_head.is_some() {
+            replay_quarantine_tail(repo, &replay_repo, journal, author)?;
+        } else {
+            replay_commits(repo, &replay_repo, journal, author)?;
+        }
+        replay_semantic_active_tail(repo, &replay_repo, journal, author)
+    })();
     let cleanup = cleanup_worktree(repo, &worktree);
     match (result, cleanup) {
         (Ok(head), Ok(())) => Ok(head),
@@ -2175,6 +2353,33 @@ fn replay_quarantine_tail(
     {
         return Err(SkillSyncError::LocalQuarantineBlocked(
             "quarantine tail replay omitted ordinary changes".to_owned(),
+        ));
+    }
+    let repaired = target.rev_parse("HEAD")?;
+    verify_managed_roots(target, &journal.upstream_oid, &repaired)?;
+    Ok(repaired)
+}
+
+fn replay_semantic_active_tail(
+    source: &GitStorage,
+    target: &GitStorage,
+    journal: &QuarantineJournal,
+    author: Option<(&str, &str)>,
+) -> Result<String, SkillSyncError> {
+    let (Some(tail_base), Some(tail_head)) = (
+        journal.active_tail_base.as_deref(),
+        journal.active_tail_head.as_deref(),
+    ) else {
+        return target.rev_parse("HEAD").map_err(Into::into);
+    };
+    let replayed = replay_linear_range(source, target, tail_base, tail_head, &[], author)?;
+    if replayed == 0
+        && changed_paths(source, tail_base, tail_head)?
+            .iter()
+            .any(|path| !is_managed_skill_path(path))
+    {
+        return Err(SkillSyncError::LocalQuarantineBlocked(
+            "semantic archive active tail replay omitted ordinary changes".to_owned(),
         ));
     }
     let repaired = target.rev_parse("HEAD")?;
