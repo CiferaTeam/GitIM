@@ -1157,6 +1157,127 @@ fn crash_journal_recovers_prepared_built_and_pushed_transactions() {
 }
 
 #[test]
+fn built_journal_accepts_an_authoritative_identical_duplicate_from_another_parent() {
+    let fixture = Fixture::new();
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let first_repo = GitStorage::new(fixture.first.path());
+    let first_guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    execute_remote_skill_transaction_with_test_config(
+        &first_repo,
+        &first_guard,
+        transaction_request(request.clone(), None),
+        SkillTransactionTestConfig {
+            crash_after: Some(SkillTransactionCrashPoint::AfterBuilt),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+
+    fs::write(
+        fixture.second.path().join("unrelated.txt"),
+        "different parent\n",
+    )
+    .unwrap();
+    git(fixture.second.path(), ["add", "unrelated.txt"]);
+    git(
+        fixture.second.path(),
+        ["commit", "-m", "test: advance transaction parent"],
+    );
+    git(fixture.second.path(), ["push", "origin", "main"]);
+    let published = fixture
+        .transaction(fixture.second.path(), request, None)
+        .unwrap();
+
+    let journal_root = fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str());
+    let journal = fs::read_to_string(journal_root.join("transaction.yaml")).unwrap();
+    assert!(
+        !journal.contains(&published.commit_id),
+        "fixture did not produce a distinct local candidate"
+    );
+
+    let recovered = recover_remote_skill_transactions(&first_repo, &first_guard).unwrap();
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0], published);
+    assert!(!journal_root.exists());
+    let checkpoint = SkillCheckpointStore::new(fixture.first.path())
+        .unwrap()
+        .load()
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint.last_scanned_tip, published.commit_id);
+}
+
+#[test]
+fn built_journal_rejects_an_authoritative_mismatched_request_reuse() {
+    let fixture = Fixture::new();
+    fixture
+        .transaction(
+            fixture.first.path(),
+            SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                request_id: RequestId::generate(),
+            }),
+            None,
+        )
+        .unwrap();
+    git(fixture.second.path(), ["fetch", "origin"]);
+    git(fixture.second.path(), ["reset", "--hard", "origin/main"]);
+
+    let request_id = RequestId::generate();
+    let local_slug = SkillSlug::new("local-built").unwrap();
+    let local_request = SkillMutationRequest::Create(SkillCreateRequest {
+        request_id: request_id.clone(),
+        slug: local_slug.clone(),
+        display_name: "Local built".to_owned(),
+        description: "Local recovery identity".to_owned(),
+        source_directory: fixture.first.path().join("unused"),
+    });
+    let first_repo = GitStorage::new(fixture.first.path());
+    let first_guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    execute_remote_skill_transaction_with_test_config(
+        &first_repo,
+        &first_guard,
+        transaction_request(local_request, Some(package(&local_slug, "local candidate"))),
+        SkillTransactionTestConfig {
+            crash_after: Some(SkillTransactionCrashPoint::AfterBuilt),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+
+    let remote_slug = SkillSlug::new("remote-published").unwrap();
+    fixture
+        .transaction(
+            fixture.second.path(),
+            SkillMutationRequest::Create(SkillCreateRequest {
+                request_id: request_id.clone(),
+                slug: remote_slug.clone(),
+                display_name: "Remote published".to_owned(),
+                description: "Remote recovery identity".to_owned(),
+                source_directory: fixture.second.path().join("unused"),
+            }),
+            Some(package(&remote_slug, "remote candidate")),
+        )
+        .unwrap();
+
+    let error = recover_remote_skill_transactions(&first_repo, &first_guard).unwrap_err();
+    assert_eq!(error.code(), "request_id_conflict");
+    assert!(fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str())
+        .join("transaction.yaml")
+        .exists());
+}
+
+#[test]
 fn startup_recovery_enumerates_published_and_unpublished_journals() {
     let fixture = Fixture::new();
     let repo = GitStorage::new(fixture.first.path());
@@ -1772,6 +1893,89 @@ fn deadline_exhaustion_reaps_the_killed_git_child_before_returning() {
         std::io::Error::last_os_error().raw_os_error(),
         Some(libc::ECHILD)
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn exhausted_overall_deadline_reaps_the_direct_child_and_releases_the_permit() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let pid_directory = TempDir::new().unwrap();
+    let wrapper = fixture.first.path().join("deadline-git");
+    let pid_path = pid_directory.path().join("deadline-git.pid");
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 10\n",
+            pid_path.display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                request_id: RequestId::generate(),
+            }),
+            None,
+        ),
+        SkillTransactionTestConfig {
+            transaction_timeout: Duration::from_secs(2),
+            git_command_timeout: Duration::from_secs(10),
+            git_program: Some(wrapper),
+            max_concurrency: 1,
+            simulate_process_group_kill_failure: true,
+            simulated_child_kill_failures: 2,
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+
+    assert!(skill_transaction_error_is_retryable(&error));
+    assert!(
+        pid_path.exists(),
+        "Git wrapper did not start before {error:?}"
+    );
+    let pid: libc::pid_t = fs::read_to_string(&pid_path)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let mut status = 0;
+    // SAFETY: `pid` was written by the direct child spawned for this test.
+    let wait_result = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+    assert_eq!(
+        wait_result, -1,
+        "the transaction returned before reaping Git child {pid}"
+    );
+    assert_eq!(
+        std::io::Error::last_os_error().raw_os_error(),
+        Some(libc::ECHILD)
+    );
+
+    let recovered = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                request_id: RequestId::generate(),
+            }),
+            None,
+        ),
+        SkillTransactionTestConfig {
+            transaction_timeout: Duration::from_secs(10),
+            max_concurrency: 1,
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(recovered.result.control_revision, Some(1));
 }
 
 #[test]

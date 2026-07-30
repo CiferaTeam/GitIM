@@ -94,6 +94,7 @@ pub struct SkillTransactionTestConfig {
     pub after_built: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_repair_compare: Option<Arc<dyn Fn() + Send + Sync>>,
     pub simulate_process_group_kill_failure: bool,
+    pub simulated_child_kill_failures: usize,
 }
 
 impl Default for SkillTransactionTestConfig {
@@ -109,6 +110,7 @@ impl Default for SkillTransactionTestConfig {
             after_built: None,
             after_repair_compare: None,
             simulate_process_group_kill_failure: false,
+            simulated_child_kill_failures: 0,
         }
     }
 }
@@ -211,6 +213,7 @@ struct TransactionContext {
     after_built: Option<Arc<dyn Fn() + Send + Sync>>,
     after_repair_compare: Option<Arc<dyn Fn() + Send + Sync>>,
     simulate_process_group_kill_failure: bool,
+    simulated_child_kill_failures: usize,
 }
 
 #[derive(Default)]
@@ -280,6 +283,7 @@ fn recover_remote_skill_transactions_with_config(
         after_built: None,
         after_repair_compare: None,
         simulate_process_group_kill_failure: false,
+        simulated_child_kill_failures: 0,
     };
     let result = recover_transaction_journals(repo, guard, &context);
     if result
@@ -331,6 +335,7 @@ fn execute_remote_skill_transaction_with_config(
         after_built: config.after_built,
         after_repair_compare: config.after_repair_compare,
         simulate_process_group_kill_failure: config.simulate_process_group_kill_failure,
+        simulated_child_kill_failures: config.simulated_child_kill_failures,
     };
     let result = execute_transaction(repo, guard, request, &context);
     if matches!(result, Err(SkillSyncError::Git(GitError::Timeout(_)))) {
@@ -596,10 +601,8 @@ fn recover_current_transaction(
             return Err(SkillError::RequestIdConflict.into());
         }
         let commit_id = find_receipt_commit(repo, &remote_tip, &journal.receipt_path, context)?;
-        if journal
-            .candidate_commit
-            .as_ref()
-            .is_some_and(|candidate| candidate != &commit_id)
+        if journal.phase == SkillTransactionPhase::Pushed
+            && journal.candidate_commit.as_deref() != Some(commit_id.as_str())
         {
             return Err(checkpoint_error(
                 "published receipt does not match the journal candidate",
@@ -2228,11 +2231,22 @@ fn run_git_output(
     envs: &[(&str, &str)],
     context: &TransactionContext,
 ) -> Result<Output, SkillSyncError> {
+    let budget_started = Instant::now();
     let remaining = context
         .deadline
-        .checked_duration_since(Instant::now())
+        .checked_duration_since(budget_started)
         .ok_or(GitError::Timeout(SKILL_TRANSACTION_TIMEOUT))?;
     let timeout = context.git_timeout.min(remaining);
+    if timeout <= CHILD_REAP_GRACE {
+        return Err(GitError::Timeout(timeout).into());
+    }
+    let command_deadline = budget_started
+        .checked_add(timeout - CHILD_REAP_GRACE)
+        .ok_or(GitError::Timeout(timeout))?;
+    let cleanup_deadline = budget_started
+        .checked_add(timeout)
+        .unwrap_or(context.deadline)
+        .min(context.deadline);
     let mut command = Command::new(&context.git_program);
     command
         .args(args)
@@ -2259,21 +2273,13 @@ fn run_git_output(
     }
     let mut child = command.spawn().map_err(GitError::Io)?;
     let pid = child.id();
-    let command_started = Instant::now();
-    let cleanup_deadline = command_started
-        .checked_add(timeout)
-        .unwrap_or(context.deadline)
-        .min(context.deadline);
-    let cleanup_budget = child_reap_budget(timeout);
-    let command_deadline = cleanup_deadline
-        .checked_sub(cleanup_budget)
-        .unwrap_or(command_started);
     let Some(stdout) = child.stdout.take() else {
         terminate_child(
             child,
             pid,
             cleanup_deadline,
             context.simulate_process_group_kill_failure,
+            context.simulated_child_kill_failures,
         );
         return Err(GitError::CommandFailed("git stdout pipe is unavailable".to_owned()).into());
     };
@@ -2283,6 +2289,7 @@ fn run_git_output(
             pid,
             cleanup_deadline,
             context.simulate_process_group_kill_failure,
+            context.simulated_child_kill_failures,
         );
         return Err(GitError::CommandFailed("git stderr pipe is unavailable".to_owned()).into());
     };
@@ -2317,6 +2324,7 @@ fn run_git_output(
                     pid,
                     cleanup_deadline,
                     context.simulate_process_group_kill_failure,
+                    context.simulated_child_kill_failures,
                 );
                 return Err(GitError::Io(error).into());
             }
@@ -2328,13 +2336,9 @@ fn run_git_output(
         pid,
         cleanup_deadline,
         context.simulate_process_group_kill_failure,
+        context.simulated_child_kill_failures,
     );
     Err(GitError::Timeout(timeout).into())
-}
-
-fn child_reap_budget(timeout: Duration) -> Duration {
-    let half = timeout / 2;
-    CHILD_REAP_GRACE.min(if half.is_zero() { timeout } else { half })
 }
 
 fn read_pipe<R>(mut pipe: R) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>
@@ -2372,37 +2376,59 @@ fn terminate_child(
     pid: u32,
     cleanup_deadline: Instant,
     simulate_process_group_kill_failure: bool,
+    mut simulated_child_kill_failures: usize,
 ) {
-    terminate_process_group(pid, simulate_process_group_kill_failure);
-    let _ = child.kill();
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Err(_) => {
-                defer_child_reap(child);
-                return;
-            }
-            Ok(None) => {
-                let now = Instant::now();
-                if now >= cleanup_deadline {
-                    break;
-                }
-                std::thread::sleep(CHILD_POLL_INTERVAL.min(cleanup_deadline - now));
-            }
+    let cleanup_started = Instant::now();
+    let cleanup_deadline = cleanup_started
+        .checked_add(CHILD_REAP_GRACE)
+        .unwrap_or(cleanup_deadline)
+        .min(cleanup_deadline);
+    let stage = cleanup_deadline
+        .checked_duration_since(cleanup_started)
+        .unwrap_or_default()
+        / 3;
+    for stage_deadline in [
+        cleanup_started
+            .checked_add(stage)
+            .unwrap_or(cleanup_deadline),
+        cleanup_started
+            .checked_add(stage * 2)
+            .unwrap_or(cleanup_deadline),
+        cleanup_deadline,
+    ] {
+        terminate_process_group(pid, simulate_process_group_kill_failure);
+        kill_child(&mut child, &mut simulated_child_kill_failures);
+        if reap_child_until(&mut child, stage_deadline) {
+            return;
         }
     }
     terminate_process_group(pid, simulate_process_group_kill_failure);
-    let _ = child.kill();
-    match child.try_wait() {
-        Ok(Some(_)) => {}
-        Ok(None) | Err(_) => defer_child_reap(child),
+    kill_child(&mut child, &mut simulated_child_kill_failures);
+    let _ = child.wait();
+}
+
+fn kill_child(child: &mut Child, simulated_failures: &mut usize) {
+    if *simulated_failures > 0 {
+        *simulated_failures -= 1;
+    } else {
+        let _ = child.kill();
     }
 }
 
-fn defer_child_reap(mut child: Child) {
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
+fn reap_child_until(child: &mut Child, deadline: Instant) -> bool {
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Err(_) => return false,
+            Ok(None) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                std::thread::sleep(CHILD_POLL_INTERVAL.min(deadline - now));
+            }
+        }
+    }
 }
 
 fn terminate_process_group(pid: u32, simulate_process_group_kill_failure: bool) {
