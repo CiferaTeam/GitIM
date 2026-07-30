@@ -138,8 +138,19 @@ impl SkillCheckpointStore {
             }
             Ok(_) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                fs::create_dir(&directory)
-                    .map_err(|error| checkpoint_error("create .gitim", error))?;
+                match fs::create_dir(&directory) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let metadata = fs::symlink_metadata(&directory)
+                            .map_err(|error| checkpoint_error("inspect raced .gitim", error))?;
+                        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                            return Err(SkillSyncError::Checkpoint(
+                                ".gitim must be a real directory".to_owned(),
+                            ));
+                        }
+                    }
+                    Err(error) => return Err(checkpoint_error("create .gitim", error)),
+                }
             }
             Err(error) => return Err(checkpoint_error("inspect .gitim", error)),
         }

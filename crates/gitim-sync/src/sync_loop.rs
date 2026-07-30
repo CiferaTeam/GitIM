@@ -1003,7 +1003,9 @@ fn migrate_via_content_replay(
     match skill_guard.guarded_integrate(
         repo,
         commit_lock,
-        IntegrationOperation::FollowEpochRedirectAfterDiscard,
+        IntegrationOperation::FollowEpochRedirectAfterDiscard {
+            expected_head: saved_sha.clone(),
+        },
     ) {
         Ok(_) => {}
         Err(e) => {

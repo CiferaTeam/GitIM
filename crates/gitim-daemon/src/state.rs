@@ -249,11 +249,8 @@ impl AppState {
         Err(SkillSyncError::Git(gitim_sync::git::GitError::PushConflict))
     }
 
-    pub fn skill_root_precondition(&self) -> Result<String, gitim_sync::git::GitError> {
-        Ok(
-            gitim_sync::skill::git_tree::tree_oid_at(&self.git_storage, "HEAD", "skills")?
-                .unwrap_or_else(|| "absent".to_owned()),
-        )
+    pub fn skill_root_precondition(&self) -> Result<String, SkillSyncError> {
+        SkillSyncGuard::new(&self.repo_root)?.accepted_skill_root(&self.git_storage)
     }
 
     /// Rotation commits carry the daemon owner's identity, same as
@@ -494,14 +491,9 @@ impl AppState {
                     // A pull-only cycle can bring in a redirect without ever
                     // hitting the push fence (no unpushed commits → no push).
                     // Follow now so this daemon switches promptly instead of
-                    // waiting for its next outbound message. Runs on the
-                    // sync worker thread; commit_lock is free here (the
-                    // cycle's guards dropped before on_synced fires).
+                    // waiting for its next outbound message. The guard owns
+                    // the two-phase lock discipline for this transition.
                     if synced_state.is_redirected() {
-                        let _guard = synced_state
-                            .commit_lock
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner());
                         match synced_state
                             .integrate_working_branch(IntegrationOperation::FollowEpochRedirect)
                         {

@@ -135,6 +135,9 @@ pub fn try_fire_rotation(
     let mutation_guard = commit_lock
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+    skill_guard
+        .quarantine_resolved()
+        .map_err(|error| RotationError::Epoch(error.to_string()))?;
     if storage.rev_parse(&origin_ref)? != captured_origin_oid {
         return Ok(RotationOutcome::Lost);
     }
@@ -426,6 +429,7 @@ pub(crate) fn follow_redirect_exact(
     current_upstream_oid: &str,
     target_branch: &str,
     target_oid: &str,
+    expected_target_oid: Option<&str>,
 ) -> Result<bool, RotationError> {
     if target_branch == current_branch {
         return Ok(false);
@@ -434,9 +438,10 @@ pub(crate) fn follow_redirect_exact(
     let has_unpushed = !storage
         .subjects_ahead_of(current_branch, current_upstream_oid)?
         .is_empty();
-    storage.create_or_repoint_branch_to(target_branch, target_oid)?;
+    storage.create_or_repoint_branch_to_exact(target_branch, target_oid, expected_target_oid)?;
     storage.set_upstream_to_origin(target_branch)?;
 
+    let old_branch_after_migrate;
     if has_unpushed {
         if let Err(error) = storage.rebase_onto(target_oid, current_upstream_oid) {
             if let Err(abort_error) = storage.abort_rebase() {
@@ -446,10 +451,21 @@ pub(crate) fn follow_redirect_exact(
             }
             return Err(error.into());
         }
-        storage.repoint_branch_to_head(target_branch)?;
+        old_branch_after_migrate = storage.rev_parse("HEAD")?;
+        storage.create_or_repoint_branch_to_exact(
+            target_branch,
+            &old_branch_after_migrate,
+            Some(target_oid),
+        )?;
+    } else {
+        old_branch_after_migrate = storage.rev_parse("HEAD")?;
     }
     storage.checkout_branch(target_branch)?;
-    storage.reset_without_checkout_to(current_branch, current_upstream_oid)?;
+    storage.reset_without_checkout_to_exact(
+        current_branch,
+        current_upstream_oid,
+        &old_branch_after_migrate,
+    )?;
     Ok(true)
 }
 

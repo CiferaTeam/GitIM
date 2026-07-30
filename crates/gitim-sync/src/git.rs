@@ -881,6 +881,15 @@ impl GitStorage {
         run_git(&["branch", "-D", branch], &self.root).map(|_| ())
     }
 
+    pub(crate) fn delete_local_branch_exact(
+        &self,
+        branch: &str,
+        expected_oid: &str,
+    ) -> Result<(), GitError> {
+        let reference = format!("refs/heads/{branch}");
+        run_git(&["update-ref", "-d", &reference, expected_oid], &self.root).map(|_| ())
+    }
+
     pub fn checkout_branch(&self, branch: &str) -> Result<(), GitError> {
         // -f: rotation holds commit_lock. Dirty tracked state is not
         // necessarily crash residue — it can be a deferred send (send.rs
@@ -946,12 +955,24 @@ impl GitStorage {
         run_git(&["branch", "-f", branch, &origin_ref], &self.root).map(|_| ())
     }
 
-    pub(crate) fn create_or_repoint_branch_to(
+    pub(crate) fn create_or_repoint_branch_to_exact(
         &self,
         branch: &str,
         oid: &str,
+        expected_oid: Option<&str>,
     ) -> Result<(), GitError> {
-        run_git(&["branch", "-f", branch, oid], &self.root).map(|_| ())
+        let reference = format!("refs/heads/{branch}");
+        let zero_oid = "0".repeat(oid.len());
+        run_git(
+            &[
+                "update-ref",
+                &reference,
+                oid,
+                expected_oid.unwrap_or(&zero_oid),
+            ],
+            &self.root,
+        )
+        .map(|_| ())
     }
 
     /// `git branch -f <branch> HEAD` — after a rebase leaves HEAD detached,
@@ -982,13 +1003,14 @@ impl GitStorage {
         run_git(&["update-ref", &refname, &origin_sha], &self.root).map(|_| ())
     }
 
-    pub(crate) fn reset_without_checkout_to(
+    pub(crate) fn reset_without_checkout_to_exact(
         &self,
         branch: &str,
         oid: &str,
+        expected_oid: &str,
     ) -> Result<(), GitError> {
         let refname = format!("refs/heads/{branch}");
-        run_git(&["update-ref", &refname, oid], &self.root).map(|_| ())
+        run_git(&["update-ref", &refname, oid, expected_oid], &self.root).map(|_| ())
     }
 
     /// Subjects of commits in `origin/<branch>..<branch>` (oldest first).
