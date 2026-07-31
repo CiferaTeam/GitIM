@@ -591,6 +591,7 @@ fn stale_errors_include_current_content_control_and_proposal_values() {
                     skill: slug(),
                     base_revision: Some(active.meta.current_revision.clone()),
                     content_sha256: new_package.content_sha256.clone(),
+                    resources: new_package.resources.clone(),
                     created_by: handler(ALICE),
                     created_at: NOW.to_owned(),
                 },

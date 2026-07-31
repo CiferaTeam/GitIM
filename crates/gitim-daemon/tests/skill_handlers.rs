@@ -138,6 +138,12 @@ impl Fixture {
             [0_u8, 159, 146, 150],
         )
         .unwrap();
+        fs::write(directory.join("references/raw.txt"), [0_u8, 159, 146, 150]).unwrap();
+        fs::write(
+            directory.join("references/utf8.unknown-extension"),
+            "plain utf-8\n",
+        )
+        .unwrap();
         directory
     }
 
@@ -275,7 +281,7 @@ async fn handlers_bootstrap_create_list_load_resource_and_reject_candidates() {
         })
         .unwrap();
     assert_eq!(loaded.canonical_ref.revision.as_ref(), Some(&current));
-    assert_eq!(loaded.resources.len(), 2);
+    assert_eq!(loaded.resources.len(), 4);
     let note = loaded
         .resources
         .iter()
@@ -290,6 +296,16 @@ async fn handlers_bootstrap_create_list_load_resource_and_reject_candidates() {
         .unwrap();
     assert_eq!(pixel.byte_size, 4);
     assert!(!pixel.text);
+    let raw = loaded
+        .resources
+        .iter()
+        .find(|resource| resource.path == "references/raw.txt")
+        .unwrap();
+    let unknown = loaded
+        .resources
+        .iter()
+        .find(|resource| resource.path == "references/utf8.unknown-extension")
+        .unwrap();
 
     let binary = store
         .resource(SkillResourceQuery {
@@ -300,6 +316,23 @@ async fn handlers_bootstrap_create_list_load_resource_and_reject_candidates() {
     assert!(!binary.text);
     assert_eq!(binary.media_type, "application/octet-stream");
     assert_eq!(binary.bytes, [0_u8, 159, 146, 150]);
+
+    let raw_resource = store
+        .resource(SkillResourceQuery {
+            reference: loaded.canonical_ref.clone(),
+            path: raw.path.clone(),
+        })
+        .unwrap();
+    let unknown_resource = store
+        .resource(SkillResourceQuery {
+            reference: loaded.canonical_ref,
+            path: unknown.path.clone(),
+        })
+        .unwrap();
+    assert_eq!(raw.text, raw_resource.text);
+    assert!(!raw.text);
+    assert_eq!(unknown.text, unknown_resource.text);
+    assert!(unknown.text);
 
     let source = fixture.package_dir("release-check", "candidate");
     let proposal_request = RequestId::generate();

@@ -871,6 +871,7 @@ fn apply_skill_create(
         skill: slug.clone(),
         base_revision: None,
         content_sha256: package.content_sha256.clone(),
+        resources: package.resources.clone(),
         created_by: receipt.actor.clone(),
         created_at: receipt.created_at.clone(),
     };
@@ -989,6 +990,7 @@ fn apply_proposal_create(
                 skill: slug.clone(),
                 base_revision: Some(base.clone()),
                 content_sha256: package.content_sha256.clone(),
+                resources: package.resources.clone(),
                 created_by: receipt.actor.clone(),
                 created_at: receipt.created_at.clone(),
             },
@@ -1282,6 +1284,7 @@ fn validate_skill_object(
             || &revision.meta.skill != slug
             || revision.meta.schema_version != SKILL_SCHEMA_VERSION
             || revision.meta.content_sha256 != revision.package.content_sha256
+            || revision.meta.resources != revision.package.resources
         {
             return Err(SkillError::RevisionCorrupted);
         }

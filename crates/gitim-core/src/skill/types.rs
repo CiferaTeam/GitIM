@@ -45,6 +45,8 @@ pub struct SkillRevisionMeta {
     #[serde(default)]
     pub base_revision: Option<RevisionId>,
     pub content_sha256: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resources: Vec<ResourceDescriptor>,
     pub created_by: Handler,
     pub created_at: String,
 }

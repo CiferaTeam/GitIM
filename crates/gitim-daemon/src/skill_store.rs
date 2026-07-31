@@ -193,6 +193,7 @@ impl SkillStore {
             &located.source,
             &package_root,
             &reference.slug,
+            &shown.revision.resources,
         )?;
         let skill_markdown =
             String::from_utf8(skill_markdown).map_err(|_| SkillError::RevisionCorrupted)?;
@@ -419,6 +420,7 @@ fn read_package_index(
     source: &ReadSource,
     root: &str,
     slug: &SkillSlug,
+    expected_resources: &[gitim_core::skill::ResourceDescriptor],
 ) -> Result<(Vec<u8>, Vec<gitim_core::skill::ResourceDescriptor>), SkillError> {
     let tree =
         list_tree_recursive(repo, &source.commit, root).map_err(|_| SkillError::LoadUnavailable)?;
@@ -454,16 +456,22 @@ fn read_package_index(
             }
         } else {
             let media_type = media_type_for_path(relative);
-            resources.push(gitim_core::skill::ResourceDescriptor {
-                path: relative.to_owned(),
-                byte_size,
-                media_type: media_type.to_owned(),
-                text: media_type_is_text(media_type),
-            });
+            let descriptor = expected_resources
+                .get(resources.len())
+                .filter(|descriptor| {
+                    descriptor.path == relative
+                        && descriptor.byte_size == byte_size
+                        && descriptor.media_type == media_type
+                })
+                .ok_or(SkillError::RevisionCorrupted)?;
+            resources.push(descriptor.clone());
         }
         skeleton.push(PackageEntry::new(relative, Vec::new()));
     }
     let skill_path = skill_path.ok_or(SkillError::RevisionCorrupted)?;
+    if resources.len() != expected_resources.len() {
+        return Err(SkillError::RevisionCorrupted);
+    }
     let skill_markdown =
         read_source_bytes(repo, source, skill_path)?.ok_or(SkillError::RevisionCorrupted)?;
     let skill_entry = skeleton
@@ -473,14 +481,6 @@ fn read_package_index(
     skill_entry.bytes.clone_from(&skill_markdown);
     validate_package_entries(slug, skeleton).map_err(|_| SkillError::RevisionCorrupted)?;
     Ok((skill_markdown, resources))
-}
-
-fn media_type_is_text(media_type: &str) -> bool {
-    media_type.starts_with("text/")
-        || matches!(
-            media_type,
-            "application/json" | "application/yaml" | "application/toml" | "image/svg+xml"
-        )
 }
 
 fn read_yaml<T>(
