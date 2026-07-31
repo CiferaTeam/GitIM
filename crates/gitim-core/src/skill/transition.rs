@@ -1579,10 +1579,17 @@ fn append_history(skill: &mut SkillObjectSnapshot, receipt: &SkillReceipt) {
     skill.history.push_str(&format_event(
         line_number,
         &receipt.actor,
-        &receipt.created_at,
+        &thread_timestamp(&receipt.created_at),
         operation_name(receipt.operation),
         &meta,
     ));
+}
+
+fn thread_timestamp(timestamp: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp).map_or_else(
+        |_| timestamp.to_owned(),
+        |parsed| parsed.format("%Y%m%dT%H%M%SZ").to_string(),
+    )
 }
 
 fn result_for_skill(

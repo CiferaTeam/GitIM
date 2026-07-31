@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::Handler;
+use crate::types::{Handler, ThreadEntry};
 
 use super::{ProposalId, RequestId, RevisionId, SkillReference, SkillSlug, SKILL_SCHEMA_VERSION};
 
@@ -301,6 +301,80 @@ pub struct SkillResourceQuery {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SkillResourceResponse {
     pub canonical_ref: SkillReference,
+    pub path: String,
+    pub media_type: String,
+    pub text: bool,
+    pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillPageQuery {
+    pub slug: SkillSlug,
+    pub limit: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillRevisionListResponse {
+    pub revisions: Vec<SkillRevisionMeta>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SkillHistoryResponse {
+    pub entries: Vec<ThreadEntry>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillProposalListQuery {
+    pub slug: SkillSlug,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<ProposalStatus>,
+    pub limit: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillProposalListResponse {
+    pub proposals: Vec<SkillProposalMeta>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillProposalShowQuery {
+    pub proposal_id: ProposalId,
+    pub diff: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillProposalDiff {
+    pub text: String,
+    pub changed_resources: Vec<ResourceDescriptor>,
+    pub truncated: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillProposalShowResponse {
+    pub proposal: SkillProposalMeta,
+    pub candidate_revision: SkillRevisionMeta,
+    pub base_revision: SkillRevisionMeta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<SkillProposalDiff>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillProposalResourceQuery {
+    pub proposal_id: ProposalId,
+    pub path: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillProposalResourceResponse {
+    pub proposal_id: ProposalId,
+    pub candidate_revision: RevisionId,
     pub path: String,
     pub media_type: String,
     pub text: bool,

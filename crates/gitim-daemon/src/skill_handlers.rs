@@ -1,8 +1,10 @@
 use gitim_core::skill::{
-    validate_package_entries, ProposalId, SkillCreateRequest, SkillError, SkillListQuery,
-    SkillMutationRequest, SkillMutationResult, SkillOperation, SkillProposalTransitionRequest,
-    SkillProposeRequest, SkillReference, SkillRepairRequest, SkillResourceQuery, SkillShowQuery,
-    SkillSlug, SkillWorkspaceBootstrapRequest, ValidatedPackage,
+    validate_package_entries, ProposalId, RequestId, SkillCreateRequest, SkillError,
+    SkillListQuery, SkillMutationRequest, SkillMutationResult, SkillOperation, SkillPageQuery,
+    SkillProposalListQuery, SkillProposalResourceQuery, SkillProposalShowQuery,
+    SkillProposalTransitionRequest, SkillProposeRequest, SkillReference, SkillRepairRequest,
+    SkillResourceQuery, SkillShowQuery, SkillSlug, SkillWorkspaceBootstrapRequest,
+    ValidatedPackage,
 };
 use gitim_sync::skill::checkpoint::SkillSyncError;
 use gitim_sync::skill::guard::SkillSyncGuard;
@@ -20,6 +22,7 @@ use crate::state::SharedState;
 
 #[derive(Serialize)]
 struct SkillMutationResponse {
+    request_id: RequestId,
     commit_id: String,
     result: SkillMutationResult,
     local_state: SkillLocalState,
@@ -51,6 +54,50 @@ pub async fn handle_skill_resource(state: SharedState, query: SkillResourceQuery
         return response;
     }
     skill_result(state.skill_store.resource(query))
+}
+
+pub async fn handle_skill_revisions(state: SharedState, query: SkillPageQuery) -> Response {
+    if let Err(response) = resolve_skill_actor(&state).await {
+        return response;
+    }
+    skill_result(state.skill_store.revisions(query))
+}
+
+pub async fn handle_skill_history(state: SharedState, query: SkillPageQuery) -> Response {
+    if let Err(response) = resolve_skill_actor(&state).await {
+        return response;
+    }
+    skill_result(state.skill_store.history(query))
+}
+
+pub async fn handle_skill_proposal_list(
+    state: SharedState,
+    query: SkillProposalListQuery,
+) -> Response {
+    if let Err(response) = resolve_skill_actor(&state).await {
+        return response;
+    }
+    skill_result(state.skill_store.proposal_list(query))
+}
+
+pub async fn handle_skill_proposal_show(
+    state: SharedState,
+    query: SkillProposalShowQuery,
+) -> Response {
+    if let Err(response) = resolve_skill_actor(&state).await {
+        return response;
+    }
+    skill_result(state.skill_store.proposal_show(query))
+}
+
+pub async fn handle_skill_proposal_resource(
+    state: SharedState,
+    query: SkillProposalResourceQuery,
+) -> Response {
+    if let Err(response) = resolve_skill_actor(&state).await {
+        return response;
+    }
+    skill_result(state.skill_store.proposal_resource(query))
 }
 
 pub async fn handle_skill_workspace_meta(state: SharedState) -> Response {
@@ -245,6 +292,7 @@ async fn run_mutation_with_proposal(
     kind: &'static str,
     proposal_id: Option<ProposalId>,
 ) -> Response {
+    let request_id = request.request_id().clone();
     if !state.has_remote {
         return skill_error(SkillError::RemoteRequired);
     }
@@ -300,6 +348,7 @@ async fn run_mutation_with_proposal(
         }
     }
     Response::json(SkillMutationResponse {
+        request_id,
         commit_id: result.commit_id,
         result: result.result,
         local_state: result.local_state,

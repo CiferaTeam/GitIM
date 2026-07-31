@@ -8,8 +8,9 @@ use std::process::{Command, Output};
 use std::sync::Arc;
 
 use gitim_core::skill::{
-    validate_package_entries, PackageEntry, ProposalId, RequestId, RevisionId, SkillListQuery,
-    SkillLoadResponse, SkillMutationRequest, SkillMutationResult, SkillOperation,
+    validate_package_entries, PackageEntry, ProposalId, ProposalStatus, RequestId, RevisionId,
+    SkillListQuery, SkillLoadResponse, SkillMutationRequest, SkillMutationResult, SkillOperation,
+    SkillPageQuery, SkillProposalListQuery, SkillProposalResourceQuery, SkillProposalShowQuery,
     SkillProposeRequest, SkillReference, SkillResourceQuery, SkillSlug,
 };
 use gitim_daemon::api::Request;
@@ -149,11 +150,12 @@ impl Fixture {
 
     async fn create(&self, slug: &str) -> SkillMutationResult {
         let source = self.package_dir(slug, "initial");
+        let request_id = RequestId::generate();
         let response = self
             .request(serde_json::json!({
                 "method": "skill_create",
                 "request": {
-                    "request_id": RequestId::generate(),
+                    "request_id": request_id,
                     "slug": slug,
                     "display_name": format!("{slug} display"),
                     "description": "Lifecycle fixture",
@@ -162,6 +164,10 @@ impl Fixture {
             }))
             .await;
         assert!(response.ok, "{:?}", response.error);
+        assert_eq!(
+            response.data.as_ref().unwrap()["request_id"],
+            request_id.as_str()
+        );
         assert_eq!(
             response.data.as_ref().unwrap()["local_state"],
             "pending_sync",
@@ -349,6 +355,7 @@ async fn handlers_bootstrap_create_list_load_resource_and_reject_candidates() {
         }))
         .await;
     assert!(proposal.ok, "{:?}", proposal.error);
+    let proposal_id = ProposalId::new(&format!("p-{}", &proposal_request.as_str()[2..])).unwrap();
     let candidate = RevisionId::new(&format!("r-{}", &proposal_request.as_str()[2..])).unwrap();
     let unpublished = store
         .load(&SkillReference {
@@ -357,6 +364,54 @@ async fn handlers_bootstrap_create_list_load_resource_and_reject_candidates() {
         })
         .unwrap_err();
     assert_eq!(unpublished.code(), "skill_revision_unpublished");
+
+    let revisions = store
+        .revisions(SkillPageQuery {
+            slug: SkillSlug::new("release-check").unwrap(),
+            limit: 50,
+            cursor: None,
+        })
+        .unwrap();
+    assert_eq!(revisions.revisions.len(), 1);
+    assert_eq!(revisions.revisions[0].id, current);
+
+    let history = store
+        .history(SkillPageQuery {
+            slug: SkillSlug::new("release-check").unwrap(),
+            limit: 100,
+            cursor: None,
+        })
+        .unwrap();
+    assert!(history.entries.len() >= 2);
+
+    let proposals = store
+        .proposal_list(SkillProposalListQuery {
+            slug: SkillSlug::new("release-check").unwrap(),
+            status: Some(ProposalStatus::Open),
+            limit: 50,
+            cursor: None,
+        })
+        .unwrap();
+    assert_eq!(proposals.proposals.len(), 1);
+    assert_eq!(proposals.proposals[0].id, proposal_id);
+
+    let shown = store
+        .proposal_show(SkillProposalShowQuery {
+            proposal_id: proposal_id.clone(),
+            diff: true,
+        })
+        .unwrap();
+    assert_eq!(shown.proposal.id, proposal_id);
+    assert!(shown.diff.unwrap().text.contains("candidate"));
+
+    let proposal_resource = store
+        .proposal_resource(SkillProposalResourceQuery {
+            proposal_id,
+            path: "references/pixel.bin".to_owned(),
+        })
+        .unwrap();
+    assert!(!proposal_resource.text);
+    assert_eq!(proposal_resource.bytes, [0_u8, 159, 146, 150]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

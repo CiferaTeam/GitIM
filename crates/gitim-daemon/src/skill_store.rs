@@ -1,12 +1,17 @@
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
+use gitim_core::parser::parse_thread;
 use gitim_core::skill::{
-    media_type_for_path, validate_package_entries, PackageEntry, SkillCatalogEntry, SkillError,
-    SkillListQuery, SkillListResponse, SkillLoadResponse, SkillMeta, SkillProposalMeta,
+    media_type_for_path, truncate_utf8_bytes, validate_package_entries, PackageEntry,
+    SkillCatalogEntry, SkillError, SkillHistoryResponse, SkillListQuery, SkillListResponse,
+    SkillLoadResponse, SkillMeta, SkillPageQuery, SkillProposalDiff, SkillProposalListQuery,
+    SkillProposalListResponse, SkillProposalMeta, SkillProposalResourceQuery,
+    SkillProposalResourceResponse, SkillProposalShowQuery, SkillProposalShowResponse,
     SkillPublicationMeta, SkillReference, SkillResourceQuery, SkillResourceResponse,
-    SkillRevisionMeta, SkillShowQuery, SkillShowResponse, SkillSlug, WorkspaceSkillMeta,
-    MAX_PACKAGE_BYTES, MAX_PACKAGE_FILES, MAX_PACKAGE_FILE_BYTES, MAX_SKILL_MD_BYTES,
+    SkillRevisionListResponse, SkillRevisionMeta, SkillShowQuery, SkillShowResponse, SkillSlug,
+    WorkspaceSkillMeta, MAX_PACKAGE_BYTES, MAX_PACKAGE_FILES, MAX_PACKAGE_FILE_BYTES,
+    MAX_SKILL_MD_BYTES,
 };
 use gitim_sync::git::GitStorage;
 use gitim_sync::skill::checkpoint::{SkillCheckpointStore, SkillValidationCheckpoint};
@@ -231,6 +236,162 @@ impl SkillStore {
         })
     }
 
+    pub fn revisions(
+        &self,
+        query: SkillPageQuery,
+    ) -> Result<SkillRevisionListResponse, SkillError> {
+        validate_page_limit(query.limit, 100)?;
+        let view = self.read_view()?.ok_or(SkillError::NotFound)?;
+        let located = self.locate_skill(&view, &query.slug)?;
+        let repo = self.repo();
+        let root = format!("{}/publications", located.root);
+        let mut revisions = list_tree_recursive(&repo, &located.source.commit, &root)
+            .map_err(|_| SkillError::LoadUnavailable)?
+            .into_iter()
+            .filter_map(|entry| {
+                entry
+                    .path
+                    .strip_prefix(&format!("{root}/"))
+                    .and_then(|path| path.strip_suffix(".meta.yaml"))
+                    .map(str::to_owned)
+            })
+            .map(|revision| {
+                let revision = gitim_core::skill::RevisionId::new(&revision)
+                    .map_err(|_| SkillError::RevisionCorrupted)?;
+                published_revision(&repo, &located, &query.slug, &revision)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        revisions.sort_by(|left, right| right.id.cmp(&left.id));
+        let (revisions, next_cursor) = paginate(
+            revisions,
+            query.limit,
+            query.cursor.as_deref(),
+            &located_tree_id(&view, &query.slug)?,
+        )?;
+        Ok(SkillRevisionListResponse {
+            revisions,
+            next_cursor,
+        })
+    }
+
+    pub fn history(&self, query: SkillPageQuery) -> Result<SkillHistoryResponse, SkillError> {
+        validate_page_limit(query.limit, 200)?;
+        let view = self.read_view()?.ok_or(SkillError::NotFound)?;
+        let located = self.locate_skill(&view, &query.slug)?;
+        let path = format!("{}/history.thread", located.root);
+        let bytes = read_source_bytes(&self.repo(), &located.source, &path)?
+            .ok_or(SkillError::RevisionCorrupted)?;
+        let thread = std::str::from_utf8(&bytes)
+            .map_err(|_| SkillError::RevisionCorrupted)
+            .and_then(|content| parse_thread(content).map_err(|_| SkillError::RevisionCorrupted))?;
+        let (entries, next_cursor) = paginate(
+            thread.entries,
+            query.limit,
+            query.cursor.as_deref(),
+            &located_tree_id(&view, &query.slug)?,
+        )?;
+        Ok(SkillHistoryResponse {
+            entries,
+            next_cursor,
+        })
+    }
+
+    pub fn proposal_list(
+        &self,
+        query: SkillProposalListQuery,
+    ) -> Result<SkillProposalListResponse, SkillError> {
+        validate_page_limit(query.limit, 100)?;
+        let view = self.read_view()?.ok_or(SkillError::NotFound)?;
+        let located = self.locate_skill(&view, &query.slug)?;
+        let mut proposals = self.proposals_for_skill(&located, &query.slug)?;
+        proposals.retain(|proposal| query.status.is_none_or(|status| proposal.status == status));
+        proposals.sort_by(|left, right| right.id.cmp(&left.id));
+        let (proposals, next_cursor) = paginate(
+            proposals,
+            query.limit,
+            query.cursor.as_deref(),
+            &located_tree_id(&view, &query.slug)?,
+        )?;
+        Ok(SkillProposalListResponse {
+            proposals,
+            next_cursor,
+        })
+    }
+
+    pub fn proposal_show(
+        &self,
+        query: SkillProposalShowQuery,
+    ) -> Result<SkillProposalShowResponse, SkillError> {
+        let (located, proposal) = self.locate_proposal(&query.proposal_id)?;
+        let candidate_revision = candidate_revision(
+            &self.repo(),
+            &located,
+            &proposal.skill,
+            &proposal.candidate_revision,
+        )?;
+        let base_revision = published_revision(
+            &self.repo(),
+            &located,
+            &proposal.skill,
+            &proposal.base_revision,
+        )?;
+        let diff = query
+            .diff
+            .then(|| {
+                proposal_diff(
+                    &self.repo(),
+                    &located,
+                    &proposal,
+                    &base_revision,
+                    &candidate_revision,
+                )
+            })
+            .transpose()?;
+        Ok(SkillProposalShowResponse {
+            proposal,
+            candidate_revision,
+            base_revision,
+            diff,
+        })
+    }
+
+    pub fn proposal_resource(
+        &self,
+        query: SkillProposalResourceQuery,
+    ) -> Result<SkillProposalResourceResponse, SkillError> {
+        validate_resource_path(&query.path)?;
+        let (located, proposal) = self.locate_proposal(&query.proposal_id)?;
+        let revision = candidate_revision(
+            &self.repo(),
+            &located,
+            &proposal.skill,
+            &proposal.candidate_revision,
+        )?;
+        let package_root = format!(
+            "{}/revisions/{}/package",
+            located.root,
+            revision.id.as_str()
+        );
+        read_package_index(
+            &self.repo(),
+            &located.source,
+            &package_root,
+            &proposal.skill,
+            &revision.resources,
+        )?;
+        let path = format!("{package_root}/{}", query.path);
+        let bytes = read_source_bytes(&self.repo(), &located.source, &path)?
+            .ok_or(SkillError::RevisionNotFound)?;
+        Ok(SkillProposalResourceResponse {
+            proposal_id: proposal.id,
+            candidate_revision: revision.id,
+            path: query.path,
+            media_type: media_type_for_path(&path).to_owned(),
+            text: std::str::from_utf8(&bytes).is_ok(),
+            bytes,
+        })
+    }
+
     pub fn invalidate(&self) {
         let mut cache = self
             .catalog_cache
@@ -243,27 +404,57 @@ impl SkillStore {
         &self,
         proposal_id: &gitim_core::skill::ProposalId,
     ) -> Result<SkillSlug, SkillError> {
+        self.locate_proposal(proposal_id)
+            .map(|(_, proposal)| proposal.skill)
+    }
+
+    fn locate_proposal(
+        &self,
+        proposal_id: &gitim_core::skill::ProposalId,
+    ) -> Result<(LocatedSkill, SkillProposalMeta), SkillError> {
         let view = self.read_view()?.ok_or(SkillError::ProposalNotFound)?;
-        let repo = self.repo();
-        for (slug, state) in &view.checkpoint.skills {
-            let skill = SkillSlug::new(slug).map_err(|_| SkillError::RevisionCorrupted)?;
-            let root = skill_root(&skill, state.archived);
+        for slug in view.checkpoint.skills.keys() {
+            let slug = SkillSlug::new(slug).map_err(|_| SkillError::RevisionCorrupted)?;
+            let located = self.locate_skill(&view, &slug)?;
             let path = format!(
-                "{root}/proposals/{}/proposal.meta.yaml",
+                "{}/proposals/{}/proposal.meta.yaml",
+                located.root,
                 proposal_id.as_str()
             );
-            let source = self.source_for_tree(&state.tree, &root);
-            let Some(bytes) = read_source_bytes(&repo, &source, &path)? else {
+            let Some(bytes) = read_source_bytes(&self.repo(), &located.source, &path)? else {
                 continue;
             };
             let proposal: SkillProposalMeta =
                 serde_yaml::from_slice(&bytes).map_err(|_| SkillError::RevisionCorrupted)?;
-            if proposal.id != *proposal_id || proposal.skill != skill {
+            if proposal.id != *proposal_id || proposal.skill != slug {
                 return Err(SkillError::RevisionCorrupted);
             }
-            return Ok(skill);
+            return Ok((located, proposal));
         }
         Err(SkillError::ProposalNotFound)
+    }
+
+    fn proposals_for_skill(
+        &self,
+        located: &LocatedSkill,
+        slug: &SkillSlug,
+    ) -> Result<Vec<SkillProposalMeta>, SkillError> {
+        let root = format!("{}/proposals", located.root);
+        list_tree_recursive(&self.repo(), &located.source.commit, &root)
+            .map_err(|_| SkillError::LoadUnavailable)?
+            .into_iter()
+            .filter(|entry| entry.path.ends_with("/proposal.meta.yaml"))
+            .map(|entry| {
+                let bytes = read_source_bytes(&self.repo(), &located.source, &entry.path)?
+                    .ok_or(SkillError::RevisionCorrupted)?;
+                let proposal: SkillProposalMeta =
+                    serde_yaml::from_slice(&bytes).map_err(|_| SkillError::RevisionCorrupted)?;
+                if &proposal.skill != slug {
+                    return Err(SkillError::RevisionCorrupted);
+                }
+                Ok(proposal)
+            })
+            .collect()
     }
 
     pub(crate) fn accepted_meta(
@@ -413,6 +604,134 @@ fn published_revision(
         return Err(SkillError::RevisionCorrupted);
     }
     Ok(meta)
+}
+
+fn candidate_revision(
+    repo: &GitStorage,
+    located: &LocatedSkill,
+    slug: &SkillSlug,
+    revision: &gitim_core::skill::RevisionId,
+) -> Result<SkillRevisionMeta, SkillError> {
+    let path = format!(
+        "{}/revisions/{}/revision.meta.yaml",
+        located.root,
+        revision.as_str()
+    );
+    let bytes =
+        read_source_bytes(repo, &located.source, &path)?.ok_or(SkillError::RevisionNotFound)?;
+    let meta: SkillRevisionMeta =
+        serde_yaml::from_slice(&bytes).map_err(|_| SkillError::RevisionCorrupted)?;
+    if meta.id != *revision || meta.skill != *slug {
+        return Err(SkillError::RevisionCorrupted);
+    }
+    Ok(meta)
+}
+
+fn proposal_diff(
+    repo: &GitStorage,
+    located: &LocatedSkill,
+    proposal: &SkillProposalMeta,
+    base: &SkillRevisionMeta,
+    candidate: &SkillRevisionMeta,
+) -> Result<SkillProposalDiff, SkillError> {
+    let base_root = format!("{}/revisions/{}/package", located.root, base.id.as_str());
+    let candidate_root = format!(
+        "{}/revisions/{}/package",
+        located.root,
+        candidate.id.as_str()
+    );
+    let (base_markdown, _) = read_package_index(
+        repo,
+        &located.source,
+        &base_root,
+        &proposal.skill,
+        &base.resources,
+    )?;
+    let (candidate_markdown, _) = read_package_index(
+        repo,
+        &located.source,
+        &candidate_root,
+        &proposal.skill,
+        &candidate.resources,
+    )?;
+    let base_markdown =
+        std::str::from_utf8(&base_markdown).map_err(|_| SkillError::RevisionCorrupted)?;
+    let candidate_markdown =
+        std::str::from_utf8(&candidate_markdown).map_err(|_| SkillError::RevisionCorrupted)?;
+    let rendered = if base_markdown == candidate_markdown {
+        String::new()
+    } else {
+        format!(
+            "--- skill:{}@{}\n+++ proposal:{}@{}\n-{}\n+{}",
+            proposal.skill.as_str(),
+            base.id.as_str(),
+            proposal.id.as_str(),
+            candidate.id.as_str(),
+            base_markdown.replace('\n', "\n-"),
+            candidate_markdown.replace('\n', "\n+"),
+        )
+    };
+    let truncated = rendered.len() > 256 * 1024;
+    let text = truncate_utf8_bytes(&rendered, 256 * 1024).to_owned();
+    let changed_resources = candidate
+        .resources
+        .iter()
+        .filter(|candidate_resource| {
+            !base
+                .resources
+                .iter()
+                .any(|base_resource| base_resource == *candidate_resource)
+        })
+        .cloned()
+        .collect();
+    Ok(SkillProposalDiff {
+        text,
+        changed_resources,
+        truncated,
+    })
+}
+
+fn located_tree_id(view: &SkillReadView, slug: &SkillSlug) -> Result<String, SkillError> {
+    view.checkpoint
+        .skills
+        .get(slug.as_str())
+        .map(|state| state.tree.tree_oid.clone())
+        .ok_or(SkillError::NotFound)
+}
+
+fn validate_page_limit(limit: u16, maximum: u16) -> Result<(), SkillError> {
+    if limit == 0 || limit > maximum {
+        return Err(SkillError::InvalidPackage);
+    }
+    Ok(())
+}
+
+fn paginate<T>(
+    values: Vec<T>,
+    limit: u16,
+    cursor: Option<&str>,
+    collection_revision: &str,
+) -> Result<(Vec<T>, Option<String>), SkillError> {
+    let start = match cursor {
+        None => 0,
+        Some(cursor) => {
+            let (revision, offset) = cursor.split_once(':').ok_or(SkillError::StaleCursor)?;
+            if revision != collection_revision {
+                return Err(SkillError::StaleCursor);
+            }
+            offset
+                .parse::<usize>()
+                .ok()
+                .filter(|offset| *offset <= values.len())
+                .ok_or(SkillError::StaleCursor)?
+        }
+    };
+    let limit = usize::from(limit);
+    let end = start.saturating_add(limit).min(values.len());
+    let has_more = end < values.len();
+    let visible = values.into_iter().skip(start).take(limit).collect();
+    let next_cursor = has_more.then(|| format!("{collection_revision}:{end}"));
+    Ok((visible, next_cursor))
 }
 
 fn read_package_index(

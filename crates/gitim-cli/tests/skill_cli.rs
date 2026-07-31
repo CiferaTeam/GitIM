@@ -7,8 +7,10 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::path::Path;
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 const REVISION: &str = "r-01K1D8QG2S8RX4T9M9BDKQ9Z7N";
 const REQUEST: &str = "q-01K1D8QG2S8RX4T9M9BDKQ9Z7N";
@@ -45,6 +47,42 @@ fn serve_once(
     response: Value,
 ) -> (thread::JoinHandle<()>, mpsc::Receiver<Value>) {
     serve_once_raw(clone, format!("{}\n", json!({"ok":true,"data":response})))
+}
+
+fn serve_once_mutation(
+    clone: &tempfile::TempDir,
+) -> (thread::JoinHandle<()>, mpsc::Receiver<Value>) {
+    let socket = clone.path().join(".gitim/run/gitim.sock");
+    let _ = fs::remove_file(&socket);
+    let listener = UnixListener::bind(socket).expect("bind socket");
+    let (sender, receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let (mut stream, request) = loop {
+            let (stream, _) = listener.accept().expect("daemon connection");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone request stream"))
+                .read_line(&mut line)
+                .expect("read request");
+            if !line.is_empty() {
+                let request: Value = serde_json::from_str(&line).expect("request json");
+                break (stream, request);
+            }
+        };
+        let request_id = request["request"]["request_id"]
+            .as_str()
+            .expect("request id");
+        stream
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"ok":true,"data":mutation_response(request_id)})
+                )
+                .as_bytes(),
+            )
+            .expect("write response");
+        let _ = sender.send(request);
+    });
+    (handle, receiver)
 }
 
 fn serve_once_raw(
@@ -95,8 +133,93 @@ fn serve_once_without_response(
     (handle, receiver)
 }
 
-fn mutation_response() -> Value {
+fn serve_blocked_mutation(
+    clone: &tempfile::TempDir,
+) -> (
+    thread::JoinHandle<()>,
+    mpsc::Receiver<Value>,
+    mpsc::Sender<()>,
+) {
+    let socket = clone.path().join(".gitim/run/gitim.sock");
+    let _ = fs::remove_file(&socket);
+    let listener = UnixListener::bind(socket).expect("bind socket");
+    let (request_sender, request_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let (mut first_stream, first_request) = loop {
+            let (stream, _) = listener.accept().expect("daemon connection");
+            let mut line = String::new();
+            BufReader::new(stream.try_clone().expect("clone request stream"))
+                .read_line(&mut line)
+                .expect("read request");
+            if !line.is_empty() {
+                break (
+                    stream,
+                    serde_json::from_str::<Value>(&line).expect("request json"),
+                );
+            }
+        };
+        request_sender
+            .send(first_request.clone())
+            .expect("send first request");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        loop {
+            if release_receiver.try_recv().is_ok() {
+                break;
+            }
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let mut line = String::new();
+                    BufReader::new(stream.try_clone().expect("clone request stream"))
+                        .read_line(&mut line)
+                        .expect("read concurrent request");
+                    if !line.is_empty() {
+                        let request: Value =
+                            serde_json::from_str(&line).expect("concurrent request json");
+                        request_sender
+                            .send(request.clone())
+                            .expect("send concurrent request");
+                        let request_id = request["request"]["request_id"]
+                            .as_str()
+                            .expect("request id");
+                        stream
+                            .write_all(
+                                format!(
+                                    "{}\n",
+                                    json!({"ok":true,"data":mutation_response(request_id)})
+                                )
+                                .as_bytes(),
+                            )
+                            .expect("write concurrent response");
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("accept concurrent request: {error}"),
+            }
+        }
+        let request_id = first_request["request"]["request_id"]
+            .as_str()
+            .expect("request id");
+        first_stream
+            .write_all(
+                format!(
+                    "{}\n",
+                    json!({"ok":true,"data":mutation_response(request_id)})
+                )
+                .as_bytes(),
+            )
+            .expect("write first response");
+    });
+    (handle, request_receiver, release_sender)
+}
+
+fn mutation_response(request_id: &str) -> Value {
     json!({
+        "request_id":request_id,
         "commit_id":"abc123",
         "result":{
             "canonical_ref":{"slug":"release-check","revision":REVISION},
@@ -136,8 +259,35 @@ fn load_response(resource_count: usize) -> Value {
     })
 }
 
+fn revision_meta() -> Value {
+    json!({
+        "schema_version":1,
+        "id":REVISION,
+        "skill":"release-check",
+        "content_sha256":"a".repeat(64),
+        "created_by":"alice",
+        "created_at":"2026-07-31T00:00:00Z"
+    })
+}
+
+fn proposal_meta() -> Value {
+    json!({
+        "schema_version":1,
+        "id":PROPOSAL,
+        "skill":"release-check",
+        "candidate_revision":REVISION,
+        "base_revision":REVISION,
+        "summary":"Tighten release checks.",
+        "status":"open",
+        "created_by":"alice",
+        "created_at":"2026-07-31T00:00:00Z",
+        "updated_at":"2026-07-31T00:00:00Z",
+        "state_revision":1
+    })
+}
+
 #[test]
-fn root_help_is_grouped_into_five_tasks() {
+fn root_help_advertises_only_v1a_tasks() {
     gitim()
         .args(["skill", "--help"])
         .assert()
@@ -147,7 +297,9 @@ fn root_help_is_grouped_into_five_tasks() {
         .stdout(predicate::str::contains("Create or improve:"))
         .stdout(predicate::str::contains("Inspect details:"))
         .stdout(predicate::str::contains("Review changes:"))
-        .stdout(predicate::str::contains("Administer:"));
+        .stdout(predicate::str::contains("Administer:").not())
+        .stdout(predicate::str::contains("role --help").not())
+        .stdout(predicate::str::contains("admin --help").not());
 }
 
 #[test]
@@ -158,50 +310,154 @@ fn nested_help_exposes_the_complete_command_sets() {
         .expect("proposal help");
     assert!(proposal.status.success());
     let proposal = String::from_utf8(proposal.stdout).expect("utf8 help");
-    for command in [
-        "list",
-        "show",
-        "resource",
-        "discussion",
-        "comment",
-        "withdraw",
-        "reject",
-        "publish",
-    ] {
+    for command in ["list", "show", "resource", "withdraw", "reject", "publish"] {
         assert!(proposal.contains(command), "missing proposal {command}");
     }
-
-    let role = gitim()
-        .args(["skill", "role", "--help"])
-        .output()
-        .expect("role help");
-    assert!(role.status.success());
-    let role = String::from_utf8(role.stdout).expect("utf8 help");
-    for command in [
-        "owner-add",
-        "owner-remove",
-        "maintainer-add",
-        "maintainer-remove",
-    ] {
-        assert!(role.contains(command), "missing role {command}");
+    for deferred in ["discussion", "comment"] {
+        assert!(
+            !proposal.contains(deferred),
+            "v1c proposal command leaked into v1a help: {deferred}"
+        );
     }
-
-    let admin = gitim()
-        .args(["skill", "admin", "--help"])
-        .output()
-        .expect("admin help");
-    assert!(admin.status.success());
-    let admin = String::from_utf8(admin.stdout).expect("utf8 help");
-    for command in ["update", "archive", "unarchive"] {
-        assert!(admin.contains(command), "missing admin {command}");
+    for deferred in ["role", "admin"] {
+        gitim()
+            .args(["skill", deferred, "--help"])
+            .assert()
+            .failure()
+            .code(2);
     }
+}
+
+#[test]
+fn json_ref_is_parseable_and_uses_the_stable_schema() {
+    let output = gitim()
+        .args([
+            "--json",
+            "skill",
+            "ref",
+            "release-check",
+            "--revision",
+            REVISION,
+        ])
+        .output()
+        .expect("ref output");
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+        json!({"reference":format!("skill:release-check@{REVISION}")})
+    );
+}
+
+#[test]
+fn every_advertised_v1a_read_dispatches_to_the_daemon() {
+    let clone = fake_clone();
+
+    let (server, request) = serve_once(
+        &clone,
+        json!({"revisions":[revision_meta()],"next_cursor":null}),
+    );
+    gitim()
+        .current_dir(clone.path())
+        .args(["--json", "skill", "revisions", "release-check"])
+        .assert()
+        .success();
+    server.join().unwrap();
+    assert_eq!(
+        request.recv().unwrap(),
+        json!({
+            "method":"skill_revisions",
+            "query":{"slug":"release-check","limit":50}
+        })
+    );
+
+    let (server, request) = serve_once(
+        &clone,
+        json!({
+            "entries":[{
+                "type":"event",
+                "line_number":1,
+                "point_to":0,
+                "author":"alice",
+                "timestamp":"20260731T000000Z",
+                "event_type":"skill-created",
+                "meta":{"request_id":REQUEST}
+            }],
+            "next_cursor":null
+        }),
+    );
+    gitim()
+        .current_dir(clone.path())
+        .args(["--json", "skill", "history", "release-check"])
+        .assert()
+        .success();
+    server.join().unwrap();
+    assert_eq!(
+        request.recv().unwrap(),
+        json!({
+            "method":"skill_history",
+            "query":{"slug":"release-check","limit":100}
+        })
+    );
+
+    let (server, request) = serve_once(
+        &clone,
+        json!({"proposals":[proposal_meta()],"next_cursor":null}),
+    );
+    gitim()
+        .current_dir(clone.path())
+        .args([
+            "--json",
+            "skill",
+            "proposal",
+            "list",
+            "release-check",
+            "--status",
+            "open",
+        ])
+        .assert()
+        .success();
+    server.join().unwrap();
+    assert_eq!(
+        request.recv().unwrap(),
+        json!({
+            "method":"skill_proposal_list",
+            "query":{
+                "slug":"release-check",
+                "status":"open",
+                "limit":50
+            }
+        })
+    );
+
+    let (server, request) = serve_once(
+        &clone,
+        json!({
+            "proposal":proposal_meta(),
+            "candidate_revision":revision_meta(),
+            "base_revision":revision_meta(),
+            "diff":null
+        }),
+    );
+    gitim()
+        .current_dir(clone.path())
+        .args(["--json", "skill", "proposal", "show", PROPOSAL, "--diff"])
+        .assert()
+        .success();
+    server.join().unwrap();
+    assert_eq!(
+        request.recv().unwrap(),
+        json!({
+            "method":"skill_proposal_show",
+            "query":{"proposal_id":PROPOSAL,"diff":true}
+        })
+    );
 }
 
 #[test]
 fn create_uses_explicit_request_id_and_clears_successful_journal() {
     let clone = fake_clone();
     let source = package(clone.path());
-    let (server, request) = serve_once(&clone, mutation_response());
+    let (server, request) = serve_once_mutation(&clone);
     gitim()
         .current_dir(clone.path())
         .args([
@@ -246,7 +502,7 @@ fn create_uses_explicit_request_id_and_clears_successful_journal() {
 fn propose_generates_and_dispatches_a_request_id() {
     let clone = fake_clone();
     let source = package(clone.path());
-    let (server, request) = serve_once(&clone, mutation_response());
+    let (server, request) = serve_once_mutation(&clone);
     let output = gitim()
         .current_dir(clone.path())
         .args([
@@ -301,17 +557,9 @@ fn every_visible_write_help_accepts_request_id() {
     for args in [
         vec!["skill", "create", "--help"],
         vec!["skill", "propose", "--help"],
-        vec!["skill", "proposal", "comment", "--help"],
         vec!["skill", "proposal", "withdraw", "--help"],
         vec!["skill", "proposal", "reject", "--help"],
         vec!["skill", "proposal", "publish", "--help"],
-        vec!["skill", "role", "owner-add", "--help"],
-        vec!["skill", "role", "owner-remove", "--help"],
-        vec!["skill", "role", "maintainer-add", "--help"],
-        vec!["skill", "role", "maintainer-remove", "--help"],
-        vec!["skill", "admin", "update", "--help"],
-        vec!["skill", "admin", "archive", "--help"],
-        vec!["skill", "admin", "unarchive", "--help"],
     ] {
         gitim()
             .args(args)
@@ -387,6 +635,55 @@ fn binary_resource_requires_output() {
         .stdout(predicate::str::is_empty())
         .stderr(predicate::str::contains("--output"));
     server.join().unwrap();
+}
+
+#[test]
+fn binary_proposal_resource_uses_the_same_safe_output_contract() {
+    let clone = fake_clone();
+    let response = json!({
+        "proposal_id":PROPOSAL,
+        "candidate_revision":REVISION,
+        "path":"assets/logo.png",
+        "media_type":"image/png",
+        "text":false,
+        "bytes":[0,159,146,150]
+    });
+    let (server, request) = serve_once(&clone, response.clone());
+    gitim()
+        .current_dir(clone.path())
+        .args(["skill", "proposal", "resource", PROPOSAL, "assets/logo.png"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("--output"));
+    server.join().unwrap();
+    assert_eq!(
+        request.recv().unwrap(),
+        json!({
+            "method":"skill_proposal_resource",
+            "query":{"proposal_id":PROPOSAL,"path":"assets/logo.png"}
+        })
+    );
+
+    let output = clone.path().join("proposal/assets/logo.png");
+    let (server, _) = serve_once(&clone, response);
+    gitim()
+        .current_dir(clone.path())
+        .args([
+            "skill",
+            "proposal",
+            "resource",
+            PROPOSAL,
+            "assets/logo.png",
+            "--output",
+            output.to_str().unwrap(),
+            "--create-dirs",
+        ])
+        .assert()
+        .success();
+    server.join().unwrap();
+    assert_eq!(fs::read(output).unwrap(), [0, 159, 146, 150]);
 }
 
 #[test]
@@ -578,7 +875,7 @@ fn retry_reuses_the_sole_matching_pending_request() {
         .join(format!("{first_id}.json"))
         .exists());
 
-    let (server, retried_request) = serve_once(&clone, mutation_response());
+    let (server, retried_request) = serve_once(&clone, mutation_response(&first_id));
     gitim()
         .current_dir(clone.path())
         .args(command)
@@ -590,6 +887,85 @@ fn retry_reuses_the_sole_matching_pending_request() {
         retried_request.recv().unwrap()["request"]["request_id"],
         first_id
     );
+}
+
+#[test]
+fn concurrent_identical_writes_share_one_durable_claim_and_dispatch_once() {
+    let clone = fake_clone();
+    let source = package(clone.path());
+    let (server, requests, release) = serve_blocked_mutation(&clone);
+    let args = [
+        "skill",
+        "create",
+        "release-check",
+        "--from",
+        source.to_str().unwrap(),
+        "--display-name",
+        "Release Check",
+        "--description",
+        "Verify releases.",
+    ];
+    let first = std::process::Command::new(assert_cmd::cargo::cargo_bin("gitim"))
+        .current_dir(clone.path())
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn first command");
+    let first_request = requests
+        .recv_timeout(Duration::from_secs(5))
+        .expect("first dispatch");
+    let request_id = first_request["request"]["request_id"]
+        .as_str()
+        .expect("request id")
+        .to_owned();
+
+    let second = std::process::Command::new(assert_cmd::cargo::cargo_bin("gitim"))
+        .current_dir(clone.path())
+        .args(args)
+        .output()
+        .expect("run concurrent command");
+    assert_eq!(second.status.code(), Some(1));
+    let second_stderr = String::from_utf8(second.stderr).expect("stderr");
+    assert!(second_stderr.contains(&request_id));
+    assert!(second_stderr.contains("in progress"));
+    assert!(
+        requests.try_recv().is_err(),
+        "the concurrent command must not dispatch"
+    );
+
+    let conflicting = std::process::Command::new(assert_cmd::cargo::cargo_bin("gitim"))
+        .current_dir(clone.path())
+        .args([
+            "skill",
+            "create",
+            "release-check",
+            "--from",
+            source.to_str().unwrap(),
+            "--display-name",
+            "Release Check",
+            "--description",
+            "Conflicting request.",
+        ])
+        .output()
+        .expect("run conflicting command");
+    assert_eq!(conflicting.status.code(), Some(1));
+    assert!(String::from_utf8(conflicting.stderr)
+        .expect("stderr")
+        .contains("in progress"));
+    assert!(
+        requests.try_recv().is_err(),
+        "the conflicting command must not dispatch"
+    );
+
+    release.send(()).expect("release first response");
+    let first_output = first.wait_with_output().expect("wait first command");
+    assert!(
+        first_output.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&first_output.stderr)
+    );
+    server.join().unwrap();
 }
 
 #[test]
@@ -639,6 +1015,48 @@ fn explicit_request_id_refuses_a_fingerprint_mismatch() {
 }
 
 #[test]
+fn generated_request_refuses_a_pending_target_with_a_different_fingerprint() {
+    let clone = fake_clone();
+    let source = package(clone.path());
+    let (server, _) = serve_once_without_response(&clone);
+    gitim()
+        .current_dir(clone.path())
+        .args([
+            "skill",
+            "create",
+            "release-check",
+            "--from",
+            source.to_str().unwrap(),
+            "--display-name",
+            "Release Check",
+            "--description",
+            "Verify releases.",
+        ])
+        .assert()
+        .failure()
+        .code(1);
+    server.join().unwrap();
+
+    gitim()
+        .current_dir(clone.path())
+        .args([
+            "skill",
+            "create",
+            "release-check",
+            "--from",
+            source.to_str().unwrap(),
+            "--display-name",
+            "Release Check",
+            "--description",
+            "Different request.",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("fingerprint"));
+}
+
+#[test]
 fn definitive_domain_failure_removes_the_pending_journal() {
     let clone = fake_clone();
     let source = package(clone.path());
@@ -676,7 +1094,7 @@ fn definitive_domain_failure_removes_the_pending_journal() {
 }
 
 #[test]
-fn mutation_success_without_data_is_a_protocol_failure_after_journal_cleanup() {
+fn mutation_success_without_data_is_a_protocol_failure_and_retains_journal() {
     let clone = fake_clone();
     let source = package(clone.path());
     let (server, _) = serve_once(&clone, Value::Null);
@@ -700,11 +1118,57 @@ fn mutation_success_without_data_is_a_protocol_failure_after_journal_cleanup() {
         .code(1)
         .stderr(predicate::str::contains("missing"));
     server.join().unwrap();
-    assert!(!clone
+    assert!(clone
         .path()
         .join(".gitim/request-journal")
         .join(format!("{REQUEST}.json"))
         .exists());
+}
+
+#[test]
+fn malformed_mutation_success_objects_are_protocol_errors() {
+    for response in [
+        json!([]),
+        json!("success"),
+        json!({"request_id":REQUEST}),
+        json!({"request_id":"q-01K1D8QG2S8RX4T9M9BDKQ9Z7P","result":{}}),
+        json!({"request_id":REQUEST,"result":"invalid"}),
+        json!({
+            "request_id":REQUEST,
+            "commit_id":"abc123",
+            "result":{},
+            "local_state":"integrated"
+        }),
+    ] {
+        let clone = fake_clone();
+        let source = package(clone.path());
+        let (server, _) = serve_once(&clone, response);
+        gitim()
+            .current_dir(clone.path())
+            .args([
+                "skill",
+                "create",
+                "release-check",
+                "--from",
+                source.to_str().unwrap(),
+                "--display-name",
+                "Release Check",
+                "--description",
+                "Verify releases.",
+                "--request-id",
+                REQUEST,
+            ])
+            .assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains("response"));
+        server.join().unwrap();
+        assert!(clone
+            .path()
+            .join(".gitim/request-journal")
+            .join(format!("{REQUEST}.json"))
+            .exists());
+    }
 }
 
 #[test]

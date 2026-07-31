@@ -1,7 +1,8 @@
 use gitim_core::auth_payload::AuthPayload;
 use gitim_core::skill::{
-    SkillCreateRequest, SkillListQuery, SkillProposalTransitionRequest, SkillProposeRequest,
-    SkillReference, SkillRepairRequest, SkillResourceQuery, SkillShowQuery,
+    SkillCreateRequest, SkillListQuery, SkillPageQuery, SkillProposalListQuery,
+    SkillProposalResourceQuery, SkillProposalShowQuery, SkillProposalTransitionRequest,
+    SkillProposeRequest, SkillReference, SkillRepairRequest, SkillResourceQuery, SkillShowQuery,
     SkillWorkspaceBootstrapRequest,
 };
 use gitim_core::types::QuickSessionStatus;
@@ -721,6 +722,16 @@ pub enum Request {
     SkillLoad { reference: SkillReference },
     #[serde(rename = "skill_resource")]
     SkillResource { query: SkillResourceQuery },
+    #[serde(rename = "skill_revisions")]
+    SkillRevisions { query: SkillPageQuery },
+    #[serde(rename = "skill_history")]
+    SkillHistory { query: SkillPageQuery },
+    #[serde(rename = "skill_proposal_list")]
+    SkillProposalList { query: SkillProposalListQuery },
+    #[serde(rename = "skill_proposal_show")]
+    SkillProposalShow { query: SkillProposalShowQuery },
+    #[serde(rename = "skill_proposal_resource")]
+    SkillProposalResource { query: SkillProposalResourceQuery },
     #[serde(rename = "skill_workspace_meta")]
     SkillWorkspaceMeta,
     #[serde(rename = "skill_workspace_bootstrap")]

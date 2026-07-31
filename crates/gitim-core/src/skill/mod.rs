@@ -21,12 +21,16 @@ pub use transition::{
     SkillTransitionOutcome, SkillTreeEdit,
 };
 pub use types::{
-    ProposalStatus, ResourceDescriptor, SkillCatalogEntry, SkillCreateRequest, SkillListQuery,
-    SkillListResponse, SkillLoadResponse, SkillMeta, SkillMutationRequest, SkillMutationResult,
-    SkillOperation, SkillProposalMeta, SkillProposalTransitionRequest, SkillProposeRequest,
+    ProposalStatus, ResourceDescriptor, SkillCatalogEntry, SkillCreateRequest,
+    SkillHistoryResponse, SkillListQuery, SkillListResponse, SkillLoadResponse, SkillMeta,
+    SkillMutationRequest, SkillMutationResult, SkillOperation, SkillPageQuery, SkillProposalDiff,
+    SkillProposalListQuery, SkillProposalListResponse, SkillProposalMeta,
+    SkillProposalResourceQuery, SkillProposalResourceResponse, SkillProposalShowQuery,
+    SkillProposalShowResponse, SkillProposalTransitionRequest, SkillProposeRequest,
     SkillPublicationMeta, SkillReceipt, SkillReceiptRequest, SkillReceiptScope, SkillRepairRequest,
-    SkillRepairScope, SkillResourceQuery, SkillResourceResponse, SkillRevisionMeta, SkillShowQuery,
-    SkillShowResponse, SkillWorkspaceBootstrapRequest, WorkspaceSkillMeta,
+    SkillRepairScope, SkillResourceQuery, SkillResourceResponse, SkillRevisionListResponse,
+    SkillRevisionMeta, SkillShowQuery, SkillShowResponse, SkillWorkspaceBootstrapRequest,
+    WorkspaceSkillMeta,
 };
 
 pub const SKILL_SCHEMA_VERSION: u32 = 1;

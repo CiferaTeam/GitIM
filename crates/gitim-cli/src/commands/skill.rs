@@ -1,25 +1,32 @@
 use clap::Subcommand;
+use fs2::FileExt;
 use gitim_client::{ensure_daemon, find_repo_root, ApiResponse, ClientError, GitimClient};
 use gitim_core::skill::{
-    canonical_package_sha256, parse_skill_reference, PackageEntry, ProposalId, RequestId,
-    ResourceDescriptor, RevisionId, SkillCreateRequest, SkillError, SkillListQuery,
-    SkillListResponse, SkillLoadResponse, SkillOperation, SkillProposalTransitionRequest,
-    SkillProposeRequest, SkillResourceQuery, SkillResourceResponse, SkillShowQuery,
-    SkillShowResponse, SkillSlug, MAX_PACKAGE_BYTES, MAX_PACKAGE_FILES, MAX_PACKAGE_FILE_BYTES,
+    canonical_package_sha256, parse_skill_reference, PackageEntry, ProposalId, ProposalStatus,
+    RequestId, ResourceDescriptor, RevisionId, SkillCreateRequest, SkillError,
+    SkillHistoryResponse, SkillListQuery, SkillListResponse, SkillLoadResponse,
+    SkillMutationResult, SkillOperation, SkillPageQuery, SkillProposalListQuery,
+    SkillProposalListResponse, SkillProposalResourceQuery, SkillProposalResourceResponse,
+    SkillProposalShowQuery, SkillProposalShowResponse, SkillProposalTransitionRequest,
+    SkillProposeRequest, SkillResourceQuery, SkillResourceResponse, SkillRevisionListResponse,
+    SkillShowQuery, SkillShowResponse, SkillSlug, MAX_PACKAGE_BYTES, MAX_PACKAGE_FILES,
+    MAX_PACKAGE_FILE_BYTES,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::time::{Duration, Instant};
 
 const SKILL_HELP: &str = "\
 Use a Skill: list, load, ref
 Create or improve: create, propose
 Inspect details: show, resource, revisions, history, validate
 Review changes: proposal --help
-Administer: role --help, admin --help";
+";
 const MAX_LOAD_RESOURCES: usize = 256;
 const MAX_JOURNALS: usize = 256;
 const MAX_JOURNAL_BYTES: u64 = 64 * 1024;
@@ -115,16 +122,6 @@ pub enum SkillCommand {
         #[command(subcommand)]
         command: ProposalCommand,
     },
-    #[command(hide = true)]
-    Role {
-        #[command(subcommand)]
-        command: RoleCommand,
-    },
-    #[command(hide = true)]
-    Admin {
-        #[command(subcommand)]
-        command: AdminCommand,
-    },
 }
 
 #[derive(Subcommand)]
@@ -153,20 +150,6 @@ pub enum ProposalCommand {
         #[arg(long, requires = "output")]
         force: bool,
     },
-    Discussion {
-        proposal_id: String,
-        #[arg(long, default_value_t = 100, value_parser = clap::value_parser!(u16).range(1..=200))]
-        limit: u16,
-        #[arg(long)]
-        cursor: Option<String>,
-    },
-    Comment {
-        proposal_id: String,
-        #[arg(long)]
-        body: String,
-        #[arg(long)]
-        request_id: Option<String>,
-    },
     Withdraw {
         proposal_id: String,
         #[arg(long)]
@@ -185,73 +168,6 @@ pub enum ProposalCommand {
         proposal_id: String,
         #[arg(long)]
         state_revision: u64,
-        #[arg(long)]
-        control_revision: u64,
-        #[arg(long)]
-        request_id: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum RoleCommand {
-    OwnerAdd {
-        slug: String,
-        handler: String,
-        #[arg(long)]
-        control_revision: u64,
-        #[arg(long)]
-        request_id: Option<String>,
-    },
-    OwnerRemove {
-        slug: String,
-        handler: String,
-        #[arg(long)]
-        remove_maintainer: bool,
-        #[arg(long)]
-        control_revision: u64,
-        #[arg(long)]
-        request_id: Option<String>,
-    },
-    MaintainerAdd {
-        slug: String,
-        handler: String,
-        #[arg(long)]
-        control_revision: u64,
-        #[arg(long)]
-        request_id: Option<String>,
-    },
-    MaintainerRemove {
-        slug: String,
-        handler: String,
-        #[arg(long)]
-        control_revision: u64,
-        #[arg(long)]
-        request_id: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum AdminCommand {
-    Update {
-        slug: String,
-        #[arg(long)]
-        display_name: Option<String>,
-        #[arg(long)]
-        description: Option<String>,
-        #[arg(long)]
-        control_revision: u64,
-        #[arg(long)]
-        request_id: Option<String>,
-    },
-    Archive {
-        slug: String,
-        #[arg(long)]
-        control_revision: u64,
-        #[arg(long)]
-        request_id: Option<String>,
-    },
-    Unarchive {
-        slug: String,
         #[arg(long)]
         control_revision: u64,
         #[arg(long)]
@@ -365,7 +281,9 @@ async fn execute(
     json_output: bool,
 ) -> Result<SkillCliExit, SkillCommandError> {
     match command {
-        SkillCommand::Ref { slug, revision } => print_reference(&slug, revision.as_deref()),
+        SkillCommand::Ref { slug, revision } => {
+            print_reference(&slug, revision.as_deref(), json_output)
+        }
         SkillCommand::Validate { source_directory } => {
             let package = read_validated_package(&source_directory, None)?;
             let value = json!({
@@ -492,12 +410,45 @@ async fn execute(
             }
             print_resource(&payload, output.as_deref(), create_dirs, force, json_output)
         }
-        SkillCommand::Revisions { .. }
-        | SkillCommand::History { .. }
-        | SkillCommand::Role { .. }
-        | SkillCommand::Admin { .. } => Err(local_error(
-            "this Skill command is unavailable from the current daemon protocol",
-        )),
+        SkillCommand::Revisions {
+            slug,
+            limit,
+            cursor,
+        } => {
+            let query = SkillPageQuery {
+                slug: SkillSlug::new(&slug).map_err(skill_command_error)?,
+                limit,
+                cursor,
+            };
+            let (client, _) = connect_client()?;
+            let response = request(client.skill_revisions(&query).await)?;
+            if !response.ok {
+                return handle_error_response(response);
+            }
+            let payload: SkillRevisionListResponse =
+                response.parse_data().map_err(command_error)?;
+            print_serializable(&payload, json_output)?;
+            Ok(SkillCliExit::Success)
+        }
+        SkillCommand::History {
+            slug,
+            limit,
+            cursor,
+        } => {
+            let query = SkillPageQuery {
+                slug: SkillSlug::new(&slug).map_err(skill_command_error)?,
+                limit,
+                cursor,
+            };
+            let (client, _) = connect_client()?;
+            let response = request(client.skill_history(&query).await)?;
+            if !response.ok {
+                return handle_error_response(response);
+            }
+            let payload: SkillHistoryResponse = response.parse_data().map_err(command_error)?;
+            print_serializable(&payload, json_output)?;
+            Ok(SkillCliExit::Success)
+        }
     }
 }
 
@@ -587,6 +538,69 @@ async fn execute_proposal(
     json_output: bool,
 ) -> Result<SkillCliExit, SkillCommandError> {
     let (proposal_id, operation, state_revision, control_revision, requested_id) = match command {
+        ProposalCommand::List {
+            slug,
+            status,
+            limit,
+            cursor,
+        } => {
+            let query = SkillProposalListQuery {
+                slug: SkillSlug::new(&slug).map_err(skill_command_error)?,
+                status: status.as_deref().map(parse_proposal_status).transpose()?,
+                limit,
+                cursor,
+            };
+            let (client, _) = connect_client()?;
+            let response = request(client.skill_proposal_list(&query).await)?;
+            if !response.ok {
+                return handle_error_response(response);
+            }
+            let payload: SkillProposalListResponse =
+                response.parse_data().map_err(command_error)?;
+            print_serializable(&payload, json_output)?;
+            return Ok(SkillCliExit::Success);
+        }
+        ProposalCommand::Show { proposal_id, diff } => {
+            let query = SkillProposalShowQuery {
+                proposal_id: ProposalId::new(&proposal_id).map_err(skill_command_error)?,
+                diff,
+            };
+            let (client, _) = connect_client()?;
+            let response = request(client.skill_proposal_show(&query).await)?;
+            if !response.ok {
+                return handle_error_response(response);
+            }
+            let payload: SkillProposalShowResponse =
+                response.parse_data().map_err(command_error)?;
+            print_serializable(&payload, json_output)?;
+            return Ok(SkillCliExit::Success);
+        }
+        ProposalCommand::Resource {
+            proposal_id,
+            relative_path,
+            output,
+            create_dirs,
+            force,
+        } => {
+            let query = SkillProposalResourceQuery {
+                proposal_id: ProposalId::new(&proposal_id).map_err(skill_command_error)?,
+                path: relative_path,
+            };
+            let (client, _) = connect_client()?;
+            let response = request(client.skill_proposal_resource(&query).await)?;
+            if !response.ok {
+                return handle_error_response(response);
+            }
+            let payload: SkillProposalResourceResponse =
+                response.parse_data().map_err(command_error)?;
+            return print_proposal_resource(
+                &payload,
+                output.as_deref(),
+                create_dirs,
+                force,
+                json_output,
+            );
+        }
         ProposalCommand::Withdraw {
             proposal_id,
             state_revision,
@@ -621,15 +635,6 @@ async fn execute_proposal(
             Some(control_revision),
             request_id,
         ),
-        ProposalCommand::List { .. }
-        | ProposalCommand::Show { .. }
-        | ProposalCommand::Resource { .. }
-        | ProposalCommand::Discussion { .. }
-        | ProposalCommand::Comment { .. } => {
-            return Err(local_error(
-                "this Skill proposal command is unavailable from the current daemon protocol",
-            ));
-        }
     };
     let proposal_id = ProposalId::new(&proposal_id).map_err(skill_command_error)?;
     let fingerprint = request_fingerprint(&json!({
@@ -667,24 +672,56 @@ fn finish_mutation(
     json_output: bool,
 ) -> Result<SkillCliExit, SkillCommandError> {
     let exit = SkillCliExit::from_response(&response);
-    if matches!(exit, SkillCliExit::Success | SkillCliExit::Permanent) {
-        journal.remove()?;
-    }
     if !response.ok {
+        if exit == SkillCliExit::Permanent {
+            journal.remove()?;
+        }
         return handle_error_response(response);
     }
-    let mut value = response
+    let value = response
         .data
         .ok_or_else(|| local_error("successful Skill response is missing data"))?;
-    normalize_references(&mut value);
-    if let Value::Object(fields) = &mut value {
-        fields.insert(
-            "request_id".to_owned(),
-            Value::String(journal.request_id.as_str().to_owned()),
-        );
+    let payload: SkillMutationSuccess = serde_json::from_value(value)
+        .map_err(|error| local_error(format!("invalid Skill mutation response: {error}")))?;
+    if payload.request_id != journal.request_id {
+        return Err(local_error(
+            "invalid Skill mutation response: request_id does not match",
+        ));
     }
+    let result_is_complete = payload
+        .result
+        .canonical_ref
+        .as_ref()
+        .zip(payload.result.current_revision.as_ref())
+        .is_some_and(|(reference, current)| reference.revision.as_ref() == Some(current))
+        && payload.result.control_revision.is_some()
+        && payload.result.event_revision.is_some();
+    if payload.commit_id.is_empty() || !result_is_complete {
+        return Err(local_error(
+            "invalid Skill mutation response: required result fields are missing",
+        ));
+    }
+    journal.remove()?;
+    let mut value = serde_json::to_value(payload)
+        .map_err(|error| local_error(format!("serialize Skill mutation response: {error}")))?;
+    normalize_references(&mut value);
     print_value(&value, json_output)?;
     Ok(SkillCliExit::Success)
+}
+
+#[derive(Deserialize, Serialize)]
+struct SkillMutationSuccess {
+    request_id: RequestId,
+    commit_id: String,
+    result: SkillMutationResult,
+    local_state: SkillMutationLocalState,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SkillMutationLocalState {
+    Integrated,
+    PendingSync,
 }
 
 fn connect_client() -> Result<(GitimClient, PathBuf), SkillCommandError> {
@@ -728,17 +765,35 @@ fn canonical_reference(
     parse_skill_reference(&value).map_err(skill_command_error)
 }
 
-fn print_reference(slug: &str, revision: Option<&str>) -> Result<SkillCliExit, SkillCommandError> {
+fn print_reference(
+    slug: &str,
+    revision: Option<&str>,
+    json_output: bool,
+) -> Result<SkillCliExit, SkillCommandError> {
     let slug = SkillSlug::new(slug).map_err(skill_command_error)?;
     let revision = revision
         .map(RevisionId::new)
         .transpose()
         .map_err(skill_command_error)?;
-    println!(
-        "{}",
-        canonical_reference_text(slug.as_str(), revision.as_ref())
-    );
+    let reference = canonical_reference_text(slug.as_str(), revision.as_ref());
+    if json_output {
+        print_value(&json!({"reference":reference}), true)?;
+    } else {
+        println!("{reference}");
+    }
     Ok(SkillCliExit::Success)
+}
+
+fn parse_proposal_status(value: &str) -> Result<ProposalStatus, SkillCommandError> {
+    match value {
+        "open" => Ok(ProposalStatus::Open),
+        "published" => Ok(ProposalStatus::Published),
+        "rejected" => Ok(ProposalStatus::Rejected),
+        "withdrawn" => Ok(ProposalStatus::Withdrawn),
+        _ => Err(local_error(
+            "proposal status must be open, published, rejected, or withdrawn",
+        )),
+    }
 }
 
 fn print_load(payload: &SkillLoadResponse, json_output: bool) -> Result<(), SkillCommandError> {
@@ -821,6 +876,64 @@ fn print_resource(
             "content":content,
         });
         print_value(&value, true)?;
+    } else {
+        std::io::stdout()
+            .write_all(content.as_bytes())
+            .map_err(|error| local_error(format!("write stdout: {error}")))?;
+    }
+    Ok(SkillCliExit::Success)
+}
+
+fn print_proposal_resource(
+    payload: &SkillProposalResourceResponse,
+    output: Option<&Path>,
+    create_dirs: bool,
+    force: bool,
+    json_output: bool,
+) -> Result<SkillCliExit, SkillCommandError> {
+    if let Some(output) = output {
+        write_resource(output, &payload.bytes, create_dirs, force)?;
+        if json_output {
+            print_value(
+                &json!({
+                    "proposal_id":payload.proposal_id,
+                    "candidate_revision":payload.candidate_revision,
+                    "path":payload.path,
+                    "media_type":payload.media_type,
+                    "text":payload.text,
+                    "byte_size":payload.bytes.len(),
+                    "output":output,
+                }),
+                true,
+            )?;
+        } else {
+            println!(
+                "Wrote {} bytes to {}",
+                payload.bytes.len(),
+                output.display()
+            );
+        }
+        return Ok(SkillCliExit::Success);
+    }
+    if !payload.text {
+        return Err(local_error(
+            "binary Skill resources require an explicit --output path",
+        ));
+    }
+    let content = std::str::from_utf8(&payload.bytes)
+        .map_err(|_| local_error("daemon marked a non-UTF-8 Skill resource as text"))?;
+    if json_output {
+        print_value(
+            &json!({
+                "proposal_id":payload.proposal_id,
+                "candidate_revision":payload.candidate_revision,
+                "path":payload.path,
+                "media_type":payload.media_type,
+                "text":true,
+                "content":content,
+            }),
+            true,
+        )?;
     } else {
         std::io::stdout()
             .write_all(content.as_bytes())
@@ -932,6 +1045,12 @@ fn print_value(value: &Value, json_output: bool) -> Result<(), SkillCommandError
     .map_err(|error| local_error(format!("format output: {error}")))?;
     println!("{rendered}");
     Ok(())
+}
+
+fn print_serializable<T: Serialize>(value: &T, json_output: bool) -> Result<(), SkillCommandError> {
+    let value = serde_json::to_value(value)
+        .map_err(|error| local_error(format!("serialize output: {error}")))?;
+    print_value(&normalized_value(value), json_output)
 }
 
 struct LocalPackage {
@@ -1067,6 +1186,11 @@ struct JournalEntry {
 struct PreparedJournal {
     request_id: RequestId,
     path: PathBuf,
+    _claim: JournalClaim,
+}
+
+struct JournalClaim {
+    _file: File,
 }
 
 impl PreparedJournal {
@@ -1093,11 +1217,20 @@ fn prepare_journal(
 ) -> Result<PreparedJournal, SkillCommandError> {
     let root = repo_root.join(".gitim/request-journal");
     ensure_real_directory(&root)?;
+    let claim = acquire_journal_claim(&root, target, fingerprint)?;
     if let Some(requested_id) = requested_id {
         let request_id = RequestId::new(requested_id).map_err(skill_command_error)?;
-        return prepare_specific_journal(&root, request_id, target, fingerprint);
+        return prepare_specific_journal(&root, request_id, target, fingerprint, claim);
     }
     let journals = load_journals(&root)?;
+    if journals
+        .iter()
+        .any(|(_, entry)| entry.target == target && entry.fingerprint != fingerprint)
+    {
+        return Err(local_error(
+            "pending Skill request target matches but fingerprint does not",
+        ));
+    }
     let matching = journals
         .into_iter()
         .filter(|(_, entry)| entry.target == target && entry.fingerprint == fingerprint)
@@ -1105,11 +1238,12 @@ fn prepare_journal(
     match matching.as_slice() {
         [] => {
             let request_id = RequestId::generate();
-            prepare_specific_journal(&root, request_id, target, fingerprint)
+            prepare_specific_journal(&root, request_id, target, fingerprint, claim)
         }
         [(path, entry)] => Ok(PreparedJournal {
             request_id: validated_journal_id(path, entry)?,
             path: path.clone(),
+            _claim: claim,
         }),
         _ => Err(local_error(
             "multiple matching pending Skill requests; pass --request-id",
@@ -1122,6 +1256,7 @@ fn prepare_specific_journal(
     request_id: RequestId,
     target: &str,
     fingerprint: &str,
+    claim: JournalClaim,
 ) -> Result<PreparedJournal, SkillCommandError> {
     let path = root.join(format!("{}.json", request_id.as_str()));
     let expected = JournalEntry {
@@ -1133,7 +1268,11 @@ fn prepare_specific_journal(
     if path.exists() {
         let current = load_journal(&path)?;
         verify_journal(&current, &expected)?;
-        return Ok(PreparedJournal { request_id, path });
+        return Ok(PreparedJournal {
+            request_id,
+            path,
+            _claim: claim,
+        });
     }
     let bytes = serde_json::to_vec(&json!({
         "version":expected.version,
@@ -1161,7 +1300,71 @@ fn prepare_specific_journal(
             )));
         }
     }
-    Ok(PreparedJournal { request_id, path })
+    Ok(PreparedJournal {
+        request_id,
+        path,
+        _claim: claim,
+    })
+}
+
+fn acquire_journal_claim(
+    root: &Path,
+    target: &str,
+    fingerprint: &str,
+) -> Result<JournalClaim, SkillCommandError> {
+    let namespace = request_fingerprint(&json!({"target":target}))?;
+    let path = root.join(format!(".claim-{namespace}.lock"));
+    let file = File::options()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| local_error(format!("open request journal claim: {error}")))?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(JournalClaim { _file: file }),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            let deadline = Instant::now() + Duration::from_millis(250);
+            loop {
+                let journals = load_journals(root)?;
+                if journals
+                    .iter()
+                    .any(|(_, entry)| entry.target == target && entry.fingerprint != fingerprint)
+                {
+                    return Err(local_error(
+                        "Skill request target is in progress with a different fingerprint",
+                    ));
+                }
+                let matching = journals
+                    .iter()
+                    .filter(|(_, entry)| entry.target == target && entry.fingerprint == fingerprint)
+                    .collect::<Vec<_>>();
+                match matching.as_slice() {
+                    [(path, entry)] => {
+                        let request_id = validated_journal_id(path, entry)?;
+                        return Err(local_error(format!(
+                            "Skill request {} is already in progress",
+                            request_id.as_str()
+                        )));
+                    }
+                    [] if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    [] => {
+                        return Err(local_error(format!(
+                            "another Skill request for {target} is already in progress"
+                        )));
+                    }
+                    _ => {
+                        return Err(local_error(format!(
+                            "multiple Skill requests for {target} are already in progress; pass --request-id"
+                        )));
+                    }
+                }
+            }
+        }
+        Err(error) => Err(local_error(format!("lock request journal claim: {error}"))),
+    }
 }
 
 fn verify_journal(
@@ -1186,12 +1389,12 @@ fn load_journals(root: &Path) -> Result<Vec<(PathBuf, JournalEntry)>, SkillComma
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| local_error(format!("read request journal entry: {error}")))?;
     paths.sort_by_key(std::fs::DirEntry::file_name);
+    paths.retain(|entry| entry.path().extension().is_some_and(|ext| ext == "json"));
     if paths.len() > MAX_JOURNALS {
         return Err(local_error("request journal contains too many entries"));
     }
     paths
         .into_iter()
-        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "json"))
         .map(|entry| {
             let path = entry.path();
             load_journal(&path).map(|journal| (path, journal))

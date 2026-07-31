@@ -925,6 +925,21 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::SkillResource { query } => {
             crate::skill_handlers::handle_skill_resource(state, query).await
         }
+        Request::SkillRevisions { query } => {
+            crate::skill_handlers::handle_skill_revisions(state, query).await
+        }
+        Request::SkillHistory { query } => {
+            crate::skill_handlers::handle_skill_history(state, query).await
+        }
+        Request::SkillProposalList { query } => {
+            crate::skill_handlers::handle_skill_proposal_list(state, query).await
+        }
+        Request::SkillProposalShow { query } => {
+            crate::skill_handlers::handle_skill_proposal_show(state, query).await
+        }
+        Request::SkillProposalResource { query } => {
+            crate::skill_handlers::handle_skill_proposal_resource(state, query).await
+        }
         Request::SkillWorkspaceMeta => {
             crate::skill_handlers::handle_skill_workspace_meta(state).await
         }

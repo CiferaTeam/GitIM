@@ -12,8 +12,9 @@ use gitim_core::responses::{
     ToggleCronResponse, UnarchiveQuickSessionResponse,
 };
 use gitim_core::skill::{
-    parse_skill_reference, SkillCreateRequest, SkillListQuery, SkillProposalTransitionRequest,
-    SkillProposeRequest, SkillResourceQuery, SkillShowQuery,
+    parse_skill_reference, SkillCreateRequest, SkillListQuery, SkillPageQuery,
+    SkillProposalListQuery, SkillProposalResourceQuery, SkillProposalShowQuery,
+    SkillProposalTransitionRequest, SkillProposeRequest, SkillResourceQuery, SkillShowQuery,
 };
 use gitim_core::types::QuickSessionStatus;
 use serde_json::{json, Value};
@@ -120,6 +121,43 @@ impl GitimClient {
         query: &SkillResourceQuery,
     ) -> Result<ApiResponse, ClientError> {
         self.request("skill_resource", json!({ "query": query }))
+            .await
+    }
+
+    pub async fn skill_revisions(
+        &self,
+        query: &SkillPageQuery,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_revisions", json!({ "query": query }))
+            .await
+    }
+
+    pub async fn skill_history(&self, query: &SkillPageQuery) -> Result<ApiResponse, ClientError> {
+        self.request("skill_history", json!({ "query": query }))
+            .await
+    }
+
+    pub async fn skill_proposal_list(
+        &self,
+        query: &SkillProposalListQuery,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_proposal_list", json!({ "query": query }))
+            .await
+    }
+
+    pub async fn skill_proposal_show(
+        &self,
+        query: &SkillProposalShowQuery,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_proposal_show", json!({ "query": query }))
+            .await
+    }
+
+    pub async fn skill_proposal_resource(
+        &self,
+        query: &SkillProposalResourceQuery,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_proposal_resource", json!({ "query": query }))
             .await
     }
 
