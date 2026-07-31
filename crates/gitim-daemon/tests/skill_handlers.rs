@@ -425,7 +425,7 @@ async fn rejected_tip_does_not_stale_an_accepted_catalog_cursor() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn accepted_reads_use_worktree_only_while_head_skill_tree_matches() {
+async fn accepted_reads_use_immutable_snapshots_when_head_skill_tree_matches() {
     let fixture = Fixture::new().await;
     fixture.bootstrap().await;
     let created = fixture.create("release-check").await;
@@ -457,7 +457,8 @@ async fn accepted_reads_use_worktree_only_while_head_skill_tree_matches() {
             revision: None,
         })
         .unwrap();
-    assert!(equal.skill_markdown.contains("worktree-equal"));
+    assert!(equal.skill_markdown.contains("initial"));
+    assert!(!equal.skill_markdown.contains("worktree-equal"));
 
     git(&fixture.repo, ["add", "."]);
     git(&fixture.repo, ["commit", "-m", "diverge skill tree"]);

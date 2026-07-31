@@ -1,5 +1,3 @@
-use std::fs::{File, OpenOptions};
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
@@ -40,9 +38,8 @@ struct LocatedSkill {
 }
 
 #[derive(Clone)]
-enum ReadSource {
-    Worktree,
-    Commit(String),
+struct ReadSource {
+    commit: String,
 }
 
 impl SkillStore {
@@ -78,7 +75,6 @@ impl SkillStore {
         let source = self.source_for_tree(accepted, "skills/workspace.meta.yaml");
         read_yaml(
             &self.repo(),
-            &self.repo_root,
             &source,
             "skills/workspace.meta.yaml",
             SkillError::AdminUninitialized,
@@ -158,7 +154,6 @@ impl SkillStore {
         let repo = self.repo();
         let meta: SkillMeta = read_yaml(
             &repo,
-            &self.repo_root,
             &located.source,
             &format!("{}/skill.meta.yaml", located.root),
             SkillError::RevisionCorrupted,
@@ -169,8 +164,7 @@ impl SkillStore {
         let revision_id = query
             .revision
             .unwrap_or_else(|| meta.current_revision.clone());
-        let revision =
-            published_revision(&repo, &self.repo_root, &located, &query.slug, &revision_id)?;
+        let revision = published_revision(&repo, &located, &query.slug, &revision_id)?;
         Ok(SkillShowResponse {
             meta,
             revision,
@@ -196,7 +190,6 @@ impl SkillStore {
         let package_root = format!("{}/revisions/{}/package", located.root, revision.as_str());
         let (skill_markdown, resources) = read_package_index(
             &self.repo(),
-            &self.repo_root,
             &located.source,
             &package_root,
             &reference.slug,
@@ -226,7 +219,7 @@ impl SkillStore {
         let revision = shown.revision.id.clone();
         let package_root = format!("{}/revisions/{}/package", located.root, revision.as_str());
         let path = format!("{package_root}/{}", query.path);
-        let bytes = read_source_bytes(&self.repo(), &self.repo_root, &located.source, &path)?
+        let bytes = read_source_bytes(&self.repo(), &located.source, &path)?
             .ok_or(SkillError::RevisionNotFound)?;
         Ok(SkillResourceResponse {
             canonical_ref: shown.canonical_ref,
@@ -259,7 +252,7 @@ impl SkillStore {
                 proposal_id.as_str()
             );
             let source = self.source_for_tree(&state.tree, &root);
-            let Some(bytes) = read_source_bytes(&repo, &self.repo_root, &source, &path)? else {
+            let Some(bytes) = read_source_bytes(&repo, &source, &path)? else {
                 continue;
             };
             let proposal: SkillProposalMeta =
@@ -280,7 +273,6 @@ impl SkillStore {
         let located = self.locate_skill(view, slug)?;
         read_yaml(
             &self.repo(),
-            &self.repo_root,
             &located.source,
             &format!("{}/skill.meta.yaml", located.root),
             SkillError::RevisionCorrupted,
@@ -307,7 +299,6 @@ impl SkillStore {
             let source = self.source_for_tree(&accepted.tree, &root);
             let meta: SkillMeta = read_yaml(
                 &repo,
-                &self.repo_root,
                 &source,
                 &format!("{root}/skill.meta.yaml"),
                 SkillError::RevisionCorrupted,
@@ -364,15 +355,17 @@ impl SkillStore {
         path: &str,
     ) -> ReadSource {
         let repo = self.repo();
-        if tree_oid_at(&repo, "HEAD", path)
+        let commit = repo
+            .rev_parse("HEAD")
             .ok()
-            .flatten()
-            .is_some_and(|tree| tree == accepted.tree_oid)
-        {
-            ReadSource::Worktree
-        } else {
-            ReadSource::Commit(accepted.commit_oid.clone())
-        }
+            .filter(|head| {
+                tree_oid_at(&repo, head, path)
+                    .ok()
+                    .flatten()
+                    .is_some_and(|tree| tree == accepted.tree_oid)
+            })
+            .unwrap_or_else(|| accepted.commit_oid.clone());
+        ReadSource { commit }
     }
 }
 
@@ -386,7 +379,6 @@ fn skill_root(slug: &SkillSlug, archived: bool) -> String {
 
 fn published_revision(
     repo: &GitStorage,
-    repo_root: &Path,
     located: &LocatedSkill,
     slug: &SkillSlug,
     revision: &gitim_core::skill::RevisionId,
@@ -396,7 +388,7 @@ fn published_revision(
         located.root,
         revision.as_str()
     );
-    let revision_bytes = read_source_bytes(repo, repo_root, &located.source, &revision_path)?
+    let revision_bytes = read_source_bytes(repo, &located.source, &revision_path)?
         .ok_or(SkillError::RevisionNotFound)?;
     let meta: SkillRevisionMeta =
         serde_yaml::from_slice(&revision_bytes).map_err(|_| SkillError::RevisionCorrupted)?;
@@ -408,7 +400,7 @@ fn published_revision(
         located.root,
         revision.as_str()
     );
-    let publication_bytes = read_source_bytes(repo, repo_root, &located.source, &publication_path)?
+    let publication_bytes = read_source_bytes(repo, &located.source, &publication_path)?
         .ok_or(SkillError::RevisionUnpublished)?;
     let publication: SkillPublicationMeta =
         serde_yaml::from_slice(&publication_bytes).map_err(|_| SkillError::RevisionCorrupted)?;
@@ -424,16 +416,12 @@ fn published_revision(
 
 fn read_package_index(
     repo: &GitStorage,
-    repo_root: &Path,
     source: &ReadSource,
     root: &str,
     slug: &SkillSlug,
 ) -> Result<(Vec<u8>, Vec<gitim_core::skill::ResourceDescriptor>), SkillError> {
-    let commit = match source {
-        ReadSource::Worktree => "HEAD",
-        ReadSource::Commit(commit) => commit,
-    };
-    let tree = list_tree_recursive(repo, commit, root).map_err(|_| SkillError::LoadUnavailable)?;
+    let tree =
+        list_tree_recursive(repo, &source.commit, root).map_err(|_| SkillError::LoadUnavailable)?;
     if tree.is_empty() || tree.len() > MAX_PACKAGE_FILES {
         return Err(SkillError::RevisionCorrupted);
     }
@@ -476,8 +464,8 @@ fn read_package_index(
         skeleton.push(PackageEntry::new(relative, Vec::new()));
     }
     let skill_path = skill_path.ok_or(SkillError::RevisionCorrupted)?;
-    let skill_markdown = read_source_bytes(repo, repo_root, source, skill_path)?
-        .ok_or(SkillError::RevisionCorrupted)?;
+    let skill_markdown =
+        read_source_bytes(repo, source, skill_path)?.ok_or(SkillError::RevisionCorrupted)?;
     let skill_entry = skeleton
         .iter_mut()
         .find(|entry| entry.path == "SKILL.md")
@@ -497,7 +485,6 @@ fn media_type_is_text(media_type: &str) -> bool {
 
 fn read_yaml<T>(
     repo: &GitStorage,
-    repo_root: &Path,
     source: &ReadSource,
     path: &str,
     missing: SkillError,
@@ -505,7 +492,7 @@ fn read_yaml<T>(
 where
     T: serde::de::DeserializeOwned,
 {
-    let bytes = read_source_bytes(repo, repo_root, source, path)?.ok_or(missing)?;
+    let bytes = read_source_bytes(repo, source, path)?.ok_or(missing)?;
     serde_yaml::from_slice(&bytes).map_err(|_| SkillError::RevisionCorrupted)
 }
 
@@ -520,97 +507,10 @@ fn accepted_view_id(checkpoint: &SkillValidationCheckpoint) -> Result<String, Sk
 
 fn read_source_bytes(
     repo: &GitStorage,
-    repo_root: &Path,
     source: &ReadSource,
     path: &str,
 ) -> Result<Option<Vec<u8>>, SkillError> {
-    match source {
-        ReadSource::Commit(commit) => {
-            read_blob_at(repo, commit, path).map_err(|_| SkillError::LoadUnavailable)
-        }
-        ReadSource::Worktree => read_worktree_file(repo_root, Path::new(path)),
-    }
-}
-
-#[cfg(unix)]
-fn read_worktree_file(repo_root: &Path, relative: &Path) -> Result<Option<Vec<u8>>, SkillError> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-    use std::os::unix::fs::OpenOptionsExt;
-
-    if relative.as_os_str().is_empty()
-        || relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(SkillError::LoadUnavailable);
-    }
-    let mut options = OpenOptions::new();
-    let mut directory = options
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
-        .open(repo_root)
-        .map_err(|_| SkillError::LoadUnavailable)?;
-    let mut components = relative.components().peekable();
-    while let Some(Component::Normal(component)) = components.next() {
-        let name = CString::new(component.as_bytes()).map_err(|_| SkillError::LoadUnavailable)?;
-        let directory_flag = if components.peek().is_some() {
-            libc::O_DIRECTORY
-        } else {
-            0
-        };
-        let descriptor = unsafe {
-            libc::openat(
-                directory.as_raw_fd(),
-                name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | directory_flag,
-            )
-        };
-        if descriptor < 0 {
-            let error = std::io::Error::last_os_error();
-            return if error.kind() == std::io::ErrorKind::NotFound {
-                Ok(None)
-            } else {
-                Err(SkillError::LoadUnavailable)
-            };
-        }
-        directory = unsafe { File::from_raw_fd(descriptor) };
-    }
-    let metadata = directory
-        .metadata()
-        .map_err(|_| SkillError::LoadUnavailable)?;
-    if !metadata.is_file() {
-        return Err(SkillError::LoadUnavailable);
-    }
-    let mut bytes = Vec::new();
-    directory
-        .read_to_end(&mut bytes)
-        .map_err(|_| SkillError::LoadUnavailable)?;
-    Ok(Some(bytes))
-}
-
-#[cfg(not(unix))]
-fn read_worktree_file(repo_root: &Path, relative: &Path) -> Result<Option<Vec<u8>>, SkillError> {
-    if relative.as_os_str().is_empty()
-        || relative
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(SkillError::LoadUnavailable);
-    }
-    let path = repo_root.join(relative);
-    let metadata = match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(_) => return Err(SkillError::LoadUnavailable),
-    };
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        return Err(SkillError::LoadUnavailable);
-    }
-    std::fs::read(path)
-        .map(Some)
-        .map_err(|_| SkillError::LoadUnavailable)
+    read_blob_at(repo, &source.commit, path).map_err(|_| SkillError::LoadUnavailable)
 }
 
 fn validate_resource_path(path: &str) -> Result<(), SkillError> {
