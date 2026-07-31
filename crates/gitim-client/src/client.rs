@@ -11,6 +11,10 @@ use gitim_core::responses::{
     SendQuickSessionMessageResponse, SetQuickSessionSummaryResponse, SetQuickSessionTitleResponse,
     ToggleCronResponse, UnarchiveQuickSessionResponse,
 };
+use gitim_core::skill::{
+    parse_skill_reference, SkillCreateRequest, SkillListQuery, SkillProposalTransitionRequest,
+    SkillProposeRequest, SkillResourceQuery, SkillShowQuery,
+};
 use gitim_core::types::QuickSessionStatus;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -89,6 +93,58 @@ impl GitimClient {
 
     pub async fn status(&self) -> Result<ApiResponse, ClientError> {
         self.request("status", json!({})).await
+    }
+
+    pub async fn skill_list(&self, query: &SkillListQuery) -> Result<ApiResponse, ClientError> {
+        self.request("skill_list", json!({ "query": query })).await
+    }
+
+    pub async fn skill_show(&self, query: &SkillShowQuery) -> Result<ApiResponse, ClientError> {
+        self.request("skill_show", json!({ "query": query })).await
+    }
+
+    pub async fn skill_load(&self, reference: &str) -> Result<ApiResponse, ClientError> {
+        let canonical = if reference.starts_with("skill:") {
+            reference.to_owned()
+        } else {
+            format!("skill:{reference}")
+        };
+        let reference = parse_skill_reference(&canonical)
+            .map_err(|error| ClientError::ProtocolError(error.to_string()))?;
+        self.request("skill_load", json!({ "reference": reference }))
+            .await
+    }
+
+    pub async fn skill_resource(
+        &self,
+        query: &SkillResourceQuery,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_resource", json!({ "query": query }))
+            .await
+    }
+
+    pub async fn skill_create(
+        &self,
+        request: &SkillCreateRequest,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_create", json!({ "request": request }))
+            .await
+    }
+
+    pub async fn skill_propose(
+        &self,
+        request: &SkillProposeRequest,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_propose", json!({ "request": request }))
+            .await
+    }
+
+    pub async fn skill_proposal_transition(
+        &self,
+        request: &SkillProposalTransitionRequest,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_proposal_transition", json!({ "request": request }))
+            .await
     }
 
     pub async fn send(

@@ -249,6 +249,12 @@ enum Commands {
         cmd: commands::labels::LabelsCommand,
     },
 
+    /// Shared Skill commands
+    Skill {
+        #[command(subcommand)]
+        command: commands::skill::SkillCommand,
+    },
+
     /// Project management — list or create
     Projects {
         #[command(subcommand)]
@@ -803,6 +809,11 @@ async fn main() {
         return;
     }
 
+    if let Commands::Skill { command } = cli.command {
+        commands::skill::run(command, cli.json).await;
+        return;
+    }
+
     let client = init_client();
 
     match cli.command {
@@ -813,6 +824,7 @@ async fn main() {
             command: BoardCommands::Path,
         } => unreachable!(),
         Commands::Timer { .. } => unreachable!(),
+        Commands::Skill { .. } => unreachable!(),
         Commands::Status => cmd_status(&client, &mode).await,
         Commands::Send {
             channel,
