@@ -168,6 +168,8 @@ impl Fixture {
             response.data.as_ref().unwrap()["request_id"],
             request_id.as_str()
         );
+        assert_eq!(response.data.as_ref().unwrap()["operation"], "skill_create");
+        assert!(response.data.as_ref().unwrap().get("target").is_none());
         assert_eq!(
             response.data.as_ref().unwrap()["local_state"],
             "pending_sync",
@@ -359,6 +361,10 @@ async fn handlers_bootstrap_create_list_load_resource_and_reject_candidates() {
     assert_eq!(
         proposal.data.as_ref().unwrap()["proposal_id"],
         proposal_id.as_str()
+    );
+    assert_eq!(
+        proposal.data.as_ref().unwrap()["operation"],
+        "proposal_create"
     );
     let candidate = RevisionId::new(&format!("r-{}", &proposal_request.as_str()[2..])).unwrap();
     let unpublished = store
@@ -602,6 +608,10 @@ async fn proposal_publish_reject_and_withdraw_emit_ordered_events() {
             response.data.as_ref().unwrap()["proposal_id"],
             proposal_id.as_str()
         );
+        assert_eq!(
+            response.data.as_ref().unwrap()["operation"],
+            "proposal_create"
+        );
         let event = events.recv().await.unwrap();
         assert!(matches!(
             event,
@@ -626,6 +636,10 @@ async fn proposal_publish_reject_and_withdraw_emit_ordered_events() {
         assert_eq!(
             response.data.as_ref().unwrap()["proposal_id"],
             proposal_id.as_str()
+        );
+        assert_eq!(
+            response.data.as_ref().unwrap()["operation"],
+            serde_json::to_value(operation).unwrap()
         );
         let event = events.recv().await.unwrap();
         let expected = match operation {
@@ -668,6 +682,11 @@ async fn metadata_role_and_archive_requests_run_shared_transitions() {
         metadata.data.as_ref().unwrap()["result"]["control_revision"],
         2
     );
+    assert_eq!(
+        metadata.data.as_ref().unwrap()["operation"],
+        "metadata_update"
+    );
+    assert!(metadata.data.as_ref().unwrap().get("target").is_none());
 
     let role = fixture
         .request(serde_json::json!({
@@ -683,6 +702,8 @@ async fn metadata_role_and_archive_requests_run_shared_transitions() {
         .await;
     assert!(role.ok, "{:?}", role.error);
     assert_eq!(role.data.as_ref().unwrap()["result"]["control_revision"], 3);
+    assert_eq!(role.data.as_ref().unwrap()["operation"], "owner_add");
+    assert_eq!(role.data.as_ref().unwrap()["target"], "bob");
 
     let archive = fixture
         .request(serde_json::json!({
@@ -700,6 +721,8 @@ async fn metadata_role_and_archive_requests_run_shared_transitions() {
         archive.data.as_ref().unwrap()["result"]["control_revision"],
         4
     );
+    assert_eq!(archive.data.as_ref().unwrap()["operation"], "archive");
+    assert!(archive.data.as_ref().unwrap().get("target").is_none());
     git(&fixture.repo, ["fetch", "origin"]);
     git(
         &fixture.repo,

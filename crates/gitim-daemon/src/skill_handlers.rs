@@ -24,6 +24,9 @@ use crate::state::SharedState;
 #[derive(Serialize)]
 struct SkillMutationResponse {
     request_id: RequestId,
+    operation: SkillOperation,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     proposal_id: Option<ProposalId>,
     commit_id: String,
@@ -368,6 +371,11 @@ async fn run_mutation_with_proposal(
     proposal_id: Option<ProposalId>,
 ) -> Response {
     let request_id = request.request_id().clone();
+    let operation = request.operation();
+    let target = match &request {
+        SkillMutationRequest::RoleUpdate(request) => Some(request.target.as_str().to_owned()),
+        _ => None,
+    };
     if !state.has_remote {
         return skill_error(SkillError::RemoteRequired);
     }
@@ -426,6 +434,8 @@ async fn run_mutation_with_proposal(
     }
     Response::json(SkillMutationResponse {
         request_id,
+        operation,
+        target,
         proposal_id,
         commit_id: result.commit_id,
         result: result.result,

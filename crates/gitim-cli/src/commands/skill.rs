@@ -552,7 +552,16 @@ async fn execute_create(
         Ok(response) => response,
         Err(error) => return Err(client_command_error(error)),
     };
-    finish_mutation(response, journal, MutationExpectation::Create, json_output)
+    let revision = revision_for_request(&journal.request_id)?;
+    finish_mutation(
+        response,
+        journal,
+        MutationExpectation::Create {
+            slug: request_body.slug,
+            revision,
+        },
+        json_output,
+    )
 }
 
 async fn execute_propose(
@@ -583,7 +592,7 @@ async fn execute_propose(
     eprintln!("Request ID: {}", journal.request_id.as_str());
     let request_body = SkillProposeRequest {
         request_id: journal.request_id.clone(),
-        slug,
+        slug: slug.clone(),
         base_revision,
         summary,
         source_directory,
@@ -597,7 +606,7 @@ async fn execute_propose(
     finish_mutation(
         response,
         journal,
-        MutationExpectation::ProposalCreate { proposal_id },
+        MutationExpectation::ProposalCreate { slug, proposal_id },
         json_output,
     )
 }
@@ -718,6 +727,13 @@ async fn execute_proposal(
     let next_state_revision = state_revision
         .checked_add(1)
         .ok_or_else(|| local_error("proposal state revision overflow"))?;
+    let next_control_revision = control_revision
+        .map(|revision| {
+            revision
+                .checked_add(1)
+                .ok_or_else(|| local_error("Skill control revision overflow"))
+        })
+        .transpose()?;
     let fingerprint = request_fingerprint(&json!({
         "operation":operation,
         "proposal_id":proposal_id,
@@ -748,9 +764,11 @@ async fn execute_proposal(
         response,
         journal,
         MutationExpectation::ProposalTransition {
+            operation,
             proposal_id,
             state_revision: next_state_revision,
             status: expected_status,
+            control_revision: next_control_revision,
         },
         json_output,
     )
@@ -772,6 +790,10 @@ async fn execute_role(
     let slug = SkillSlug::new(&args.slug).map_err(skill_command_error)?;
     let target = Handler::new(&args.handler)
         .map_err(|_| skill_command_error(SkillError::RoleTargetInvalid))?;
+    let next_control_revision = args
+        .control_revision
+        .checked_add(1)
+        .ok_or_else(|| local_error("Skill control revision overflow"))?;
     let fingerprint = request_fingerprint(&json!({
         "operation":operation,
         "slug":slug,
@@ -800,7 +822,17 @@ async fn execute_role(
         .skill_role_update(&request_body)
         .await
         .map_err(client_command_error)?;
-    finish_mutation(response, journal, MutationExpectation::Control, json_output)
+    finish_mutation(
+        response,
+        journal,
+        MutationExpectation::Control {
+            operation,
+            slug: request_body.slug,
+            target: Some(request_body.target),
+            control_revision: next_control_revision,
+        },
+        json_output,
+    )
 }
 
 async fn execute_admin(
@@ -820,6 +852,9 @@ async fn execute_admin(
                     "skill admin update requires --display-name or --description",
                 ));
             }
+            let next_control_revision = control_revision
+                .checked_add(1)
+                .ok_or_else(|| local_error("Skill control revision overflow"))?;
             let slug = SkillSlug::new(&slug).map_err(skill_command_error)?;
             let fingerprint = request_fingerprint(&json!({
                 "operation":SkillOperation::MetadataUpdate,
@@ -848,7 +883,17 @@ async fn execute_admin(
                 .skill_metadata_update(&request_body)
                 .await
                 .map_err(client_command_error)?;
-            finish_mutation(response, journal, MutationExpectation::Control, json_output)
+            finish_mutation(
+                response,
+                journal,
+                MutationExpectation::Control {
+                    operation: SkillOperation::MetadataUpdate,
+                    slug: request_body.slug,
+                    target: None,
+                    control_revision: next_control_revision,
+                },
+                json_output,
+            )
         }
         AdminCommand::Archive(args) => {
             execute_archive_transition(args, SkillOperation::Archive, json_output).await
@@ -865,6 +910,10 @@ async fn execute_archive_transition(
     json_output: bool,
 ) -> Result<SkillCliExit, SkillCommandError> {
     let slug = SkillSlug::new(&args.slug).map_err(skill_command_error)?;
+    let next_control_revision = args
+        .control_revision
+        .checked_add(1)
+        .ok_or_else(|| local_error("Skill control revision overflow"))?;
     let fingerprint = request_fingerprint(&json!({
         "operation":operation,
         "slug":slug,
@@ -889,7 +938,17 @@ async fn execute_archive_transition(
         .skill_archive_transition(&request_body)
         .await
         .map_err(client_command_error)?;
-    finish_mutation(response, journal, MutationExpectation::Control, json_output)
+    finish_mutation(
+        response,
+        journal,
+        MutationExpectation::Control {
+            operation,
+            slug: request_body.slug,
+            target: None,
+            control_revision: next_control_revision,
+        },
+        json_output,
+    )
 }
 
 fn finish_mutation(
@@ -928,28 +987,71 @@ fn finish_mutation(
             "invalid Skill mutation response: required result fields are missing",
         ));
     }
-    let proposal_matches = match expectation {
-        MutationExpectation::Create | MutationExpectation::Control => {
-            payload.proposal_id.is_none()
+    let operation_matches = match expectation {
+        MutationExpectation::Create { slug, revision } => {
+            payload.operation == SkillOperation::SkillCreate
+                && payload.target.is_none()
+                && payload.proposal_id.is_none()
+                && payload
+                    .result
+                    .canonical_ref
+                    .as_ref()
+                    .is_some_and(|reference| {
+                        reference.slug == slug && reference.revision.as_ref() == Some(&revision)
+                    })
+                && payload.result.current_revision.as_ref() == Some(&revision)
+                && payload.result.control_revision == Some(1)
+                && payload.result.event_revision == Some(1)
                 && payload.result.proposal_state_revision.is_none()
                 && payload.result.proposal_status.is_none()
         }
-        MutationExpectation::ProposalCreate { proposal_id } => {
-            payload.proposal_id.as_ref() == Some(&proposal_id)
+        MutationExpectation::ProposalCreate { slug, proposal_id } => {
+            payload.operation == SkillOperation::ProposalCreate
+                && payload.target.is_none()
+                && payload.proposal_id.as_ref() == Some(&proposal_id)
+                && payload
+                    .result
+                    .canonical_ref
+                    .as_ref()
+                    .is_some_and(|reference| reference.slug == slug)
                 && payload.result.proposal_state_revision == Some(1)
                 && payload.result.proposal_status == Some(ProposalStatus::Open)
         }
         MutationExpectation::ProposalTransition {
+            operation,
             proposal_id,
             state_revision,
             status,
+            control_revision,
         } => {
-            payload.proposal_id.as_ref() == Some(&proposal_id)
+            payload.operation == operation
+                && payload.target.is_none()
+                && payload.proposal_id.as_ref() == Some(&proposal_id)
                 && payload.result.proposal_state_revision == Some(state_revision)
                 && payload.result.proposal_status == Some(status)
+                && control_revision
+                    .is_none_or(|revision| payload.result.control_revision == Some(revision))
+        }
+        MutationExpectation::Control {
+            operation,
+            slug,
+            target,
+            control_revision,
+        } => {
+            payload.operation == operation
+                && payload.target == target
+                && payload.proposal_id.is_none()
+                && payload
+                    .result
+                    .canonical_ref
+                    .as_ref()
+                    .is_some_and(|reference| reference.slug == slug)
+                && payload.result.control_revision == Some(control_revision)
+                && payload.result.proposal_state_revision.is_none()
+                && payload.result.proposal_status.is_none()
         }
     };
-    if !proposal_matches {
+    if !operation_matches {
         return Err(local_error(
             "invalid Skill mutation response: operation result does not match the request",
         ));
@@ -963,21 +1065,35 @@ fn finish_mutation(
 }
 
 enum MutationExpectation {
-    Create,
+    Create {
+        slug: SkillSlug,
+        revision: RevisionId,
+    },
     ProposalCreate {
+        slug: SkillSlug,
         proposal_id: ProposalId,
     },
     ProposalTransition {
+        operation: SkillOperation,
         proposal_id: ProposalId,
         state_revision: u64,
         status: ProposalStatus,
+        control_revision: Option<u64>,
     },
-    Control,
+    Control {
+        operation: SkillOperation,
+        slug: SkillSlug,
+        target: Option<Handler>,
+        control_revision: u64,
+    },
 }
 
 #[derive(Deserialize, Serialize)]
 struct SkillMutationSuccess {
     request_id: RequestId,
+    operation: SkillOperation,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target: Option<Handler>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     proposal_id: Option<ProposalId>,
     commit_id: String,
@@ -1035,6 +1151,10 @@ fn canonical_reference(
 
 fn proposal_for_request(request_id: &RequestId) -> Result<ProposalId, SkillCommandError> {
     ProposalId::new(&format!("p-{}", &request_id.as_str()[2..])).map_err(skill_command_error)
+}
+
+fn revision_for_request(request_id: &RequestId) -> Result<RevisionId, SkillCommandError> {
+    RevisionId::new(&format!("r-{}", &request_id.as_str()[2..])).map_err(skill_command_error)
 }
 
 fn print_reference(

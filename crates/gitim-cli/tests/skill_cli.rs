@@ -219,14 +219,37 @@ fn serve_blocked_mutation(
 }
 
 fn mutation_response(request_id: &str) -> Value {
+    let revision = format!("r-{}", &request_id[2..]);
     json!({
         "request_id":request_id,
+        "operation":"skill_create",
+        "commit_id":"abc123",
+        "result":{
+            "canonical_ref":{"slug":"release-check","revision":revision},
+            "current_revision":revision,
+            "control_revision":1,
+            "event_revision":1
+        },
+        "local_state":"integrated"
+    })
+}
+
+fn control_mutation_response(
+    request_id: &str,
+    operation: &str,
+    target: Option<&str>,
+    control_revision: u64,
+) -> Value {
+    json!({
+        "request_id":request_id,
+        "operation":operation,
+        "target":target,
         "commit_id":"abc123",
         "result":{
             "canonical_ref":{"slug":"release-check","revision":REVISION},
             "current_revision":REVISION,
-            "control_revision":1,
-            "event_revision":1
+            "control_revision":control_revision,
+            "event_revision":8
         },
         "local_state":"integrated"
     })
@@ -240,6 +263,14 @@ fn proposal_mutation_response(
 ) -> Value {
     json!({
         "request_id":request_id,
+        "operation":if status == "open" {"proposal_create"} else {
+            match status {
+                "published" => "proposal_publish",
+                "rejected" => "proposal_reject",
+                "withdrawn" => "proposal_withdraw",
+                _ => "proposal_create",
+            }
+        },
         "proposal_id":proposal_id,
         "commit_id":"abc123",
         "result":{
@@ -307,6 +338,81 @@ fn proposal_meta() -> Value {
         "updated_at":"2026-07-31T00:00:00Z",
         "state_revision":1
     })
+}
+
+#[derive(Clone, Copy)]
+enum ControlValidationCase {
+    Create,
+    Update,
+    Role,
+    Archive,
+}
+
+fn control_validation_args(case: ControlValidationCase, source: &Path) -> Vec<String> {
+    match case {
+        ControlValidationCase::Create => vec![
+            "skill",
+            "create",
+            "release-check",
+            "--from",
+            source.to_str().unwrap(),
+            "--display-name",
+            "Release Check",
+            "--description",
+            "Verify releases.",
+            "--request-id",
+            REQUEST,
+        ],
+        ControlValidationCase::Update => vec![
+            "skill",
+            "admin",
+            "update",
+            "release-check",
+            "--display-name",
+            "Release Gate",
+            "--control-revision",
+            "7",
+            "--request-id",
+            REQUEST,
+        ],
+        ControlValidationCase::Role => vec![
+            "skill",
+            "role",
+            "owner-add",
+            "release-check",
+            "bob",
+            "--control-revision",
+            "7",
+            "--request-id",
+            REQUEST,
+        ],
+        ControlValidationCase::Archive => vec![
+            "skill",
+            "admin",
+            "archive",
+            "release-check",
+            "--control-revision",
+            "7",
+            "--request-id",
+            REQUEST,
+        ],
+    }
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+fn control_validation_response(case: ControlValidationCase) -> Value {
+    match case {
+        ControlValidationCase::Create => mutation_response(REQUEST),
+        ControlValidationCase::Update => {
+            control_mutation_response(REQUEST, "metadata_update", None, 8)
+        }
+        ControlValidationCase::Role => {
+            control_mutation_response(REQUEST, "owner_add", Some("bob"), 8)
+        }
+        ControlValidationCase::Archive => control_mutation_response(REQUEST, "archive", None, 8),
+    }
 }
 
 #[test]
@@ -643,6 +749,7 @@ fn role_and_admin_writes_dispatch_typed_requests() {
                     "expected_control_revision":7
                 }
             }),
+            control_mutation_response(REQUEST, "owner_remove", Some("bob"), 8),
         ),
         (
             vec![
@@ -669,6 +776,7 @@ fn role_and_admin_writes_dispatch_typed_requests() {
                     "expected_control_revision":7
                 }
             }),
+            control_mutation_response(REQUEST, "metadata_update", None, 8),
         ),
         (
             vec![
@@ -690,11 +798,12 @@ fn role_and_admin_writes_dispatch_typed_requests() {
                     "expected_control_revision":7
                 }
             }),
+            control_mutation_response(REQUEST, "archive", None, 8),
         ),
     ];
-    for (args, expected) in cases {
+    for (args, expected, response) in cases {
         let clone = fake_clone();
-        let (server, request) = serve_once(&clone, mutation_response(REQUEST));
+        let (server, request) = serve_once(&clone, response);
         gitim()
             .current_dir(clone.path())
             .args(args)
@@ -702,6 +811,100 @@ fn role_and_admin_writes_dispatch_typed_requests() {
             .success();
         server.join().unwrap();
         assert_eq!(request.recv().unwrap(), expected);
+    }
+}
+
+#[test]
+fn create_and_control_successes_are_bound_to_the_requested_operation() {
+    for case in [
+        ControlValidationCase::Create,
+        ControlValidationCase::Update,
+        ControlValidationCase::Role,
+        ControlValidationCase::Archive,
+    ] {
+        let clone = fake_clone();
+        let source = package(clone.path());
+        let (server, _) = serve_once(&clone, control_validation_response(case));
+        gitim()
+            .current_dir(clone.path())
+            .args(control_validation_args(case, &source))
+            .assert()
+            .success();
+        server.join().unwrap();
+        assert!(!clone
+            .path()
+            .join(".gitim/request-journal")
+            .join(format!("{REQUEST}.json"))
+            .exists());
+    }
+}
+
+#[test]
+fn create_and_control_mismatches_retain_the_request_journal() {
+    for case in [
+        ControlValidationCase::Create,
+        ControlValidationCase::Update,
+        ControlValidationCase::Role,
+        ControlValidationCase::Archive,
+    ] {
+        let expected_control = if matches!(case, ControlValidationCase::Create) {
+            1
+        } else {
+            8
+        };
+        let mut responses = Vec::new();
+
+        let mut wrong_slug = control_validation_response(case);
+        wrong_slug["result"]["canonical_ref"]["slug"] = json!("other-skill");
+        responses.push(wrong_slug);
+
+        let mut wrong_operation = control_validation_response(case);
+        wrong_operation["operation"] = json!("proposal_create");
+        responses.push(wrong_operation);
+
+        let mut stale_control = control_validation_response(case);
+        stale_control["result"]["control_revision"] = json!(expected_control - 1);
+        responses.push(stale_control);
+
+        let mut jumped_control = control_validation_response(case);
+        jumped_control["result"]["control_revision"] = json!(expected_control + 1);
+        responses.push(jumped_control);
+
+        if matches!(case, ControlValidationCase::Role) {
+            let mut wrong_target = control_validation_response(case);
+            wrong_target["target"] = json!("carol");
+            responses.push(wrong_target);
+        }
+        if matches!(case, ControlValidationCase::Create) {
+            let wrong_revision = "r-01K1D8QG2S8RX4T9M9BDKQ9Z7P";
+            let mut mismatched_revision = control_validation_response(case);
+            mismatched_revision["result"]["canonical_ref"]["revision"] = json!(wrong_revision);
+            mismatched_revision["result"]["current_revision"] = json!(wrong_revision);
+            responses.push(mismatched_revision);
+
+            let mut jumped_event = control_validation_response(case);
+            jumped_event["result"]["event_revision"] = json!(2);
+            responses.push(jumped_event);
+        }
+
+        for response in responses {
+            let clone = fake_clone();
+            let source = package(clone.path());
+            let (server, _) = serve_once(&clone, response);
+            gitim()
+                .current_dir(clone.path())
+                .args(control_validation_args(case, &source))
+                .assert()
+                .failure()
+                .code(1)
+                .stderr(predicate::str::contains("response"));
+            server.join().unwrap();
+            assert!(clone
+                .path()
+                .join(".gitim/request-journal")
+                .join(format!("{REQUEST}.json"))
+                .exists());
+        }
     }
 }
 

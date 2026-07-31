@@ -218,6 +218,19 @@ impl SkillMutationRequest {
             Self::Repair(request) => &request.request_id,
         }
     }
+
+    pub const fn operation(&self) -> SkillOperation {
+        match self {
+            Self::WorkspaceBootstrap(_) => SkillOperation::WorkspaceBootstrap,
+            Self::Create(_) => SkillOperation::SkillCreate,
+            Self::Propose(_) => SkillOperation::ProposalCreate,
+            Self::ProposalTransition(request) => request.operation,
+            Self::MetadataUpdate(_) => SkillOperation::MetadataUpdate,
+            Self::RoleUpdate(request) => request.operation,
+            Self::ArchiveTransition(request) => request.operation,
+            Self::Repair(_) => SkillOperation::RepairSkillState,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
