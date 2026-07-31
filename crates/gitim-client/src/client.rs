@@ -12,9 +12,10 @@ use gitim_core::responses::{
     ToggleCronResponse, UnarchiveQuickSessionResponse,
 };
 use gitim_core::skill::{
-    parse_skill_reference, SkillCreateRequest, SkillListQuery, SkillPageQuery,
-    SkillProposalListQuery, SkillProposalResourceQuery, SkillProposalShowQuery,
-    SkillProposalTransitionRequest, SkillProposeRequest, SkillResourceQuery, SkillShowQuery,
+    parse_skill_reference, SkillArchiveTransitionRequest, SkillCreateRequest, SkillListQuery,
+    SkillMetadataUpdateRequest, SkillPageQuery, SkillProposalListQuery, SkillProposalResourceQuery,
+    SkillProposalShowQuery, SkillProposalTransitionRequest, SkillProposeRequest,
+    SkillResourceQuery, SkillRoleUpdateRequest, SkillShowQuery,
 };
 use gitim_core::types::QuickSessionStatus;
 use serde_json::{json, Value};
@@ -182,6 +183,30 @@ impl GitimClient {
         request: &SkillProposalTransitionRequest,
     ) -> Result<ApiResponse, ClientError> {
         self.request("skill_proposal_transition", json!({ "request": request }))
+            .await
+    }
+
+    pub async fn skill_metadata_update(
+        &self,
+        request: &SkillMetadataUpdateRequest,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_metadata_update", json!({ "request": request }))
+            .await
+    }
+
+    pub async fn skill_role_update(
+        &self,
+        request: &SkillRoleUpdateRequest,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_role_update", json!({ "request": request }))
+            .await
+    }
+
+    pub async fn skill_archive_transition(
+        &self,
+        request: &SkillArchiveTransitionRequest,
+    ) -> Result<ApiResponse, ClientError> {
+        self.request("skill_archive_transition", json!({ "request": request }))
             .await
     }
 

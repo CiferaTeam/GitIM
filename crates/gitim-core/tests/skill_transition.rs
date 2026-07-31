@@ -4,13 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gitim_core::skill::{
     plan_skill_mutation, validate_package_entries, validate_skill_commit, PackageEntry, ProposalId,
-    ProposalStatus, RequestId, RevisionId, SkillConflictCheckpoint, SkillError,
-    SkillMutationContext, SkillMutationPlan, SkillMutationRequest, SkillOperation,
-    SkillProposalMeta, SkillProposalSnapshot, SkillProposalTransitionRequest, SkillProposeRequest,
-    SkillPublicationMeta, SkillReceipt, SkillReceiptScope, SkillRepairAcceptedState,
-    SkillRepairRequest, SkillRepairScope, SkillRepositorySnapshot, SkillRevisionMeta,
-    SkillRevisionSnapshot, SkillSlug, SkillTreeEdit, SkillWorkspaceBootstrapRequest,
-    WorkspaceSkillMeta, SKILL_SCHEMA_VERSION,
+    ProposalStatus, RequestId, RevisionId, SkillArchiveTransitionRequest, SkillConflictCheckpoint,
+    SkillError, SkillMetadataUpdateRequest, SkillMutationContext, SkillMutationPlan,
+    SkillMutationRequest, SkillOperation, SkillProposalMeta, SkillProposalSnapshot,
+    SkillProposalTransitionRequest, SkillProposeRequest, SkillPublicationMeta, SkillReceipt,
+    SkillReceiptScope, SkillRepairAcceptedState, SkillRepairRequest, SkillRepairScope,
+    SkillRepositorySnapshot, SkillRevisionMeta, SkillRevisionSnapshot, SkillRoleUpdateRequest,
+    SkillSlug, SkillTreeEdit, SkillWorkspaceBootstrapRequest, WorkspaceSkillMeta,
+    SKILL_SCHEMA_VERSION,
 };
 use gitim_core::types::Handler;
 
@@ -240,6 +241,163 @@ fn terminal_request(
                 .then_some(skill.meta.control_revision),
         }),
     )
+}
+
+#[test]
+fn metadata_roles_and_archive_are_valid_control_transitions() {
+    let before = create_active_skill();
+    let control = before.active_skills[&slug()].meta.control_revision;
+    let metadata = SkillMutationRequest::MetadataUpdate(SkillMetadataUpdateRequest {
+        request_id: request_id('C'),
+        slug: slug(),
+        display_name: Some("Release Gate".to_owned()),
+        description: None,
+        expected_control_revision: control,
+    });
+    let metadata_plan = plan_skill_mutation(&before, &context(ALICE, None), &metadata).unwrap();
+    let metadata_skill = &metadata_plan.after.active_skills[&slug()];
+    assert_eq!(metadata_skill.meta.display_name, "Release Gate");
+    assert_eq!(metadata_skill.meta.control_revision, control + 1);
+    assert_eq!(
+        metadata_skill.meta.event_revision,
+        before.active_skills[&slug()].meta.event_revision + 1
+    );
+    validate_skill_commit(
+        &before,
+        &metadata_plan.after,
+        &metadata_plan.commit_evidence,
+    )
+    .unwrap();
+
+    let role = SkillMutationRequest::RoleUpdate(SkillRoleUpdateRequest {
+        request_id: request_id('D'),
+        slug: slug(),
+        operation: SkillOperation::OwnerAdd,
+        target: handler(BOB),
+        remove_maintainer: false,
+        expected_control_revision: metadata_skill.meta.control_revision,
+    });
+    let role_plan =
+        plan_skill_mutation(&metadata_plan.after, &context(ALICE, None), &role).unwrap();
+    let role_skill = &role_plan.after.active_skills[&slug()];
+    assert!(role_skill.meta.owners.contains(&handler(BOB)));
+    assert!(role_skill.meta.maintainers.contains(&handler(BOB)));
+
+    let mut before_archive = role_plan.after.clone();
+    let revision = before_archive.active_skills[&slug()]
+        .meta
+        .current_revision
+        .clone();
+    let revision_meta_path = format!(
+        "skills/release-check/revisions/{}/revision.meta.yaml",
+        revision.as_str()
+    );
+    let mut noncanonical_revision_meta = b"# preserve exact bytes\n".to_vec();
+    noncanonical_revision_meta.extend_from_slice(
+        before_archive
+            .repository_files
+            .get(&revision_meta_path)
+            .unwrap(),
+    );
+    before_archive
+        .repository_files
+        .insert(revision_meta_path, noncanonical_revision_meta.clone());
+    let archive = SkillMutationRequest::ArchiveTransition(SkillArchiveTransitionRequest {
+        request_id: request_id('E'),
+        slug: slug(),
+        operation: SkillOperation::Archive,
+        expected_control_revision: role_skill.meta.control_revision,
+    });
+    let archive_plan =
+        plan_skill_mutation(&before_archive, &context(ALICE, None), &archive).unwrap();
+    assert!(!archive_plan.after.active_skills.contains_key(&slug()));
+    assert!(archive_plan.after.archived_skills.contains_key(&slug()));
+    assert!(archive_plan
+        .changed_paths
+        .contains("archive/skills/release-check/skill.meta.yaml"));
+    assert!(!archive_plan
+        .after
+        .repository_files
+        .contains_key("skills/release-check/skill.meta.yaml"));
+    assert_eq!(
+        archive_plan.after.repository_files[&format!(
+            "archive/skills/release-check/revisions/{}/revision.meta.yaml",
+            revision.as_str()
+        )],
+        noncanonical_revision_meta
+    );
+    validate_skill_commit(
+        &before_archive,
+        &archive_plan.after,
+        &archive_plan.commit_evidence,
+    )
+    .unwrap();
+
+    let archived_cleanup = SkillMutationRequest::RoleUpdate(SkillRoleUpdateRequest {
+        request_id: request_id('H'),
+        slug: slug(),
+        operation: SkillOperation::OwnerRemove,
+        target: handler(ALICE),
+        remove_maintainer: true,
+        expected_control_revision: archive_plan.after.archived_skills[&slug()]
+            .meta
+            .control_revision,
+    });
+    let cleanup_plan =
+        plan_skill_mutation(&archive_plan.after, &context(BOB, None), &archived_cleanup).unwrap();
+    assert_eq!(
+        cleanup_plan.after.archived_skills[&slug()].meta.owners,
+        vec![handler(BOB)]
+    );
+    let unarchive = SkillMutationRequest::ArchiveTransition(SkillArchiveTransitionRequest {
+        request_id: request_id('J'),
+        slug: slug(),
+        operation: SkillOperation::Unarchive,
+        expected_control_revision: cleanup_plan.after.archived_skills[&slug()]
+            .meta
+            .control_revision,
+    });
+    let unarchive_plan =
+        plan_skill_mutation(&cleanup_plan.after, &context(BOB, None), &unarchive).unwrap();
+    assert!(unarchive_plan.after.active_skills.contains_key(&slug()));
+    assert!(!unarchive_plan.after.archived_skills.contains_key(&slug()));
+    validate_skill_commit(
+        &cleanup_plan.after,
+        &unarchive_plan.after,
+        &unarchive_plan.commit_evidence,
+    )
+    .unwrap();
+}
+
+#[test]
+fn role_control_invariants_reject_invalid_transitions() {
+    let before = create_active_skill();
+    let control = before.active_skills[&slug()].meta.control_revision;
+    let last_owner = SkillMutationRequest::RoleUpdate(SkillRoleUpdateRequest {
+        request_id: request_id('F'),
+        slug: slug(),
+        operation: SkillOperation::OwnerRemove,
+        target: handler(ALICE),
+        remove_maintainer: true,
+        expected_control_revision: control,
+    });
+    assert_eq!(
+        plan_skill_mutation(&before, &context(ALICE, None), &last_owner),
+        Err(SkillError::LastOwner)
+    );
+
+    let remove_owner_maintainer = SkillMutationRequest::RoleUpdate(SkillRoleUpdateRequest {
+        request_id: request_id('G'),
+        slug: slug(),
+        operation: SkillOperation::MaintainerRemove,
+        target: handler(ALICE),
+        remove_maintainer: false,
+        expected_control_revision: control,
+    });
+    assert_eq!(
+        plan_skill_mutation(&before, &context(ALICE, None), &remove_owner_maintainer),
+        Err(SkillError::OwnerIsMaintainer)
+    );
 }
 
 #[test]

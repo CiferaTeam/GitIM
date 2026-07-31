@@ -199,6 +199,9 @@ pub enum SkillMutationRequest {
     Create(SkillCreateRequest),
     Propose(SkillProposeRequest),
     ProposalTransition(SkillProposalTransitionRequest),
+    MetadataUpdate(SkillMetadataUpdateRequest),
+    RoleUpdate(SkillRoleUpdateRequest),
+    ArchiveTransition(SkillArchiveTransitionRequest),
     Repair(SkillRepairRequest),
 }
 
@@ -209,6 +212,9 @@ impl SkillMutationRequest {
             Self::Create(request) => &request.request_id,
             Self::Propose(request) => &request.request_id,
             Self::ProposalTransition(request) => &request.request_id,
+            Self::MetadataUpdate(request) => &request.request_id,
+            Self::RoleUpdate(request) => &request.request_id,
+            Self::ArchiveTransition(request) => &request.request_id,
             Self::Repair(request) => &request.request_id,
         }
     }
@@ -407,6 +413,36 @@ pub struct SkillProposalTransitionRequest {
     pub expected_state_revision: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_control_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillMetadataUpdateRequest {
+    pub request_id: RequestId,
+    pub slug: SkillSlug,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub expected_control_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillRoleUpdateRequest {
+    pub request_id: RequestId,
+    pub slug: SkillSlug,
+    pub operation: SkillOperation,
+    pub target: Handler,
+    #[serde(default)]
+    pub remove_maintainer: bool,
+    pub expected_control_revision: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillArchiveTransitionRequest {
+    pub request_id: RequestId,
+    pub slug: SkillSlug,
+    pub operation: SkillOperation,
+    pub expected_control_revision: u64,
 }
 
 const fn schema_version() -> u32 {

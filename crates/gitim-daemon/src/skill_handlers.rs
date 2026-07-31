@@ -1,10 +1,11 @@
 use gitim_core::skill::{
-    validate_package_entries, ProposalId, RequestId, SkillCreateRequest, SkillError,
-    SkillListQuery, SkillMutationRequest, SkillMutationResult, SkillOperation, SkillPageQuery,
+    validate_package_entries, ProposalId, RequestId, SkillArchiveTransitionRequest,
+    SkillCreateRequest, SkillError, SkillListQuery, SkillMetadataUpdateRequest,
+    SkillMutationRequest, SkillMutationResult, SkillOperation, SkillPageQuery,
     SkillProposalListQuery, SkillProposalResourceQuery, SkillProposalShowQuery,
     SkillProposalTransitionRequest, SkillProposeRequest, SkillReference, SkillRepairRequest,
-    SkillResourceQuery, SkillShowQuery, SkillSlug, SkillWorkspaceBootstrapRequest,
-    ValidatedPackage,
+    SkillResourceQuery, SkillRoleUpdateRequest, SkillShowQuery, SkillSlug,
+    SkillWorkspaceBootstrapRequest, ValidatedPackage,
 };
 use gitim_sync::skill::checkpoint::SkillSyncError;
 use gitim_sync::skill::guard::SkillSyncGuard;
@@ -23,6 +24,8 @@ use crate::state::SharedState;
 #[derive(Serialize)]
 struct SkillMutationResponse {
     request_id: RequestId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    proposal_id: Option<ProposalId>,
     commit_id: String,
     result: SkillMutationResult,
     local_state: SkillLocalState,
@@ -217,6 +220,78 @@ pub async fn handle_skill_proposal_transition(
     .await
 }
 
+pub async fn handle_skill_metadata_update(
+    state: SharedState,
+    request: SkillMetadataUpdateRequest,
+) -> Response {
+    let actor = match resolve_skill_actor(&state).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    let slug = request.slug.clone();
+    run_mutation(
+        state,
+        actor,
+        SkillMutationRequest::MetadataUpdate(request),
+        None,
+        Some(slug),
+        "metadata_updated",
+    )
+    .await
+}
+
+pub async fn handle_skill_role_update(
+    state: SharedState,
+    request: SkillRoleUpdateRequest,
+) -> Response {
+    let actor = match resolve_skill_actor(&state).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    let kind = match request.operation {
+        SkillOperation::OwnerAdd => "owner_added",
+        SkillOperation::OwnerRemove => "owner_removed",
+        SkillOperation::MaintainerAdd => "maintainer_added",
+        SkillOperation::MaintainerRemove => "maintainer_removed",
+        _ => return skill_error(SkillError::SyncConflict),
+    };
+    let slug = request.slug.clone();
+    run_mutation(
+        state,
+        actor,
+        SkillMutationRequest::RoleUpdate(request),
+        None,
+        Some(slug),
+        kind,
+    )
+    .await
+}
+
+pub async fn handle_skill_archive_transition(
+    state: SharedState,
+    request: SkillArchiveTransitionRequest,
+) -> Response {
+    let actor = match resolve_skill_actor(&state).await {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    let kind = match request.operation {
+        SkillOperation::Archive => "skill_archived",
+        SkillOperation::Unarchive => "skill_unarchived",
+        _ => return skill_error(SkillError::SyncConflict),
+    };
+    let slug = request.slug.clone();
+    run_mutation(
+        state,
+        actor,
+        SkillMutationRequest::ArchiveTransition(request),
+        None,
+        Some(slug),
+        kind,
+    )
+    .await
+}
+
 pub async fn handle_skill_repair(state: SharedState, request: SkillRepairRequest) -> Response {
     let actor = match resolve_skill_actor(&state).await {
         Ok(actor) => actor,
@@ -342,13 +417,16 @@ async fn run_mutation_with_proposal(
                 kind,
                 event_revision,
                 control_revision,
-                proposal_id.map(|proposal| proposal.as_str().to_owned()),
+                proposal_id
+                    .as_ref()
+                    .map(|proposal| proposal.as_str().to_owned()),
                 result.result.proposal_state_revision,
             );
         }
     }
     Response::json(SkillMutationResponse {
         request_id,
+        proposal_id,
         commit_id: result.commit_id,
         result: result.result,
         local_state: result.local_state,

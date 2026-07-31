@@ -955,6 +955,15 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
         Request::SkillProposalTransition { request } => {
             crate::skill_handlers::handle_skill_proposal_transition(state, request).await
         }
+        Request::SkillMetadataUpdate { request } => {
+            crate::skill_handlers::handle_skill_metadata_update(state, request).await
+        }
+        Request::SkillRoleUpdate { request } => {
+            crate::skill_handlers::handle_skill_role_update(state, request).await
+        }
+        Request::SkillArchiveTransition { request } => {
+            crate::skill_handlers::handle_skill_archive_transition(state, request).await
+        }
         Request::SkillRepair { request } => {
             crate::skill_handlers::handle_skill_repair(state, request).await
         }

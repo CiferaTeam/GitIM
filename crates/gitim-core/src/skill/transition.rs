@@ -272,6 +272,64 @@ fn raw_semantic_request_matches(
                 },
             ))
         }
+        SkillMutationRequest::MetadataUpdate(request) => Some((
+            SkillReceiptScope::Skill,
+            Some(request.slug.clone()),
+            SkillOperation::MetadataUpdate,
+            SkillReceiptRequest {
+                payload_sha256: hash_bytes(
+                    operation_name(SkillOperation::MetadataUpdate).as_bytes(),
+                ),
+                slug: Some(request.slug.clone()),
+                display_name: request.display_name.clone(),
+                description: request.description.clone(),
+                expected_control_revision: Some(request.expected_control_revision),
+                ..SkillReceiptRequest::default()
+            },
+        )),
+        SkillMutationRequest::RoleUpdate(request) => {
+            if !matches!(
+                request.operation,
+                SkillOperation::OwnerAdd
+                    | SkillOperation::OwnerRemove
+                    | SkillOperation::MaintainerAdd
+                    | SkillOperation::MaintainerRemove
+            ) {
+                return false;
+            }
+            Some((
+                SkillReceiptScope::Skill,
+                Some(request.slug.clone()),
+                request.operation,
+                SkillReceiptRequest {
+                    payload_sha256: hash_bytes(operation_name(request.operation).as_bytes()),
+                    slug: Some(request.slug.clone()),
+                    target: Some(request.target.clone()),
+                    expected_control_revision: Some(request.expected_control_revision),
+                    remove_maintainer: request.remove_maintainer,
+                    ..SkillReceiptRequest::default()
+                },
+            ))
+        }
+        SkillMutationRequest::ArchiveTransition(request) => {
+            if !matches!(
+                request.operation,
+                SkillOperation::Archive | SkillOperation::Unarchive
+            ) {
+                return false;
+            }
+            Some((
+                SkillReceiptScope::Skill,
+                Some(request.slug.clone()),
+                request.operation,
+                SkillReceiptRequest {
+                    payload_sha256: hash_bytes(operation_name(request.operation).as_bytes()),
+                    slug: Some(request.slug.clone()),
+                    expected_control_revision: Some(request.expected_control_revision),
+                    ..SkillReceiptRequest::default()
+                },
+            ))
+        }
         SkillMutationRequest::Repair(request) => {
             let (scope, skill) = match &request.scope {
                 SkillRepairScope::Workspace => (SkillReceiptScope::Workspace, None),
@@ -426,6 +484,71 @@ fn receipt_for_request(
                     proposal: Some(request.proposal_id.clone()),
                     expected_control_revision: request.expected_control_revision,
                     expected_proposal_revision: Some(request.expected_state_revision),
+                    ..SkillReceiptRequest::default()
+                },
+            )
+        }
+        SkillMutationRequest::MetadataUpdate(request) => {
+            if request.display_name.is_none() && request.description.is_none() {
+                return Err(SkillError::InvalidPackage);
+            }
+            if let Some(display_name) = &request.display_name {
+                validate_bounded_text(display_name, 80)?;
+            }
+            if let Some(description) = &request.description {
+                validate_bounded_text(description, 1_024)?;
+            }
+            (
+                SkillReceiptScope::Skill,
+                Some(request.slug.clone()),
+                SkillOperation::MetadataUpdate,
+                SkillReceiptRequest {
+                    slug: Some(request.slug.clone()),
+                    display_name: request.display_name.clone(),
+                    description: request.description.clone(),
+                    expected_control_revision: Some(request.expected_control_revision),
+                    ..SkillReceiptRequest::default()
+                },
+            )
+        }
+        SkillMutationRequest::RoleUpdate(request) => {
+            if !matches!(
+                request.operation,
+                SkillOperation::OwnerAdd
+                    | SkillOperation::OwnerRemove
+                    | SkillOperation::MaintainerAdd
+                    | SkillOperation::MaintainerRemove
+            ) || (request.remove_maintainer && request.operation != SkillOperation::OwnerRemove)
+            {
+                return Err(SkillError::SyncConflict);
+            }
+            (
+                SkillReceiptScope::Skill,
+                Some(request.slug.clone()),
+                request.operation,
+                SkillReceiptRequest {
+                    slug: Some(request.slug.clone()),
+                    target: Some(request.target.clone()),
+                    expected_control_revision: Some(request.expected_control_revision),
+                    remove_maintainer: request.remove_maintainer,
+                    ..SkillReceiptRequest::default()
+                },
+            )
+        }
+        SkillMutationRequest::ArchiveTransition(request) => {
+            if !matches!(
+                request.operation,
+                SkillOperation::Archive | SkillOperation::Unarchive
+            ) {
+                return Err(SkillError::SyncConflict);
+            }
+            (
+                SkillReceiptScope::Skill,
+                Some(request.slug.clone()),
+                request.operation,
+                SkillReceiptRequest {
+                    slug: Some(request.slug.clone()),
+                    expected_control_revision: Some(request.expected_control_revision),
                     ..SkillReceiptRequest::default()
                 },
             )
@@ -600,6 +723,74 @@ fn canonical_receipt_request(
                 },
             })
         }
+        SkillOperation::MetadataUpdate => {
+            let slug = receipt
+                .skill
+                .as_ref()
+                .ok_or(SkillError::SyncConflict)?
+                .clone();
+            let (skill, archived) = skill_by_slug(before, &slug).ok_or(SkillError::NotFound)?;
+            if archived {
+                return Err(SkillError::Archived);
+            }
+            if receipt.request.expected_control_revision != Some(skill.meta.control_revision) {
+                return Err(SkillError::SyncConflict);
+            }
+            Ok(CanonicalReceiptRequest {
+                scope: SkillReceiptScope::Skill,
+                skill: Some(slug.clone()),
+                request: SkillReceiptRequest {
+                    payload_sha256: operation_payload(),
+                    slug: Some(slug),
+                    display_name: receipt.request.display_name.clone(),
+                    description: receipt.request.description.clone(),
+                    expected_control_revision: Some(skill.meta.control_revision),
+                    ..SkillReceiptRequest::default()
+                },
+            })
+        }
+        SkillOperation::OwnerAdd
+        | SkillOperation::OwnerRemove
+        | SkillOperation::MaintainerAdd
+        | SkillOperation::MaintainerRemove => {
+            let slug = receipt
+                .skill
+                .as_ref()
+                .ok_or(SkillError::SyncConflict)?
+                .clone();
+            let (skill, _) = skill_by_slug(before, &slug).ok_or(SkillError::NotFound)?;
+            Ok(CanonicalReceiptRequest {
+                scope: SkillReceiptScope::Skill,
+                skill: Some(slug.clone()),
+                request: SkillReceiptRequest {
+                    payload_sha256: operation_payload(),
+                    slug: Some(slug),
+                    target: receipt.request.target.clone(),
+                    expected_control_revision: Some(skill.meta.control_revision),
+                    remove_maintainer: receipt.operation == SkillOperation::OwnerRemove
+                        && receipt.request.remove_maintainer,
+                    ..SkillReceiptRequest::default()
+                },
+            })
+        }
+        SkillOperation::Archive | SkillOperation::Unarchive => {
+            let slug = receipt
+                .skill
+                .as_ref()
+                .ok_or(SkillError::SyncConflict)?
+                .clone();
+            let (skill, _) = skill_by_slug(before, &slug).ok_or(SkillError::NotFound)?;
+            Ok(CanonicalReceiptRequest {
+                scope: SkillReceiptScope::Skill,
+                skill: Some(slug.clone()),
+                request: SkillReceiptRequest {
+                    payload_sha256: operation_payload(),
+                    slug: Some(slug),
+                    expected_control_revision: Some(skill.meta.control_revision),
+                    ..SkillReceiptRequest::default()
+                },
+            })
+        }
         SkillOperation::RepairSkillState => {
             let checkpoint = before
                 .conflict_checkpoint
@@ -667,6 +858,14 @@ fn execute_transition(
         SkillOperation::ProposalPublish
         | SkillOperation::ProposalReject
         | SkillOperation::ProposalWithdraw => apply_proposal_transition(&mut after, &receipt)?,
+        SkillOperation::MetadataUpdate => apply_metadata_update(&mut after, &receipt)?,
+        SkillOperation::OwnerAdd
+        | SkillOperation::OwnerRemove
+        | SkillOperation::MaintainerAdd
+        | SkillOperation::MaintainerRemove => apply_role_update(&mut after, &receipt)?,
+        SkillOperation::Archive | SkillOperation::Unarchive => {
+            apply_archive_transition(&mut after, &receipt)?
+        }
         SkillOperation::RepairSkillState => apply_repair(&mut after, &receipt)?,
         _ => return Err(SkillError::SyncConflict),
     };
@@ -797,6 +996,85 @@ fn authorize_and_check_preconditions(
                         != Some(&skill.meta.current_revision))
             {
                 return Err(stale_content(skill));
+            }
+        }
+        SkillOperation::MetadataUpdate => {
+            let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;
+            if before.archived_skills.contains_key(slug) {
+                return Err(SkillError::Archived);
+            }
+            let skill = before.active_skills.get(slug).ok_or(SkillError::NotFound)?;
+            require_control_revision(skill, receipt)?;
+            if !contains_handler(&skill.meta.maintainers, &receipt.actor) {
+                return Err(SkillError::NotMaintainer);
+            }
+            if receipt.request.display_name.is_none() && receipt.request.description.is_none() {
+                return Err(SkillError::InvalidPackage);
+            }
+        }
+        SkillOperation::OwnerAdd
+        | SkillOperation::OwnerRemove
+        | SkillOperation::MaintainerAdd
+        | SkillOperation::MaintainerRemove => {
+            let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;
+            let (skill, _) = skill_by_slug(before, slug).ok_or(SkillError::NotFound)?;
+            require_control_revision(skill, receipt)?;
+            if !contains_handler(&skill.meta.owners, &receipt.actor) {
+                return Err(SkillError::NotOwner);
+            }
+            let target = receipt
+                .request
+                .target
+                .as_ref()
+                .ok_or(SkillError::RoleTargetInvalid)?;
+            match receipt.operation {
+                SkillOperation::OwnerAdd | SkillOperation::MaintainerAdd => {
+                    if !before.active_users.contains(target.as_str()) {
+                        return Err(SkillError::RoleTargetInactive);
+                    }
+                }
+                SkillOperation::OwnerRemove => {
+                    if !contains_handler(&skill.meta.owners, target) {
+                        return Err(SkillError::RoleTargetInvalid);
+                    }
+                    if skill.meta.owners.len() == 1 {
+                        return Err(SkillError::LastOwner);
+                    }
+                }
+                SkillOperation::MaintainerRemove => {
+                    if contains_handler(&skill.meta.owners, target) {
+                        return Err(SkillError::OwnerIsMaintainer);
+                    }
+                    if !contains_handler(&skill.meta.maintainers, target) {
+                        return Err(SkillError::RoleTargetInvalid);
+                    }
+                }
+                _ => return Err(SkillError::SyncConflict),
+            }
+        }
+        SkillOperation::Archive => {
+            let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;
+            if before.archived_skills.contains_key(slug) {
+                return Err(SkillError::Archived);
+            }
+            let skill = before.active_skills.get(slug).ok_or(SkillError::NotFound)?;
+            require_control_revision(skill, receipt)?;
+            if !contains_handler(&skill.meta.owners, &receipt.actor) {
+                return Err(SkillError::NotOwner);
+            }
+        }
+        SkillOperation::Unarchive => {
+            let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;
+            if before.active_skills.contains_key(slug) {
+                return Err(SkillError::SyncConflict);
+            }
+            let skill = before
+                .archived_skills
+                .get(slug)
+                .ok_or(SkillError::NotFound)?;
+            require_control_revision(skill, receipt)?;
+            if !contains_handler(&skill.meta.owners, &receipt.actor) {
+                return Err(SkillError::NotOwner);
             }
         }
         SkillOperation::RepairSkillState => {
@@ -1096,6 +1374,103 @@ fn apply_proposal_transition(
     }
     append_history(skill, receipt);
     Ok(result_for_skill(skill, Some(&proposal_meta)))
+}
+
+fn apply_metadata_update(
+    after: &mut SkillRepositorySnapshot,
+    receipt: &SkillReceipt,
+) -> Result<SkillMutationResult, SkillError> {
+    let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;
+    let skill = after
+        .active_skills
+        .get_mut(slug)
+        .ok_or(SkillError::NotFound)?;
+    if let Some(display_name) = &receipt.request.display_name {
+        validate_bounded_text(display_name, 80)?;
+        skill.meta.display_name.clone_from(display_name);
+    }
+    if let Some(description) = &receipt.request.description {
+        validate_bounded_text(description, 1_024)?;
+        skill.meta.description.clone_from(description);
+    }
+    advance_skill_control(skill, receipt);
+    Ok(result_for_skill(skill, None))
+}
+
+fn apply_role_update(
+    after: &mut SkillRepositorySnapshot,
+    receipt: &SkillReceipt,
+) -> Result<SkillMutationResult, SkillError> {
+    let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;
+    let skill = after
+        .active_skills
+        .get_mut(slug)
+        .or_else(|| after.archived_skills.get_mut(slug))
+        .ok_or(SkillError::NotFound)?;
+    let target = receipt
+        .request
+        .target
+        .as_ref()
+        .ok_or(SkillError::RoleTargetInvalid)?
+        .clone();
+    match receipt.operation {
+        SkillOperation::OwnerAdd => {
+            insert_handler(&mut skill.meta.owners, target.clone());
+            insert_handler(&mut skill.meta.maintainers, target);
+        }
+        SkillOperation::OwnerRemove => {
+            skill.meta.owners.retain(|handler| handler != &target);
+            if receipt.request.remove_maintainer {
+                skill.meta.maintainers.retain(|handler| handler != &target);
+            }
+        }
+        SkillOperation::MaintainerAdd => {
+            insert_handler(&mut skill.meta.maintainers, target);
+        }
+        SkillOperation::MaintainerRemove => {
+            skill.meta.maintainers.retain(|handler| handler != &target);
+        }
+        _ => return Err(SkillError::SyncConflict),
+    }
+    advance_skill_control(skill, receipt);
+    Ok(result_for_skill(skill, None))
+}
+
+fn apply_archive_transition(
+    after: &mut SkillRepositorySnapshot,
+    receipt: &SkillReceipt,
+) -> Result<SkillMutationResult, SkillError> {
+    let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;
+    let mut skill = match receipt.operation {
+        SkillOperation::Archive => after
+            .active_skills
+            .remove(slug)
+            .ok_or(SkillError::NotFound)?,
+        SkillOperation::Unarchive => after
+            .archived_skills
+            .remove(slug)
+            .ok_or(SkillError::NotFound)?,
+        _ => return Err(SkillError::SyncConflict),
+    };
+    advance_skill_control(&mut skill, receipt);
+    let result = result_for_skill(&skill, None);
+    match receipt.operation {
+        SkillOperation::Archive => {
+            after.archived_skills.insert(slug.clone(), skill);
+        }
+        SkillOperation::Unarchive => {
+            after.active_skills.insert(slug.clone(), skill);
+        }
+        _ => return Err(SkillError::SyncConflict),
+    }
+    Ok(result)
+}
+
+fn advance_skill_control(skill: &mut SkillObjectSnapshot, receipt: &SkillReceipt) {
+    skill.meta.control_revision += 1;
+    skill.meta.event_revision += 1;
+    skill.meta.updated_at.clone_from(&receipt.created_at);
+    append_history(skill, receipt);
 }
 
 fn apply_repair(
@@ -1476,6 +1851,43 @@ fn expected_edits(
                 )?);
             }
         }
+        SkillOperation::MetadataUpdate
+        | SkillOperation::OwnerAdd
+        | SkillOperation::OwnerRemove
+        | SkillOperation::MaintainerAdd
+        | SkillOperation::MaintainerRemove => {
+            let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;
+            let (skill, archived) = skill_by_slug(after, slug).ok_or(SkillError::NotFound)?;
+            let root = skill_root(slug, archived);
+            push_skill_meta_and_history_at(&mut edits, &root, skill)?;
+        }
+        SkillOperation::Archive | SkillOperation::Unarchive => {
+            let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;
+            let (source_root, destination_root) = if receipt.operation == SkillOperation::Archive {
+                (skill_root(slug, false), skill_root(slug, true))
+            } else {
+                (skill_root(slug, true), skill_root(slug, false))
+            };
+            let mutable_paths = ["skill.meta.yaml", "history.thread"];
+            for (path, bytes) in before
+                .repository_files
+                .iter()
+                .filter(|(path, _)| path.starts_with(&format!("{source_root}/")))
+            {
+                edits.push(SkillTreeEdit::Delete { path: path.clone() });
+                let relative = path
+                    .strip_prefix(&format!("{source_root}/"))
+                    .ok_or(SkillError::SyncConflict)?;
+                if !mutable_paths.contains(&relative) {
+                    edits.push(SkillTreeEdit::Upsert {
+                        path: format!("{destination_root}/{relative}"),
+                        bytes: bytes.clone(),
+                    });
+                }
+            }
+            let (skill, _) = skill_by_slug(after, slug).ok_or(SkillError::NotFound)?;
+            push_skill_meta_and_history_at(&mut edits, &destination_root, skill)?;
+        }
         SkillOperation::RepairSkillState => {
             let checkpoint = before
                 .conflict_checkpoint
@@ -1510,9 +1922,20 @@ fn push_skill_meta_and_history(
     slug: &SkillSlug,
     skill: &SkillObjectSnapshot,
 ) -> Result<(), SkillError> {
-    edits.push(upsert_yaml(&skill_meta_path(slug), &skill.meta)?);
+    push_skill_meta_and_history_at(edits, &skill_root(slug, false), skill)
+}
+
+fn push_skill_meta_and_history_at(
+    edits: &mut Vec<SkillTreeEdit>,
+    root: &str,
+    skill: &SkillObjectSnapshot,
+) -> Result<(), SkillError> {
+    edits.push(upsert_yaml(
+        &format!("{root}/skill.meta.yaml"),
+        &skill.meta,
+    )?);
     edits.push(SkillTreeEdit::Upsert {
-        path: skill_history_path(slug),
+        path: format!("{root}/history.thread"),
         bytes: skill.history.as_bytes().to_vec(),
     });
     Ok(())
@@ -1636,6 +2059,30 @@ fn find_proposal<'a>(
                 .find(|(_, skill)| skill.proposals.contains_key(proposal))
                 .map(|(slug, skill)| (slug, skill, true))
         })
+}
+
+fn skill_by_slug<'a>(
+    snapshot: &'a SkillRepositorySnapshot,
+    slug: &SkillSlug,
+) -> Option<(&'a SkillObjectSnapshot, bool)> {
+    snapshot
+        .active_skills
+        .get(slug)
+        .map(|skill| (skill, false))
+        .or_else(|| {
+            snapshot
+                .archived_skills
+                .get(slug)
+                .map(|skill| (skill, true))
+        })
+}
+
+fn skill_root(slug: &SkillSlug, archived: bool) -> String {
+    if archived {
+        format!("archive/skills/{}", slug.as_str())
+    } else {
+        format!("skills/{}", slug.as_str())
+    }
 }
 
 fn repair_scope_matches(receipt: &SkillReceipt, accepted: &SkillRepairAcceptedState) -> bool {
@@ -1902,6 +2349,17 @@ fn stale_control(skill: &SkillObjectSnapshot) -> SkillError {
     }
 }
 
+fn require_control_revision(
+    skill: &SkillObjectSnapshot,
+    receipt: &SkillReceipt,
+) -> Result<(), SkillError> {
+    if receipt.request.expected_control_revision == Some(skill.meta.control_revision) {
+        Ok(())
+    } else {
+        Err(stale_control(skill))
+    }
+}
+
 fn stale_proposal(skill: &SkillObjectSnapshot, proposal: &SkillProposalMeta) -> SkillError {
     SkillError::StaleProposalRevision {
         current_revision: skill.meta.current_revision.clone(),
@@ -1914,6 +2372,13 @@ fn stale_proposal(skill: &SkillObjectSnapshot, proposal: &SkillProposalMeta) -> 
 
 fn contains_handler(handlers: &[Handler], needle: &Handler) -> bool {
     handlers.iter().any(|handler| handler == needle)
+}
+
+fn insert_handler(handlers: &mut Vec<Handler>, handler: Handler) {
+    if !contains_handler(handlers, &handler) {
+        handlers.push(handler);
+        handlers.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    }
 }
 
 fn sorted_unique_handlers(handlers: &[Handler]) -> bool {
@@ -1990,14 +2455,6 @@ fn edit_path(edit: &SkillTreeEdit) -> &str {
     match edit {
         SkillTreeEdit::Upsert { path, .. } | SkillTreeEdit::Delete { path } => path,
     }
-}
-
-fn skill_meta_path(slug: &SkillSlug) -> String {
-    format!("skills/{}/skill.meta.yaml", slug.as_str())
-}
-
-fn skill_history_path(slug: &SkillSlug) -> String {
-    format!("skills/{}/history.thread", slug.as_str())
 }
 
 fn revision_meta_path(slug: &SkillSlug, revision: &RevisionId) -> String {

@@ -1,9 +1,9 @@
 use gitim_core::auth_payload::AuthPayload;
 use gitim_core::skill::{
-    SkillCreateRequest, SkillListQuery, SkillPageQuery, SkillProposalListQuery,
-    SkillProposalResourceQuery, SkillProposalShowQuery, SkillProposalTransitionRequest,
-    SkillProposeRequest, SkillReference, SkillRepairRequest, SkillResourceQuery, SkillShowQuery,
-    SkillWorkspaceBootstrapRequest,
+    SkillArchiveTransitionRequest, SkillCreateRequest, SkillListQuery, SkillMetadataUpdateRequest,
+    SkillPageQuery, SkillProposalListQuery, SkillProposalResourceQuery, SkillProposalShowQuery,
+    SkillProposalTransitionRequest, SkillProposeRequest, SkillReference, SkillRepairRequest,
+    SkillResourceQuery, SkillRoleUpdateRequest, SkillShowQuery, SkillWorkspaceBootstrapRequest,
 };
 use gitim_core::types::QuickSessionStatus;
 use serde::{Deserialize, Serialize};
@@ -745,6 +745,14 @@ pub enum Request {
     #[serde(rename = "skill_proposal_transition")]
     SkillProposalTransition {
         request: SkillProposalTransitionRequest,
+    },
+    #[serde(rename = "skill_metadata_update")]
+    SkillMetadataUpdate { request: SkillMetadataUpdateRequest },
+    #[serde(rename = "skill_role_update")]
+    SkillRoleUpdate { request: SkillRoleUpdateRequest },
+    #[serde(rename = "skill_archive_transition")]
+    SkillArchiveTransition {
+        request: SkillArchiveTransitionRequest,
     },
     #[serde(rename = "skill_repair")]
     SkillRepair { request: SkillRepairRequest },

@@ -72,14 +72,14 @@ fn serve_once_mutation(
         let request_id = request["request"]["request_id"]
             .as_str()
             .expect("request id");
+        let response = if request["method"] == "skill_propose" {
+            let proposal_id = format!("p-{}", &request_id[2..]);
+            proposal_mutation_response(request_id, &proposal_id, 1, "open")
+        } else {
+            mutation_response(request_id)
+        };
         stream
-            .write_all(
-                format!(
-                    "{}\n",
-                    json!({"ok":true,"data":mutation_response(request_id)})
-                )
-                .as_bytes(),
-            )
+            .write_all(format!("{}\n", json!({"ok":true,"data":response})).as_bytes())
             .expect("write response");
         let _ = sender.send(request);
     });
@@ -232,6 +232,28 @@ fn mutation_response(request_id: &str) -> Value {
     })
 }
 
+fn proposal_mutation_response(
+    request_id: &str,
+    proposal_id: &str,
+    state_revision: u64,
+    status: &str,
+) -> Value {
+    json!({
+        "request_id":request_id,
+        "proposal_id":proposal_id,
+        "commit_id":"abc123",
+        "result":{
+            "canonical_ref":{"slug":"release-check","revision":REVISION},
+            "current_revision":REVISION,
+            "control_revision":1,
+            "event_revision":2,
+            "proposal_state_revision":state_revision,
+            "proposal_status":status
+        },
+        "local_state":"integrated"
+    })
+}
+
 fn load_response(resource_count: usize) -> Value {
     let resources = (0..resource_count)
         .map(|index| {
@@ -288,7 +310,7 @@ fn proposal_meta() -> Value {
 }
 
 #[test]
-fn root_help_advertises_only_v1a_tasks() {
+fn root_help_advertises_the_five_task_groups() {
     gitim()
         .args(["skill", "--help"])
         .assert()
@@ -298,9 +320,9 @@ fn root_help_advertises_only_v1a_tasks() {
         .stdout(predicate::str::contains("Create or improve:"))
         .stdout(predicate::str::contains("Inspect details:"))
         .stdout(predicate::str::contains("Review changes:"))
-        .stdout(predicate::str::contains("Administer:").not())
-        .stdout(predicate::str::contains("role --help").not())
-        .stdout(predicate::str::contains("admin --help").not());
+        .stdout(predicate::str::contains("Administer:"))
+        .stdout(predicate::str::contains("role --help"))
+        .stdout(predicate::str::contains("admin --help"));
 }
 
 #[test]
@@ -320,12 +342,29 @@ fn nested_help_exposes_the_complete_command_sets() {
             "v1c proposal command leaked into v1a help: {deferred}"
         );
     }
-    for deferred in ["role", "admin"] {
-        gitim()
-            .args(["skill", deferred, "--help"])
-            .assert()
-            .failure()
-            .code(2);
+    let role = gitim()
+        .args(["skill", "role", "--help"])
+        .output()
+        .expect("role help");
+    assert!(role.status.success());
+    let role = String::from_utf8(role.stdout).expect("utf8 help");
+    for command in [
+        "owner-add",
+        "owner-remove",
+        "maintainer-add",
+        "maintainer-remove",
+    ] {
+        assert!(role.contains(command), "missing role {command}");
+    }
+
+    let admin = gitim()
+        .args(["skill", "admin", "--help"])
+        .output()
+        .expect("admin help");
+    assert!(admin.status.success());
+    let admin = String::from_utf8(admin.stdout).expect("utf8 help");
+    for command in ["update", "archive", "unarchive"] {
+        assert!(admin.contains(command), "missing admin {command}");
     }
 }
 
@@ -561,12 +600,108 @@ fn every_visible_write_help_accepts_request_id() {
         vec!["skill", "proposal", "withdraw", "--help"],
         vec!["skill", "proposal", "reject", "--help"],
         vec!["skill", "proposal", "publish", "--help"],
+        vec!["skill", "role", "owner-add", "--help"],
+        vec!["skill", "role", "owner-remove", "--help"],
+        vec!["skill", "role", "maintainer-add", "--help"],
+        vec!["skill", "role", "maintainer-remove", "--help"],
+        vec!["skill", "admin", "update", "--help"],
+        vec!["skill", "admin", "archive", "--help"],
+        vec!["skill", "admin", "unarchive", "--help"],
     ] {
         gitim()
             .args(args)
             .assert()
             .success()
             .stdout(predicate::str::contains("--request-id"));
+    }
+}
+
+#[test]
+fn role_and_admin_writes_dispatch_typed_requests() {
+    let cases = [
+        (
+            vec![
+                "skill",
+                "role",
+                "owner-remove",
+                "release-check",
+                "bob",
+                "--remove-maintainer",
+                "--control-revision",
+                "7",
+                "--request-id",
+                REQUEST,
+            ],
+            json!({
+                "method":"skill_role_update",
+                "request":{
+                    "request_id":REQUEST,
+                    "slug":"release-check",
+                    "operation":"owner_remove",
+                    "target":"bob",
+                    "remove_maintainer":true,
+                    "expected_control_revision":7
+                }
+            }),
+        ),
+        (
+            vec![
+                "skill",
+                "admin",
+                "update",
+                "release-check",
+                "--display-name",
+                "Release Gate",
+                "--description",
+                "Verify every release.",
+                "--control-revision",
+                "7",
+                "--request-id",
+                REQUEST,
+            ],
+            json!({
+                "method":"skill_metadata_update",
+                "request":{
+                    "request_id":REQUEST,
+                    "slug":"release-check",
+                    "display_name":"Release Gate",
+                    "description":"Verify every release.",
+                    "expected_control_revision":7
+                }
+            }),
+        ),
+        (
+            vec![
+                "skill",
+                "admin",
+                "archive",
+                "release-check",
+                "--control-revision",
+                "7",
+                "--request-id",
+                REQUEST,
+            ],
+            json!({
+                "method":"skill_archive_transition",
+                "request":{
+                    "request_id":REQUEST,
+                    "slug":"release-check",
+                    "operation":"archive",
+                    "expected_control_revision":7
+                }
+            }),
+        ),
+    ];
+    for (args, expected) in cases {
+        let clone = fake_clone();
+        let (server, request) = serve_once(&clone, mutation_response(REQUEST));
+        gitim()
+            .current_dir(clone.path())
+            .args(args)
+            .assert()
+            .success();
+        server.join().unwrap();
+        assert_eq!(request.recv().unwrap(), expected);
     }
 }
 
@@ -940,6 +1075,136 @@ fn retry_reuses_the_sole_matching_pending_request() {
         retried_request.recv().unwrap()["request"]["request_id"],
         first_id
     );
+}
+
+#[test]
+fn implicit_retry_rejects_an_unknown_journal_version_without_dispatch() {
+    let clone = fake_clone();
+    let source = package(clone.path());
+    let command = [
+        "skill",
+        "create",
+        "release-check",
+        "--from",
+        source.to_str().unwrap(),
+        "--display-name",
+        "Release Check",
+        "--description",
+        "Verify releases.",
+    ];
+    let (server, first_request) = serve_once_without_response(&clone);
+    gitim()
+        .current_dir(clone.path())
+        .args(command)
+        .assert()
+        .failure()
+        .code(1);
+    server.join().unwrap();
+    let request_id = first_request.recv().unwrap()["request"]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let journal = clone
+        .path()
+        .join(".gitim/request-journal")
+        .join(format!("{request_id}.json"));
+    let mut value: Value = serde_json::from_slice(&fs::read(&journal).unwrap()).unwrap();
+    value["version"] = json!(2);
+    fs::write(&journal, serde_json::to_vec(&value).unwrap()).unwrap();
+
+    gitim()
+        .current_dir(clone.path())
+        .args(command)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("journal version"));
+    assert!(journal.exists());
+}
+
+#[test]
+fn proposal_success_must_match_the_requested_proposal_state() {
+    for response in [
+        proposal_mutation_response(REQUEST, "p-01K1D8QG2S8RX4T9M9BDKQ9Z7P", 3, "rejected"),
+        proposal_mutation_response(REQUEST, PROPOSAL, 2, "rejected"),
+        proposal_mutation_response(REQUEST, PROPOSAL, 3, "open"),
+        {
+            let mut value = proposal_mutation_response(REQUEST, PROPOSAL, 3, "rejected");
+            value.as_object_mut().unwrap().remove("proposal_id");
+            value
+        },
+    ] {
+        let clone = fake_clone();
+        let (server, _) = serve_once(&clone, response);
+        gitim()
+            .current_dir(clone.path())
+            .args([
+                "skill",
+                "proposal",
+                "reject",
+                PROPOSAL,
+                "--state-revision",
+                "2",
+                "--request-id",
+                REQUEST,
+            ])
+            .assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains("response"));
+        server.join().unwrap();
+        assert!(clone
+            .path()
+            .join(".gitim/request-journal")
+            .join(format!("{REQUEST}.json"))
+            .exists());
+    }
+}
+
+#[test]
+fn propose_success_must_identify_the_new_open_proposal() {
+    for response in [
+        proposal_mutation_response(REQUEST, "p-01K1D8QG2S8RX4T9M9BDKQ9Z7P", 1, "open"),
+        proposal_mutation_response(REQUEST, PROPOSAL, 2, "open"),
+        proposal_mutation_response(REQUEST, PROPOSAL, 1, "rejected"),
+        {
+            let mut value = proposal_mutation_response(REQUEST, PROPOSAL, 1, "open");
+            value["result"]
+                .as_object_mut()
+                .unwrap()
+                .remove("proposal_status");
+            value
+        },
+    ] {
+        let clone = fake_clone();
+        let source = package(clone.path());
+        let (server, _) = serve_once(&clone, response);
+        gitim()
+            .current_dir(clone.path())
+            .args([
+                "skill",
+                "propose",
+                "release-check",
+                "--from",
+                source.to_str().unwrap(),
+                "--base",
+                REVISION,
+                "--summary",
+                "Tighten release checks.",
+                "--request-id",
+                REQUEST,
+            ])
+            .assert()
+            .failure()
+            .code(1)
+            .stderr(predicate::str::contains("response"));
+        server.join().unwrap();
+        assert!(clone
+            .path()
+            .join(".gitim/request-journal")
+            .join(format!("{REQUEST}.json"))
+            .exists());
+    }
 }
 
 #[test]

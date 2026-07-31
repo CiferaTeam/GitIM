@@ -1006,6 +1006,9 @@ fn request_slug(request: &SkillMutationRequest) -> Option<&SkillSlug> {
     match request {
         SkillMutationRequest::Create(request) => Some(&request.slug),
         SkillMutationRequest::Propose(request) => Some(&request.slug),
+        SkillMutationRequest::MetadataUpdate(request) => Some(&request.slug),
+        SkillMutationRequest::RoleUpdate(request) => Some(&request.slug),
+        SkillMutationRequest::ArchiveTransition(request) => Some(&request.slug),
         SkillMutationRequest::Repair(request) => match &request.scope {
             SkillRepairScope::Workspace => None,
             SkillRepairScope::Skill(slug) => Some(slug),
@@ -1415,6 +1418,15 @@ fn semantic_oids(
     match request {
         SkillMutationRequest::Create(value) => add_skill_semantic_paths(&mut paths, &value.slug),
         SkillMutationRequest::Propose(value) => add_skill_semantic_paths(&mut paths, &value.slug),
+        SkillMutationRequest::MetadataUpdate(value) => {
+            add_skill_semantic_paths(&mut paths, &value.slug);
+        }
+        SkillMutationRequest::RoleUpdate(value) => {
+            add_skill_semantic_paths(&mut paths, &value.slug);
+        }
+        SkillMutationRequest::ArchiveTransition(value) => {
+            add_skill_semantic_paths(&mut paths, &value.slug);
+        }
         SkillMutationRequest::ProposalTransition(value) => {
             let slug = snapshot
                 .active_skills

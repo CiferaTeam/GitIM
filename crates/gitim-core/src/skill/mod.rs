@@ -21,15 +21,16 @@ pub use transition::{
     SkillTransitionOutcome, SkillTreeEdit,
 };
 pub use types::{
-    ProposalStatus, ResourceDescriptor, SkillCatalogEntry, SkillCreateRequest,
-    SkillHistoryResponse, SkillListQuery, SkillListResponse, SkillLoadResponse, SkillMeta,
-    SkillMutationRequest, SkillMutationResult, SkillOperation, SkillPageQuery, SkillProposalDiff,
-    SkillProposalListQuery, SkillProposalListResponse, SkillProposalMeta,
-    SkillProposalResourceQuery, SkillProposalResourceResponse, SkillProposalShowQuery,
-    SkillProposalShowResponse, SkillProposalTransitionRequest, SkillProposeRequest,
-    SkillPublicationMeta, SkillReceipt, SkillReceiptRequest, SkillReceiptScope, SkillRepairRequest,
-    SkillRepairScope, SkillResourceQuery, SkillResourceResponse, SkillRevisionListResponse,
-    SkillRevisionMeta, SkillShowQuery, SkillShowResponse, SkillWorkspaceBootstrapRequest,
+    ProposalStatus, ResourceDescriptor, SkillArchiveTransitionRequest, SkillCatalogEntry,
+    SkillCreateRequest, SkillHistoryResponse, SkillListQuery, SkillListResponse, SkillLoadResponse,
+    SkillMeta, SkillMetadataUpdateRequest, SkillMutationRequest, SkillMutationResult,
+    SkillOperation, SkillPageQuery, SkillProposalDiff, SkillProposalListQuery,
+    SkillProposalListResponse, SkillProposalMeta, SkillProposalResourceQuery,
+    SkillProposalResourceResponse, SkillProposalShowQuery, SkillProposalShowResponse,
+    SkillProposalTransitionRequest, SkillProposeRequest, SkillPublicationMeta, SkillReceipt,
+    SkillReceiptRequest, SkillReceiptScope, SkillRepairRequest, SkillRepairScope,
+    SkillResourceQuery, SkillResourceResponse, SkillRevisionListResponse, SkillRevisionMeta,
+    SkillRoleUpdateRequest, SkillShowQuery, SkillShowResponse, SkillWorkspaceBootstrapRequest,
     WorkspaceSkillMeta,
 };
 

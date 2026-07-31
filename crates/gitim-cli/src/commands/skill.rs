@@ -3,15 +3,16 @@ use fs2::FileExt;
 use gitim_client::{ensure_daemon, find_repo_root, ApiResponse, ClientError, GitimClient};
 use gitim_core::skill::{
     canonical_package_sha256, parse_skill_reference, PackageEntry, ProposalId, ProposalStatus,
-    RequestId, ResourceDescriptor, RevisionId, SkillCreateRequest, SkillError,
-    SkillHistoryResponse, SkillListQuery, SkillListResponse, SkillLoadResponse,
-    SkillMutationResult, SkillOperation, SkillPageQuery, SkillProposalListQuery,
-    SkillProposalListResponse, SkillProposalResourceQuery, SkillProposalResourceResponse,
-    SkillProposalShowQuery, SkillProposalShowResponse, SkillProposalTransitionRequest,
-    SkillProposeRequest, SkillResourceQuery, SkillResourceResponse, SkillRevisionListResponse,
-    SkillShowQuery, SkillShowResponse, SkillSlug, MAX_PACKAGE_BYTES, MAX_PACKAGE_FILES,
-    MAX_PACKAGE_FILE_BYTES,
+    RequestId, ResourceDescriptor, RevisionId, SkillArchiveTransitionRequest, SkillCreateRequest,
+    SkillError, SkillHistoryResponse, SkillListQuery, SkillListResponse, SkillLoadResponse,
+    SkillMetadataUpdateRequest, SkillMutationResult, SkillOperation, SkillPageQuery,
+    SkillProposalListQuery, SkillProposalListResponse, SkillProposalResourceQuery,
+    SkillProposalResourceResponse, SkillProposalShowQuery, SkillProposalShowResponse,
+    SkillProposalTransitionRequest, SkillProposeRequest, SkillResourceQuery, SkillResourceResponse,
+    SkillRevisionListResponse, SkillRoleUpdateRequest, SkillShowQuery, SkillShowResponse,
+    SkillSlug, MAX_PACKAGE_BYTES, MAX_PACKAGE_FILES, MAX_PACKAGE_FILE_BYTES,
 };
+use gitim_core::types::Handler;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::env;
@@ -26,6 +27,7 @@ Use a Skill: list, load, ref
 Create or improve: create, propose
 Inspect details: show, resource, revisions, history, validate
 Review changes: proposal --help
+Administer: role --help, admin --help
 ";
 const MAX_LOAD_RESOURCES: usize = 256;
 const MAX_JOURNALS: usize = 256;
@@ -122,6 +124,16 @@ pub enum SkillCommand {
         #[command(subcommand)]
         command: ProposalCommand,
     },
+    #[command(hide = true)]
+    Role {
+        #[command(subcommand)]
+        command: RoleCommand,
+    },
+    #[command(hide = true)]
+    Admin {
+        #[command(subcommand)]
+        command: AdminCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -173,6 +185,55 @@ pub enum ProposalCommand {
         #[arg(long)]
         request_id: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+pub enum RoleCommand {
+    OwnerAdd(RoleUpdateArgs),
+    OwnerRemove {
+        #[command(flatten)]
+        args: RoleUpdateArgs,
+        #[arg(long)]
+        remove_maintainer: bool,
+    },
+    MaintainerAdd(RoleUpdateArgs),
+    MaintainerRemove(RoleUpdateArgs),
+}
+
+#[derive(clap::Args)]
+pub struct RoleUpdateArgs {
+    slug: String,
+    handler: String,
+    #[arg(long)]
+    control_revision: u64,
+    #[arg(long)]
+    request_id: Option<String>,
+}
+
+#[derive(Subcommand)]
+pub enum AdminCommand {
+    Update {
+        slug: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        control_revision: u64,
+        #[arg(long)]
+        request_id: Option<String>,
+    },
+    Archive(AdminTransitionArgs),
+    Unarchive(AdminTransitionArgs),
+}
+
+#[derive(clap::Args)]
+pub struct AdminTransitionArgs {
+    slug: String,
+    #[arg(long)]
+    control_revision: u64,
+    #[arg(long)]
+    request_id: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -329,6 +390,8 @@ async fn execute(
             .await
         }
         SkillCommand::Proposal { command } => execute_proposal(command, json_output).await,
+        SkillCommand::Role { command } => execute_role(command, json_output).await,
+        SkillCommand::Admin { command } => execute_admin(command, json_output).await,
         SkillCommand::List {
             archived,
             limit,
@@ -489,7 +552,7 @@ async fn execute_create(
         Ok(response) => response,
         Err(error) => return Err(client_command_error(error)),
     };
-    finish_mutation(response, journal, json_output)
+    finish_mutation(response, journal, MutationExpectation::Create, json_output)
 }
 
 async fn execute_propose(
@@ -530,7 +593,13 @@ async fn execute_propose(
         Ok(response) => response,
         Err(error) => return Err(client_command_error(error)),
     };
-    finish_mutation(response, journal, json_output)
+    let proposal_id = proposal_for_request(&journal.request_id)?;
+    finish_mutation(
+        response,
+        journal,
+        MutationExpectation::ProposalCreate { proposal_id },
+        json_output,
+    )
 }
 
 async fn execute_proposal(
@@ -640,6 +709,15 @@ async fn execute_proposal(
         ),
     };
     let proposal_id = ProposalId::new(&proposal_id).map_err(skill_command_error)?;
+    let expected_status = match operation {
+        SkillOperation::ProposalWithdraw => ProposalStatus::Withdrawn,
+        SkillOperation::ProposalReject => ProposalStatus::Rejected,
+        SkillOperation::ProposalPublish => ProposalStatus::Published,
+        _ => return Err(local_error("invalid proposal transition")),
+    };
+    let next_state_revision = state_revision
+        .checked_add(1)
+        .ok_or_else(|| local_error("proposal state revision overflow"))?;
     let fingerprint = request_fingerprint(&json!({
         "operation":operation,
         "proposal_id":proposal_id,
@@ -656,7 +734,7 @@ async fn execute_proposal(
     eprintln!("Request ID: {}", journal.request_id.as_str());
     let request_body = SkillProposalTransitionRequest {
         request_id: journal.request_id.clone(),
-        proposal_id,
+        proposal_id: proposal_id.clone(),
         operation,
         expected_state_revision: state_revision,
         expected_control_revision: control_revision,
@@ -666,12 +744,158 @@ async fn execute_proposal(
         Ok(response) => response,
         Err(error) => return Err(client_command_error(error)),
     };
-    finish_mutation(response, journal, json_output)
+    finish_mutation(
+        response,
+        journal,
+        MutationExpectation::ProposalTransition {
+            proposal_id,
+            state_revision: next_state_revision,
+            status: expected_status,
+        },
+        json_output,
+    )
+}
+
+async fn execute_role(
+    command: RoleCommand,
+    json_output: bool,
+) -> Result<SkillCliExit, SkillCommandError> {
+    let (args, operation, remove_maintainer) = match command {
+        RoleCommand::OwnerAdd(args) => (args, SkillOperation::OwnerAdd, false),
+        RoleCommand::OwnerRemove {
+            args,
+            remove_maintainer,
+        } => (args, SkillOperation::OwnerRemove, remove_maintainer),
+        RoleCommand::MaintainerAdd(args) => (args, SkillOperation::MaintainerAdd, false),
+        RoleCommand::MaintainerRemove(args) => (args, SkillOperation::MaintainerRemove, false),
+    };
+    let slug = SkillSlug::new(&args.slug).map_err(skill_command_error)?;
+    let target = Handler::new(&args.handler)
+        .map_err(|_| skill_command_error(SkillError::RoleTargetInvalid))?;
+    let fingerprint = request_fingerprint(&json!({
+        "operation":operation,
+        "slug":slug,
+        "target":target,
+        "remove_maintainer":remove_maintainer,
+        "expected_control_revision":args.control_revision,
+    }))?;
+    let repo_root = repo_root()?;
+    let journal = prepare_journal(
+        &repo_root,
+        args.request_id.as_deref(),
+        &format!("skill:{}", slug.as_str()),
+        &fingerprint,
+    )?;
+    eprintln!("Request ID: {}", journal.request_id.as_str());
+    let request_body = SkillRoleUpdateRequest {
+        request_id: journal.request_id.clone(),
+        slug,
+        operation,
+        target,
+        remove_maintainer,
+        expected_control_revision: args.control_revision,
+    };
+    let client = connect_client_at(&repo_root)?;
+    let response = client
+        .skill_role_update(&request_body)
+        .await
+        .map_err(client_command_error)?;
+    finish_mutation(response, journal, MutationExpectation::Control, json_output)
+}
+
+async fn execute_admin(
+    command: AdminCommand,
+    json_output: bool,
+) -> Result<SkillCliExit, SkillCommandError> {
+    match command {
+        AdminCommand::Update {
+            slug,
+            display_name,
+            description,
+            control_revision,
+            request_id,
+        } => {
+            if display_name.is_none() && description.is_none() {
+                return Err(local_error(
+                    "skill admin update requires --display-name or --description",
+                ));
+            }
+            let slug = SkillSlug::new(&slug).map_err(skill_command_error)?;
+            let fingerprint = request_fingerprint(&json!({
+                "operation":SkillOperation::MetadataUpdate,
+                "slug":slug,
+                "display_name":display_name,
+                "description":description,
+                "expected_control_revision":control_revision,
+            }))?;
+            let repo_root = repo_root()?;
+            let journal = prepare_journal(
+                &repo_root,
+                request_id.as_deref(),
+                &format!("skill:{}", slug.as_str()),
+                &fingerprint,
+            )?;
+            eprintln!("Request ID: {}", journal.request_id.as_str());
+            let request_body = SkillMetadataUpdateRequest {
+                request_id: journal.request_id.clone(),
+                slug,
+                display_name,
+                description,
+                expected_control_revision: control_revision,
+            };
+            let client = connect_client_at(&repo_root)?;
+            let response = client
+                .skill_metadata_update(&request_body)
+                .await
+                .map_err(client_command_error)?;
+            finish_mutation(response, journal, MutationExpectation::Control, json_output)
+        }
+        AdminCommand::Archive(args) => {
+            execute_archive_transition(args, SkillOperation::Archive, json_output).await
+        }
+        AdminCommand::Unarchive(args) => {
+            execute_archive_transition(args, SkillOperation::Unarchive, json_output).await
+        }
+    }
+}
+
+async fn execute_archive_transition(
+    args: AdminTransitionArgs,
+    operation: SkillOperation,
+    json_output: bool,
+) -> Result<SkillCliExit, SkillCommandError> {
+    let slug = SkillSlug::new(&args.slug).map_err(skill_command_error)?;
+    let fingerprint = request_fingerprint(&json!({
+        "operation":operation,
+        "slug":slug,
+        "expected_control_revision":args.control_revision,
+    }))?;
+    let repo_root = repo_root()?;
+    let journal = prepare_journal(
+        &repo_root,
+        args.request_id.as_deref(),
+        &format!("skill:{}", slug.as_str()),
+        &fingerprint,
+    )?;
+    eprintln!("Request ID: {}", journal.request_id.as_str());
+    let request_body = SkillArchiveTransitionRequest {
+        request_id: journal.request_id.clone(),
+        slug,
+        operation,
+        expected_control_revision: args.control_revision,
+    };
+    let client = connect_client_at(&repo_root)?;
+    let response = client
+        .skill_archive_transition(&request_body)
+        .await
+        .map_err(client_command_error)?;
+    finish_mutation(response, journal, MutationExpectation::Control, json_output)
 }
 
 fn finish_mutation(
     response: ApiResponse,
     journal: PreparedJournal,
+    expectation: MutationExpectation,
     json_output: bool,
 ) -> Result<SkillCliExit, SkillCommandError> {
     let exit = SkillCliExit::from_response(&response);
@@ -704,6 +928,32 @@ fn finish_mutation(
             "invalid Skill mutation response: required result fields are missing",
         ));
     }
+    let proposal_matches = match expectation {
+        MutationExpectation::Create | MutationExpectation::Control => {
+            payload.proposal_id.is_none()
+                && payload.result.proposal_state_revision.is_none()
+                && payload.result.proposal_status.is_none()
+        }
+        MutationExpectation::ProposalCreate { proposal_id } => {
+            payload.proposal_id.as_ref() == Some(&proposal_id)
+                && payload.result.proposal_state_revision == Some(1)
+                && payload.result.proposal_status == Some(ProposalStatus::Open)
+        }
+        MutationExpectation::ProposalTransition {
+            proposal_id,
+            state_revision,
+            status,
+        } => {
+            payload.proposal_id.as_ref() == Some(&proposal_id)
+                && payload.result.proposal_state_revision == Some(state_revision)
+                && payload.result.proposal_status == Some(status)
+        }
+    };
+    if !proposal_matches {
+        return Err(local_error(
+            "invalid Skill mutation response: operation result does not match the request",
+        ));
+    }
     journal.remove()?;
     let mut value = serde_json::to_value(payload)
         .map_err(|error| local_error(format!("serialize Skill mutation response: {error}")))?;
@@ -712,9 +962,24 @@ fn finish_mutation(
     Ok(SkillCliExit::Success)
 }
 
+enum MutationExpectation {
+    Create,
+    ProposalCreate {
+        proposal_id: ProposalId,
+    },
+    ProposalTransition {
+        proposal_id: ProposalId,
+        state_revision: u64,
+        status: ProposalStatus,
+    },
+    Control,
+}
+
 #[derive(Deserialize, Serialize)]
 struct SkillMutationSuccess {
     request_id: RequestId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    proposal_id: Option<ProposalId>,
     commit_id: String,
     result: SkillMutationResult,
     local_state: SkillMutationLocalState,
@@ -766,6 +1031,10 @@ fn canonical_reference(
         format!("skill:{value}")
     };
     parse_skill_reference(&value).map_err(skill_command_error)
+}
+
+fn proposal_for_request(request_id: &RequestId) -> Result<ProposalId, SkillCommandError> {
+    ProposalId::new(&format!("p-{}", &request_id.as_str()[2..])).map_err(skill_command_error)
 }
 
 fn print_reference(
@@ -1374,8 +1643,13 @@ fn verify_journal(
     current: &JournalEntry,
     expected: &JournalEntry,
 ) -> Result<(), SkillCommandError> {
-    if current.version != expected.version
-        || current.request_id != expected.request_id
+    if current.version != expected.version {
+        return Err(local_error(format!(
+            "unsupported request journal version {}; expected {}",
+            current.version, expected.version
+        )));
+    }
+    if current.request_id != expected.request_id
         || current.target != expected.target
         || current.fingerprint != expected.fingerprint
     {
@@ -1450,6 +1724,12 @@ fn load_journal(path: &Path) -> Result<JournalEntry, SkillCommandError> {
 }
 
 fn validated_journal_id(path: &Path, entry: &JournalEntry) -> Result<RequestId, SkillCommandError> {
+    if entry.version != JOURNAL_VERSION {
+        return Err(local_error(format!(
+            "unsupported request journal version {}; expected {}",
+            entry.version, JOURNAL_VERSION
+        )));
+    }
     let request_id = RequestId::new(&entry.request_id)
         .map_err(|_| local_error(format!("invalid request journal {}", path.display())))?;
     let expected_name = format!("{}.json", request_id.as_str());

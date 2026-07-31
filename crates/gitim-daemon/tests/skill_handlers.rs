@@ -356,6 +356,10 @@ async fn handlers_bootstrap_create_list_load_resource_and_reject_candidates() {
         .await;
     assert!(proposal.ok, "{:?}", proposal.error);
     let proposal_id = ProposalId::new(&format!("p-{}", &proposal_request.as_str()[2..])).unwrap();
+    assert_eq!(
+        proposal.data.as_ref().unwrap()["proposal_id"],
+        proposal_id.as_str()
+    );
     let candidate = RevisionId::new(&format!("r-{}", &proposal_request.as_str()[2..])).unwrap();
     let unpublished = store
         .load(&SkillReference {
@@ -594,6 +598,10 @@ async fn proposal_publish_reject_and_withdraw_emit_ordered_events() {
             }))
             .await;
         assert!(response.ok, "{:?}", response.error);
+        assert_eq!(
+            response.data.as_ref().unwrap()["proposal_id"],
+            proposal_id.as_str()
+        );
         let event = events.recv().await.unwrap();
         assert!(matches!(
             event,
@@ -615,6 +623,10 @@ async fn proposal_publish_reject_and_withdraw_emit_ordered_events() {
             }))
             .await;
         assert!(response.ok, "{:?}", response.error);
+        assert_eq!(
+            response.data.as_ref().unwrap()["proposal_id"],
+            proposal_id.as_str()
+        );
         let event = events.recv().await.unwrap();
         let expected = match operation {
             SkillOperation::ProposalPublish => "proposal_published",
@@ -631,6 +643,71 @@ async fn proposal_publish_reject_and_withdraw_emit_ordered_events() {
             } if kind == expected && id == proposal_id.as_str()
         ));
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn metadata_role_and_archive_requests_run_shared_transitions() {
+    let fixture = Fixture::new().await;
+    fixture.bootstrap().await;
+    let created = fixture.create("release-check").await;
+    *fixture.state.users.write().await = vec!["alice".to_owned(), "bob".to_owned()];
+
+    let metadata = fixture
+        .request(serde_json::json!({
+            "method":"skill_metadata_update",
+            "request":{
+                "request_id":RequestId::generate(),
+                "slug":"release-check",
+                "display_name":"Release Gate",
+                "expected_control_revision":created.control_revision.unwrap()
+            }
+        }))
+        .await;
+    assert!(metadata.ok, "{:?}", metadata.error);
+    assert_eq!(
+        metadata.data.as_ref().unwrap()["result"]["control_revision"],
+        2
+    );
+
+    let role = fixture
+        .request(serde_json::json!({
+            "method":"skill_role_update",
+            "request":{
+                "request_id":RequestId::generate(),
+                "slug":"release-check",
+                "operation":"owner_add",
+                "target":"bob",
+                "expected_control_revision":2
+            }
+        }))
+        .await;
+    assert!(role.ok, "{:?}", role.error);
+    assert_eq!(role.data.as_ref().unwrap()["result"]["control_revision"], 3);
+
+    let archive = fixture
+        .request(serde_json::json!({
+            "method":"skill_archive_transition",
+            "request":{
+                "request_id":RequestId::generate(),
+                "slug":"release-check",
+                "operation":"archive",
+                "expected_control_revision":3
+            }
+        }))
+        .await;
+    assert!(archive.ok, "{:?}", archive.error);
+    assert_eq!(
+        archive.data.as_ref().unwrap()["result"]["control_revision"],
+        4
+    );
+    git(&fixture.repo, ["fetch", "origin"]);
+    git(
+        &fixture.repo,
+        [
+            "show",
+            "origin/main:archive/skills/release-check/skill.meta.yaml",
+        ],
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
