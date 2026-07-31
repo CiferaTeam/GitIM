@@ -211,6 +211,7 @@ fn private_index_commit_uses_explicit_base_and_preserves_checkout_state() {
     assert_eq!(keep.mode, "100755");
     assert_eq!(added.mode, "100644");
     assert_eq!(added.object_type, "blob");
+    assert_eq!(added.byte_size, Some(b"regular blob\n".len() as u64));
     assert_eq!(
         tree_oid_at(&fixture.repo, &built.commit_oid, "bin/new-regular").unwrap(),
         Some(added.oid.clone())

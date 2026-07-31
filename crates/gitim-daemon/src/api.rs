@@ -1,4 +1,9 @@
 use gitim_core::auth_payload::AuthPayload;
+use gitim_core::skill::{
+    SkillCreateRequest, SkillListQuery, SkillProposalTransitionRequest, SkillProposeRequest,
+    SkillReference, SkillRepairRequest, SkillResourceQuery, SkillShowQuery,
+    SkillWorkspaceBootstrapRequest,
+};
 use gitim_core::types::QuickSessionStatus;
 use serde::{Deserialize, Serialize};
 
@@ -134,6 +139,18 @@ pub enum Event {
         agent_id: String,
         status: gitim_core::types::QuickSessionStatus,
         revision: u64,
+    },
+
+    #[serde(rename = "skill_changed")]
+    SkillChanged {
+        slug: String,
+        kind: String,
+        event_revision: u64,
+        control_revision: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        proposal_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        proposal_state_revision: Option<u64>,
     },
 }
 
@@ -695,6 +712,31 @@ pub enum Request {
     /// Excludes departed handlers.
     #[serde(rename = "agents_with_labels")]
     AgentsWithLabels { labels: Vec<String> },
+
+    #[serde(rename = "skill_list")]
+    SkillList { query: SkillListQuery },
+    #[serde(rename = "skill_show")]
+    SkillShow { query: SkillShowQuery },
+    #[serde(rename = "skill_load")]
+    SkillLoad { reference: SkillReference },
+    #[serde(rename = "skill_resource")]
+    SkillResource { query: SkillResourceQuery },
+    #[serde(rename = "skill_workspace_meta")]
+    SkillWorkspaceMeta,
+    #[serde(rename = "skill_workspace_bootstrap")]
+    SkillWorkspaceBootstrap {
+        request: SkillWorkspaceBootstrapRequest,
+    },
+    #[serde(rename = "skill_create")]
+    SkillCreate { request: SkillCreateRequest },
+    #[serde(rename = "skill_propose")]
+    SkillPropose { request: SkillProposeRequest },
+    #[serde(rename = "skill_proposal_transition")]
+    SkillProposalTransition {
+        request: SkillProposalTransitionRequest,
+    },
+    #[serde(rename = "skill_repair")]
+    SkillRepair { request: SkillRepairRequest },
 }
 
 fn default_archived_dms_limit() -> usize {

@@ -31,6 +31,10 @@ use crate::gitignore::ensure_defaults_gitignored;
 use crate::slug::RESERVED;
 use gitim_client::{ensure_daemon_with_log, ClientError, GitimClient};
 use gitim_core::me_json::MeJson;
+use gitim_core::skill::{
+    RequestId, SkillRepairRequest, SkillRepairScope, SkillSlug, SkillWorkspaceBootstrapRequest,
+    WorkspaceSkillMeta,
+};
 use gitim_core::types::{UserMeta, MAX_INTRODUCTION_LEN};
 use gitim_sync::url_redact::redacted_url;
 
@@ -5559,6 +5563,13 @@ async fn recover_single_workspace(
         };
         match provision_human(&workspace, &remote_url, &git_server, auth).await {
             Ok(dir) => {
+                if let Err(error) = ensure_workspace_skill_bootstrap(&dir).await {
+                    tracing::warn!(
+                        slug = %slug,
+                        error = %error,
+                        "recovered workspace without Skill administration bootstrap"
+                    );
+                }
                 let mut s = crate::preconditions::arc_mutex_lock(&state);
                 if let Some(ctx) = s.workspaces.get_mut(&slug) {
                     ctx.human_repo = Some(dir);
@@ -6297,6 +6308,9 @@ async fn provision_local_workspace(
         })?;
 
     apply_default_gitignore(&human_dir);
+    ensure_workspace_skill_bootstrap(&human_dir)
+        .await
+        .map_err(|error| ("skill_bootstrap_failed", redacted_url(&error)))?;
 
     let config = WorkspaceConfig {
         workspace: workspace.to_string_lossy().into_owned(),
@@ -6421,6 +6435,12 @@ async fn provision_github_workspace(
             })?;
 
         apply_default_gitignore(&final_human);
+        ensure_workspace_skill_bootstrap(&final_human)
+            .await
+            .map_err(|error| {
+                cleanup_human_dir(workspace);
+                ("skill_bootstrap_failed", redacted_url(&error))
+            })?;
 
         // Best-effort email fetch: a failure or null email (private account)
         // falls back to the `<handler>@gitim` sentinel. Never blocks init —
@@ -6457,6 +6477,144 @@ async fn provision_github_workspace(
 
         Ok((final_human, config))
     }
+}
+
+async fn ensure_workspace_skill_bootstrap(human_repo: &Path) -> Result<(), String> {
+    let client = GitimClient::new(human_repo);
+    let current = client
+        .request("skill_workspace_meta", serde_json::json!({}))
+        .await
+        .map_err(|error| format!("read accepted workspace Skill metadata: {error}"))?;
+    if current.ok {
+        return Ok(());
+    }
+    if !matches!(
+        current.error_code.as_deref(),
+        Some("skill_admin_uninitialized" | "skill_not_found")
+    ) {
+        return Err(current
+            .error
+            .unwrap_or_else(|| "workspace Skill metadata is unavailable".to_owned()));
+    }
+    let request = SkillWorkspaceBootstrapRequest {
+        request_id: RequestId::generate(),
+    };
+    let response = client
+        .request_with_timeout(
+            "skill_workspace_bootstrap",
+            serde_json::json!({ "request": request }),
+            std::time::Duration::from_secs(360),
+        )
+        .await
+        .map_err(|error| format!("bootstrap workspace Skill administration: {error}"))?;
+    if response.ok {
+        Ok(())
+    } else {
+        Err(response.error.unwrap_or_else(|| {
+            "workspace Skill bootstrap was rejected without a message".to_owned()
+        }))
+    }
+}
+
+async fn admin_repair_skill_state(
+    State(state): State<SharedRuntimeState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    axum::extract::Path(slug): axum::extract::Path<String>,
+    Json(request): Json<crate::cli::dto::SkillAdminRepairRequest>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if !peer.ip().is_loopback() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody::with_code(
+                "repair-skill-state is available only over loopback",
+                "loopback_required",
+            )),
+        )
+            .into_response();
+    }
+    if !request.confirm {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorBody::with_code(
+                "repair-skill-state requires confirmation",
+                "confirmation_required",
+            )),
+        )
+            .into_response();
+    }
+    let actor = match human_handler(&state, &slug) {
+        Ok(actor) => actor,
+        Err(response) => return response,
+    };
+    let client = match human_client(&state, &slug) {
+        Ok(client) => client,
+        Err(response) => return response,
+    };
+    let workspace_response = match client
+        .request("skill_workspace_meta", serde_json::json!({}))
+        .await
+    {
+        Ok(response) => response,
+        Err(error) => return Json(ErrorBody::new(error.to_string())).into_response(),
+    };
+    if !workspace_response.ok {
+        return Json(gitim_client::ApiResponse {
+            ok: false,
+            data: None,
+            error: workspace_response.error,
+            error_code: workspace_response.error_code,
+        })
+        .into_response();
+    }
+    let workspace: WorkspaceSkillMeta = match workspace_response.parse_data() {
+        Ok(workspace) => workspace,
+        Err(error) => return Json(ErrorBody::new(error.to_string())).into_response(),
+    };
+    if !workspace
+        .administrators
+        .iter()
+        .any(|administrator| administrator.as_str() == actor)
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody::with_code(
+                "tracked workspace Skill administrator required",
+                "skill_admin_required",
+            )),
+        )
+            .into_response();
+    }
+    let scope = match request.skill {
+        Some(skill) => match SkillSlug::new(&skill) {
+            Ok(skill) => SkillRepairScope::Skill(skill),
+            Err(error) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorBody::with_code(error.to_string(), error.code())),
+                )
+                    .into_response()
+            }
+        },
+        None => SkillRepairScope::Workspace,
+    };
+    let repair = SkillRepairRequest {
+        request_id: RequestId::generate(),
+        scope,
+        conflict_tip: request.conflict_tip,
+        accepted_tree: request.accepted_tree,
+    };
+    api_response_to_json(
+        client
+            .request_with_timeout(
+                "skill_repair",
+                serde_json::json!({ "request": repair }),
+                std::time::Duration::from_secs(360),
+            )
+            .await,
+    )
 }
 
 async fn workspaces_create(
@@ -7198,6 +7356,7 @@ fn build_router_with_asset_router(
         .route("/agents/remove", post(agents_remove))
         .route("/agents/burn", post(agents_burn))
         .route("/agents/{id}", get(agents_get).patch(agents_patch));
+    let ws_router = ws_router.route("/admin/repair-skill-state", post(admin_repair_skill_state));
 
     let router = Router::new()
         .route("/health", get(health))

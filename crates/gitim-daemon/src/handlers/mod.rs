@@ -219,6 +219,11 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::MarkQuickSessionError { .. }
                 | Request::ArchiveQuickSession { .. }
                 | Request::UnarchiveQuickSession { .. }
+                | Request::SkillWorkspaceBootstrap { .. }
+                | Request::SkillCreate { .. }
+                | Request::SkillPropose { .. }
+                | Request::SkillProposalTransition { .. }
+                | Request::SkillRepair { .. }
         );
         if is_write {
             return Response::error("guest mode: write operations are not allowed");
@@ -907,6 +912,36 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Err(r) => return r,
             };
             project::handle_set_channel_project(state, channel, project, resolved_author).await
+        }
+        Request::SkillList { query } => {
+            crate::skill_handlers::handle_skill_list(state, query).await
+        }
+        Request::SkillShow { query } => {
+            crate::skill_handlers::handle_skill_show(state, query).await
+        }
+        Request::SkillLoad { reference } => {
+            crate::skill_handlers::handle_skill_load(state, reference).await
+        }
+        Request::SkillResource { query } => {
+            crate::skill_handlers::handle_skill_resource(state, query).await
+        }
+        Request::SkillWorkspaceMeta => {
+            crate::skill_handlers::handle_skill_workspace_meta(state).await
+        }
+        Request::SkillWorkspaceBootstrap { request } => {
+            crate::skill_handlers::handle_skill_workspace_bootstrap(state, request).await
+        }
+        Request::SkillCreate { request } => {
+            crate::skill_handlers::handle_skill_create(state, request).await
+        }
+        Request::SkillPropose { request } => {
+            crate::skill_handlers::handle_skill_propose(state, request).await
+        }
+        Request::SkillProposalTransition { request } => {
+            crate::skill_handlers::handle_skill_proposal_transition(state, request).await
+        }
+        Request::SkillRepair { request } => {
+            crate::skill_handlers::handle_skill_repair(state, request).await
         }
     }
 }

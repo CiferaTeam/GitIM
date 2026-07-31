@@ -38,6 +38,16 @@ impl GitimClient {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<ApiResponse, ClientError> {
+        self.request_with_timeout(method, params, DAEMON_REQUEST_TIMEOUT)
+            .await
+    }
+
+    pub async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<ApiResponse, ClientError> {
         let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound
                 || e.kind() == std::io::ErrorKind::ConnectionRefused
@@ -60,7 +70,7 @@ impl GitimClient {
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
 
         let mut line = String::new();
-        tokio::time::timeout(DAEMON_REQUEST_TIMEOUT, reader.read_line(&mut line))
+        tokio::time::timeout(timeout, reader.read_line(&mut line))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;

@@ -19,6 +19,7 @@ pub mod cmd_fleet;
 pub mod cmd_list_agents;
 pub mod cmd_preflight;
 pub mod cmd_runtime_id;
+pub mod cmd_skill_repair;
 pub mod cmd_status;
 pub mod cmd_update_agent;
 pub mod cmd_workspaces;

@@ -1,9 +1,10 @@
 use crate::api::Event;
+use crate::skill_store::SkillStore;
 use gitim_core::types::{Config, ThreadFile};
 use gitim_sync::git::GitStorage;
 use gitim_sync::skill::checkpoint::SkillSyncError;
 use gitim_sync::skill::guard::{GuardedPushOutcome, IntegrationOperation, SkillSyncGuard};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -73,6 +74,7 @@ pub struct AppState {
     pub repo_root: PathBuf,
     pub config: Config,
     pub git_storage: GitStorage,
+    pub skill_store: SkillStore,
     pub thread_cache: RwLock<HashMap<String, ThreadFile>>,
     pub users: RwLock<Vec<String>>,
     pub event_tx: broadcast::Sender<Event>,
@@ -139,6 +141,7 @@ pub struct AppState {
     /// the guard to cross, and a tokio Mutex would force sync_loop —
     /// currently a plain `fn` — into async plumbing for no gain.
     pub commit_lock: Arc<StdMutex<()>>,
+    skill_event_revisions: StdMutex<BTreeMap<String, u64>>,
 }
 
 impl AppState {
@@ -159,11 +162,13 @@ impl AppState {
         github_email: Option<String>,
     ) -> Self {
         let git_storage = GitStorage::new(&repo_root);
+        let skill_store = SkillStore::new(&repo_root);
         let has_remote = git_storage.has_remote();
         Self {
             repo_root,
             config,
             git_storage,
+            skill_store,
             thread_cache: RwLock::new(HashMap::new()),
             users: RwLock::new(Vec::new()),
             event_tx,
@@ -189,6 +194,94 @@ impl AppState {
             ),
             auth_failed: Arc::new(AtomicBool::new(false)),
             commit_lock: Arc::new(StdMutex::new(())),
+            skill_event_revisions: StdMutex::new(BTreeMap::new()),
+        }
+    }
+
+    pub fn prime_skill_event_revisions(&self) {
+        let Ok(Some(view)) = self.skill_store.read_view() else {
+            return;
+        };
+        let mut revisions = self
+            .skill_event_revisions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        revisions.clear();
+        revisions.extend(
+            view.checkpoint
+                .skills
+                .iter()
+                .map(|(slug, state)| (slug.clone(), state.event_revision)),
+        );
+    }
+
+    pub fn record_local_skill_event(
+        &self,
+        slug: &str,
+        kind: &str,
+        event_revision: u64,
+        control_revision: u64,
+        proposal_id: Option<String>,
+        proposal_state_revision: Option<u64>,
+    ) {
+        {
+            let mut revisions = self
+                .skill_event_revisions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let current = revisions.entry(slug.to_owned()).or_default();
+            if event_revision <= *current {
+                return;
+            }
+            *current = event_revision;
+        }
+        self.skill_store.invalidate();
+        let _ = self.event_tx.send(Event::SkillChanged {
+            slug: slug.to_owned(),
+            kind: kind.to_owned(),
+            event_revision,
+            control_revision,
+            proposal_id,
+            proposal_state_revision,
+        });
+    }
+
+    pub fn refresh_synced_skill_events(&self) {
+        self.skill_store.invalidate();
+        let Ok(Some(view)) = self.skill_store.read_view() else {
+            return;
+        };
+        for (slug, accepted) in &view.checkpoint.skills {
+            let Ok(skill_slug) = gitim_core::skill::SkillSlug::new(slug) else {
+                continue;
+            };
+            let Ok(meta) = self.skill_store.accepted_meta(&view, &skill_slug) else {
+                continue;
+            };
+            let should_emit = {
+                let mut revisions = self
+                    .skill_event_revisions
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let current = revisions.entry(slug.clone()).or_default();
+                if accepted.event_revision <= *current {
+                    false
+                } else {
+                    *current = accepted.event_revision;
+                    true
+                }
+            };
+            if !should_emit {
+                continue;
+            }
+            let _ = self.event_tx.send(Event::SkillChanged {
+                slug: slug.clone(),
+                kind: "synced".to_owned(),
+                event_revision: accepted.event_revision,
+                control_revision: meta.control_revision,
+                proposal_id: None,
+                proposal_state_revision: None,
+            });
         }
     }
 
@@ -466,6 +559,7 @@ impl AppState {
                     }
                 },
                 move |_head_commit| {
+                    synced_state.refresh_synced_skill_events();
                     // on_synced: refresh users list from disk
                     let users_dir = synced_state.repo_root.join("users");
                     if let Ok(entries) = std::fs::read_dir(&users_dir) {

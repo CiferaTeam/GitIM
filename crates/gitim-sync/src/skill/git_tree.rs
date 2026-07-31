@@ -18,6 +18,7 @@ pub struct GitTreeEntry {
     pub mode: String,
     pub object_type: String,
     pub oid: String,
+    pub byte_size: Option<u64>,
     pub path: String,
 }
 
@@ -102,7 +103,10 @@ where
 {
     let commit_oid = resolve_commit_with_runner(repo, commit, run)?;
     let output = if path.is_empty() {
-        run(repo, &["ls-tree", "-r", "-z", "--full-tree", &commit_oid])?
+        run(
+            repo,
+            &["ls-tree", "-r", "-l", "-z", "--full-tree", &commit_oid],
+        )?
     } else {
         validate_tree_path(path).map_err(E::from)?;
         let literal_pathspec = format!(":(literal){path}");
@@ -111,6 +115,7 @@ where
             &[
                 "ls-tree",
                 "-r",
+                "-l",
                 "-z",
                 "--full-tree",
                 &commit_oid,
@@ -322,6 +327,12 @@ fn parse_ls_tree(bytes: &[u8]) -> Result<Vec<GitTreeEntry>, GitError> {
             let oid = fields
                 .next()
                 .ok_or_else(|| invalid_input("ls-tree record is missing oid"))?;
+            let byte_size = match fields.next() {
+                None | Some("-") => None,
+                Some(value) => Some(value.parse::<u64>().map_err(|error| {
+                    invalid_input(format!("invalid ls-tree byte size: {error}"))
+                })?),
+            };
             if fields.next().is_some() {
                 return Err(invalid_input("ls-tree record has extra metadata fields"));
             }
@@ -330,6 +341,7 @@ fn parse_ls_tree(bytes: &[u8]) -> Result<Vec<GitTreeEntry>, GitError> {
                 mode: mode.to_owned(),
                 object_type: object_type.to_owned(),
                 oid: oid.to_owned(),
+                byte_size,
                 path: path.to_owned(),
             })
         })

@@ -157,6 +157,15 @@ pub struct AddAgentResponse {
     pub id: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SkillAdminRepairRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill: Option<String>,
+    pub conflict_tip: String,
+    pub accepted_tree: String,
+    pub confirm: bool,
+}
+
 /// Redact secret-shaped values from an env map.
 ///
 /// Takes ownership because the CLI is one-shot — the caller is constructing

@@ -123,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             recovered.len()
         );
     }
+    app_state.prime_skill_event_revisions();
 
     let lc = lifecycle::DaemonLifecycle::new(&repo_root);
     tokio::spawn(async move {

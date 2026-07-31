@@ -1,6 +1,7 @@
 use crate::api::{Event, Response};
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
+use gitim_core::skill::SkillError;
 use gitim_core::types::{Handler, UserMeta, MAX_INTRODUCTION_LEN};
 use gitim_sync::git::GitStorage;
 use std::path::Component;
@@ -243,12 +244,7 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
         return Response::error(format!("user @{} not found", handler));
     }
     if let Err(code) = ensure_no_skill_roles(&state.repo_root, &handler) {
-        return Response::error(code);
-    }
-
-    // 5. Ensure archive/users/ directory exists.
-    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
-        return Response::error(format!("failed to create archive/users dir: {}", e));
+        return skill_role_precondition_response(code);
     }
 
     // Commit-tree lock: held across git mv + commit so a concurrent
@@ -258,12 +254,18 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
     // section is all blocking subprocess calls; std::sync::Mutex guard
     // must not cross any `.await`.
     let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+    if let Err(code) = ensure_no_skill_roles(&state.repo_root, &handler) {
+        return skill_role_precondition_response(code);
+    }
     let skills_tree = match state.skill_root_precondition() {
         Ok(tree) => tree,
         Err(error) => {
             return Response::error(format!("archive_user Skill precondition failed: {error}"))
         }
     };
+    if let Err(error) = std::fs::create_dir_all(&archive_dir) {
+        return Response::error(format!("failed to create archive/users dir: {error}"));
+    }
 
     // 6. git mv users/<h>.meta.yaml → archive/users/<h>.meta.yaml
     let from_rel = format!("users/{}.meta.yaml", handler);
@@ -536,6 +538,15 @@ pub(crate) fn ensure_no_skill_roles(
     Ok(())
 }
 
+pub(crate) fn skill_role_precondition_response(code: String) -> Response {
+    for error in [SkillError::AdminRolePresent, SkillError::RolesPresent] {
+        if code == error.code() {
+            return Response::error_with_code(error.to_string(), error.code());
+        }
+    }
+    Response::error(code)
+}
+
 fn is_bounded_skill_tree_path(path: &std::path::Path) -> bool {
     let components: Vec<_> = path.components().collect();
     if components
@@ -641,6 +652,45 @@ mod tests {
             .unwrap();
     }
 
+    fn commit_skill_roles(state: &SharedState, administrators: &[&str], owners: &[&str]) {
+        let workspace = state.repo_root.join("skills/workspace.meta.yaml");
+        std::fs::create_dir_all(workspace.parent().unwrap()).unwrap();
+        let administrators = administrators
+            .iter()
+            .map(|handler| format!("  - {handler}\n"))
+            .collect::<String>();
+        std::fs::write(
+            &workspace,
+            format!(
+                "schema_version: 1\nadministrators:\n{administrators}control_revision: 1\ncreated_at: 2026-01-01T00:00:00Z\nupdated_at: 2026-01-01T00:00:00Z\n"
+            ),
+        )
+        .unwrap();
+        if !owners.is_empty() {
+            let skill = state.repo_root.join("skills/reviewer/skill.meta.yaml");
+            std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+            let owners = owners
+                .iter()
+                .map(|handler| format!("  - {handler}\n"))
+                .collect::<String>();
+            std::fs::write(
+                skill,
+                format!("slug: reviewer\nowners:\n{owners}maintainers: []\n"),
+            )
+            .unwrap();
+        }
+        std::process::Command::new("git")
+            .args(["add", "skills"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "test: assign Skill roles"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+    }
+
     #[tokio::test]
     async fn archive_user_moves_board_to_archive() {
         let tmp = tempfile::tempdir().unwrap();
@@ -683,6 +733,28 @@ mod tests {
             .repo_root
             .join("archive/showboards/alice/board.md")
             .exists());
+    }
+
+    #[tokio::test]
+    async fn archive_user_rejects_workspace_administrator_before_filesystem_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        register(&state, "bob").await;
+        commit_skill_roles(&state, &["alice"], &[]);
+        let head = state.git_storage.rev_parse("HEAD").unwrap();
+
+        let response =
+            handle_archive_user(state.clone(), "alice".to_owned(), "bob".to_owned()).await;
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(SkillError::AdminRolePresent.code())
+        );
+        assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head);
+        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(!state.repo_root.join("archive/users").exists());
     }
 
     #[cfg(unix)]

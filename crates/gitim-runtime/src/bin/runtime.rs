@@ -239,6 +239,24 @@ enum Command {
         #[command(subcommand)]
         command: AssetCommand,
     },
+    /// Restore accepted workspace or Skill state from a validation checkpoint.
+    RepairSkillState {
+        /// Workspace slug. Optional when exactly one workspace is configured.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Skill slug. Omit to repair workspace Skill-administrator state.
+        #[arg(long)]
+        skill: Option<String>,
+        /// Rejected commit recorded in the local checkpoint.
+        #[arg(long = "conflict-tip")]
+        conflict_tip: String,
+        /// Accepted tree recorded in the local checkpoint.
+        #[arg(long = "accepted-tree")]
+        accepted_tree: String,
+        /// Acknowledge that the repair creates an audited repository commit.
+        #[arg(long)]
+        confirm: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -430,8 +448,8 @@ fn validate_args(args: &Args) -> Result<(), String> {
 async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
     use gitim_runtime::cli::{
         cmd_add_agent, cmd_asset, cmd_burn_agent, cmd_fleet, cmd_list_agents, cmd_preflight,
-        cmd_runtime_id, cmd_status, cmd_update_agent, cmd_workspaces, from_cli_error,
-        resolve_base_url, tunnel as cli_tunnel, CliError, Client, ErrorResponse,
+        cmd_runtime_id, cmd_skill_repair, cmd_status, cmd_update_agent, cmd_workspaces,
+        from_cli_error, resolve_base_url, tunnel as cli_tunnel, CliError, Client, ErrorResponse,
     };
 
     tracing_subscriber::fmt()
@@ -602,6 +620,25 @@ async fn run_cli(cmd: Command) -> Result<(), Box<dyn std::error::Error>> {
                 .await
             }
         },
+        Command::RepairSkillState {
+            workspace,
+            skill,
+            conflict_tip,
+            accepted_tree,
+            confirm,
+        } => {
+            cmd_skill_repair::run(
+                &client,
+                cmd_skill_repair::Args {
+                    workspace,
+                    skill,
+                    conflict_tip,
+                    accepted_tree,
+                    confirm,
+                },
+            )
+            .await
+        }
     };
 
     match result {
@@ -952,7 +989,13 @@ async fn run_shell(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         tracing::warn!(error = %e, port, "failed to persist listen_port hint");
     }
 
-    let mut server = tokio::spawn(async move { axum::serve(listener, router).await });
+    let mut server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+    });
 
     // Wait for shutdown signal; also bail if the server itself errors out
     tokio::select! {
@@ -1255,6 +1298,64 @@ mod argv_subcommand_tests {
             }
             other => panic!("expected asset get, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn repair_skill_state_parses_confirmed_workspace_and_skill_scopes() {
+        let workspace = Args::try_parse_from([
+            "gitim-runtime",
+            "repair-skill-state",
+            "--workspace",
+            "room",
+            "--conflict-tip",
+            "aaaaaaaa",
+            "--accepted-tree",
+            "bbbbbbbb",
+            "--confirm",
+        ])
+        .expect("workspace repair argv");
+        assert!(matches!(
+            workspace.command,
+            Some(Command::RepairSkillState {
+                workspace: Some(ref slug),
+                skill: None,
+                ref conflict_tip,
+                ref accepted_tree,
+                confirm: true,
+            }) if slug == "room" && conflict_tip == "aaaaaaaa" && accepted_tree == "bbbbbbbb"
+        ));
+
+        let skill = Args::try_parse_from([
+            "gitim-runtime",
+            "repair-skill-state",
+            "--skill",
+            "release-check",
+            "--conflict-tip",
+            "aaaaaaaa",
+            "--accepted-tree",
+            "bbbbbbbb",
+            "--confirm",
+        ])
+        .expect("Skill repair argv");
+        assert!(matches!(
+            skill.command,
+            Some(Command::RepairSkillState {
+                workspace: None,
+                skill: Some(ref slug),
+                confirm: true,
+                ..
+            }) if slug == "release-check"
+        ));
+    }
+
+    #[test]
+    fn repair_skill_state_requires_checkpoint_arguments() {
+        let error =
+            Args::try_parse_from(["gitim-runtime", "repair-skill-state", "--confirm"]).unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 
     // ------------------------------------------------------------------

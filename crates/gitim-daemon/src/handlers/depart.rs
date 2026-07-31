@@ -1,5 +1,5 @@
 use crate::api::{Event, Response};
-use crate::handlers::user::ensure_no_skill_roles;
+use crate::handlers::user::{ensure_no_skill_roles, skill_role_precondition_response};
 use crate::state::SharedState;
 use gitim_core::dm::parse_dm_filename;
 use gitim_core::formatter::format_event;
@@ -88,7 +88,7 @@ pub async fn handle_depart_user(state: SharedState, handler: String) -> Response
         return Response::error(format!("user @{} not found", handler));
     }
     if let Err(code) = ensure_no_skill_roles(&state.repo_root, &handler) {
-        return Response::error(code);
+        return skill_role_precondition_response(code);
     }
 
     // 4. Run phases. Each phase returns `Result<u64, Response>` where the
@@ -606,22 +606,20 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
         )));
     }
 
-    let archive_dir = state.repo_root.join("archive/users");
-    if let Err(e) = std::fs::create_dir_all(&archive_dir) {
-        return Err(Response::error(format!(
-            "phase4: failed to create archive/users dir: {}",
-            e
-        )));
-    }
-
     {
         let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
         if let Err(code) = ensure_no_skill_roles(&state.repo_root, handler) {
-            return Err(Response::error(code));
+            return Err(skill_role_precondition_response(code));
         }
         let skills_tree = state.skill_root_precondition().map_err(|error| {
             Response::error(format!("phase4 Skill precondition failed: {error}"))
         })?;
+        let archive_dir = state.repo_root.join("archive/users");
+        if let Err(error) = std::fs::create_dir_all(&archive_dir) {
+            return Err(Response::error(format!(
+                "phase4: failed to create archive/users dir: {error}"
+            )));
+        }
 
         if let Err(e) = state.git_storage.mv(&from_rel, &to_rel) {
             return Err(Response::error(format!("phase4: git mv failed: {}", e)));
@@ -802,6 +800,63 @@ mod tests {
             .unwrap();
     }
 
+    fn commit_skill_roles(state: &SharedState, administrators: &[&str], owners: &[&str]) {
+        let workspace = state.repo_root.join("skills/workspace.meta.yaml");
+        std::fs::create_dir_all(workspace.parent().unwrap()).unwrap();
+        let administrators = administrators
+            .iter()
+            .map(|handler| format!("  - {handler}\n"))
+            .collect::<String>();
+        std::fs::write(
+            &workspace,
+            format!(
+                "schema_version: 1\nadministrators:\n{administrators}control_revision: 1\ncreated_at: 2026-01-01T00:00:00Z\nupdated_at: 2026-01-01T00:00:00Z\n"
+            ),
+        )
+        .unwrap();
+        if !owners.is_empty() {
+            let skill = state.repo_root.join("skills/reviewer/skill.meta.yaml");
+            std::fs::create_dir_all(skill.parent().unwrap()).unwrap();
+            let owners = owners
+                .iter()
+                .map(|handler| format!("  - {handler}\n"))
+                .collect::<String>();
+            std::fs::write(
+                skill,
+                format!("slug: reviewer\nowners:\n{owners}maintainers: []\n"),
+            )
+            .unwrap();
+        }
+        std::process::Command::new("git")
+            .args(["add", "skills"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "test: assign Skill roles"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+    }
+
+    fn commit_authored_thread(state: &SharedState, handler: &str) -> String {
+        let thread = state.repo_root.join("channels/general.thread");
+        std::fs::create_dir_all(thread.parent().unwrap()).unwrap();
+        let content = format!("[L1][P0][@{handler}][20260101T000000Z] hello\n");
+        std::fs::write(&thread, &content).unwrap();
+        std::process::Command::new("git")
+            .args(["add", "channels/general.thread"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "test: add authored thread"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        content
+    }
+
     #[tokio::test]
     async fn depart_user_phase4_archives_board() {
         let tmp = tempfile::tempdir().unwrap();
@@ -842,5 +897,51 @@ mod tests {
                 .exists(),
             "archive board should exist"
         );
+    }
+
+    #[tokio::test]
+    async fn depart_user_rejects_skill_owner_before_phase_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register_user(&state, "alice");
+        {
+            state.users.write().await.push("alice".to_owned());
+        }
+        let thread = commit_authored_thread(&state, "alice");
+        commit_skill_roles(&state, &[], &["alice"]);
+        let head = state.git_storage.rev_parse("HEAD").unwrap();
+
+        let response = handle_depart_user(state.clone(), "alice".to_owned()).await;
+
+        assert!(!response.ok);
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(gitim_core::skill::SkillError::RolesPresent.code())
+        );
+        assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head);
+        assert_eq!(
+            std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap(),
+            thread
+        );
+        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+    }
+
+    #[tokio::test]
+    async fn depart_phase_four_rechecks_administrator_before_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register_user(&state, "alice");
+        commit_skill_roles(&state, &["alice"], &[]);
+        let head = state.git_storage.rev_parse("HEAD").unwrap();
+
+        let response = phase4_archive_user(&state, "alice").await.unwrap_err();
+
+        assert_eq!(
+            response.error_code.as_deref(),
+            Some(gitim_core::skill::SkillError::AdminRolePresent.code())
+        );
+        assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head);
+        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(!state.repo_root.join("archive/users").exists());
     }
 }
