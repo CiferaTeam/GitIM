@@ -593,6 +593,9 @@ async fn execute_proposal(
             }
             let payload: SkillProposalResourceResponse =
                 response.parse_data().map_err(command_error)?;
+            if payload.bytes.len() > MAX_PACKAGE_FILE_BYTES {
+                return Err(local_error("Skill resource exceeds the byte limit"));
+            }
             return print_proposal_resource(
                 &payload,
                 output.as_deref(),

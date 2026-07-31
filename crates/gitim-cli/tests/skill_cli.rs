@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use assert_cmd::Command;
+use gitim_core::skill::MAX_PACKAGE_FILE_BYTES;
 use predicates::prelude::*;
 use serde_json::{json, Value};
 use std::fs;
@@ -684,6 +685,58 @@ fn binary_proposal_resource_uses_the_same_safe_output_contract() {
         .success();
     server.join().unwrap();
     assert_eq!(fs::read(output).unwrap(), [0, 159, 146, 150]);
+}
+
+#[test]
+fn oversized_proposal_resource_is_a_protocol_error_and_never_touches_output() {
+    let clone = fake_clone();
+    let response = json!({
+        "proposal_id":PROPOSAL,
+        "candidate_revision":REVISION,
+        "path":"references/oversized.txt",
+        "media_type":"text/plain",
+        "text":true,
+        "bytes":vec![b'x'; MAX_PACKAGE_FILE_BYTES + 1]
+    });
+
+    let (server, _) = serve_once(&clone, response.clone());
+    gitim()
+        .current_dir(clone.path())
+        .args([
+            "skill",
+            "proposal",
+            "resource",
+            PROPOSAL,
+            "references/oversized.txt",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("byte limit"));
+    server.join().unwrap();
+
+    let output = clone.path().join("existing.txt");
+    fs::write(&output, "sentinel").unwrap();
+    let (server, _) = serve_once(&clone, response);
+    gitim()
+        .current_dir(clone.path())
+        .args([
+            "skill",
+            "proposal",
+            "resource",
+            PROPOSAL,
+            "references/oversized.txt",
+            "--output",
+            output.to_str().unwrap(),
+            "--force",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("byte limit"));
+    server.join().unwrap();
+    assert_eq!(fs::read_to_string(output).unwrap(), "sentinel");
 }
 
 #[test]
