@@ -6421,10 +6421,24 @@ async fn provision_github_workspace(
                 .output();
         }
 
-        let auth = gitim_core::auth_payload::AuthPayload::GitHub {
-            token: token.clone(),
+        let (git_server, auth) = if clone_override.is_some() {
+            (
+                "git",
+                gitim_core::auth_payload::AuthPayload::Git {
+                    handler: owner.clone(),
+                    display_name: owner.clone(),
+                    github_email: None,
+                },
+            )
+        } else {
+            (
+                "github",
+                gitim_core::auth_payload::AuthPayload::GitHub {
+                    token: token.clone(),
+                },
+            )
         };
-        let final_human = provision_human(workspace, &remote_url, "github", auth)
+        let final_human = provision_human(workspace, &remote_url, git_server, auth)
             .await
             .map_err(|e| {
                 cleanup_human_dir(workspace);

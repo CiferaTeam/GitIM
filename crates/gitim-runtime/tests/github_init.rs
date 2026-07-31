@@ -8,10 +8,14 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use common::{ensure_daemon_in_path, short_tempdir};
+use common::{ensure_daemon_in_path, short_tempdir, HomeGuard};
+use gitim_core::skill::WorkspaceSkillMeta;
 use gitim_runtime::git_config::{GitProvider, WorkspaceConfig};
 use gitim_runtime::github::GithubError;
 use gitim_runtime::http::{create_router, GithubApiClient, SharedRuntimeState};
+use gitim_sync::git::GitStorage;
+use gitim_sync::skill::checkpoint::SkillCheckpointStore;
+use gitim_sync::skill::git_tree::read_blob_at;
 
 struct MockGithubApi {
     verify_result: Mutex<Option<Result<(), GithubError>>>,
@@ -342,14 +346,10 @@ async fn github_init_fails_on_network_error() {
 
 // -- Happy path + cleanup --
 
-// Ignored: the daemon's github-mode onboard calls `curl api.github.com/user`
-// for identity inference, which this test cannot mock. Runtime's responsibility
-// (token verify, repo access check, clone via override, provision_human call)
-// is covered by the failure-mode tests above and the response-body-leak test.
-// Revisit once daemon identity inference becomes injectable.
 #[tokio::test]
-#[ignore]
+#[serial_test::serial(home_env)]
 async fn github_init_full_flow_with_mock_api() {
+    let _home = HomeGuard::install();
     ensure_daemon_in_path();
     let tmp = short_tempdir();
     let bare = setup_fake_bare(tmp.path());
@@ -382,6 +382,26 @@ async fn github_init_full_flow_with_mock_api() {
         Some("https://github.com/fake/fake")
     );
     assert_eq!(cfg.git.token.as_deref(), Some("ghp_TESTSENTINEL_abc"));
+    let human = ws.join(".gitim-runtime/human");
+    let checkpoint = SkillCheckpointStore::new(&human)
+        .unwrap()
+        .load()
+        .unwrap()
+        .expect("GitHub provisioning should write a Skill checkpoint");
+    let accepted = checkpoint
+        .workspace_tree
+        .expect("GitHub provisioning should accept workspace Skill metadata");
+    let workspace_meta: WorkspaceSkillMeta = serde_yaml::from_slice(
+        &read_blob_at(
+            &GitStorage::new(&human),
+            &accepted.commit_oid,
+            "skills/workspace.meta.yaml",
+        )
+        .unwrap()
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(workspace_meta.administrators[0].as_str(), "fake");
 
     kill_human_daemon(&ws);
     server.abort();

@@ -179,9 +179,6 @@ pub async fn handle_skill_repair(state: SharedState, request: SkillRepairRequest
         gitim_core::skill::SkillRepairScope::Workspace => None,
         gitim_core::skill::SkillRepairScope::Skill(slug) => Some(slug.clone()),
     };
-    if let Err(error) = validate_repair_checkpoint(&state, &request) {
-        return sync_error(error);
-    }
     run_mutation(
         state,
         actor,
@@ -191,29 +188,6 @@ pub async fn handle_skill_repair(state: SharedState, request: SkillRepairRequest
         "state_repaired",
     )
     .await
-}
-
-fn validate_repair_checkpoint(
-    state: &SharedState,
-    request: &SkillRepairRequest,
-) -> Result<(), SkillSyncError> {
-    let checkpoint = gitim_sync::skill::checkpoint::SkillCheckpointStore::new(&state.repo_root)?
-        .load()?
-        .ok_or(SkillError::SyncConflict)?;
-    let key = match &request.scope {
-        gitim_core::skill::SkillRepairScope::Workspace => "$workspace",
-        gitim_core::skill::SkillRepairScope::Skill(slug) => slug.as_str(),
-    };
-    let conflict = checkpoint
-        .conflicts
-        .get(key)
-        .ok_or(SkillError::SyncConflict)?;
-    if conflict.rejected_commit != request.conflict_tip
-        || conflict.accepted_tree_oid.as_deref() != Some(request.accepted_tree.as_str())
-    {
-        return Err(SkillError::SyncConflict.into());
-    }
-    Ok(())
 }
 
 async fn resolve_skill_actor(state: &SharedState) -> Result<String, Response> {

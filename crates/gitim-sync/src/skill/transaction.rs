@@ -14,9 +14,9 @@ use gitim_core::skill::{
     PackageEntryKind, ProposalId, RequestId, RevisionId, SkillCommitEvidence, SkillError,
     SkillMeta, SkillMutationContext, SkillMutationPlan, SkillMutationRequest, SkillMutationResult,
     SkillObjectSnapshot, SkillProposalMeta, SkillProposalSnapshot, SkillPublicationMeta,
-    SkillReceipt, SkillRepairAcceptedState, SkillRepairScope, SkillRepositorySnapshot,
-    SkillRevisionMeta, SkillRevisionSnapshot, SkillSlug, SkillTreeEdit, ValidatedPackage,
-    WorkspaceSkillMeta,
+    SkillReceipt, SkillRepairAcceptedState, SkillRepairRequest, SkillRepairScope,
+    SkillRepositorySnapshot, SkillRevisionMeta, SkillRevisionSnapshot, SkillSlug, SkillTreeEdit,
+    ValidatedPackage, WorkspaceSkillMeta,
 };
 use serde::{Deserialize, Serialize};
 
@@ -1795,6 +1795,7 @@ fn attach_repair_checkpoint(
     if checkpoint.last_scanned_tip != remote_tip {
         return Err(SkillError::SyncConflict.into());
     }
+    ensure_repair_request_matches_checkpoint(request, checkpoint)?;
     let (key, slug) = match &request.scope {
         SkillRepairScope::Workspace => ("$workspace", None),
         SkillRepairScope::Skill(slug) => (slug.as_str(), Some(slug)),
@@ -1803,11 +1804,6 @@ fn attach_repair_checkpoint(
         .conflicts
         .get(key)
         .ok_or(SkillError::SyncConflict)?;
-    if conflict.rejected_commit != request.conflict_tip
-        || conflict.accepted_tree_oid.as_deref() != Some(request.accepted_tree.as_str())
-    {
-        return Err(SkillError::SyncConflict.into());
-    }
 
     let (accepted_state, accepted_files, accepted_modes) = if let Some((commit, archived)) =
         accepted_scope_location(checkpoint, slug)
@@ -1992,7 +1988,31 @@ fn ensure_repair_checkpoint_unchanged_locked(
         return Ok(());
     };
     let current = checkpoint.load()?.ok_or(SkillError::SyncConflict)?;
+    let SkillMutationRequest::Repair(repair) = request else {
+        return Err(SkillError::SyncConflict.into());
+    };
+    ensure_repair_request_matches_checkpoint(repair, &current)?;
     if repair_checkpoint_fingerprint(request, Some(&current))?.as_ref() != Some(expected) {
+        return Err(SkillError::SyncConflict.into());
+    }
+    Ok(())
+}
+
+fn ensure_repair_request_matches_checkpoint(
+    repair: &SkillRepairRequest,
+    checkpoint: &SkillValidationCheckpoint,
+) -> Result<(), SkillSyncError> {
+    let key = match &repair.scope {
+        SkillRepairScope::Workspace => "$workspace",
+        SkillRepairScope::Skill(slug) => slug.as_str(),
+    };
+    let conflict = checkpoint
+        .conflicts
+        .get(key)
+        .ok_or(SkillError::SyncConflict)?;
+    if conflict.rejected_commit != repair.conflict_tip
+        || conflict.accepted_tree_oid.as_deref() != Some(repair.accepted_tree.as_str())
+    {
         return Err(SkillError::SyncConflict.into());
     }
     Ok(())

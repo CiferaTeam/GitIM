@@ -2,11 +2,16 @@
 
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::extract::ConnectInfo;
+use axum::http::{Request, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use gitim_runtime::cli::cmd_skill_repair::{build_request, run, Args};
 use gitim_runtime::cli::{CliError, Client};
+use gitim_runtime::http::create_router;
 use serde_json::json;
+use tower::ServiceExt;
 
 #[test]
 fn repair_request_requires_explicit_confirmation() {
@@ -87,24 +92,29 @@ async fn repair_cli_maps_runtime_checkpoint_rejection() {
     server.abort();
 }
 
-#[test]
-fn runtime_sources_gate_bootstrap_and_private_repair_route() {
-    let source = include_str!("../src/http.rs");
-    let recovery = source.find("recover_single_workspace").unwrap();
-    let agent_recovery = source[recovery..]
-        .find("recover_agents_for_workspace")
-        .map(|offset| recovery + offset)
+#[tokio::test]
+async fn repair_route_rejects_non_loopback_peers_before_workspace_lookup() {
+    let (router, _state) = create_router();
+    let mut request = Request::post("/workspaces/missing/admin/repair-skill-state")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&json!({
+                "conflict_tip": "a".repeat(40),
+                "accepted_tree": "b".repeat(40),
+                "confirm": true
+            }))
+            .unwrap(),
+        ))
         .unwrap();
-    let bootstrap = source[recovery..agent_recovery]
-        .find("ensure_workspace_skill_bootstrap")
-        .map(|offset| recovery + offset)
-        .expect("recovery bootstraps Skills before agents");
-    assert!(bootstrap < agent_recovery);
-    assert!(source.matches("ensure_workspace_skill_bootstrap").count() >= 4);
-    assert!(source.contains("recovered workspace without Skill administration bootstrap"));
-    assert!(source.contains("/admin/repair-skill-state"));
-    assert!(!source.contains("/im/repair-skill-state"));
-    assert!(source.contains("peer.ip().is_loopback()"));
+    request.extensions_mut().insert(ConnectInfo(
+        "203.0.113.10:31234"
+            .parse::<std::net::SocketAddr>()
+            .unwrap(),
+    ));
+
+    let response = router.oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
 }
 
 #[test]

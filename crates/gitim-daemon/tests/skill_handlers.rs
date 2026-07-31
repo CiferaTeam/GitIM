@@ -17,6 +17,7 @@ use gitim_daemon::handlers::handle_request;
 use gitim_daemon::skill_import::snapshot_skill_directory;
 use gitim_daemon::skill_store::SkillStore;
 use gitim_daemon::state::AppState;
+use gitim_sync::skill::checkpoint::SkillConflict;
 use tempfile::TempDir;
 
 fn git<I, S>(root: &Path, args: I) -> Output
@@ -155,6 +156,11 @@ impl Fixture {
             }))
             .await;
         assert!(response.ok, "{:?}", response.error);
+        assert_eq!(
+            response.data.as_ref().unwrap()["local_state"],
+            "pending_sync",
+            "remote publication should be readable before local worktree integration"
+        );
         serde_json::from_value(response.data.unwrap()["result"].clone()).unwrap()
     }
 
@@ -362,6 +368,110 @@ async fn accepted_catalog_paginates_and_pinned_archived_revision_loads_exactly()
         .unwrap();
     assert!(pinned.archived);
     assert!(pinned.skill_markdown.contains("initial"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rejected_tip_does_not_stale_an_accepted_catalog_cursor() {
+    let fixture = Fixture::new().await;
+    fixture.bootstrap().await;
+    fixture.create("release-check").await;
+    fixture.create("deploy-check").await;
+    let store = &fixture.state.skill_store;
+
+    let first = store
+        .list(SkillListQuery {
+            archived: false,
+            limit: 1,
+            cursor: None,
+        })
+        .unwrap();
+    let cursor = first.next_cursor.unwrap();
+    let checkpoint_store =
+        gitim_sync::skill::checkpoint::SkillCheckpointStore::new(&fixture.repo).unwrap();
+    let mut checkpoint = checkpoint_store.load().unwrap().unwrap();
+    git(&fixture.repo, ["fetch", "origin"]);
+    git(&fixture.repo, ["reset", "--hard", "origin/main"]);
+    fs::write(fixture.repo.join("rejected-marker"), "rejected\n").unwrap();
+    git(&fixture.repo, ["add", "rejected-marker"]);
+    git(&fixture.repo, ["commit", "-m", "rejected candidate"]);
+    checkpoint.last_scanned_tip =
+        String::from_utf8(git(&fixture.repo, ["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
+    checkpoint.conflicts.insert(
+        "$workspace".to_owned(),
+        SkillConflict {
+            rejected_commit: checkpoint.last_scanned_tip.clone(),
+            code: "skill_invalid_workspace_meta".to_owned(),
+            accepted_tree_oid: checkpoint
+                .workspace_tree
+                .as_ref()
+                .map(|tree| tree.tree_oid.clone()),
+            rejected_receipt_paths: BTreeSet::new(),
+        },
+    );
+    checkpoint_store.save(&checkpoint).unwrap();
+    store.invalidate();
+
+    let second = store
+        .list(SkillListQuery {
+            archived: false,
+            limit: 1,
+            cursor: Some(cursor),
+        })
+        .unwrap();
+    assert_eq!(second.skills[0].slug.as_str(), "release-check");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn accepted_reads_use_worktree_only_while_head_skill_tree_matches() {
+    let fixture = Fixture::new().await;
+    fixture.bootstrap().await;
+    let created = fixture.create("release-check").await;
+    let revision = created.current_revision.unwrap();
+    let checkpoint_store =
+        gitim_sync::skill::checkpoint::SkillCheckpointStore::new(&fixture.repo).unwrap();
+    let checkpoint = checkpoint_store.load().unwrap().unwrap();
+    let accepted = checkpoint.skills.get("release-check").unwrap();
+    git(
+        &fixture.repo,
+        ["reset", "--hard", &accepted.tree.commit_oid],
+    );
+
+    let markdown = fixture.repo.join(format!(
+        "skills/release-check/revisions/{}/package/SKILL.md",
+        revision.as_str()
+    ));
+    fs::write(
+        &markdown,
+        "---\nname: release-check\ndescription: Worktree\n---\n\nworktree-equal\n",
+    )
+    .unwrap();
+    fixture.state.skill_store.invalidate();
+    let equal = fixture
+        .state
+        .skill_store
+        .load(&SkillReference {
+            slug: SkillSlug::new("release-check").unwrap(),
+            revision: None,
+        })
+        .unwrap();
+    assert!(equal.skill_markdown.contains("worktree-equal"));
+
+    git(&fixture.repo, ["add", "."]);
+    git(&fixture.repo, ["commit", "-m", "diverge skill tree"]);
+    fixture.state.skill_store.invalidate();
+    let diverged = fixture
+        .state
+        .skill_store
+        .load(&SkillReference {
+            slug: SkillSlug::new("release-check").unwrap(),
+            revision: None,
+        })
+        .unwrap();
+    assert!(diverged.skill_markdown.contains("initial"));
+    assert!(!diverged.skill_markdown.contains("worktree-equal"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -881,6 +881,7 @@ fn skill_and_workspace_repairs_restore_the_checkpoint_accepted_tree() {
                 )
             };
         let (_store, conflict) = install_conflict(&fixture, &changed_path, rewrite);
+        let rejected_commit = conflict.rejected_commit.clone();
         let accepted_tree = conflict.accepted_tree_oid.clone().unwrap();
         let repair_id = RequestId::generate();
         let repaired = fixture
@@ -924,6 +925,125 @@ fn skill_and_workspace_repairs_restore_the_checkpoint_accepted_tree() {
         .trim()
         .to_owned();
         assert_eq!(repaired_tree, accepted_tree);
+        let receipt = format!(
+            "origin/main:skills/receipts/{}.meta.yaml",
+            repair_id.as_str()
+        );
+        git(fixture.first.path(), ["show", &receipt]);
+        git(
+            fixture.first.path(),
+            [
+                "merge-base",
+                "--is-ancestor",
+                &rejected_commit,
+                "origin/main",
+            ],
+        );
+        let checkpoint = SkillCheckpointStore::new(fixture.first.path())
+            .unwrap()
+            .load()
+            .unwrap()
+            .unwrap();
+        let checkpoint_key = if workspace_scope {
+            "$workspace"
+        } else {
+            slug.as_str()
+        };
+        assert!(!checkpoint.conflicts.contains_key(checkpoint_key));
+        assert_eq!(checkpoint.last_scanned_tip, repaired.commit_id);
+        let resumed = validate_incoming_skill_history(
+            &GitStorage::new(fixture.first.path()),
+            &checkpoint,
+            "origin/main",
+        )
+        .unwrap();
+        assert!(resumed.checkpoint.conflicts.is_empty());
+    }
+}
+
+#[test]
+fn repair_rejects_non_admin_absent_conflict_and_checkpoint_mismatch_without_receipts() {
+    let fixture = Fixture::new();
+    fixture.bootstrap_and_create(&SkillSlug::new("repair-admission").unwrap());
+    let store = SkillCheckpointStore::new(fixture.first.path()).unwrap();
+    let accepted = store.load().unwrap().unwrap().workspace_tree.unwrap();
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+
+    let absent_id = RequestId::generate();
+    let absent = execute_remote_skill_transaction(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::Repair(SkillRepairRequest {
+                request_id: absent_id.clone(),
+                scope: SkillRepairScope::Workspace,
+                conflict_tip: accepted.commit_oid.clone(),
+                accepted_tree: accepted.tree_oid.clone(),
+            }),
+            None,
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(absent.code(), "skill_sync_conflict");
+
+    let (_store, conflict) = install_conflict(&fixture, "skills/workspace.meta.yaml", |value| {
+        value.replace("administrators:\n- alice", "administrators: []")
+    });
+    let mismatch_id = RequestId::generate();
+    let mismatch = execute_remote_skill_transaction(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::Repair(SkillRepairRequest {
+                request_id: mismatch_id.clone(),
+                scope: SkillRepairScope::Workspace,
+                conflict_tip: accepted.commit_oid,
+                accepted_tree: conflict.accepted_tree_oid.clone().unwrap(),
+            }),
+            None,
+        ),
+    )
+    .unwrap_err();
+    assert_eq!(mismatch.code(), "skill_sync_conflict");
+
+    let non_admin_id = RequestId::generate();
+    let non_admin = execute_remote_skill_transaction(
+        &repo,
+        &guard,
+        RemoteSkillTransactionRequest {
+            request: SkillMutationRequest::Repair(SkillRepairRequest {
+                request_id: non_admin_id.clone(),
+                scope: SkillRepairScope::Workspace,
+                conflict_tip: conflict.rejected_commit,
+                accepted_tree: conflict.accepted_tree_oid.unwrap(),
+            }),
+            actor: "bob".to_owned(),
+            author_email: "bob@example.com".to_owned(),
+            now: "2026-07-31T00:00:00Z".to_owned(),
+            package: None,
+            active_users: BTreeSet::from(["alice".to_owned(), "bob".to_owned()]),
+        },
+    )
+    .unwrap_err();
+    assert_eq!(non_admin.code(), "skill_admin_required");
+
+    git(fixture.first.path(), ["fetch", "origin"]);
+    for request_id in [absent_id, mismatch_id, non_admin_id] {
+        let receipt = format!(
+            "origin/main:skills/receipts/{}.meta.yaml",
+            request_id.as_str()
+        );
+        let output = Command::new("git")
+            .args(["show", &receipt])
+            .current_dir(fixture.first.path())
+            .output()
+            .unwrap();
+        assert!(
+            !output.status.success(),
+            "unexpected receipt for {}",
+            request_id.as_str()
+        );
     }
 }
 
@@ -976,6 +1096,55 @@ fn workspace_repair_rejects_a_checkpoint_changed_after_candidate_build() {
     .unwrap_err();
     assert!(changed.load(Ordering::SeqCst));
     assert_eq!(error.code(), "skill_sync_conflict");
+    git(fixture.first.path(), ["fetch", "origin"]);
+    let receipt = format!(
+        "origin/main:skills/receipts/{}.meta.yaml",
+        request_id.as_str()
+    );
+    let output = Command::new("git")
+        .args(["show", &receipt])
+        .current_dir(fixture.first.path())
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+}
+
+#[test]
+fn workspace_repair_rejects_a_checkpoint_cleared_after_candidate_build() {
+    let fixture = Fixture::new();
+    let slug = SkillSlug::new("repair-clear-race").unwrap();
+    fixture.bootstrap_and_create(&slug);
+    let (store, conflict) = install_conflict(&fixture, "skills/workspace.meta.yaml", |value| {
+        value.replace("administrators:\n- alice", "administrators: []")
+    });
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::Repair(SkillRepairRequest {
+        request_id: request_id.clone(),
+        scope: SkillRepairScope::Workspace,
+        conflict_tip: conflict.rejected_commit,
+        accepted_tree: conflict.accepted_tree_oid.unwrap(),
+    });
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let cleared = Arc::new(AtomicBool::new(false));
+    let cleared_flag = Arc::clone(&cleared);
+    let error = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig {
+            after_built: Some(Arc::new(move || {
+                if !cleared_flag.swap(true, Ordering::SeqCst) {
+                    fs::remove_file(&store.path).unwrap();
+                }
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap_err();
+    assert!(cleared.load(Ordering::SeqCst));
+    assert_eq!(error.code(), "skill_sync_conflict");
+
     git(fixture.first.path(), ["fetch", "origin"]);
     let receipt = format!(
         "origin/main:skills/receipts/{}.meta.yaml",
