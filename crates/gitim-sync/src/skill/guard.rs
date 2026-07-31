@@ -560,6 +560,9 @@ impl SkillSyncGuard {
     }
 
     pub fn accepted_skill_root(&self, repo: &GitStorage) -> Result<String, SkillSyncError> {
+        if repo.has_remote() {
+            repo.fetch()?;
+        }
         let branch = repo.current_branch()?;
         let Some(upstream_oid) = revision_oid(repo, &format!("origin/{branch}"))? else {
             return Ok("absent".to_owned());

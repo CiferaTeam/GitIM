@@ -6410,15 +6410,79 @@ async fn provision_github_workspace(
             ));
         }
 
-        // Scrub the token from the clone's origin URL so `git remote -v`
-        // and any diagnostic dump stop leaking it. When an override is
-        // active (e2e tests point at a `file://` bare) skip this — that URL
-        // never carried a token to begin with.
+        // Keep config.json as the token source of truth before any daemon
+        // operation can fetch or push. The clone URL necessarily carried the
+        // token, so temporarily scrub it until the protected config is
+        // durable and token propagation can recreate the derived origin URL.
+        // Test-only file remotes never contain a token and stay untouched.
         if clone_override.is_none() {
             let _ = std::process::Command::new("git")
                 .args(["remote", "set-url", "origin", &remote_url])
                 .current_dir(&human_dir)
                 .output();
+        }
+
+        // Best-effort email fetch: a failure or null email (private account)
+        // falls back to the `<handler>@gitim` sentinel. Never blocks init.
+        let github_email = match github_api.fetch_user_email(&token).await {
+            Ok(email) => email,
+            Err(e) => {
+                tracing::warn!(
+                    "fetch_user_email failed, agent commits will fallback: {}",
+                    redacted_url(&e.to_string())
+                );
+                None
+            }
+        };
+
+        let config = WorkspaceConfig {
+            workspace: workspace.to_string_lossy().into_owned(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            git: GitConfig {
+                provider: GitProvider::Github,
+                remote_url: Some(remote_url.clone()),
+                token: Some(token.clone()),
+                github_email,
+            },
+        };
+        config.write(workspace).map_err(|e| {
+            cleanup_human_dir(workspace);
+            (
+                "config_write_failed",
+                redacted_url(&format!("failed to write config: {e}")),
+            )
+        })?;
+
+        if clone_override.is_none() {
+            crate::token_propagation::propagate_token(workspace).map_err(|error| {
+                cleanup_human_dir(workspace);
+                (
+                    "config_write_failed",
+                    redacted_url(&format!(
+                        "failed to configure clone authentication: {error}"
+                    )),
+                )
+            })?;
+            let configured_origin = std::process::Command::new("git")
+                .args(["config", "--get", "remote.origin.url"])
+                .current_dir(&human_dir)
+                .output()
+                .map_err(|error| {
+                    cleanup_human_dir(workspace);
+                    (
+                        "config_write_failed",
+                        redacted_url(&format!("failed to verify clone authentication: {error}")),
+                    )
+                })?;
+            if !configured_origin.status.success()
+                || String::from_utf8_lossy(&configured_origin.stdout).trim() != clone_url
+            {
+                cleanup_human_dir(workspace);
+                return Err((
+                    "config_write_failed",
+                    "failed to configure authenticated clone origin".to_owned(),
+                ));
+            }
         }
 
         let (git_server, auth) = if clone_override.is_some() {
@@ -6456,37 +6520,6 @@ async fn provision_github_workspace(
                 ("skill_bootstrap_failed", redacted_url(&error))
             })?;
 
-        // Best-effort email fetch: a failure or null email (private account)
-        // falls back to the `<handler>@gitim` sentinel. Never blocks init —
-        // the workspace is already usable without it.
-        let github_email = match github_api.fetch_user_email(&token).await {
-            Ok(email) => email,
-            Err(e) => {
-                tracing::warn!(
-                    "fetch_user_email failed, agent commits will fallback: {}",
-                    redacted_url(&e.to_string())
-                );
-                None
-            }
-        };
-
-        let config = WorkspaceConfig {
-            workspace: workspace.to_string_lossy().into_owned(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            git: GitConfig {
-                provider: GitProvider::Github,
-                remote_url: Some(remote_url.clone()),
-                token: Some(token.clone()),
-                github_email,
-            },
-        };
-        config.write(workspace).map_err(|e| {
-            cleanup_human_dir(workspace);
-            (
-                "config_write_failed",
-                redacted_url(&format!("failed to write config: {e}")),
-            )
-        })?;
         let _ = mark_excluded_from_backups(&runtime_dir);
 
         Ok((final_human, config))

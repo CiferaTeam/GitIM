@@ -73,6 +73,12 @@ pub struct AcceptedSkillState {
     pub archived: bool,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AcceptedRolePresence {
+    pub workspace_administrator: bool,
+    pub skill_owner_or_maintainer: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SkillConflict {
@@ -169,6 +175,82 @@ impl SkillCheckpointStore {
 
     pub fn load(&self) -> Result<Option<SkillValidationCheckpoint>, SkillSyncError> {
         self.with_lock(|locked| locked.load())
+    }
+
+    /// Read role membership only from immutable commits selected by the
+    /// accepted checkpoint. Callers first refresh the checkpoint through the
+    /// Skill sync guard, then use this snapshot instead of the working tree or
+    /// HEAD, either of which may be stale or rejected.
+    pub fn accepted_role_presence(
+        &self,
+        repo: &GitStorage,
+        handler: &str,
+    ) -> Result<AcceptedRolePresence, SkillSyncError> {
+        let checkpoint = self.load()?.ok_or_else(|| {
+            SkillSyncError::Checkpoint("accepted Skill checkpoint is missing".to_owned())
+        })?;
+        if !checkpoint.conflicts.is_empty() {
+            return Err(SkillError::SyncConflict.into());
+        }
+
+        let mut roles = AcceptedRolePresence::default();
+        if let Some(tree) = &checkpoint.workspace_tree {
+            ensure_accepted_object(
+                repo,
+                &tree.commit_oid,
+                "skills/workspace.meta.yaml",
+                &tree.tree_oid,
+            )?;
+            let bytes = super::git_tree::read_blob_at(
+                repo,
+                &tree.commit_oid,
+                "skills/workspace.meta.yaml",
+            )?
+            .ok_or_else(|| {
+                SkillSyncError::Checkpoint(
+                    "accepted workspace Skill metadata is missing".to_owned(),
+                )
+            })?;
+            let metadata: WorkspaceSkillMeta = serde_yaml::from_slice(&bytes).map_err(|error| {
+                SkillSyncError::Checkpoint(format!(
+                    "parse accepted workspace Skill metadata: {error}"
+                ))
+            })?;
+            roles.workspace_administrator = metadata
+                .administrators
+                .iter()
+                .any(|administrator| administrator.as_str() == handler);
+        }
+
+        for (slug, state) in &checkpoint.skills {
+            let root = if state.archived {
+                format!("archive/skills/{slug}")
+            } else {
+                format!("skills/{slug}")
+            };
+            ensure_accepted_object(repo, &state.tree.commit_oid, &root, &state.tree.tree_oid)?;
+            let path = format!("{root}/skill.meta.yaml");
+            let bytes = super::git_tree::read_blob_at(repo, &state.tree.commit_oid, &path)?
+                .ok_or_else(|| {
+                    SkillSyncError::Checkpoint(format!(
+                        "accepted Skill metadata is missing for {slug}"
+                    ))
+                })?;
+            let metadata: SkillMeta = serde_yaml::from_slice(&bytes).map_err(|error| {
+                SkillSyncError::Checkpoint(format!(
+                    "parse accepted Skill metadata for {slug}: {error}"
+                ))
+            })?;
+            if metadata
+                .owners
+                .iter()
+                .chain(metadata.maintainers.iter())
+                .any(|role| role.as_str() == handler)
+            {
+                roles.skill_owner_or_maintainer = true;
+            }
+        }
+        Ok(roles)
     }
 
     pub fn save(&self, checkpoint: &SkillValidationCheckpoint) -> Result<(), SkillSyncError> {
@@ -309,6 +391,21 @@ impl SkillCheckpointStore {
         }
         Ok(())
     }
+}
+
+fn ensure_accepted_object(
+    repo: &GitStorage,
+    commit: &str,
+    path: &str,
+    expected_oid: &str,
+) -> Result<(), SkillSyncError> {
+    let actual = super::git_tree::tree_oid_at(repo, commit, path)?;
+    if actual.as_deref() != Some(expected_oid) {
+        return Err(SkillSyncError::Checkpoint(format!(
+            "accepted Skill pointer does not match {path}"
+        )));
+    }
+    Ok(())
 }
 
 pub(crate) fn lock_exclusive_until(

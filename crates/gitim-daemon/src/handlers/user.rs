@@ -3,8 +3,7 @@ use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
 use gitim_core::skill::SkillError;
 use gitim_core::types::{Handler, UserMeta, MAX_INTRODUCTION_LEN};
-use gitim_sync::git::GitStorage;
-use std::path::Component;
+use gitim_sync::skill::checkpoint::SkillCheckpointStore;
 use tracing::{info, warn};
 
 pub async fn handle_register_user(
@@ -243,10 +242,6 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
     if !active_path.exists() {
         return Response::error(format!("user @{} not found", handler));
     }
-    if let Err(code) = ensure_no_skill_roles(&state.repo_root, &handler) {
-        return skill_role_precondition_response(code);
-    }
-
     // Commit-tree lock: held across git mv + commit so a concurrent
     // `handle_send` (also takes this lock) can't slip a `git add` + `git
     // commit` in between our staged mv and our `add_and_commit_as`, which
@@ -254,15 +249,15 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
     // section is all blocking subprocess calls; std::sync::Mutex guard
     // must not cross any `.await`.
     let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
-    if let Err(code) = ensure_no_skill_roles(&state.repo_root, &handler) {
-        return skill_role_precondition_response(code);
-    }
     let skills_tree = match state.skill_root_precondition() {
         Ok(tree) => tree,
         Err(error) => {
             return Response::error(format!("archive_user Skill precondition failed: {error}"))
         }
     };
+    if let Err(code) = ensure_no_accepted_skill_roles(&state, &handler) {
+        return skill_role_precondition_response(code);
+    }
     if let Err(error) = std::fs::create_dir_all(&archive_dir) {
         return Response::error(format!("failed to create archive/users dir: {error}"));
     }
@@ -496,44 +491,20 @@ pub async fn handle_unarchive_user(
     Response::json(payload)
 }
 
-pub(crate) fn ensure_no_skill_roles(
-    repo_root: &std::path::Path,
+pub(crate) fn ensure_no_accepted_skill_roles(
+    state: &SharedState,
     handler: &str,
 ) -> Result<(), String> {
-    let repo = GitStorage::new(repo_root);
-    let entries = repo
-        .list_tree_entries_at_ref("HEAD", &["skills", "archive/skills"])
-        .map_err(|error| format!("read committed Skill tree: {error}"))?;
-    for entry in entries {
-        if !is_bounded_skill_tree_path(&entry.path)
-            || entry.object_type != "blob"
-            || !matches!(entry.mode.as_str(), "100644" | "100755")
-        {
-            return Err("invalid_skill_tree_entry".to_owned());
-        }
-        let Some(path) = entry.path.to_str() else {
-            return Err("invalid_skill_tree_entry".to_owned());
-        };
-        let is_workspace = path == "skills/workspace.meta.yaml";
-        let is_skill_meta = path.ends_with("/skill.meta.yaml");
-        if !is_workspace && !is_skill_meta {
-            continue;
-        }
-        let content = repo
-            .show_file_at_ref("HEAD", path)
-            .map_err(|error| format!("read committed {path}: {error}"))?
-            .ok_or_else(|| format!("committed Skill metadata disappeared: {path}"))?;
-        let value: serde_yaml::Value = serde_yaml::from_str(&content)
-            .map_err(|error| format!("parse committed {path}: {error}"))?;
-        if is_workspace && yaml_role_contains(&value, "administrators", handler) {
-            return Err("skill_admin_role_present".to_owned());
-        }
-        if is_skill_meta
-            && (yaml_role_contains(&value, "owners", handler)
-                || yaml_role_contains(&value, "maintainers", handler))
-        {
-            return Err("skill_roles_present".to_owned());
-        }
+    let checkpoint = SkillCheckpointStore::new(&state.repo_root)
+        .map_err(|error| format!("open accepted Skill checkpoint: {error}"))?;
+    let roles = checkpoint
+        .accepted_role_presence(&state.git_storage, handler)
+        .map_err(|error| format!("read accepted Skill roles: {error}"))?;
+    if roles.workspace_administrator {
+        return Err(SkillError::AdminRolePresent.code().to_owned());
+    }
+    if roles.skill_owner_or_maintainer {
+        return Err(SkillError::RolesPresent.code().to_owned());
     }
     Ok(())
 }
@@ -547,36 +518,17 @@ pub(crate) fn skill_role_precondition_response(code: String) -> Response {
     Response::error(code)
 }
 
-fn is_bounded_skill_tree_path(path: &std::path::Path) -> bool {
-    let components: Vec<_> = path.components().collect();
-    if components
-        .iter()
-        .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return false;
-    }
-    matches!(
-        components.as_slice(),
-        [Component::Normal(root), ..] if *root == "skills"
-    ) || matches!(
-        components.as_slice(),
-        [Component::Normal(archive), Component::Normal(skills), ..]
-            if *archive == "archive" && *skills == "skills"
-    )
-}
-
-fn yaml_role_contains(value: &serde_yaml::Value, key: &str, handler: &str) -> bool {
-    value
-        .get(key)
-        .and_then(serde_yaml::Value::as_sequence)
-        .is_some_and(|values| values.iter().any(|value| value.as_str() == Some(handler)))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::AppState;
+    use gitim_core::skill::{RequestId, SkillMutationRequest, SkillWorkspaceBootstrapRequest};
     use gitim_core::types::config::Config;
+    use gitim_sync::skill::guard::SkillSyncGuard;
+    use gitim_sync::skill::transaction::{
+        execute_remote_skill_transaction, RemoteSkillTransactionRequest,
+    };
+    use std::collections::BTreeSet;
     use std::sync::Arc;
     use tokio::sync::broadcast;
 
@@ -691,6 +643,38 @@ mod tests {
             .unwrap();
     }
 
+    fn publish_workspace_bootstrap(state: &SharedState, actor: &str, active_users: &[&str]) {
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "HEAD"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        assert!(
+            push.status.success(),
+            "push users fixture: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+        let guard = SkillSyncGuard::new(&state.repo_root).unwrap();
+        execute_remote_skill_transaction(
+            &state.git_storage,
+            &guard,
+            RemoteSkillTransactionRequest {
+                request: SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                    request_id: RequestId::generate(),
+                }),
+                actor: actor.to_owned(),
+                author_email: format!("{actor}@example.com"),
+                now: "2026-07-31T00:00:00Z".to_owned(),
+                package: None,
+                active_users: active_users
+                    .iter()
+                    .map(|handler| (*handler).to_owned())
+                    .collect::<BTreeSet<_>>(),
+            },
+        )
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn archive_user_moves_board_to_archive() {
         let tmp = tempfile::tempdir().unwrap();
@@ -736,13 +720,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_user_rejects_workspace_administrator_before_filesystem_mutation() {
+    async fn archive_user_allows_accepted_role_removal_when_head_still_contains_role() {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_state(tmp.path());
         register(&state, "alice").await;
         register(&state, "bob").await;
         commit_skill_roles(&state, &["alice"], &[]);
+
+        let response =
+            handle_archive_user(state.clone(), "alice".to_owned(), "bob".to_owned()).await;
+
+        assert!(
+            response.ok,
+            "accepted role removal should permit archive: {:?}",
+            response.error
+        );
+        assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(state
+            .repo_root
+            .join("archive/users/alice.meta.yaml")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn archive_user_rejects_accepted_administrator_when_head_omits_role() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register(&state, "alice").await;
+        register(&state, "bob").await;
+        publish_workspace_bootstrap(&state, "alice", &["alice", "bob"]);
+        assert!(
+            state
+                .git_storage
+                .show_file_at_ref("HEAD", "skills/workspace.meta.yaml")
+                .unwrap()
+                .is_none(),
+            "fixture HEAD must remain stale and omit the accepted role"
+        );
         let head = state.git_storage.rev_parse("HEAD").unwrap();
+        let user_bytes = std::fs::read(state.repo_root.join("users/alice.meta.yaml")).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap()
+            .stdout;
 
         let response =
             handle_archive_user(state.clone(), "alice".to_owned(), "bob".to_owned()).await;
@@ -750,16 +772,30 @@ mod tests {
         assert!(!response.ok);
         assert_eq!(
             response.error_code.as_deref(),
-            Some(SkillError::AdminRolePresent.code())
+            Some(SkillError::AdminRolePresent.code()),
+            "unexpected stale-HEAD archive error: {:?}",
+            response.error
         );
         assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head);
-        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+        assert_eq!(
+            std::fs::read(state.repo_root.join("users/alice.meta.yaml")).unwrap(),
+            user_bytes
+        );
+        assert_eq!(
+            std::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&state.repo_root)
+                .output()
+                .unwrap()
+                .stdout,
+            status
+        );
         assert!(!state.repo_root.join("archive/users").exists());
     }
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn archive_user_rejects_external_skill_metadata_symlink_before_mutation() {
+    async fn archive_user_does_not_traverse_rejected_skill_metadata_symlink() {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -782,15 +818,15 @@ mod tests {
             .current_dir(&state.repo_root)
             .output()
             .unwrap();
-        let head = state.git_storage.rev_parse("HEAD").unwrap();
-
         let response =
             handle_archive_user(state.clone(), "alice".to_owned(), "bob".to_owned()).await;
 
-        assert!(!response.ok);
-        assert_eq!(response.error.as_deref(), Some("invalid_skill_tree_entry"));
-        assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head);
-        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(response.ok, "archive failed: {:?}", response.error);
+        assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(state
+            .repo_root
+            .join("archive/users/alice.meta.yaml")
+            .exists());
         assert_eq!(
             std::fs::read_to_string(&external).unwrap(),
             external_content
@@ -799,7 +835,7 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn depart_user_rejects_a_skill_directory_symlink_loop_before_mutation() {
+    async fn depart_user_does_not_traverse_rejected_skill_directory_symlink_loop() {
         use std::os::unix::fs::symlink;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -818,15 +854,11 @@ mod tests {
             .current_dir(&state.repo_root)
             .output()
             .unwrap();
-        let head = state.git_storage.rev_parse("HEAD").unwrap();
-
         let response = crate::handlers::handle_depart_user(state.clone(), "alice".to_owned()).await;
 
-        assert!(!response.ok);
-        assert_eq!(response.error.as_deref(), Some("invalid_skill_tree_entry"));
-        assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head);
-        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
-        assert!(!state
+        assert!(response.ok, "depart failed: {:?}", response.error);
+        assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(state
             .repo_root
             .join("archive/users/alice.meta.yaml")
             .exists());

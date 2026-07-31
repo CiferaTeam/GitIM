@@ -1,5 +1,5 @@
 use crate::api::{Event, Response};
-use crate::handlers::user::{ensure_no_skill_roles, skill_role_precondition_response};
+use crate::handlers::user::{ensure_no_accepted_skill_roles, skill_role_precondition_response};
 use crate::state::SharedState;
 use gitim_core::dm::parse_dm_filename;
 use gitim_core::formatter::format_event;
@@ -87,8 +87,14 @@ pub async fn handle_depart_user(state: SharedState, handler: String) -> Response
     if !active_meta.exists() {
         return Response::error(format!("user @{} not found", handler));
     }
-    if let Err(code) = ensure_no_skill_roles(&state.repo_root, &handler) {
-        return skill_role_precondition_response(code);
+    {
+        let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+        if let Err(error) = state.skill_root_precondition() {
+            return Response::error(format!("depart_user Skill precondition failed: {error}"));
+        }
+        if let Err(code) = ensure_no_accepted_skill_roles(&state, &handler) {
+            return skill_role_precondition_response(code);
+        }
     }
 
     // 4. Run phases. Each phase returns `Result<u64, Response>` where the
@@ -608,12 +614,12 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
 
     {
         let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
-        if let Err(code) = ensure_no_skill_roles(&state.repo_root, handler) {
-            return Err(skill_role_precondition_response(code));
-        }
         let skills_tree = state.skill_root_precondition().map_err(|error| {
             Response::error(format!("phase4 Skill precondition failed: {error}"))
         })?;
+        if let Err(code) = ensure_no_accepted_skill_roles(state, handler) {
+            return Err(skill_role_precondition_response(code));
+        }
         let archive_dir = state.repo_root.join("archive/users");
         if let Err(error) = std::fs::create_dir_all(&archive_dir) {
             return Err(Response::error(format!(
@@ -713,7 +719,16 @@ fn push_with_retry(state: &SharedState, phase: &str) -> Result<(), Response> {
 mod tests {
     use super::*;
     use crate::state::AppState;
+    use gitim_core::skill::{
+        validate_package_entries, PackageEntry, RequestId, SkillCreateRequest,
+        SkillMutationRequest, SkillSlug, SkillWorkspaceBootstrapRequest,
+    };
     use gitim_core::types::config::Config;
+    use gitim_sync::skill::guard::SkillSyncGuard;
+    use gitim_sync::skill::transaction::{
+        execute_remote_skill_transaction, RemoteSkillTransactionRequest,
+    };
+    use std::collections::BTreeSet;
     use std::sync::Arc;
     use tokio::sync::broadcast;
 
@@ -839,6 +854,64 @@ mod tests {
             .unwrap();
     }
 
+    fn publish_workspace_bootstrap_and_alice_owned_skill(state: &SharedState) {
+        let push = std::process::Command::new("git")
+            .args(["push", "origin", "HEAD"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap();
+        assert!(
+            push.status.success(),
+            "push users fixture: {}",
+            String::from_utf8_lossy(&push.stderr)
+        );
+        let guard = SkillSyncGuard::new(&state.repo_root).unwrap();
+        let active_users = BTreeSet::from(["alice".to_owned(), "bob".to_owned()]);
+        execute_remote_skill_transaction(
+            &state.git_storage,
+            &guard,
+            RemoteSkillTransactionRequest {
+                request: SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                    request_id: RequestId::generate(),
+                }),
+                actor: "bob".to_owned(),
+                author_email: "bob@example.com".to_owned(),
+                now: "2026-07-31T00:00:00Z".to_owned(),
+                package: None,
+                active_users: active_users.clone(),
+            },
+        )
+        .unwrap();
+        let slug = SkillSlug::new("reviewer").unwrap();
+        let package = validate_package_entries(
+            &slug,
+            vec![PackageEntry::new(
+                "SKILL.md",
+                b"---\nname: reviewer\ndescription: Review code\n---\n\nReview.\n".to_vec(),
+            )],
+        )
+        .unwrap();
+        execute_remote_skill_transaction(
+            &state.git_storage,
+            &guard,
+            RemoteSkillTransactionRequest {
+                request: SkillMutationRequest::Create(SkillCreateRequest {
+                    request_id: RequestId::generate(),
+                    slug,
+                    display_name: "Reviewer".to_owned(),
+                    description: "Review code".to_owned(),
+                    source_directory: state.repo_root.join("unused"),
+                }),
+                actor: "alice".to_owned(),
+                author_email: "alice@example.com".to_owned(),
+                now: "2026-07-31T00:01:00Z".to_owned(),
+                package: Some(package),
+                active_users,
+            },
+        )
+        .unwrap();
+    }
+
     fn commit_authored_thread(state: &SharedState, handler: &str) -> String {
         let thread = state.repo_root.join("channels/general.thread");
         std::fs::create_dir_all(thread.parent().unwrap()).unwrap();
@@ -900,7 +973,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn depart_user_rejects_skill_owner_before_phase_one() {
+    async fn depart_user_allows_accepted_role_removal_when_head_still_contains_owner() {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_state(tmp.path());
         register_user(&state, "alice");
@@ -909,7 +982,54 @@ mod tests {
         }
         let thread = commit_authored_thread(&state, "alice");
         commit_skill_roles(&state, &[], &["alice"]);
+        let response = handle_depart_user(state.clone(), "alice".to_owned()).await;
+
+        assert!(
+            response.ok,
+            "accepted role removal should permit depart: {:?}",
+            response.error
+        );
+        let departed_thread =
+            std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap();
+        assert!(departed_thread.starts_with(&thread));
+        assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(state
+            .repo_root
+            .join("archive/users/alice.meta.yaml")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn depart_user_rejects_accepted_owner_when_head_omits_role_before_phase_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register_user(&state, "alice");
+        register_user(&state, "bob");
+        {
+            state
+                .users
+                .write()
+                .await
+                .extend(["alice".to_owned(), "bob".to_owned()]);
+        }
+        let thread = commit_authored_thread(&state, "alice");
+        publish_workspace_bootstrap_and_alice_owned_skill(&state);
+        assert!(
+            state
+                .git_storage
+                .show_file_at_ref("HEAD", "skills/reviewer/skill.meta.yaml")
+                .unwrap()
+                .is_none(),
+            "fixture HEAD must remain stale and omit the accepted role"
+        );
         let head = state.git_storage.rev_parse("HEAD").unwrap();
+        let user_bytes = std::fs::read(state.repo_root.join("users/alice.meta.yaml")).unwrap();
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&state.repo_root)
+            .output()
+            .unwrap()
+            .stdout;
 
         let response = handle_depart_user(state.clone(), "alice".to_owned()).await;
 
@@ -923,25 +1043,35 @@ mod tests {
             std::fs::read_to_string(state.repo_root.join("channels/general.thread")).unwrap(),
             thread
         );
-        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+        assert_eq!(
+            std::fs::read(state.repo_root.join("users/alice.meta.yaml")).unwrap(),
+            user_bytes
+        );
+        assert_eq!(
+            std::process::Command::new("git")
+                .args(["status", "--porcelain"])
+                .current_dir(&state.repo_root)
+                .output()
+                .unwrap()
+                .stdout,
+            status
+        );
+        assert!(!state.repo_root.join("archive/users").exists());
     }
 
     #[tokio::test]
-    async fn depart_phase_four_rechecks_administrator_before_mutation() {
+    async fn depart_phase_four_uses_accepted_role_removal() {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_state(tmp.path());
         register_user(&state, "alice");
         commit_skill_roles(&state, &["alice"], &[]);
-        let head = state.git_storage.rev_parse("HEAD").unwrap();
+        let commits = phase4_archive_user(&state, "alice").await.unwrap();
 
-        let response = phase4_archive_user(&state, "alice").await.unwrap_err();
-
-        assert_eq!(
-            response.error_code.as_deref(),
-            Some(gitim_core::skill::SkillError::AdminRolePresent.code())
-        );
-        assert_eq!(state.git_storage.rev_parse("HEAD").unwrap(), head);
-        assert!(state.repo_root.join("users/alice.meta.yaml").exists());
-        assert!(!state.repo_root.join("archive/users").exists());
+        assert_eq!(commits, 1);
+        assert!(!state.repo_root.join("users/alice.meta.yaml").exists());
+        assert!(state
+            .repo_root
+            .join("archive/users/alice.meta.yaml")
+            .exists());
     }
 }
