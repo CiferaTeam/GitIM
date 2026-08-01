@@ -186,9 +186,15 @@ impl SkillCheckpointStore {
         repo: &GitStorage,
         handler: &str,
     ) -> Result<AcceptedRolePresence, SkillSyncError> {
-        let checkpoint = self.load()?.ok_or_else(|| {
-            SkillSyncError::Checkpoint("accepted Skill checkpoint is missing".to_owned())
-        })?;
+        let checkpoint = match self.load()? {
+            Some(checkpoint) => checkpoint,
+            None if !repo.has_remote() => return Ok(AcceptedRolePresence::default()),
+            None => {
+                return Err(SkillSyncError::Checkpoint(
+                    "accepted Skill checkpoint is missing".to_owned(),
+                ))
+            }
+        };
         if !checkpoint.conflicts.is_empty() {
             return Err(SkillError::SyncConflict.into());
         }
