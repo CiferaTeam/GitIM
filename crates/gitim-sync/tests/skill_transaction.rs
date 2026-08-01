@@ -2142,7 +2142,7 @@ fn hanging_git_child_with_group_kill_failure_respects_deadline_and_releases_perm
 
 #[cfg(unix)]
 #[test]
-fn post_push_timeout_is_retryable_and_keeps_the_pushed_journal() {
+fn post_push_timeout_returns_pending_sync_and_keeps_the_pushed_journal() {
     use std::os::unix::fs::PermissionsExt;
 
     let fixture = Fixture::new();
@@ -2186,17 +2186,15 @@ fn post_push_timeout_is_retryable_and_keeps_the_pushed_journal() {
         })),
         ..SkillTransactionTestConfig::default()
     };
-    let failures_before = skill_transport_failure_count();
-    let error = execute_remote_skill_transaction_with_test_config(
+    let result = execute_remote_skill_transaction_with_test_config(
         &repo,
         &guard,
         transaction_request(request.clone(), None),
         config.clone(),
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(skill_transaction_error_is_retryable(&error));
-    assert!(skill_transport_failure_count() > failures_before);
+    assert_eq!(result.local_state, SkillLocalState::PendingSync);
     let journal = fixture
         .first
         .path()
@@ -2207,7 +2205,7 @@ fn post_push_timeout_is_retryable_and_keeps_the_pushed_journal() {
     let journal_text = fs::read_to_string(&journal).unwrap();
     assert!(
         journal_text.contains("phase: pushed"),
-        "unexpected journal after {error:?}; armed={}, fired={}: {journal_text}",
+        "unexpected journal; armed={}, fired={}: {journal_text}",
         fixture
             .first
             .path()
@@ -2252,7 +2250,7 @@ fn post_push_timeout_is_retryable_and_keeps_the_pushed_journal() {
 
 #[cfg(unix)]
 #[test]
-fn post_validation_timeout_keeps_the_previous_checkpoint_and_pushed_journal() {
+fn post_validation_timeout_returns_pending_sync_and_keeps_the_pushed_journal() {
     use std::os::unix::fs::PermissionsExt;
 
     let fixture = Fixture::new();
@@ -2304,15 +2302,15 @@ fn post_validation_timeout_keeps_the_previous_checkpoint_and_pushed_journal() {
         })),
         ..SkillTransactionTestConfig::default()
     };
-    let error = execute_remote_skill_transaction_with_test_config(
+    let result = execute_remote_skill_transaction_with_test_config(
         &repo,
         &guard,
         transaction_request(request.clone(), Some(package(&slug, "candidate"))),
         config.clone(),
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(skill_transaction_error_is_retryable(&error));
+    assert_eq!(result.local_state, SkillLocalState::PendingSync);
     assert_eq!(fs::read(&checkpoint_path).unwrap(), checkpoint_before);
     let journal = fixture
         .first
@@ -2338,7 +2336,7 @@ fn post_validation_timeout_keeps_the_previous_checkpoint_and_pushed_journal() {
 
 #[cfg(unix)]
 #[test]
-fn checkpoint_finalization_validation_obeys_the_overall_deadline() {
+fn checkpoint_finalization_timeout_returns_pending_sync_within_the_overall_deadline() {
     use std::os::unix::fs::PermissionsExt;
 
     let fixture = Fixture::new();
@@ -2373,7 +2371,7 @@ fn checkpoint_finalization_validation_obeys_the_overall_deadline() {
     let repo = GitStorage::new(fixture.first.path());
     let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
     let started = std::time::Instant::now();
-    let error = execute_remote_skill_transaction_with_test_config(
+    let result = execute_remote_skill_transaction_with_test_config(
         &repo,
         &guard,
         transaction_request(request, None),
@@ -2387,9 +2385,9 @@ fn checkpoint_finalization_validation_obeys_the_overall_deadline() {
             ..SkillTransactionTestConfig::default()
         },
     )
-    .unwrap_err();
+    .unwrap();
 
-    assert!(skill_transaction_error_is_retryable(&error));
+    assert_eq!(result.local_state, SkillLocalState::PendingSync);
     assert!(
         marker.exists(),
         "checkpoint validation bypassed the test Git runner"
@@ -2557,14 +2555,14 @@ fn exhausted_overall_deadline_reaps_the_direct_child_and_releases_the_permit() {
 }
 
 #[test]
-fn post_push_checkpoint_failure_returns_error_and_retains_the_pushed_journal() {
+fn post_push_checkpoint_failure_returns_pending_sync_and_retains_the_pushed_journal() {
     let fixture = Fixture::new();
     let request_id = RequestId::generate();
     let checkpoint_path = fixture.first.path().join(".gitim/skill-validation.json");
     let callback_path = checkpoint_path.clone();
     let repo = GitStorage::new(fixture.first.path());
     let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
-    execute_remote_skill_transaction_with_test_config(
+    let result = execute_remote_skill_transaction_with_test_config(
         &repo,
         &guard,
         transaction_request(
@@ -2583,8 +2581,9 @@ fn post_push_checkpoint_failure_returns_error_and_retains_the_pushed_journal() {
             ..SkillTransactionTestConfig::default()
         },
     )
-    .unwrap_err();
+    .unwrap();
 
+    assert_eq!(result.local_state, SkillLocalState::PendingSync);
     assert!(checkpoint_path.is_dir());
     let journal = fs::read_to_string(
         fixture
@@ -2676,7 +2675,7 @@ fn saturated_workspace_semaphore_obeys_the_overall_deadline() {
 }
 
 #[test]
-fn checkpoint_lock_contention_obeys_deadline_and_retains_pushed_journal() {
+fn checkpoint_lock_contention_returns_pending_sync_and_retains_pushed_journal() {
     let fixture = Fixture::new();
     let root = fixture.first.path().to_path_buf();
     let checkpoint = SkillCheckpointStore::new(&root).unwrap();
@@ -2691,7 +2690,6 @@ fn checkpoint_lock_contention_obeys_deadline_and_retains_pushed_journal() {
     let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(1);
     let worker_root = root.clone();
     let worker_request = request.clone();
-    let failures_before = skill_transport_failure_count();
     let worker = std::thread::spawn(move || {
         let repo = GitStorage::new(&worker_root);
         let guard = SkillSyncGuard::new(&worker_root).unwrap();
@@ -2727,11 +2725,10 @@ fn checkpoint_lock_contention_obeys_deadline_and_retains_pushed_journal() {
 
     FileExt::unlock(&checkpoint_lock).unwrap();
     worker.join().unwrap();
-    let error = result_while_lock_held
+    let result = result_while_lock_held
         .expect("checkpoint lock wait exceeded the transaction deadline")
-        .unwrap_err();
-    assert!(skill_transaction_error_is_retryable(&error));
-    assert!(skill_transport_failure_count() > failures_before);
+        .unwrap();
+    assert_eq!(result.local_state, SkillLocalState::PendingSync);
     assert!(!checkpoint.path.exists());
     let journal_path = root
         .join(".gitim/skill-transactions")

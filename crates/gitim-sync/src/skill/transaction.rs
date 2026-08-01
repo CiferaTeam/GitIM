@@ -67,6 +67,12 @@ pub struct RemoteSkillTransactionResult {
     pub local_state: SkillLocalState,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PublishedViewOutcome {
+    local_state: SkillLocalState,
+    checkpoint_recorded: bool,
+}
+
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SkillTransactionCrashPoint {
@@ -521,12 +527,14 @@ fn execute_transaction(
         };
 
         match publish_result {
-            Ok(local_state) => {
-                complete_journal(&mut journal, &request_lock)?;
+            Ok(outcome) => {
+                if outcome.checkpoint_recorded {
+                    complete_journal(&mut journal, &request_lock)?;
+                }
                 return Ok(RemoteSkillTransactionResult {
                     commit_id: candidate,
                     result: plan.result,
-                    local_state,
+                    local_state: outcome.local_state,
                 });
             }
             Err(SkillSyncError::Git(GitError::PushConflict)) if attempt < 2 => {
@@ -1698,7 +1706,7 @@ fn push_and_record_candidate(
     checkpoint: Option<&LockedSkillCheckpoint<'_>>,
     request_lock: &RequestJournalLock,
     context: &TransactionContext,
-) -> Result<SkillLocalState, SkillSyncError> {
+) -> Result<PublishedViewOutcome, SkillSyncError> {
     if let Some(checkpoint) = checkpoint {
         ensure_repair_checkpoint_unchanged_locked(
             checkpoint,
@@ -1720,7 +1728,7 @@ fn push_and_record_candidate(
     if let Some(timeout) = context.post_push_git_timeout {
         post_push_context.git_timeout = timeout;
     }
-    match checkpoint {
+    let recorded = match checkpoint {
         Some(checkpoint) => record_published_view_locked(
             repo,
             remote_branch,
@@ -1736,7 +1744,17 @@ fn push_and_record_candidate(
             candidate,
             &post_push_context,
         ),
-    }
+    };
+    Ok(match recorded {
+        Ok(local_state) => PublishedViewOutcome {
+            local_state,
+            checkpoint_recorded: true,
+        },
+        Err(_) => PublishedViewOutcome {
+            local_state: SkillLocalState::PendingSync,
+            checkpoint_recorded: false,
+        },
+    })
 }
 
 fn push_candidate(
