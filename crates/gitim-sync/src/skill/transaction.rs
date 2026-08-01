@@ -56,7 +56,6 @@ pub struct RemoteSkillTransactionRequest {
     pub author_email: String,
     pub now: String,
     pub package: Option<ValidatedPackage>,
-    pub active_users: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -126,7 +125,6 @@ struct TransactionJournal {
     author_email: String,
     now: String,
     package_sha256: Option<String>,
-    active_users: BTreeSet<String>,
     receipt_path: String,
     source_directory: PathBuf,
     private_index: PathBuf,
@@ -360,7 +358,7 @@ fn execute_transaction(
         acquire_workspace_permits(repo.root(), context.deadline, context.max_concurrency)?;
     if needs_recovery {
         if let Some(recovered) =
-            recover_current_transaction(repo, &mut journal, &request_lock, context)?
+            recover_current_transaction(repo, guard, &mut journal, &request_lock, context)?
         {
             return Ok(recovered);
         }
@@ -373,11 +371,20 @@ fn execute_transaction(
         fetch(repo, context)?;
         let start_branch = current_branch(repo, context)?;
         let (remote_branch, remote_tip) = resolve_active_remote(repo, &start_branch, context)?;
+        let active_users = validate_remote_authority(
+            repo,
+            guard,
+            &remote_branch,
+            &remote_tip,
+            &journal.request,
+            context,
+        )?;
         if let Some(result) = reconcile_attempt_authoritative_receipt(
             repo,
             &mut journal,
             &remote_branch,
             &remote_tip,
+            &active_users,
             &request_lock,
             context,
         )? {
@@ -392,7 +399,7 @@ fn execute_transaction(
         let mut snapshot = load_snapshot_for_request(
             repo,
             &remote_tip,
-            &journal.active_users,
+            &active_users,
             &journal.request,
             repair_checkpoint.as_ref(),
             context,
@@ -452,14 +459,7 @@ fn execute_transaction(
         save_journal(&journal, &request_lock)?;
 
         let candidate = build_candidate(repo, &journal, &plan, context)?;
-        validate_candidate(
-            repo,
-            &candidate,
-            &snapshot,
-            &plan,
-            &journal.active_users,
-            context,
-        )?;
+        validate_candidate(repo, &candidate, &snapshot, &plan, &active_users, context)?;
         journal.candidate_commit = Some(candidate.clone());
         journal.result = Some(plan.result.clone());
         journal.phase = SkillTransactionPhase::Built;
@@ -512,11 +512,20 @@ fn execute_transaction(
             Err(SkillSyncError::Git(GitError::PushConflict)) if attempt < 2 => {
                 fetch(repo, context)?;
                 let (next_branch, next_tip) = resolve_active_remote(repo, &start_branch, context)?;
+                let next_active_users = validate_remote_authority(
+                    repo,
+                    guard,
+                    &next_branch,
+                    &next_tip,
+                    &journal.request,
+                    context,
+                )?;
                 if let Some(result) = reconcile_attempt_authoritative_receipt(
                     repo,
                     &mut journal,
                     &next_branch,
                     &next_tip,
+                    &next_active_users,
                     &request_lock,
                     context,
                 )? {
@@ -527,7 +536,7 @@ fn execute_transaction(
                 let mut next_snapshot = load_snapshot_for_request(
                     repo,
                     &next_tip,
-                    &journal.active_users,
+                    &next_active_users,
                     &journal.request,
                     next_repair_checkpoint.as_ref(),
                     context,
@@ -591,6 +600,7 @@ fn execute_transaction(
 
 fn recover_current_transaction(
     repo: &GitStorage,
+    guard: &SkillSyncGuard,
     journal: &mut TransactionJournal,
     request_lock: &RequestJournalLock,
     context: &TransactionContext,
@@ -605,11 +615,20 @@ fn recover_current_transaction(
     fetch(repo, context)?;
     let start_branch = current_branch(repo, context)?;
     let (remote_branch, remote_tip) = resolve_active_remote(repo, &start_branch, context)?;
+    let active_users = validate_remote_authority(
+        repo,
+        guard,
+        &remote_branch,
+        &remote_tip,
+        &journal.request,
+        context,
+    )?;
     if let Some(result) = reconcile_authoritative_receipt(
         repo,
         journal,
         &remote_branch,
         &remote_tip,
+        &active_users,
         request_lock,
         context,
     )? {
@@ -632,6 +651,7 @@ fn reconcile_authoritative_receipt(
     journal: &mut TransactionJournal,
     remote_branch: &str,
     remote_tip: &str,
+    active_users: &BTreeSet<String>,
     request_lock: &RequestJournalLock,
     context: &TransactionContext,
 ) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
@@ -639,7 +659,7 @@ fn reconcile_authoritative_receipt(
         return Ok(None);
     }
     let package = load_snapshotted_package(journal)?;
-    let snapshot = load_snapshot(repo, remote_tip, &journal.active_users, context)?;
+    let snapshot = load_snapshot(repo, remote_tip, active_users, context)?;
     let duplicate = plan_skill_mutation(
         &snapshot,
         &SkillMutationContext {
@@ -678,6 +698,7 @@ fn reconcile_attempt_authoritative_receipt(
     journal: &mut TransactionJournal,
     remote_branch: &str,
     remote_tip: &str,
+    active_users: &BTreeSet<String>,
     request_lock: &RequestJournalLock,
     context: &TransactionContext,
 ) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
@@ -686,6 +707,7 @@ fn reconcile_attempt_authoritative_receipt(
         journal,
         remote_branch,
         remote_tip,
+        active_users,
         request_lock,
         context,
     ) {
@@ -754,7 +776,7 @@ fn recover_transaction_journals(
             return Err(checkpoint_error("transaction journal fingerprint mismatch"));
         }
         if let Some(result) =
-            recover_current_transaction(repo, &mut journal, &request_lock, context)?
+            recover_current_transaction(repo, guard, &mut journal, &request_lock, context)?
         {
             recovered.push(result);
         }
@@ -818,7 +840,6 @@ fn prepare_journal(
             .package
             .as_ref()
             .map(|value| value.content_sha256.clone()),
-        active_users: request.active_users,
         receipt_path: receipt_path(&request_id),
         source_directory,
         private_index,
@@ -1704,6 +1725,11 @@ fn record_accepted_view_locked(
         validate_incoming_skill_history_with_runner(repo, &previous, commit, &|repo, args| {
             run_git(repo, args, &[], context)
         })?;
+    if !validation.checkpoint.conflicts.is_empty()
+        || validation.checkpoint.last_scanned_tip != commit
+    {
+        return Err(SkillError::SyncConflict.into());
+    }
     let head = rev_parse(repo, "HEAD", context)?;
     let head_root = object_oid_at(repo, &head, "skills", context)?;
     let accepted_root = object_oid_at(repo, commit, "skills", context)?;
@@ -1723,11 +1749,7 @@ fn record_published_view(
     commit: &str,
     context: &TransactionContext,
 ) -> Result<SkillLocalState, SkillSyncError> {
-    match record_accepted_view(repo, branch, prior_tip, commit, context) {
-        Ok(local_state) => Ok(local_state),
-        Err(error) if skill_transaction_error_is_retryable(&error) => Err(error),
-        Err(_) => Ok(SkillLocalState::PendingSync),
-    }
+    record_accepted_view(repo, branch, prior_tip, commit, context)
 }
 
 fn record_published_view_locked(
@@ -1738,11 +1760,7 @@ fn record_published_view_locked(
     checkpoint: &LockedSkillCheckpoint<'_>,
     context: &TransactionContext,
 ) -> Result<SkillLocalState, SkillSyncError> {
-    match record_accepted_view_locked(repo, branch, prior_tip, commit, checkpoint, context) {
-        Ok(local_state) => Ok(local_state),
-        Err(error) if skill_transaction_error_is_retryable(&error) => Err(error),
-        Err(_) => Ok(SkillLocalState::PendingSync),
-    }
+    record_accepted_view_locked(repo, branch, prior_tip, commit, checkpoint, context)
 }
 
 fn find_receipt_commit(
@@ -2028,6 +2046,25 @@ fn ensure_repair_request_matches_checkpoint(
         return Err(SkillError::SyncConflict.into());
     }
     Ok(())
+}
+
+fn validate_remote_authority(
+    repo: &GitStorage,
+    guard: &SkillSyncGuard,
+    remote_branch: &str,
+    remote_tip: &str,
+    request: &SkillMutationRequest,
+    context: &TransactionContext,
+) -> Result<BTreeSet<String>, SkillSyncError> {
+    let validation = guard.validate_transaction_tip(
+        repo,
+        remote_tip,
+        remote_branch,
+        context.deadline,
+        matches!(request, SkillMutationRequest::Repair(_)),
+        &|repo, args| run_git(repo, args, &[], context),
+    )?;
+    Ok(validation.active_users)
 }
 
 fn fetch(repo: &GitStorage, context: &TransactionContext) -> Result<(), SkillSyncError> {

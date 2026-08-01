@@ -728,7 +728,6 @@ mod tests {
     use gitim_sync::skill::transaction::{
         execute_remote_skill_transaction, RemoteSkillTransactionRequest,
     };
-    use std::collections::BTreeSet;
     use std::sync::Arc;
     use tokio::sync::broadcast;
 
@@ -866,7 +865,6 @@ mod tests {
             String::from_utf8_lossy(&push.stderr)
         );
         let guard = SkillSyncGuard::new(&state.repo_root).unwrap();
-        let active_users = BTreeSet::from(["alice".to_owned(), "bob".to_owned()]);
         execute_remote_skill_transaction(
             &state.git_storage,
             &guard,
@@ -878,7 +876,6 @@ mod tests {
                 author_email: "bob@example.com".to_owned(),
                 now: "2026-07-31T00:00:00Z".to_owned(),
                 package: None,
-                active_users: active_users.clone(),
             },
         )
         .unwrap();
@@ -906,7 +903,6 @@ mod tests {
                 author_email: "alice@example.com".to_owned(),
                 now: "2026-07-31T00:01:00Z".to_owned(),
                 package: Some(package),
-                active_users,
             },
         )
         .unwrap();

@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
@@ -12,9 +11,10 @@ use std::time::Duration;
 use fs2::FileExt;
 use gitim_core::skill::{
     validate_package_entries, PackageEntry, RequestId, SkillCreateRequest, SkillMutationRequest,
-    SkillProposeRequest, SkillRepairRequest, SkillRepairScope, SkillSlug,
-    SkillWorkspaceBootstrapRequest,
+    SkillOperation, SkillProposeRequest, SkillRepairRequest, SkillRepairScope,
+    SkillRoleUpdateRequest, SkillSlug, SkillWorkspaceBootstrapRequest,
 };
+use gitim_core::types::Handler;
 use gitim_sync::git::GitStorage;
 use gitim_sync::skill::checkpoint::{
     validate_incoming_skill_history, SkillCheckpointStore, SkillConflict,
@@ -137,7 +137,6 @@ impl Fixture {
                 author_email: "alice@example.com".to_owned(),
                 now: "2026-07-31T00:00:00Z".to_owned(),
                 package,
-                active_users: BTreeSet::from(["alice".to_owned()]),
             },
         )
     }
@@ -491,8 +490,160 @@ fn transaction_request(
         author_email: "alice@example.com".to_owned(),
         now: "2026-07-31T00:00:00Z".to_owned(),
         package,
-        active_users: BTreeSet::from(["alice".to_owned()]),
     }
+}
+
+fn add_remote_user(root: &Path, handler: &str) {
+    git(root, ["fetch", "origin"]);
+    git(root, ["reset", "--hard", "origin/main"]);
+    fs::write(
+        root.join(format!("users/{handler}.meta.yaml")),
+        format!("display_name: {handler}\nrole: agent\nintroduction: Collaborator\n"),
+    )
+    .unwrap();
+    git(root, ["add", "users"]);
+    git(root, ["commit", "-m", "add collaborator"]);
+    git(root, ["push", "origin", "main"]);
+}
+
+fn remote_tip(root: &Path) -> String {
+    git(root, ["fetch", "origin"]);
+    String::from_utf8(git(root, ["rev-parse", "origin/main"]).stdout)
+        .unwrap()
+        .trim()
+        .to_owned()
+}
+
+fn remote_tree_paths(root: &Path) -> String {
+    String::from_utf8(git(root, ["ls-tree", "-r", "--name-only", "origin/main"]).stdout).unwrap()
+}
+
+#[test]
+fn role_update_rejects_a_target_archived_after_the_clone_snapshot() {
+    let fixture = Fixture::new();
+    add_remote_user(fixture.second.path(), "bob");
+    let slug = SkillSlug::new("remote-user-authority").unwrap();
+    fixture.bootstrap_and_create(&slug);
+    let checkpoint_before = SkillCheckpointStore::new(fixture.first.path())
+        .unwrap()
+        .load()
+        .unwrap()
+        .unwrap();
+
+    git(fixture.second.path(), ["fetch", "origin"]);
+    git(fixture.second.path(), ["reset", "--hard", "origin/main"]);
+    fs::create_dir_all(fixture.second.path().join("archive/users")).unwrap();
+    git(
+        fixture.second.path(),
+        ["mv", "users/bob.meta.yaml", "archive/users/bob.meta.yaml"],
+    );
+    git(
+        fixture.second.path(),
+        ["commit", "-m", "archive collaborator"],
+    );
+    git(fixture.second.path(), ["push", "origin", "main"]);
+    let archived_tip = remote_tip(fixture.first.path());
+    let request_id = RequestId::generate();
+
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let error = execute_remote_skill_transaction(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::RoleUpdate(SkillRoleUpdateRequest {
+                request_id: request_id.clone(),
+                slug,
+                operation: SkillOperation::MaintainerAdd,
+                target: Handler::new("bob").unwrap(),
+                remove_maintainer: false,
+                expected_control_revision: 1,
+            }),
+            None,
+        ),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "skill_role_target_inactive");
+    assert_eq!(remote_tip(fixture.first.path()), archived_tip);
+    let receipt_path = format!("skills/receipts/{}.meta.yaml", request_id.as_str());
+    assert!(!remote_tree_paths(fixture.first.path())
+        .lines()
+        .any(|path| path == receipt_path));
+    let checkpoint = SkillCheckpointStore::new(fixture.first.path())
+        .unwrap()
+        .load()
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint, checkpoint_before);
+}
+
+#[test]
+fn mutation_rejects_an_unaccepted_remote_skill_commit_without_publication() {
+    let fixture = Fixture::new();
+    add_remote_user(fixture.second.path(), "bob");
+    let slug = SkillSlug::new("remote-skill-authority").unwrap();
+    fixture.bootstrap_and_create(&slug);
+    let checkpoint_before = SkillCheckpointStore::new(fixture.first.path())
+        .unwrap()
+        .load()
+        .unwrap()
+        .unwrap();
+    let accepted_workspace = checkpoint_before.workspace_tree.clone().unwrap();
+
+    git(fixture.second.path(), ["fetch", "origin"]);
+    git(fixture.second.path(), ["reset", "--hard", "origin/main"]);
+    let workspace_path = fixture.second.path().join("skills/workspace.meta.yaml");
+    let workspace = fs::read_to_string(&workspace_path).unwrap();
+    fs::write(
+        &workspace_path,
+        workspace.replace(
+            "administrators:\n- alice",
+            "administrators:\n- alice\n- bob",
+        ),
+    )
+    .unwrap();
+    git(fixture.second.path(), ["add", "skills/workspace.meta.yaml"]);
+    git(
+        fixture.second.path(),
+        ["commit", "-m", "inject unauthorized administrator"],
+    );
+    git(fixture.second.path(), ["push", "origin", "main"]);
+    let rejected_tip = remote_tip(fixture.first.path());
+    let request_id = RequestId::generate();
+
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let error = execute_remote_skill_transaction(
+        &repo,
+        &guard,
+        transaction_request(
+            SkillMutationRequest::RoleUpdate(SkillRoleUpdateRequest {
+                request_id: request_id.clone(),
+                slug,
+                operation: SkillOperation::MaintainerAdd,
+                target: Handler::new("bob").unwrap(),
+                remove_maintainer: false,
+                expected_control_revision: 1,
+            }),
+            None,
+        ),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.code(), "skill_sync_conflict");
+    assert_eq!(remote_tip(fixture.first.path()), rejected_tip);
+    let receipt_path = format!("skills/receipts/{}.meta.yaml", request_id.as_str());
+    assert!(!remote_tree_paths(fixture.first.path())
+        .lines()
+        .any(|path| path == receipt_path));
+    let checkpoint = SkillCheckpointStore::new(fixture.first.path())
+        .unwrap()
+        .load()
+        .unwrap()
+        .unwrap();
+    assert_eq!(checkpoint, checkpoint_before);
+    assert_eq!(checkpoint.workspace_tree.unwrap(), accepted_workspace);
 }
 
 #[test]
@@ -964,6 +1115,7 @@ fn skill_and_workspace_repairs_restore_the_checkpoint_accepted_tree() {
 #[test]
 fn repair_rejects_non_admin_absent_conflict_and_checkpoint_mismatch_without_receipts() {
     let fixture = Fixture::new();
+    add_remote_user(fixture.second.path(), "bob");
     fixture.bootstrap_and_create(&SkillSlug::new("repair-admission").unwrap());
     let store = SkillCheckpointStore::new(fixture.first.path()).unwrap();
     let accepted = store.load().unwrap().unwrap().workspace_tree.unwrap();
@@ -1022,7 +1174,6 @@ fn repair_rejects_non_admin_absent_conflict_and_checkpoint_mismatch_without_rece
             author_email: "bob@example.com".to_owned(),
             now: "2026-07-31T00:00:00Z".to_owned(),
             package: None,
-            active_users: BTreeSet::from(["alice".to_owned(), "bob".to_owned()]),
         },
     )
     .unwrap_err();
@@ -1242,8 +1393,6 @@ fn concurrent_repairs_serialize_final_checkpoint_authority_through_publication()
     });
     let (waiting_sender, waiting_receiver) = std::sync::mpsc::sync_channel(1);
     let waiting_receiver = Arc::new(Mutex::new(waiting_receiver));
-    let (progress_sender, progress_receiver) = std::sync::mpsc::sync_channel(1);
-    let progress_receiver = Arc::new(Mutex::new(progress_receiver));
     let second_progressed_in_pause = Arc::new(AtomicBool::new(false));
     let second_handle = Arc::new(Mutex::new(None));
     let launched = Arc::new(AtomicBool::new(false));
@@ -1252,7 +1401,6 @@ fn concurrent_repairs_serialize_final_checkpoint_authority_through_publication()
     let second_progressed_in_pause_for_hook = Arc::clone(&second_progressed_in_pause);
     let second_handle_for_hook = Arc::clone(&second_handle);
     let waiting_receiver_for_hook = Arc::clone(&waiting_receiver);
-    let progress_receiver_for_hook = Arc::clone(&progress_receiver);
     let launched_for_hook = Arc::clone(&launched);
     let first_repo = GitStorage::new(fixture.first.path());
     let first_guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
@@ -1268,7 +1416,6 @@ fn concurrent_repairs_serialize_final_checkpoint_authority_through_publication()
                 let root = second_root.clone();
                 let request = second_request.clone();
                 let ready = waiting_sender.clone();
-                let progressed = progress_sender.clone();
                 let handle = std::thread::spawn(move || {
                     let repo = GitStorage::new(&root);
                     let guard = SkillSyncGuard::new(&root).unwrap();
@@ -1280,24 +1427,16 @@ fn concurrent_repairs_serialize_final_checkpoint_authority_through_publication()
                             before_repair_checkpoint_load: Some(Arc::new(move || {
                                 let _ = ready.try_send(());
                             })),
-                            after_repair_snapshot: Some(Arc::new(move || {
-                                let _ = progressed.try_send(());
-                            })),
                             ..SkillTransactionTestConfig::default()
                         },
                     )
                 });
                 *second_handle_for_hook.lock().unwrap() = Some(handle);
-                waiting_receiver_for_hook
-                    .lock()
-                    .unwrap()
-                    .recv_timeout(Duration::from_secs(2))
-                    .unwrap();
                 second_progressed_in_pause_for_hook.store(
-                    progress_receiver_for_hook
+                    waiting_receiver_for_hook
                         .lock()
                         .unwrap()
-                        .recv_timeout(Duration::from_secs(2))
+                        .recv_timeout(Duration::from_millis(250))
                         .is_ok(),
                     Ordering::SeqCst,
                 );
@@ -2282,14 +2421,14 @@ fn exhausted_overall_deadline_reaps_the_direct_child_and_releases_the_permit() {
 }
 
 #[test]
-fn post_push_checkpoint_failure_returns_pending_sync_and_completes_the_journal() {
+fn post_push_checkpoint_failure_returns_error_and_retains_the_pushed_journal() {
     let fixture = Fixture::new();
     let request_id = RequestId::generate();
     let checkpoint_path = fixture.first.path().join(".gitim/skill-validation.json");
     let callback_path = checkpoint_path.clone();
     let repo = GitStorage::new(fixture.first.path());
     let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
-    let result = execute_remote_skill_transaction_with_test_config(
+    execute_remote_skill_transaction_with_test_config(
         &repo,
         &guard,
         transaction_request(
@@ -2300,21 +2439,27 @@ fn post_push_checkpoint_failure_returns_pending_sync_and_completes_the_journal()
         ),
         SkillTransactionTestConfig {
             after_built: Some(Arc::new(move || {
+                if callback_path.is_file() {
+                    fs::remove_file(&callback_path).unwrap();
+                }
                 fs::create_dir(&callback_path).unwrap();
             })),
             ..SkillTransactionTestConfig::default()
         },
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(result.local_state, SkillLocalState::PendingSync);
     assert!(checkpoint_path.is_dir());
-    assert!(!fixture
-        .first
-        .path()
-        .join(".gitim/skill-transactions")
-        .join(request_id.as_str())
-        .exists());
+    let journal = fs::read_to_string(
+        fixture
+            .first
+            .path()
+            .join(".gitim/skill-transactions")
+            .join(request_id.as_str())
+            .join("transaction.yaml"),
+    )
+    .unwrap();
+    assert!(journal.contains("phase: pushed"));
 }
 
 #[test]
@@ -2399,20 +2544,14 @@ fn checkpoint_lock_contention_obeys_deadline_and_retains_pushed_journal() {
     let fixture = Fixture::new();
     let root = fixture.first.path().to_path_buf();
     let checkpoint = SkillCheckpointStore::new(&root).unwrap();
-    let checkpoint_lock = fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&checkpoint.lock_path)
-        .unwrap();
-    checkpoint_lock.lock_exclusive().unwrap();
 
     let request_id = RequestId::generate();
     let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
         request_id: request_id.clone(),
     });
     let (built_sender, built_receiver) = std::sync::mpsc::sync_channel(1);
+    let (continue_sender, continue_receiver) = std::sync::mpsc::sync_channel(1);
+    let continue_receiver = Arc::new(Mutex::new(continue_receiver));
     let (result_sender, result_receiver) = std::sync::mpsc::sync_channel(1);
     let worker_root = root.clone();
     let worker_request = request.clone();
@@ -2429,6 +2568,7 @@ fn checkpoint_lock_contention_obeys_deadline_and_retains_pushed_journal() {
                 max_concurrency: 1,
                 after_built: Some(Arc::new(move || {
                     built_sender.send(()).unwrap();
+                    continue_receiver.lock().unwrap().recv().unwrap();
                 })),
                 ..SkillTransactionTestConfig::default()
             },
@@ -2438,6 +2578,15 @@ fn checkpoint_lock_contention_obeys_deadline_and_retains_pushed_journal() {
     built_receiver
         .recv_timeout(Duration::from_secs(10))
         .unwrap();
+    let checkpoint_lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&checkpoint.lock_path)
+        .unwrap();
+    checkpoint_lock.lock_exclusive().unwrap();
+    continue_sender.send(()).unwrap();
     let result_while_lock_held = result_receiver.recv_timeout(Duration::from_secs(4));
 
     FileExt::unlock(&checkpoint_lock).unwrap();

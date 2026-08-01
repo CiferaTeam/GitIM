@@ -528,7 +528,6 @@ mod tests {
     use gitim_sync::skill::transaction::{
         execute_remote_skill_transaction, RemoteSkillTransactionRequest,
     };
-    use std::collections::BTreeSet;
     use std::sync::Arc;
     use tokio::sync::broadcast;
 
@@ -643,7 +642,7 @@ mod tests {
             .unwrap();
     }
 
-    fn publish_workspace_bootstrap(state: &SharedState, actor: &str, active_users: &[&str]) {
+    fn publish_workspace_bootstrap(state: &SharedState, actor: &str) {
         let push = std::process::Command::new("git")
             .args(["push", "origin", "HEAD"])
             .current_dir(&state.repo_root)
@@ -666,10 +665,6 @@ mod tests {
                 author_email: format!("{actor}@example.com"),
                 now: "2026-07-31T00:00:00Z".to_owned(),
                 package: None,
-                active_users: active_users
-                    .iter()
-                    .map(|handler| (*handler).to_owned())
-                    .collect::<BTreeSet<_>>(),
             },
         )
         .unwrap();
@@ -748,7 +743,7 @@ mod tests {
         let state = setup_state(tmp.path());
         register(&state, "alice").await;
         register(&state, "bob").await;
-        publish_workspace_bootstrap(&state, "alice", &["alice", "bob"]);
+        publish_workspace_bootstrap(&state, "alice");
         assert!(
             state
                 .git_storage

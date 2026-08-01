@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
@@ -96,7 +95,6 @@ async fn production_startup_recovers_pushed_skill_transaction_before_serving() {
             author_email: "alice@example.com".to_owned(),
             now: "2026-07-31T00:00:00Z".to_owned(),
             package: None,
-            active_users: BTreeSet::from(["alice".to_owned()]),
         },
         SkillTransactionTestConfig {
             crash_after: Some(SkillTransactionCrashPoint::AfterPushed),
@@ -138,7 +136,6 @@ async fn production_startup_refuses_to_serve_an_ambiguous_pushed_transaction() {
             author_email: "alice@example.com".to_owned(),
             now: "2026-07-31T00:00:00Z".to_owned(),
             package: None,
-            active_users: BTreeSet::from(["alice".to_owned()]),
         },
         SkillTransactionTestConfig {
             crash_after: Some(SkillTransactionCrashPoint::AfterPushed),

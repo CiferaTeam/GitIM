@@ -3,12 +3,14 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Instant;
 
 use gitim_core::skill::SkillError;
 use serde::{Deserialize, Serialize};
 
 use super::checkpoint::{
-    validate_incoming_skill_history, IncomingSkillValidation, SkillCheckpointStore, SkillSyncError,
+    validate_incoming_skill_history, validate_incoming_skill_history_with_runner,
+    IncomingSkillValidation, SkillCheckpointStore, SkillGitRunner, SkillSyncError,
     SkillValidationCheckpoint,
 };
 use crate::conflict;
@@ -606,6 +608,39 @@ impl SkillSyncGuard {
             }
             Ok(validation)
         })
+    }
+
+    pub(crate) fn validate_transaction_tip(
+        &self,
+        repo: &GitStorage,
+        fetched_tip: &str,
+        active_epoch: &str,
+        deadline: Instant,
+        allow_conflicts: bool,
+        runner: &SkillGitRunner<'_>,
+    ) -> Result<IncomingSkillValidation, SkillSyncError> {
+        let timeout = deadline.saturating_duration_since(Instant::now());
+        self.checkpoint
+            .with_lock_until(deadline, timeout, |checkpoint| {
+                let previous = checkpoint
+                    .load()?
+                    .unwrap_or_else(|| SkillValidationCheckpoint::empty(active_epoch));
+                let validation = validate_incoming_skill_history_with_runner(
+                    repo,
+                    &previous,
+                    fetched_tip,
+                    runner,
+                )?;
+                if !allow_conflicts && !validation.checkpoint.conflicts.is_empty() {
+                    return Err(SkillError::SyncConflict.into());
+                }
+                if validation.checkpoint.last_scanned_tip != fetched_tip {
+                    return Err(SkillSyncError::Checkpoint(
+                        "accepted Skill checkpoint is not bound to the transaction tip".to_owned(),
+                    ));
+                }
+                Ok(validation)
+            })
     }
 
     fn prepare_quarantine_locked(

@@ -680,9 +680,17 @@ async fn proposal_publish_reject_and_withdraw_emit_ordered_events() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn metadata_role_and_archive_requests_run_shared_transitions() {
     let fixture = Fixture::new().await;
+    fs::write(
+        fixture.repo.join("users/bob.meta.yaml"),
+        "display_name: Bob\nrole: agent\nintroduction: Collaborator\n",
+    )
+    .unwrap();
+    git(&fixture.repo, ["add", "users/bob.meta.yaml"]);
+    git(&fixture.repo, ["commit", "-m", "add collaborator"]);
+    git(&fixture.repo, ["push", "origin", "main"]);
+    *fixture.state.users.write().await = vec!["alice".to_owned(), "bob".to_owned()];
     fixture.bootstrap().await;
     let created = fixture.create("release-check").await;
-    *fixture.state.users.write().await = vec!["alice".to_owned(), "bob".to_owned()];
 
     let metadata = fixture
         .request(serde_json::json!({
@@ -784,7 +792,6 @@ async fn accepted_remote_change_emits_one_deduplicated_invalidation() {
             author_email: "alice@example.com".to_owned(),
             now: "2026-07-31T12:00:00Z".to_owned(),
             package: Some(package),
-            active_users: BTreeSet::from(["alice".to_owned()]),
         },
     )
     .unwrap();

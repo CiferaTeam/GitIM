@@ -31,7 +31,7 @@ const MAX_EPOCH_DEPTH: usize = 32;
 const SHA1_EMPTY_TREE_OID: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const SHA256_EMPTY_TREE_OID: &str =
     "6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321";
-type SkillGitRunner<'a> =
+pub(crate) type SkillGitRunner<'a> =
     dyn Fn(&GitStorage, &[&str]) -> Result<std::process::Output, SkillSyncError> + 'a;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -135,6 +135,7 @@ impl SkillSyncError {
 pub struct IncomingSkillValidation {
     pub checkpoint: SkillValidationCheckpoint,
     pub accepted_changes: Vec<AcceptedSkillChange>,
+    pub active_users: BTreeSet<String>,
 }
 
 impl SkillCheckpointStore {
@@ -516,6 +517,7 @@ pub(crate) fn validate_incoming_skill_history_with_runner(
         ));
     }
 
+    let active_users = replay.accepted.snapshot.active_users.clone();
     let accepted_changes = replay
         .changes
         .into_iter()
@@ -531,6 +533,7 @@ pub(crate) fn validate_incoming_skill_history_with_runner(
     Ok(IncomingSkillValidation {
         checkpoint: replay.checkpoint,
         accepted_changes,
+        active_users,
     })
 }
 

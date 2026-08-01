@@ -1,7 +1,6 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -104,7 +103,6 @@ impl Fixture {
                     author_email: "alice@example.com".to_owned(),
                     now: "2026-07-31T00:00:00Z".to_owned(),
                     package,
-                    active_users: BTreeSet::from(["alice".to_owned()]),
                 },
             )
             .unwrap()

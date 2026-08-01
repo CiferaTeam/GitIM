@@ -13,7 +13,6 @@ use gitim_sync::skill::transaction::{
     execute_remote_skill_transaction, RemoteSkillTransactionRequest, SkillLocalState,
 };
 use serde::Serialize;
-use std::collections::BTreeSet;
 use std::fs;
 
 use crate::api::Response;
@@ -382,13 +381,6 @@ async fn run_mutation_with_proposal(
     if !state.has_remote {
         return skill_error(SkillError::RemoteRequired);
     }
-    let active_users = state
-        .users
-        .read()
-        .await
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
     let (_, author_email) = state.author_for(&actor);
     let root = state.repo_root.clone();
     let transaction = tokio::task::spawn_blocking(move || {
@@ -403,7 +395,6 @@ async fn run_mutation_with_proposal(
                 author_email,
                 now: chrono::Utc::now().to_rfc3339(),
                 package,
-                active_users,
             },
         )
     })
