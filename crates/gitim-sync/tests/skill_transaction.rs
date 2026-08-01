@@ -2207,6 +2207,7 @@ fn post_push_timeout_returns_pending_sync_and_keeps_the_pushed_journal() {
         })),
         ..SkillTransactionTestConfig::default()
     };
+    let failures_before = skill_transport_failure_count();
     let result = execute_remote_skill_transaction_with_test_config(
         &repo,
         &guard,
@@ -2216,6 +2217,7 @@ fn post_push_timeout_returns_pending_sync_and_keeps_the_pushed_journal() {
     .unwrap();
 
     assert_eq!(result.local_state, SkillLocalState::PendingSync);
+    assert!(skill_transport_failure_count() > failures_before);
     let journal = fixture
         .first
         .path()
@@ -2579,6 +2581,9 @@ fn exhausted_overall_deadline_reaps_the_direct_child_and_releases_the_permit() {
 fn post_push_checkpoint_failure_returns_pending_sync_and_retains_the_pushed_journal() {
     let fixture = Fixture::new();
     let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
     let checkpoint_path = fixture.first.path().join(".gitim/skill-validation.json");
     let callback_path = checkpoint_path.clone();
     let repo = GitStorage::new(fixture.first.path());
@@ -2586,12 +2591,7 @@ fn post_push_checkpoint_failure_returns_pending_sync_and_retains_the_pushed_jour
     let result = execute_remote_skill_transaction_with_test_config(
         &repo,
         &guard,
-        transaction_request(
-            SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
-                request_id: request_id.clone(),
-            }),
-            None,
-        ),
+        transaction_request(request.clone(), None),
         SkillTransactionTestConfig {
             after_built: Some(Arc::new(move || {
                 if callback_path.is_file() {
@@ -2616,6 +2616,17 @@ fn post_push_checkpoint_failure_returns_pending_sync_and_retains_the_pushed_jour
     )
     .unwrap();
     assert!(journal.contains("phase: pushed"));
+
+    let retry = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(retry.commit_id, result.commit_id);
+    assert_eq!(retry.result, result.result);
+    assert_eq!(retry.local_state, SkillLocalState::PendingSync);
 }
 
 #[test]

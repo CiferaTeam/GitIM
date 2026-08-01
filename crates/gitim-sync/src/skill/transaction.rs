@@ -18,6 +18,7 @@ use gitim_core::skill::{
     SkillRepositorySnapshot, SkillRevisionMeta, SkillRevisionSnapshot, SkillSlug, SkillTreeEdit,
     ValidatedPackage, WorkspaceSkillMeta,
 };
+use gitim_core::types::{Handler, UserMeta};
 use serde::{Deserialize, Serialize};
 
 pub use gitim_core::skill::SkillLocalState;
@@ -447,9 +448,14 @@ fn execute_transaction(
             journal.candidate_commit = Some(commit_id.clone());
             journal.result = Some(plan.result.clone());
             save_journal(&journal, &request_lock)?;
-            let local_state =
-                record_published_view(repo, &remote_branch, &remote_tip, &remote_tip, context)?;
-            complete_journal(&mut journal, &request_lock)?;
+            let outcome = published_view_outcome(record_published_view(
+                repo,
+                &remote_branch,
+                &remote_tip,
+                &remote_tip,
+                context,
+            ));
+            let local_state = finalize_published_journal(&mut journal, &request_lock, outcome)?;
             return Ok(RemoteSkillTransactionResult {
                 commit_id,
                 result: plan.result,
@@ -514,13 +520,11 @@ fn execute_transaction(
 
         match publish_result {
             Ok(outcome) => {
-                if outcome.checkpoint_recorded {
-                    complete_journal(&mut journal, &request_lock)?;
-                }
+                let local_state = finalize_published_journal(&mut journal, &request_lock, outcome)?;
                 return Ok(RemoteSkillTransactionResult {
                     commit_id: candidate,
                     result: plan.result,
-                    local_state: outcome.local_state,
+                    local_state,
                 });
             }
             Err(SkillSyncError::Git(GitError::PushConflict)) if attempt < 2 => {
@@ -573,14 +577,15 @@ fn execute_transaction(
                         journal.candidate_commit = Some(commit_id.clone());
                         journal.result = Some(duplicate.result.clone());
                         save_journal(&journal, &request_lock)?;
-                        let local_state = record_published_view(
+                        let outcome = published_view_outcome(record_published_view(
                             repo,
                             &next_branch,
                             &next_tip,
                             &next_tip,
                             context,
-                        )?;
-                        complete_journal(&mut journal, &request_lock)?;
+                        ));
+                        let local_state =
+                            finalize_published_journal(&mut journal, &request_lock, outcome)?;
                         return Ok(RemoteSkillTransactionResult {
                             commit_id,
                             result: duplicate.result,
@@ -637,6 +642,16 @@ fn recover_current_transaction(
     fetch(repo, context)?;
     let start_branch = current_branch(repo, context)?;
     let (remote_branch, remote_tip) = resolve_active_remote(repo, &start_branch, context)?;
+    if let Some(result) = reconcile_pushed_candidate_receipt(
+        repo,
+        journal,
+        &remote_branch,
+        &remote_tip,
+        request_lock,
+        context,
+    )? {
+        return Ok(Some(result));
+    }
     let active_users = validate_remote_authority(
         repo,
         guard,
@@ -666,6 +681,69 @@ fn recover_current_transaction(
     fs::remove_dir_all(&root)
         .map_err(|error| checkpoint_io("remove unpublished transaction", error))?;
     Ok(None)
+}
+
+fn reconcile_pushed_candidate_receipt(
+    repo: &GitStorage,
+    journal: &mut TransactionJournal,
+    remote_branch: &str,
+    remote_tip: &str,
+    request_lock: &RequestJournalLock,
+    context: &TransactionContext,
+) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
+    if journal.phase != SkillTransactionPhase::Pushed {
+        return Ok(None);
+    }
+    let candidate = journal
+        .candidate_commit
+        .clone()
+        .ok_or_else(|| checkpoint_error("pushed journal is missing its candidate commit"))?;
+    let receipt_commit = find_receipt_commit(repo, remote_tip, &journal.receipt_path, context)?;
+    if receipt_commit != candidate {
+        return Err(checkpoint_error(
+            "published receipt does not match the journal candidate",
+        ));
+    }
+    let candidate_receipt =
+        read_optional_blob(repo, &candidate, &journal.receipt_path, context)?
+            .ok_or_else(|| checkpoint_error("journal candidate is missing its receipt"))?;
+    let remote_receipt = read_optional_blob(repo, remote_tip, &journal.receipt_path, context)?
+        .ok_or_else(|| checkpoint_error("published receipt is missing from the remote tip"))?;
+    if candidate_receipt != remote_receipt {
+        return Err(checkpoint_error(
+            "published receipt differs from the journal candidate",
+        ));
+    }
+    let package = load_snapshotted_package(journal)?;
+    let active_users = load_active_users(repo, &candidate, context)?;
+    let snapshot = load_snapshot(repo, &candidate, &active_users, context)?;
+    let duplicate = plan_skill_mutation(
+        &snapshot,
+        &SkillMutationContext {
+            actor: journal.actor.clone(),
+            now: journal.now.clone(),
+            package,
+        },
+        &journal.request,
+    )?;
+    if !duplicate.edits.is_empty() {
+        return Err(SkillError::RequestIdConflict.into());
+    }
+    journal.result = Some(duplicate.result.clone());
+    save_journal(journal, request_lock)?;
+    let outcome = published_view_outcome(record_published_view(
+        repo,
+        remote_branch,
+        remote_tip,
+        remote_tip,
+        context,
+    ));
+    let local_state = finalize_published_journal(journal, request_lock, outcome)?;
+    Ok(Some(RemoteSkillTransactionResult {
+        commit_id: candidate,
+        result: duplicate.result,
+        local_state,
+    }))
 }
 
 fn reconcile_authoritative_receipt(
@@ -706,8 +784,14 @@ fn reconcile_authoritative_receipt(
     journal.candidate_commit = Some(commit_id.clone());
     journal.result = Some(duplicate.result.clone());
     save_journal(journal, request_lock)?;
-    let local_state = record_published_view(repo, remote_branch, remote_tip, remote_tip, context)?;
-    complete_journal(journal, request_lock)?;
+    let outcome = published_view_outcome(record_published_view(
+        repo,
+        remote_branch,
+        remote_tip,
+        remote_tip,
+        context,
+    ));
+    let local_state = finalize_published_journal(journal, request_lock, outcome)?;
     Ok(Some(RemoteSkillTransactionResult {
         commit_id,
         result: duplicate.result,
@@ -1163,6 +1247,39 @@ fn load_snapshot(
 ) -> Result<SkillRepositorySnapshot, SkillSyncError> {
     let material = load_tree_material(repo, commit, context)?;
     parse_snapshot(material, active_users.clone()).map_err(Into::into)
+}
+
+fn load_active_users(
+    repo: &GitStorage,
+    commit: &str,
+    context: &TransactionContext,
+) -> Result<BTreeSet<String>, SkillSyncError> {
+    validate_revision(commit)?;
+    let output = run_git(
+        repo,
+        &["ls-tree", "-r", "-z", "--full-tree", commit, "--", "users"],
+        &[],
+        context,
+    )?;
+    let mut active_users = BTreeSet::new();
+    for entry in parse_tree_entries(&output.stdout)? {
+        validate_relative_path(&entry.path)?;
+        let components: Vec<_> = entry.path.split('/').collect();
+        let ["users", file] = components.as_slice() else {
+            continue;
+        };
+        let Some(handler) = file.strip_suffix(".meta.yaml") else {
+            continue;
+        };
+        let handler = Handler::new(handler).map_err(|_| SkillError::SyncConflict)?;
+        if entry.object_type != "blob" || !matches!(entry.mode.as_str(), "100644" | "100755") {
+            return Err(SkillError::SyncConflict.into());
+        }
+        let blob = run_git(repo, &["cat-file", "blob", &entry.oid], &[], context)?;
+        serde_yaml::from_slice::<UserMeta>(&blob.stdout).map_err(|_| SkillError::SyncConflict)?;
+        active_users.insert(handler.as_str().to_owned());
+    }
+    Ok(active_users)
 }
 
 fn load_snapshot_for_request(
@@ -1692,16 +1809,38 @@ fn push_and_record_candidate(
             &post_push_context,
         ),
     };
-    Ok(match recorded {
+    Ok(published_view_outcome(recorded))
+}
+
+fn published_view_outcome(
+    recorded: Result<SkillLocalState, SkillSyncError>,
+) -> PublishedViewOutcome {
+    match recorded {
         Ok(local_state) => PublishedViewOutcome {
             local_state,
             checkpoint_recorded: true,
         },
-        Err(_) => PublishedViewOutcome {
-            local_state: SkillLocalState::PendingSync,
-            checkpoint_recorded: false,
-        },
-    })
+        Err(error) => {
+            if skill_transaction_error_is_retryable(&error) {
+                SKILL_TRANSPORT_FAILURES.fetch_add(1, Ordering::Relaxed);
+            }
+            PublishedViewOutcome {
+                local_state: SkillLocalState::PendingSync,
+                checkpoint_recorded: false,
+            }
+        }
+    }
+}
+
+fn finalize_published_journal(
+    journal: &mut TransactionJournal,
+    request_lock: &RequestJournalLock,
+    outcome: PublishedViewOutcome,
+) -> Result<SkillLocalState, SkillSyncError> {
+    if outcome.checkpoint_recorded {
+        complete_journal(journal, request_lock)?;
+    }
+    Ok(outcome.local_state)
 }
 
 fn push_candidate(
