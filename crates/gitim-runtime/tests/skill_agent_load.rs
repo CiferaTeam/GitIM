@@ -28,6 +28,101 @@ const SKILL_BODY_MARKER: &str = "PINNED_SKILL_BODY_7E41";
 const ANSWER: &str = "pinned Skill loaded before this answer";
 const CONTRACT_FIRST_LINE: &str =
     "GitIM provides optional shared Skills and does not load them automatically.";
+const TEST_BINARY_TARGET: &str = "skill-agent-load";
+
+struct PathGuard {
+    original: Option<std::ffi::OsString>,
+}
+
+impl PathGuard {
+    fn prepend(paths: &[&Path]) -> Self {
+        let original = std::env::var_os("PATH");
+        let mut entries = paths
+            .iter()
+            .map(|path| path.to_path_buf())
+            .collect::<Vec<_>>();
+        if let Some(current) = original.as_deref() {
+            entries.extend(std::env::split_paths(current));
+        }
+        let joined = std::env::join_paths(entries).expect("join test PATH");
+        std::env::set_var("PATH", joined);
+        Self { original }
+    }
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        match self.original.take() {
+            Some(path) => std::env::set_var("PATH", path),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+}
+
+fn build_current_test_binaries() -> PathBuf {
+    let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("canonical workspace root");
+    let target_dir = workspace_root.join("target").join(TEST_BINARY_TARGET);
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = std::process::Command::new(cargo)
+        .current_dir(&workspace_root)
+        .args([
+            "build",
+            "--locked",
+            "--target-dir",
+            target_dir.to_str().expect("UTF-8 target directory"),
+            "-p",
+            "gitim-cli",
+            "--bin",
+            "gitim",
+            "-p",
+            "gitim-daemon",
+            "--bin",
+            "gitim-daemon",
+        ])
+        .output()
+        .expect("build current GitIM test binaries in isolated target");
+    assert!(
+        output.status.success(),
+        "failed to build current GitIM test binaries:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bin_dir = target_dir.join("debug");
+    for binary in ["gitim", "gitim-daemon"] {
+        assert!(
+            bin_dir.join(binary).is_file(),
+            "isolated build did not produce {binary}"
+        );
+    }
+    bin_dir
+}
+
+#[cfg(unix)]
+fn install_stale_binary_markers(directory: &Path, marker: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(directory).expect("create stale marker binary directory");
+    for binary in ["gitim", "gitim-daemon"] {
+        let path = directory.join(binary);
+        std::fs::write(
+            &path,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' '{binary}' >> '{}'\nexit 97\n",
+                marker.display()
+            ),
+        )
+        .expect("write stale marker binary");
+        let mut permissions = std::fs::metadata(&path)
+            .expect("read stale marker metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).expect("make stale marker executable");
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum TranscriptEntry {
@@ -224,8 +319,15 @@ async fn publish_fixture(human_repo: &Path, source: PathBuf) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pinned_message_loads_exact_published_revision_before_answer() {
+    let current_bin_dir = tokio::task::spawn_blocking(build_current_test_binaries)
+        .await
+        .expect("current binary build task");
     ensure_daemon_in_path();
     let tmp = short_tempdir();
+    let stale_bin_dir = tmp.path().join("stale-bin");
+    let stale_marker = tmp.path().join("stale-binary-invoked");
+    install_stale_binary_markers(&stale_bin_dir, &stale_marker);
+    let _path_guard = PathGuard::prepend(&[&current_bin_dir, &stale_bin_dir]);
     let remote = setup_bare_remote(&tmp);
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -340,4 +442,8 @@ async fn pinned_message_loads_exact_published_revision_before_answer() {
 
     stop_daemon(&agent.repo_root).await;
     stop_daemon(&human_repo).await;
+    assert!(
+        !stale_marker.exists(),
+        "a stale PATH binary was invoked instead of the isolated current build"
+    );
 }
