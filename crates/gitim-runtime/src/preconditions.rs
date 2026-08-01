@@ -83,6 +83,7 @@ pub fn reqwest_client_with_defaults(
     reqwest::Client::builder()
         .connect_timeout(connect_timeout)
         .timeout(request_timeout)
+        .no_proxy()
         .build()
         .expect("reqwest client builds with default settings")
 }
