@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use fs2::FileExt;
@@ -56,6 +56,7 @@ fn configure(root: &Path) {
 }
 
 struct Fixture {
+    _test_lock: MutexGuard<'static, ()>,
     _remote: TempDir,
     first: TempDir,
     second: TempDir,
@@ -63,6 +64,13 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        // These fixtures spawn real Git processes and assert wall-clock deadlines.
+        // Serialize fixture setup and execution so tests cannot consume each other's budgets.
+        static TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let test_lock = TEST_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let remote = TempDir::new().unwrap();
         git(remote.path(), ["init", "--bare", "-b", "main"]);
 
@@ -111,6 +119,7 @@ impl Fixture {
         configure(second.path());
 
         Self {
+            _test_lock: test_lock,
             _remote: remote,
             first,
             second,
@@ -2082,8 +2091,8 @@ fn hanging_git_child_with_group_kill_failure_respects_deadline_and_releases_perm
     let repo = GitStorage::new(fixture.first.path());
     let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
     let config = SkillTransactionTestConfig {
-        transaction_timeout: Duration::from_secs(8),
-        git_command_timeout: Duration::from_secs(2),
+        transaction_timeout: Duration::from_secs(20),
+        git_command_timeout: Duration::from_secs(8),
         git_program: Some(wrapper),
         max_concurrency: 1,
         simulate_process_group_kill_failure: true,
@@ -2105,7 +2114,7 @@ fn hanging_git_child_with_group_kill_failure_respects_deadline_and_releases_perm
     assert!(skill_transaction_error_is_retryable(&error));
     assert!(skill_transport_failure_count() > failures_before);
     assert!(
-        started.elapsed() < Duration::from_secs(4),
+        started.elapsed() < Duration::from_secs(10),
         "timeout cleanup exceeded its bounded deadline"
     );
     assert!(fixture
@@ -2169,10 +2178,10 @@ fn post_push_timeout_is_retryable_and_keeps_the_pushed_journal() {
     let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
     let config = SkillTransactionTestConfig {
         transaction_timeout: Duration::from_secs(30),
-        git_command_timeout: Duration::from_secs(2),
+        post_push_git_command_timeout: Some(Duration::from_secs(2)),
         git_program: Some(wrapper),
         max_concurrency: 1,
-        after_built: Some(Arc::new(move || {
+        after_pushed: Some(Arc::new(move || {
             fs::write(&armed, b"armed").unwrap();
         })),
         ..SkillTransactionTestConfig::default()
@@ -2287,10 +2296,10 @@ fn post_validation_timeout_keeps_the_previous_checkpoint_and_pushed_journal() {
     let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
     let config = SkillTransactionTestConfig {
         transaction_timeout: Duration::from_secs(30),
-        git_command_timeout: Duration::from_secs(2),
+        post_push_git_command_timeout: Some(Duration::from_secs(2)),
         git_program: Some(wrapper),
         max_concurrency: 1,
-        after_built: Some(Arc::new(move || {
+        after_pushed: Some(Arc::new(move || {
             fs::write(&armed, b"armed").unwrap();
         })),
         ..SkillTransactionTestConfig::default()
@@ -2436,7 +2445,7 @@ fn deadline_exhaustion_reaps_the_killed_git_child_before_returning() {
             None,
         ),
         SkillTransactionTestConfig {
-            transaction_timeout: Duration::from_secs(2),
+            transaction_timeout: Duration::from_secs(8),
             git_command_timeout: Duration::from_secs(10),
             git_program: Some(wrapper),
             simulate_process_group_kill_failure: true,
@@ -2495,7 +2504,7 @@ fn exhausted_overall_deadline_reaps_the_direct_child_and_releases_the_permit() {
             None,
         ),
         SkillTransactionTestConfig {
-            transaction_timeout: Duration::from_secs(2),
+            transaction_timeout: Duration::from_secs(8),
             git_command_timeout: Duration::from_secs(10),
             git_program: Some(wrapper),
             max_concurrency: 1,

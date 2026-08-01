@@ -80,12 +80,14 @@ pub enum SkillTransactionCrashPoint {
 pub struct SkillTransactionTestConfig {
     pub transaction_timeout: Duration,
     pub git_command_timeout: Duration,
+    pub post_push_git_command_timeout: Option<Duration>,
     pub max_concurrency: usize,
     pub git_program: Option<PathBuf>,
     pub crash_after: Option<SkillTransactionCrashPoint>,
     pub before_repair_checkpoint_load: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_repair_snapshot: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_built: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub after_pushed: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_repair_compare: Option<Arc<dyn Fn() + Send + Sync>>,
     pub simulate_process_group_kill_failure: bool,
     pub simulated_child_kill_failures: usize,
@@ -96,12 +98,14 @@ impl Default for SkillTransactionTestConfig {
         Self {
             transaction_timeout: SKILL_TRANSACTION_TIMEOUT,
             git_command_timeout: SKILL_GIT_COMMAND_TIMEOUT,
+            post_push_git_command_timeout: None,
             max_concurrency: SKILL_GIT_MAX_CONCURRENCY,
             git_program: None,
             crash_after: None,
             before_repair_checkpoint_load: None,
             after_repair_snapshot: None,
             after_built: None,
+            after_pushed: None,
             after_repair_compare: None,
             simulate_process_group_kill_failure: false,
             simulated_child_kill_failures: 0,
@@ -195,15 +199,18 @@ impl Drop for WorkspacePermit {
     }
 }
 
+#[derive(Clone)]
 struct TransactionContext {
     deadline: Instant,
     git_timeout: Duration,
+    post_push_git_timeout: Option<Duration>,
     max_concurrency: usize,
     git_program: PathBuf,
     crash_after: Option<SkillTransactionCrashPoint>,
     before_repair_checkpoint_load: Option<Arc<dyn Fn() + Send + Sync>>,
     after_repair_snapshot: Option<Arc<dyn Fn() + Send + Sync>>,
     after_built: Option<Arc<dyn Fn() + Send + Sync>>,
+    after_pushed: Option<Arc<dyn Fn() + Send + Sync>>,
     after_repair_compare: Option<Arc<dyn Fn() + Send + Sync>>,
     simulate_process_group_kill_failure: bool,
     simulated_child_kill_failures: usize,
@@ -268,12 +275,14 @@ fn recover_remote_skill_transactions_with_config(
     let context = TransactionContext {
         deadline,
         git_timeout: config.git_command_timeout,
+        post_push_git_timeout: config.post_push_git_command_timeout,
         max_concurrency: config.max_concurrency,
         git_program: config.git_program.unwrap_or_else(|| PathBuf::from("git")),
         crash_after: None,
         before_repair_checkpoint_load: None,
         after_repair_snapshot: None,
         after_built: None,
+        after_pushed: None,
         after_repair_compare: None,
         simulate_process_group_kill_failure: false,
         simulated_child_kill_failures: 0,
@@ -320,12 +329,14 @@ fn execute_remote_skill_transaction_with_config(
     let context = TransactionContext {
         deadline,
         git_timeout: config.git_command_timeout,
+        post_push_git_timeout: config.post_push_git_command_timeout,
         max_concurrency: config.max_concurrency,
         git_program: config.git_program.unwrap_or_else(|| PathBuf::from("git")),
         crash_after: config.crash_after,
         before_repair_checkpoint_load: config.before_repair_checkpoint_load,
         after_repair_snapshot: config.after_repair_snapshot,
         after_built: config.after_built,
+        after_pushed: config.after_pushed,
         after_repair_compare: config.after_repair_compare,
         simulate_process_group_kill_failure: config.simulate_process_group_kill_failure,
         simulated_child_kill_failures: config.simulated_child_kill_failures,
@@ -1701,7 +1712,14 @@ fn push_and_record_candidate(
     push_candidate(repo, candidate, remote_branch, context)?;
     journal.phase = SkillTransactionPhase::Pushed;
     save_journal(journal, request_lock)?;
+    if let Some(after_pushed) = &context.after_pushed {
+        after_pushed();
+    }
     maybe_crash(context, SkillTransactionCrashPoint::AfterPushed)?;
+    let mut post_push_context = context.clone();
+    if let Some(timeout) = context.post_push_git_timeout {
+        post_push_context.git_timeout = timeout;
+    }
     match checkpoint {
         Some(checkpoint) => record_published_view_locked(
             repo,
@@ -1709,9 +1727,15 @@ fn push_and_record_candidate(
             remote_tip,
             candidate,
             checkpoint,
-            context,
+            &post_push_context,
         ),
-        None => record_published_view(repo, remote_branch, remote_tip, candidate, context),
+        None => record_published_view(
+            repo,
+            remote_branch,
+            remote_tip,
+            candidate,
+            &post_push_context,
+        ),
     }
 }
 
