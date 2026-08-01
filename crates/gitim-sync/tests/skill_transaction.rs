@@ -10,9 +10,9 @@ use std::time::Duration;
 
 use fs2::FileExt;
 use gitim_core::skill::{
-    validate_package_entries, PackageEntry, RequestId, SkillCreateRequest, SkillMutationRequest,
-    SkillOperation, SkillProposeRequest, SkillRepairRequest, SkillRepairScope,
-    SkillRoleUpdateRequest, SkillSlug, SkillWorkspaceBootstrapRequest,
+    validate_package_entries, PackageEntry, RequestId, SkillCreateRequest, SkillError,
+    SkillMutationRequest, SkillOperation, SkillProposeRequest, SkillRepairRequest,
+    SkillRepairScope, SkillRoleUpdateRequest, SkillSlug, SkillWorkspaceBootstrapRequest,
 };
 use gitim_core::types::Handler;
 use gitim_sync::git::GitStorage;
@@ -336,7 +336,7 @@ fn concurrent_identical_requests_serialize_one_checkout_journal_and_publication(
 }
 
 #[test]
-fn concurrent_distinct_bootstraps_return_the_winning_workspace_state() {
+fn concurrent_distinct_bootstraps_publish_a_receipt_for_each_request() {
     let fixture = Fixture::new();
     fs::write(
         fixture.first.path().join("users/bob.meta.yaml"),
@@ -356,6 +356,7 @@ fn concurrent_distinct_bootstraps_return_the_winning_workspace_state() {
 
     let alice_root = fixture.first.path().to_path_buf();
     let alice_barrier = Arc::clone(&barrier);
+    let alice_raced = AtomicBool::new(false);
     let alice_request_id_for_thread = alice_request_id.clone();
     let alice = std::thread::spawn(move || {
         let repo = GitStorage::new(&alice_root);
@@ -374,7 +375,9 @@ fn concurrent_distinct_bootstraps_return_the_winning_workspace_state() {
             },
             SkillTransactionTestConfig {
                 after_built: Some(Arc::new(move || {
-                    alice_barrier.wait();
+                    if !alice_raced.swap(true, Ordering::SeqCst) {
+                        alice_barrier.wait();
+                    }
                 })),
                 ..SkillTransactionTestConfig::default()
             },
@@ -383,6 +386,7 @@ fn concurrent_distinct_bootstraps_return_the_winning_workspace_state() {
 
     let bob_root = fixture.second.path().to_path_buf();
     let bob_barrier = Arc::clone(&barrier);
+    let bob_raced = AtomicBool::new(false);
     let bob_request_id_for_thread = bob_request_id.clone();
     let bob = std::thread::spawn(move || {
         let repo = GitStorage::new(&bob_root);
@@ -401,7 +405,9 @@ fn concurrent_distinct_bootstraps_return_the_winning_workspace_state() {
             },
             SkillTransactionTestConfig {
                 after_built: Some(Arc::new(move || {
-                    bob_barrier.wait();
+                    if !bob_raced.swap(true, Ordering::SeqCst) {
+                        bob_barrier.wait();
+                    }
                 })),
                 ..SkillTransactionTestConfig::default()
             },
@@ -410,7 +416,7 @@ fn concurrent_distinct_bootstraps_return_the_winning_workspace_state() {
 
     let alice_result = alice.join().unwrap().unwrap();
     let bob_result = bob.join().unwrap().unwrap();
-    assert_eq!(alice_result.commit_id, bob_result.commit_id);
+    assert_ne!(alice_result.commit_id, bob_result.commit_id);
     assert_eq!(alice_result.result.control_revision, Some(1));
     assert_eq!(bob_result.result.control_revision, Some(1));
 
@@ -448,18 +454,33 @@ fn concurrent_distinct_bootstraps_return_the_winning_workspace_state() {
         ],
     );
     assert!(!winning_receipt.stdout.is_empty());
-    let losing_receipt = Command::new("git")
-        .args([
+    let losing_receipt = git(
+        fixture.first.path(),
+        [
             "show",
             &format!(
                 "origin/main:skills/receipts/{}.meta.yaml",
                 losing_request.as_str()
             ),
-        ])
-        .current_dir(fixture.first.path())
-        .output()
-        .unwrap();
-    assert!(!losing_receipt.status.success());
+        ],
+    );
+    assert!(!losing_receipt.stdout.is_empty());
+
+    let conflicting_slug = SkillSlug::new("bootstrap-request-reuse").unwrap();
+    let conflict = fixture
+        .transaction(
+            fixture.first.path(),
+            SkillMutationRequest::Create(SkillCreateRequest {
+                request_id: losing_request.clone(),
+                slug: conflicting_slug.clone(),
+                display_name: "Bootstrap request reuse".to_owned(),
+                description: "A completed bootstrap request cannot be reused".to_owned(),
+                source_directory: fixture.first.path().join("unused"),
+            }),
+            Some(package(&conflicting_slug, "different mutation")),
+        )
+        .unwrap_err();
+    assert_eq!(conflict.code(), SkillError::RequestIdConflict.code());
 }
 
 #[test]

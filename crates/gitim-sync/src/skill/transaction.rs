@@ -439,20 +439,6 @@ fn execute_transaction(
                 discard_unpublished_journal(&journal, &request_lock)?;
                 return Err(SkillError::RequestIdConflict.into());
             }
-            Err(SkillError::SyncConflict) => {
-                if let Some(result) = reconcile_initialized_bootstrap(
-                    repo,
-                    &mut journal,
-                    &snapshot,
-                    &remote_branch,
-                    &remote_tip,
-                    &request_lock,
-                    context,
-                )? {
-                    return Ok(result);
-                }
-                return Err(SkillError::SyncConflict.into());
-            }
             Err(error) => return Err(error.into()),
         };
         if plan.edits.is_empty() {
@@ -601,22 +587,17 @@ fn execute_transaction(
                             local_state,
                         });
                     }
+                    Ok(_)
+                        if matches!(
+                            journal.request,
+                            SkillMutationRequest::WorkspaceBootstrap(_)
+                        ) =>
+                    {
+                        continue;
+                    }
                     Err(SkillError::RequestIdConflict) => {
                         discard_unpublished_journal(&journal, &request_lock)?;
                         return Err(SkillError::RequestIdConflict.into());
-                    }
-                    Err(SkillError::SyncConflict) => {
-                        if let Some(result) = reconcile_initialized_bootstrap(
-                            repo,
-                            &mut journal,
-                            &next_snapshot,
-                            &next_branch,
-                            &next_tip,
-                            &request_lock,
-                            context,
-                        )? {
-                            return Ok(result);
-                        }
                     }
                     _ => {}
                 }
@@ -758,40 +739,6 @@ fn reconcile_attempt_authoritative_receipt(
         }
         result => result,
     }
-}
-
-fn reconcile_initialized_bootstrap(
-    repo: &GitStorage,
-    journal: &mut TransactionJournal,
-    snapshot: &SkillRepositorySnapshot,
-    remote_branch: &str,
-    remote_tip: &str,
-    request_lock: &RequestJournalLock,
-    context: &TransactionContext,
-) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
-    if !matches!(journal.request, SkillMutationRequest::WorkspaceBootstrap(_)) {
-        return Ok(None);
-    }
-    let Some(workspace) = snapshot.workspace.as_ref() else {
-        return Ok(None);
-    };
-    let commit_id =
-        find_path_creation_commit(repo, remote_tip, "skills/workspace.meta.yaml", context)?;
-    let result = SkillMutationResult {
-        canonical_ref: None,
-        current_revision: None,
-        control_revision: Some(workspace.control_revision),
-        event_revision: None,
-        proposal_state_revision: None,
-        proposal_status: None,
-    };
-    let local_state = record_published_view(repo, remote_branch, remote_tip, remote_tip, context)?;
-    complete_journal(journal, request_lock)?;
-    Ok(Some(RemoteSkillTransactionResult {
-        commit_id,
-        result,
-        local_state,
-    }))
 }
 
 fn recover_transaction_journals(

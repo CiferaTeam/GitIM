@@ -938,10 +938,9 @@ fn authorize_and_check_preconditions(
 
     match receipt.operation {
         SkillOperation::WorkspaceBootstrap => {
-            if before.workspace.is_some() {
-                return Err(SkillError::SyncConflict);
-            }
-            if !before.active_skills.is_empty() || !before.archived_skills.is_empty() {
+            if before.workspace.is_none()
+                && (!before.active_skills.is_empty() || !before.archived_skills.is_empty())
+            {
                 return Err(SkillError::AdminUninitialized);
             }
         }
@@ -1111,6 +1110,12 @@ fn apply_workspace_bootstrap(
     after: &mut SkillRepositorySnapshot,
     receipt: &SkillReceipt,
 ) -> Result<SkillMutationResult, SkillError> {
+    if let Some(workspace) = &after.workspace {
+        return Ok(SkillMutationResult {
+            control_revision: Some(workspace.control_revision),
+            ..empty_result()
+        });
+    }
     after.workspace = Some(WorkspaceSkillMeta {
         schema_version: SKILL_SCHEMA_VERSION,
         administrators: vec![receipt.actor.clone()],
@@ -1775,10 +1780,12 @@ fn expected_edits(
     let mut edits = Vec::new();
     match receipt.operation {
         SkillOperation::WorkspaceBootstrap => {
-            edits.push(upsert_yaml(
-                "skills/workspace.meta.yaml",
-                after.workspace.as_ref().ok_or(SkillError::SyncConflict)?,
-            )?);
+            if before.workspace != after.workspace {
+                edits.push(upsert_yaml(
+                    "skills/workspace.meta.yaml",
+                    after.workspace.as_ref().ok_or(SkillError::SyncConflict)?,
+                )?);
+            }
         }
         SkillOperation::SkillCreate => {
             let slug = receipt.skill.as_ref().ok_or(SkillError::SyncConflict)?;

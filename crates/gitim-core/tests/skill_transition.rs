@@ -150,16 +150,24 @@ fn workspace_bootstrap_is_a_valid_single_transition() {
 }
 
 #[test]
-fn workspace_bootstrap_rejects_an_already_initialized_snapshot() {
+fn workspace_bootstrap_on_initialized_snapshot_records_only_its_receipt() {
     let before = initialized_snapshot();
     let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
         request_id: request_id('S'),
     });
 
+    let plan = plan_skill_mutation(&before, &context(BOB, None), &request).unwrap();
+
+    assert_eq!(plan.after.workspace, before.workspace);
+    assert_eq!(plan.result.control_revision, Some(1));
     assert_eq!(
-        plan_skill_mutation(&before, &context(ALICE, None), &request),
-        Err(SkillError::SyncConflict)
+        plan.changed_paths,
+        BTreeSet::from([format!(
+            "skills/receipts/{}.meta.yaml",
+            request.request_id().as_str()
+        )])
     );
+    validate_skill_commit(&before, &plan.after, &plan.commit_evidence).unwrap();
 }
 
 #[test]
