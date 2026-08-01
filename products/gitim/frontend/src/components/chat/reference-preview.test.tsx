@@ -35,11 +35,50 @@ vi.hoisted(() => {
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-const api = vi.hoisted(() => ({ readQuickSession: vi.fn() }));
+const api = vi.hoisted(() => ({
+  readQuickSession: vi.fn(),
+  readCard: vi.fn(),
+  autoOpenHoverCard: false,
+}));
+
 vi.mock("@/lib/client", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/client")>()),
   readQuickSession: api.readQuickSession,
+  readCard: api.readCard,
 }));
+
+vi.mock("@/components/ui/hover-card", async () => {
+  const React = await import("react");
+  const HoverOpenContext = React.createContext(false);
+  return {
+    HoverCard: ({
+      open,
+      onOpenChange,
+      children,
+    }: {
+      open?: boolean;
+      onOpenChange?: (open: boolean) => void;
+      children?: React.ReactNode;
+    }) => {
+      React.useEffect(() => {
+        if (api.autoOpenHoverCard) onOpenChange?.(true);
+      }, [onOpenChange]);
+      return (
+        <HoverOpenContext.Provider value={Boolean(open)}>
+          <div data-open={String(open)}>{children}</div>
+        </HoverOpenContext.Provider>
+      );
+    },
+    HoverCardTrigger: ({ children }: { children?: React.ReactNode }) => (
+      <>{children}</>
+    ),
+    HoverCardContent: ({ children }: { children?: React.ReactNode }) => {
+      const isOpen = React.useContext(HoverOpenContext);
+      if (!isOpen) return null;
+      return <div>{children}</div>;
+    },
+  };
+});
 
 describe("CardReferenceLink", () => {
   let container: HTMLDivElement;
@@ -47,6 +86,7 @@ describe("CardReferenceLink", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    api.autoOpenHoverCard = false;
     useCardStore.getState().resetForWorkspaceSwitch();
     useConnectionStore.setState({ mode: "remote" });
     useWorkspaceStore.setState({
@@ -67,6 +107,7 @@ describe("CardReferenceLink", () => {
   });
 
   afterEach(() => {
+    api.autoOpenHoverCard = false;
     act(() => {
       root.unmount();
     });
@@ -90,7 +131,78 @@ describe("CardReferenceLink", () => {
     expect(container.textContent).toContain("20260702...067");
   });
 
-  it("reads and renders only the target card discussion line", () => {
+  it("does not stick on Loading preview when the load effect re-runs after status=loading", async () => {
+    api.autoOpenHoverCard = true;
+    let resolveRead: ((value: unknown) => void) | undefined;
+    api.readCard.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+
+    await act(async () => {
+      root.render(
+        <CardReferenceLink
+          reference={{
+            channel: "awesome-agents-team-0519",
+            cardId: "20260801-135834-917",
+            label: "Verify strict multi-agent scope",
+          }}
+          onOpen={vi.fn()}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).toContain("Loading preview...");
+    expect(api.readCard).toHaveBeenCalled();
+
+    await act(async () => {
+      resolveRead?.({
+        ok: true,
+        data: {
+          meta: {
+            card_id: "20260801-135834-917",
+            channel: "awesome-agents-team-0519",
+            title: "Verify strict multi-agent scope",
+            status: "done",
+            labels: [],
+            assignee: "pi-minimax3-code",
+            created_by: "alice",
+            created_at: "20260801T135834Z",
+            updated_at: "20260801T140000Z",
+          },
+          entries: [
+            {
+              line_number: 1,
+              point_to: 0,
+              author: "alice",
+              timestamp: "20260801T135900Z",
+              body: "kickoff notes for the verify pass",
+            },
+            {
+              line_number: 2,
+              point_to: 0,
+              author: "pi-minimax3-code",
+              timestamp: "20260801T140000Z",
+              body: "verification complete — scope is strict",
+            },
+          ],
+          archived: false,
+        },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(document.body.textContent).not.toContain("Loading preview...");
+    expect(document.body.textContent).toContain(
+      "verification complete — scope is strict",
+    );
+  });
+
+  it("reads a window of card discussion messages around the target line", () => {
     const messages: Message[] = [
       {
         line_number: 1,
@@ -115,11 +227,18 @@ describe("CardReferenceLink", () => {
       },
     ];
 
-    expect(getCardPreviewReadQuery(2)).toEqual({ since: 1, limit: 1 });
-    expect(selectCardPreviewMessages(messages, 2).map((msg) => msg.line_number)).toEqual([2]);
+    expect(getCardPreviewReadQuery(2)).toEqual({ since: 0, limit: 11 });
+    expect(selectCardPreviewMessages(messages, 2).map((msg) => msg.line_number)).toEqual([
+      1, 2, 3,
+    ]);
+    expect(getCardPreviewReadQuery()).toEqual({ limit: 12 });
+    expect(selectCardPreviewMessages(messages).map((msg) => msg.line_number)).toEqual([
+      1, 2, 3,
+    ]);
   });
 
   it("loads active or archived Quick Sessions and highlights the requested line", async () => {
+    api.autoOpenHoverCard = true;
     api.readQuickSession.mockResolvedValue({
       ok: true,
       data: {
@@ -162,9 +281,10 @@ describe("CardReferenceLink", () => {
         />,
       );
       await Promise.resolve();
+      await Promise.resolve();
     });
+
     await act(async () => {
-      (container.querySelector("button") as HTMLButtonElement).click();
       await vi.waitFor(() => {
         expect(document.body.textContent).toContain("Investigate flakes");
       });

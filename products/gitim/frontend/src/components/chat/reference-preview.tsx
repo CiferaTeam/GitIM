@@ -128,7 +128,7 @@ function MessageRows({
             <span className="font-medium text-foreground/80">@{msg.author}</span>
             <span>{formatTimestamp(msg.timestamp, timezone)}</span>
           </div>
-          <div className="mt-0.5 line-clamp-3 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/90">
+          <div className="mt-0.5 line-clamp-6 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/90">
             {msg.body}
           </div>
         </div>
@@ -177,7 +177,15 @@ export function CardReferenceLink({
   );
 
   useEffect(() => {
-    if (!open || !activeSlug || status === "loading" || status === "ok") return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatus("idle");
+    setError(null);
+    setLoadedCard(null);
+    setLoadedMessages([]);
+  }, [activeSlug, reference.cardId, reference.channel, reference.line]);
+
+  useEffect(() => {
+    if (!open || !activeSlug) return;
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus("loading");
@@ -200,6 +208,11 @@ export function CardReferenceLink({
           upsertCard(res.data.meta);
         }
         setStatus("ok");
+      })
+      .catch((reason: unknown) => {
+        if (cancelled) return;
+        setStatus("error");
+        setError(reason instanceof Error ? reason.message : "Failed to load card");
       });
     return () => {
       cancelled = true;
@@ -210,7 +223,6 @@ export function CardReferenceLink({
     reference.cardId,
     reference.channel,
     reference.line,
-    status,
     upsertArchivedCard,
     upsertCard,
   ]);
@@ -248,8 +260,8 @@ export function CardReferenceLink({
           )}
         </button>
       </HoverCardTrigger>
-      <HoverCardContent align="start" className="w-[360px] max-w-[calc(100vw-24px)] p-0">
-        <div className="max-h-[360px] overflow-y-auto p-3">
+      <HoverCardContent align="start" className="w-[420px] max-w-[calc(100vw-24px)] p-0">
+        <div className="max-h-[420px] overflow-y-auto p-3">
           <div className="flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold text-foreground">
@@ -317,7 +329,14 @@ export function MessageReferenceLink({
   }, [currentChannel, currentMessages, loadedMessages, reference.channel, reference.line]);
 
   useEffect(() => {
-    if (!open || !activeSlug || status === "loading" || status === "ok") return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setStatus("idle");
+    setError(null);
+    setLoadedMessages([]);
+  }, [activeSlug, reference.channel, reference.line]);
+
+  useEffect(() => {
+    if (!open || !activeSlug) return;
     if (currentChannel === reference.channel && currentMessages.length > 0) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setStatus("ok");
@@ -338,6 +357,11 @@ export function MessageReferenceLink({
         }
         setLoadedMessages(res.data.entries as Message[]);
         setStatus("ok");
+      })
+      .catch((reason: unknown) => {
+        if (cancelled) return;
+        setStatus("error");
+        setError(reason instanceof Error ? reason.message : "Failed to load message");
       });
     return () => {
       cancelled = true;
@@ -349,7 +373,6 @@ export function MessageReferenceLink({
     open,
     reference.channel,
     reference.line,
-    status,
   ]);
 
   const handleOpen = useCallback(
@@ -372,8 +395,8 @@ export function MessageReferenceLink({
           <span>#{reference.channel}:L{String(reference.line).padStart(6, "0")}</span>
         </button>
       </HoverCardTrigger>
-      <HoverCardContent align="start" className="w-[360px] max-w-[calc(100vw-24px)] p-0">
-        <div className="max-h-[360px] overflow-y-auto p-3">
+      <HoverCardContent align="start" className="w-[420px] max-w-[calc(100vw-24px)] p-0">
+        <div className="max-h-[420px] overflow-y-auto p-3">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold text-foreground">
