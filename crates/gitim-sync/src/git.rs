@@ -1124,7 +1124,10 @@ fn is_rate_limited(stderr: &str) -> bool {
     let lower = stderr.to_lowercase();
     lower.contains("rate limit")
         || lower.contains("too many requests")
-        || lower.contains("429")
+        || lower.contains("error: 429")
+        || lower.contains("http 429")
+        || lower.contains("status code 429")
+        || lower.contains("status: 429")
         || lower.contains("secondaryratelimit")
 }
 
@@ -1202,6 +1205,9 @@ mod tests {
         assert!(!is_rate_limited("error: failed to push some refs"));
         assert!(!is_rate_limited(
             "[rejected] main -> main (non-fast-forward)"
+        ));
+        assert!(!is_rate_limited(
+            "! [rejected] dead429beef -> main (non-fast-forward)"
         ));
         assert!(!is_rate_limited(""));
     }
