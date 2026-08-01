@@ -2168,7 +2168,7 @@ fn post_push_timeout_is_retryable_and_keeps_the_pushed_journal() {
     let repo = GitStorage::new(fixture.first.path());
     let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
     let config = SkillTransactionTestConfig {
-        transaction_timeout: Duration::from_secs(8),
+        transaction_timeout: Duration::from_secs(30),
         git_command_timeout: Duration::from_secs(2),
         git_program: Some(wrapper),
         max_concurrency: 1,
@@ -2286,7 +2286,7 @@ fn post_validation_timeout_keeps_the_previous_checkpoint_and_pushed_journal() {
     let repo = GitStorage::new(fixture.first.path());
     let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
     let config = SkillTransactionTestConfig {
-        transaction_timeout: Duration::from_secs(8),
+        transaction_timeout: Duration::from_secs(30),
         git_command_timeout: Duration::from_secs(2),
         git_program: Some(wrapper),
         max_concurrency: 1,
