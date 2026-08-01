@@ -327,6 +327,133 @@ fn concurrent_identical_requests_serialize_one_checkout_journal_and_publication(
 }
 
 #[test]
+fn concurrent_distinct_bootstraps_return_the_winning_workspace_state() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.first.path().join("users/bob.meta.yaml"),
+        "display_name: Bob\nrole: human\nintroduction: Administrator candidate\n",
+    )
+    .unwrap();
+    git(fixture.first.path(), ["add", "users/bob.meta.yaml"]);
+    git(
+        fixture.first.path(),
+        ["commit", "-m", "add second bootstrap candidate"],
+    );
+    git(fixture.first.path(), ["push", "origin", "main"]);
+    git(fixture.second.path(), ["pull", "--ff-only"]);
+    let alice_request_id = RequestId::generate();
+    let bob_request_id = RequestId::generate();
+    let barrier = Arc::new(Barrier::new(2));
+
+    let alice_root = fixture.first.path().to_path_buf();
+    let alice_barrier = Arc::clone(&barrier);
+    let alice_request_id_for_thread = alice_request_id.clone();
+    let alice = std::thread::spawn(move || {
+        let repo = GitStorage::new(&alice_root);
+        let guard = SkillSyncGuard::new(&alice_root).unwrap();
+        execute_remote_skill_transaction_with_test_config(
+            &repo,
+            &guard,
+            RemoteSkillTransactionRequest {
+                request: SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                    request_id: alice_request_id_for_thread,
+                }),
+                actor: "alice".to_owned(),
+                author_email: "alice@example.com".to_owned(),
+                now: "2026-07-31T00:00:00Z".to_owned(),
+                package: None,
+            },
+            SkillTransactionTestConfig {
+                after_built: Some(Arc::new(move || {
+                    alice_barrier.wait();
+                })),
+                ..SkillTransactionTestConfig::default()
+            },
+        )
+    });
+
+    let bob_root = fixture.second.path().to_path_buf();
+    let bob_barrier = Arc::clone(&barrier);
+    let bob_request_id_for_thread = bob_request_id.clone();
+    let bob = std::thread::spawn(move || {
+        let repo = GitStorage::new(&bob_root);
+        let guard = SkillSyncGuard::new(&bob_root).unwrap();
+        execute_remote_skill_transaction_with_test_config(
+            &repo,
+            &guard,
+            RemoteSkillTransactionRequest {
+                request: SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+                    request_id: bob_request_id_for_thread,
+                }),
+                actor: "bob".to_owned(),
+                author_email: "bob@example.com".to_owned(),
+                now: "2026-07-31T00:00:01Z".to_owned(),
+                package: None,
+            },
+            SkillTransactionTestConfig {
+                after_built: Some(Arc::new(move || {
+                    bob_barrier.wait();
+                })),
+                ..SkillTransactionTestConfig::default()
+            },
+        )
+    });
+
+    let alice_result = alice.join().unwrap().unwrap();
+    let bob_result = bob.join().unwrap().unwrap();
+    assert_eq!(alice_result.commit_id, bob_result.commit_id);
+    assert_eq!(alice_result.result.control_revision, Some(1));
+    assert_eq!(bob_result.result.control_revision, Some(1));
+
+    git(fixture.first.path(), ["fetch", "origin"]);
+    let workspace = git(
+        fixture.first.path(),
+        ["show", "origin/main:skills/workspace.meta.yaml"],
+    );
+    let workspace: gitim_core::skill::WorkspaceSkillMeta =
+        serde_yaml::from_slice(&workspace.stdout).unwrap();
+    assert_eq!(workspace.administrators.len(), 1);
+    assert!(
+        workspace.administrators[0].as_str() == "alice"
+            || workspace.administrators[0].as_str() == "bob"
+    );
+
+    let winning_request = if workspace.administrators[0].as_str() == "alice" {
+        &alice_request_id
+    } else {
+        &bob_request_id
+    };
+    let losing_request = if workspace.administrators[0].as_str() == "alice" {
+        &bob_request_id
+    } else {
+        &alice_request_id
+    };
+    let winning_receipt = git(
+        fixture.first.path(),
+        [
+            "show",
+            &format!(
+                "origin/main:skills/receipts/{}.meta.yaml",
+                winning_request.as_str()
+            ),
+        ],
+    );
+    assert!(!winning_receipt.stdout.is_empty());
+    let losing_receipt = Command::new("git")
+        .args([
+            "show",
+            &format!(
+                "origin/main:skills/receipts/{}.meta.yaml",
+                losing_request.as_str()
+            ),
+        ])
+        .current_dir(fixture.first.path())
+        .output()
+        .unwrap();
+    assert!(!losing_receipt.status.success());
+}
+
+#[test]
 fn mismatched_request_reuse_waits_for_the_request_owner_then_rejects() {
     let fixture = Fixture::new();
     let request_id = RequestId::generate();
