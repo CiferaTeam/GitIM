@@ -1,6 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 
@@ -17,6 +19,53 @@ const GIT_HTTP_TIMEOUT_ARGS: &[&str] = &[
     "-c",
     "http.lowSpeedTime=10",
 ];
+
+const CACHE_REMOTE_HEADS: &str = "refs/gitim-fetch-cache/remote/heads";
+const CACHE_GENERATIONS: &str = "refs/gitim-fetch-cache/generations";
+const CACHE_SCHEMA_MARKER_KEY: &str = "gitim.fetch-cache-schema";
+const CACHE_SCHEMA_MARKER_VALUE: &str = "1";
+static CACHE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+thread_local! {
+    static CACHE_TIP_BATCH_INVOCATION_COUNT: std::cell::Cell<u64> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn reset_cache_tip_batch_invocation_count() {
+    CACHE_TIP_BATCH_INVOCATION_COUNT.set(0);
+}
+
+#[cfg(test)]
+fn cache_tip_batch_invocation_count() -> u64 {
+    CACHE_TIP_BATCH_INVOCATION_COUNT.get()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GitObjectFormat {
+    Sha1,
+    Sha256,
+}
+
+impl GitObjectFormat {
+    fn parse(value: &str) -> Result<Self, GitError> {
+        match value {
+            "sha1" => Ok(Self::Sha1),
+            "sha256" => Ok(Self::Sha256),
+            _ => Err(GitError::CommandFailed(
+                "unsupported Git object format".to_string(),
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Sha1 => "sha1",
+            Self::Sha256 => "sha256",
+        }
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum GitError {
@@ -48,8 +97,10 @@ pub enum GitError {
 ///
 /// Spawns `git` as a child process and waits up to `GIT_COMMAND_TIMEOUT` for
 /// it to finish. If the deadline expires, the child is killed and
-/// `GitError::Timeout` is returned. On success, stderr is checked for
-/// ENOSPC patterns before returning the output.
+/// `GitError::Timeout` is returned. Input is written concurrently with output
+/// collection so commands with streaming responses cannot fill one pipe while
+/// waiting on the other. On success, stderr is checked for ENOSPC patterns
+/// before returning the output.
 fn run_git_command(args: &[&str], current_dir: &Path) -> Result<Output, GitError> {
     run_git_command_with_env(args, current_dir, &[])
 }
@@ -63,6 +114,15 @@ fn run_git_command_with_env(
     current_dir: &Path,
     envs: &[(&str, &str)],
 ) -> Result<Output, GitError> {
+    run_git_command_with_env_and_input(args, current_dir, envs, None)
+}
+
+fn run_git_command_with_env_and_input(
+    args: &[&str],
+    current_dir: &Path,
+    envs: &[(&str, &str)],
+    input: Option<&[u8]>,
+) -> Result<Output, GitError> {
     let mut cmd = Command::new("git");
     cmd.args(args)
         .current_dir(current_dir)
@@ -72,10 +132,31 @@ fn run_git_command_with_env(
         .env("LC_ALL", "C")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if input.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
-    let child = cmd.spawn()?;
+    let mut child = cmd.spawn()?;
+    let input_result = match input {
+        Some(input) => {
+            let Some(mut stdin) = child.stdin.take() else {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(GitError::CommandFailed(
+                    "git subprocess stdin is unavailable".to_string(),
+                ));
+            };
+            let input = input.to_vec();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(stdin.write_all(&input));
+            });
+            Some(rx)
+        }
+        None => None,
+    };
 
     // Wait with timeout using a thread + channel.
     // We keep the Child's pid so we can kill it on timeout.
@@ -87,6 +168,17 @@ fn run_git_command_with_env(
 
     match rx.recv_timeout(GIT_COMMAND_TIMEOUT) {
         Ok(Ok(output)) => {
+            if let Some(input_result) = input_result {
+                match input_result.recv() {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => return Err(GitError::Io(error)),
+                    Err(_) => {
+                        return Err(GitError::CommandFailed(
+                            "git subprocess input thread panicked".to_string(),
+                        ));
+                    }
+                }
+            }
             // Check for disk-full even on "success" — git sometimes exits 0
             // with ENOSPC warnings in stderr, and some commands (e.g. fetch)
             // may partially succeed.
@@ -149,6 +241,16 @@ fn run_git_with_env(
     Ok(output)
 }
 
+fn run_git_with_input(args: &[&str], current_dir: &Path, input: &[u8]) -> Result<Output, GitError> {
+    let output = run_git_command_with_env_and_input(args, current_dir, &[], Some(input))?;
+    if !output.status.success() {
+        return Err(GitError::CommandFailed(
+            String::from_utf8_lossy(&output.stderr).to_string(),
+        ));
+    }
+    Ok(output)
+}
+
 /// Run a git subprocess with timeout, for best-effort calls that discard
 /// the result. Returns the output if the command succeeded within the
 /// timeout, or `None` on any error (timeout, non-zero exit, I/O).
@@ -168,6 +270,185 @@ fn is_disk_full(stderr: &str) -> bool {
         || lower.contains("enospc")
         || lower.contains("cannot write: no space left on device")
         || lower.contains("disk full")
+}
+
+fn parse_cache_ref_manifest(stdout: &[u8]) -> Result<BTreeMap<String, String>, GitError> {
+    let stdout = std::str::from_utf8(stdout)
+        .map_err(|_| GitError::CommandFailed("invalid fetch-cache ref manifest".to_string()))?;
+    let mut manifest = BTreeMap::new();
+    for record in stdout.lines() {
+        let (ref_name, object_id) = record.split_once('\0').ok_or_else(|| {
+            GitError::CommandFailed("invalid fetch-cache ref manifest".to_string())
+        })?;
+        if ref_name
+            .strip_prefix(&format!("{CACHE_REMOTE_HEADS}/"))
+            .is_none_or(|branch| branch.is_empty())
+            || object_id.is_empty()
+            || object_id.contains('\0')
+            || manifest
+                .insert(ref_name.to_string(), object_id.to_string())
+                .is_some()
+        {
+            return Err(GitError::CommandFailed(
+                "invalid fetch-cache ref manifest".to_string(),
+            ));
+        }
+    }
+    Ok(manifest)
+}
+
+fn parse_cache_generation_manifest(
+    stdout: &[u8],
+    generation: u64,
+) -> Result<BTreeMap<String, String>, GitError> {
+    let stdout = std::str::from_utf8(stdout)
+        .map_err(|_| GitError::CommandFailed("invalid fetch-cache ref manifest".to_string()))?;
+    let generation_prefix = format!("{CACHE_GENERATIONS}/{generation}/heads/");
+    let shadow_prefix = format!("{CACHE_REMOTE_HEADS}/");
+    let mut manifest = BTreeMap::new();
+    for record in stdout.lines() {
+        let (ref_name, object_id) = record.split_once('\0').ok_or_else(|| {
+            GitError::CommandFailed("invalid fetch-cache ref manifest".to_string())
+        })?;
+        let branch = ref_name
+            .strip_prefix(&generation_prefix)
+            .filter(|branch| !branch.is_empty())
+            .ok_or_else(|| {
+                GitError::CommandFailed("invalid fetch-cache ref manifest".to_string())
+            })?;
+        if object_id.is_empty()
+            || object_id.contains('\0')
+            || manifest
+                .insert(format!("{shadow_prefix}{branch}"), object_id.to_string())
+                .is_some()
+        {
+            return Err(GitError::CommandFailed(
+                "invalid fetch-cache ref manifest".to_string(),
+            ));
+        }
+    }
+    Ok(manifest)
+}
+
+fn cache_tip_batch_error() -> GitError {
+    GitError::CommandFailed("fetch-cache commit objects are unavailable".to_string())
+}
+
+fn parse_cache_tip_batch_output(stdout: &[u8], expected: &[&str]) -> Result<(), GitError> {
+    if expected.is_empty() {
+        return if stdout.is_empty() {
+            Ok(())
+        } else {
+            Err(cache_tip_batch_error())
+        };
+    }
+    if !stdout.ends_with(b"\n") {
+        return Err(cache_tip_batch_error());
+    }
+
+    let mut lines = stdout.split(|byte| *byte == b'\n');
+    for expected_object_id in expected {
+        let line = lines.next().ok_or_else(cache_tip_batch_error)?;
+        let mut fields = line.split(|byte| *byte == b' ');
+        if fields.next() != Some(expected_object_id.as_bytes())
+            || fields.next() != Some(b"commit")
+            || fields.next().is_some()
+        {
+            return Err(cache_tip_batch_error());
+        }
+    }
+    if lines.next() != Some(&[][..]) || lines.next().is_some() {
+        return Err(cache_tip_batch_error());
+    }
+    Ok(())
+}
+
+fn cache_path_argument(path: &Path) -> Result<&str, GitError> {
+    path.to_str()
+        .ok_or_else(|| GitError::CommandFailed("fetch-cache path is not UTF-8".to_string()))
+}
+
+fn cache_scratch_path(path: &Path, kind: &str) -> Result<PathBuf, GitError> {
+    let parent = path.parent().ok_or_else(|| {
+        GitError::CommandFailed("fetch-cache path has no parent directory".to_string())
+    })?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| GitError::CommandFailed("fetch-cache path is not UTF-8".to_string()))?;
+    for _ in 0..32 {
+        let sequence = CACHE_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!(".{name}.{kind}-{}-{sequence}", std::process::id()));
+        if std::fs::symlink_metadata(&candidate).is_err() {
+            return Ok(candidate);
+        }
+    }
+    Err(GitError::CommandFailed(
+        "failed to allocate fetch-cache scratch path".to_string(),
+    ))
+}
+
+fn remove_cache_path(path: &Path) -> std::io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
+fn object_format_at(path: &Path) -> Result<GitObjectFormat, GitError> {
+    let output = run_git(&["rev-parse", "--show-object-format"], path)?;
+    let value = std::str::from_utf8(&output.stdout)
+        .map_err(|_| GitError::CommandFailed("Git object format is not UTF-8".to_string()))?;
+    GitObjectFormat::parse(value.trim())
+}
+
+fn is_valid_bare_cache(path: &Path, expected_object_format: GitObjectFormat) -> bool {
+    if !std::fs::symlink_metadata(path)
+        .ok()
+        .is_some_and(|metadata| metadata.file_type().is_dir())
+    {
+        return false;
+    }
+    let is_bare = run_git_command(&["rev-parse", "--is-bare-repository"], path)
+        .ok()
+        .filter(|output| output.status.success())
+        .is_some_and(|output| String::from_utf8_lossy(&output.stdout).trim() == "true");
+    if !is_bare || object_format_at(path).ok() != Some(expected_object_format) {
+        return false;
+    }
+    let marker = run_git_command(
+        &[
+            "config",
+            "--local",
+            "--null",
+            "--get-all",
+            CACHE_SCHEMA_MARKER_KEY,
+        ],
+        path,
+    )
+    .ok()
+    .filter(|output| output.status.success())
+    .is_some_and(|output| output.stdout == format!("{CACHE_SCHEMA_MARKER_VALUE}\0").as_bytes());
+    if !marker {
+        return false;
+    }
+    run_git_command(
+        &["config", "--local", "--get-regexp", "^(remote\\.|url\\.)"],
+        path,
+    )
+    .ok()
+    .is_some_and(|output| output.status.code() == Some(1) && output.stdout.is_empty())
+}
+
+fn validate_cache_generation(generation: u64) -> Result<(), GitError> {
+    if generation == 0 {
+        return Err(GitError::CommandFailed(
+            "fetch-cache generation must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -279,6 +560,77 @@ impl GitStorage {
         run_git_best_effort(&["remote", "get-url", "origin"], &self.root).is_some()
     }
 
+    pub(crate) fn object_format(&self) -> Result<GitObjectFormat, GitError> {
+        object_format_at(&self.root)
+    }
+
+    pub(crate) fn raw_origin_url(&self) -> Result<String, GitError> {
+        let output = run_git_command(
+            &["config", "--null", "--get-all", "remote.origin.url"],
+            &self.root,
+        )
+        .map_err(|_| GitError::CommandFailed("failed to read raw origin URL".to_string()))?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                "failed to read raw origin URL".to_string(),
+            ));
+        }
+        let values = output.stdout.strip_suffix(b"\0").ok_or_else(|| {
+            GitError::CommandFailed("raw origin URL list is malformed".to_string())
+        })?;
+        let mut values = values.split(|byte| *byte == 0);
+        let value = values
+            .next()
+            .ok_or_else(|| GitError::CommandFailed("raw origin URL list is empty".to_string()))?;
+        if values.next().is_some() {
+            return Err(GitError::CommandFailed(
+                "raw origin URL list must contain exactly one value".to_string(),
+            ));
+        }
+        let value = std::str::from_utf8(value)
+            .map_err(|_| GitError::CommandFailed("raw origin URL is not UTF-8".to_string()))?;
+        if value.is_empty() || value.trim() != value {
+            return Err(GitError::CommandFailed(
+                "raw origin URL is invalid".to_string(),
+            ));
+        }
+        Ok(value.to_string())
+    }
+
+    pub(crate) fn origin_fetch_refspecs(&self) -> Result<Vec<String>, GitError> {
+        let output = run_git_command(
+            &["config", "--null", "--get-all", "remote.origin.fetch"],
+            &self.root,
+        )
+        .map_err(|_| GitError::CommandFailed("failed to read origin fetch refspecs".to_string()))?;
+        if !output.status.success() {
+            return Err(GitError::CommandFailed(
+                "failed to read origin fetch refspecs".to_string(),
+            ));
+        }
+        let values = output.stdout.strip_suffix(b"\0").ok_or_else(|| {
+            GitError::CommandFailed("origin fetch refspec list is malformed".to_string())
+        })?;
+        let mut values = values.split(|byte| *byte == 0);
+        let value = values.next().ok_or_else(|| {
+            GitError::CommandFailed("origin fetch refspec list is empty".to_string())
+        })?;
+        if values.next().is_some() {
+            return Err(GitError::CommandFailed(
+                "origin fetch refspec list must contain exactly one value".to_string(),
+            ));
+        }
+        let value = std::str::from_utf8(value).map_err(|_| {
+            GitError::CommandFailed("origin fetch refspecs are not UTF-8".to_string())
+        })?;
+        if value.is_empty() || value.trim() != value {
+            return Err(GitError::CommandFailed(
+                "origin fetch refspec is invalid".to_string(),
+            ));
+        }
+        Ok(vec![value.to_string()])
+    }
+
     pub fn fetch(&self) -> Result<(), GitError> {
         let args = [
             GIT_HTTP_TIMEOUT_ARGS[0],
@@ -293,6 +645,225 @@ impl GitStorage {
             return Err(classify_remote_error(&String::from_utf8_lossy(
                 &output.stderr,
             )));
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn fetch_cache_shadow(&self) -> Result<(), GitError> {
+        let refspec = format!("+refs/heads/*:{CACHE_REMOTE_HEADS}/*");
+        let args = [
+            GIT_HTTP_TIMEOUT_ARGS[0],
+            GIT_HTTP_TIMEOUT_ARGS[1],
+            GIT_HTTP_TIMEOUT_ARGS[2],
+            GIT_HTTP_TIMEOUT_ARGS[3],
+            "fetch",
+            "--atomic",
+            "--no-tags",
+            "--prune",
+            "origin",
+            &refspec,
+        ];
+        let output = run_git_command(&args, &self.root)?;
+        if !output.status.success() {
+            return Err(classify_remote_error(&String::from_utf8_lossy(
+                &output.stderr,
+            )));
+        }
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cache_shadow_manifest(&self) -> Result<BTreeMap<String, String>, GitError> {
+        let format_arg = "--format=%(refname)%00%(objectname)";
+        let prefix = format!("{CACHE_REMOTE_HEADS}/");
+        let output = run_git(&["for-each-ref", format_arg, &prefix], &self.root)?;
+        parse_cache_ref_manifest(&output.stdout)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cache_generation_manifest(
+        cache_path: &Path,
+        generation: u64,
+    ) -> Result<BTreeMap<String, String>, GitError> {
+        validate_cache_generation(generation)?;
+        let format_arg = "--format=%(refname)%00%(objectname)";
+        let prefix = format!("{CACHE_GENERATIONS}/{generation}/heads/");
+        let output = run_git(&["for-each-ref", format_arg, &prefix], cache_path)?;
+        parse_cache_generation_manifest(&output.stdout, generation)
+    }
+
+    pub(crate) fn cache_commit_tips_are_readable(
+        cache_path: &Path,
+        manifest: &BTreeMap<String, String>,
+    ) -> Result<(), GitError> {
+        let object_ids = manifest
+            .values()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if object_ids.is_empty() {
+            return Ok(());
+        }
+        let mut input = Vec::new();
+        for object_id in &object_ids {
+            input.extend_from_slice(object_id.as_bytes());
+            input.push(b'\n');
+        }
+
+        #[cfg(test)]
+        CACHE_TIP_BATCH_INVOCATION_COUNT
+            .set(CACHE_TIP_BATCH_INVOCATION_COUNT.get().saturating_add(1));
+        let output = run_git_with_input(
+            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            cache_path,
+            &input,
+        )
+        .map_err(|_| cache_tip_batch_error())?;
+        parse_cache_tip_batch_output(&output.stdout, &object_ids)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn ensure_bare_cache(
+        path: &Path,
+        object_format: GitObjectFormat,
+    ) -> Result<(), GitError> {
+        if is_valid_bare_cache(path, object_format) {
+            return Ok(());
+        }
+        Self::rebuild_bare_cache(path, object_format)
+    }
+
+    pub(crate) fn rebuild_bare_cache(
+        path: &Path,
+        object_format: GitObjectFormat,
+    ) -> Result<(), GitError> {
+        let parent = path.parent().ok_or_else(|| {
+            GitError::CommandFailed("fetch-cache path has no parent directory".to_string())
+        })?;
+        std::fs::create_dir_all(parent)?;
+        let temporary = cache_scratch_path(path, "new")?;
+        let temporary_arg = cache_path_argument(&temporary)?;
+        let object_format_arg = format!("--object-format={}", object_format.as_str());
+        if let Err(error) = run_git(
+            &["init", "--bare", &object_format_arg, temporary_arg],
+            parent,
+        ) {
+            let _ = remove_cache_path(&temporary);
+            return Err(error);
+        }
+        if let Err(error) = run_git(
+            &[
+                "config",
+                "--local",
+                CACHE_SCHEMA_MARKER_KEY,
+                CACHE_SCHEMA_MARKER_VALUE,
+            ],
+            &temporary,
+        ) {
+            let _ = remove_cache_path(&temporary);
+            return Err(error);
+        }
+
+        if std::fs::symlink_metadata(path).is_ok() {
+            let backup = cache_scratch_path(path, "old")?;
+            if let Err(error) = std::fs::rename(path, &backup) {
+                let _ = remove_cache_path(&temporary);
+                return Err(GitError::Io(error));
+            }
+            if let Err(error) = std::fs::rename(&temporary, path) {
+                let _ = std::fs::rename(&backup, path);
+                let _ = remove_cache_path(&temporary);
+                return Err(GitError::Io(error));
+            }
+            remove_cache_path(&backup)?;
+        } else if let Err(error) = std::fs::rename(&temporary, path) {
+            let _ = remove_cache_path(&temporary);
+            return Err(GitError::Io(error));
+        }
+        if is_valid_bare_cache(path, object_format) {
+            Ok(())
+        } else {
+            Err(GitError::CommandFailed(
+                "fetch-cache repository validation failed".to_string(),
+            ))
+        }
+    }
+
+    pub(crate) fn cache_repository_is_valid(path: &Path, object_format: GitObjectFormat) -> bool {
+        is_valid_bare_cache(path, object_format)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn publish_cache_generation(
+        &self,
+        cache_path: &Path,
+        generation: u64,
+    ) -> Result<(), GitError> {
+        validate_cache_generation(generation)?;
+        let leader_path = cache_path_argument(&self.root)?;
+        let generation_prefix = format!("{CACHE_GENERATIONS}/{generation}/heads/");
+        let output = run_git(
+            &["for-each-ref", "--format=%(refname)", &generation_prefix],
+            cache_path,
+        )?;
+        let mut updates = String::new();
+        for ref_name in String::from_utf8_lossy(&output.stdout).lines() {
+            updates.push_str("delete ");
+            updates.push_str(ref_name);
+            updates.push('\n');
+        }
+        if !updates.is_empty() {
+            run_git_with_input(&["update-ref", "--stdin"], cache_path, updates.as_bytes())?;
+        }
+
+        let refspec = format!("+{CACHE_REMOTE_HEADS}/*:{generation_prefix}*");
+        run_git(
+            &["fetch", "--atomic", "--no-tags", leader_path, &refspec],
+            cache_path,
+        )
+        .map(|_| ())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn import_cache_generation(
+        &self,
+        cache_path: &Path,
+        generation: u64,
+    ) -> Result<(), GitError> {
+        validate_cache_generation(generation)?;
+        let cache_path = cache_path_argument(cache_path)?;
+        let refspec = format!("+{CACHE_GENERATIONS}/{generation}/heads/*:refs/remotes/origin/*");
+        run_git(
+            &["fetch", "--atomic", "--no-tags", cache_path, &refspec],
+            &self.root,
+        )
+        .map(|_| ())
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn cleanup_cache_generations(
+        cache_path: &Path,
+        active_generation: u64,
+    ) -> Result<(), GitError> {
+        validate_cache_generation(active_generation)?;
+        let generations_prefix = format!("{CACHE_GENERATIONS}/");
+        let output = run_git(
+            &["for-each-ref", "--format=%(refname)", &generations_prefix],
+            cache_path,
+        )?;
+        let active_prefix = format!("{CACHE_GENERATIONS}/{active_generation}/");
+        let mut updates = String::new();
+        for ref_name in String::from_utf8_lossy(&output.stdout).lines() {
+            if !ref_name.starts_with(&active_prefix) {
+                updates.push_str("delete ");
+                updates.push_str(ref_name);
+                updates.push('\n');
+            }
+        }
+        if !updates.is_empty() {
+            run_git_with_input(&["update-ref", "--stdin"], cache_path, updates.as_bytes())?;
         }
         Ok(())
     }
@@ -986,6 +1557,881 @@ pub(crate) fn classify_remote_error(raw_stderr: &str) -> GitError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    struct CacheGitFixture {
+        _origin: tempfile::TempDir,
+        leader: tempfile::TempDir,
+        follower: tempfile::TempDir,
+        configured_origin: String,
+    }
+
+    impl CacheGitFixture {
+        fn new() -> Self {
+            Self::with_object_format("sha1")
+        }
+
+        fn with_object_format(object_format: &str) -> Self {
+            let origin = tempfile::TempDir::new().unwrap();
+            let object_format_arg = format!("--object-format={object_format}");
+            git_test_ok(
+                origin.path(),
+                &["init", "--bare", &object_format_arg, "-b", "main"],
+            );
+
+            let leader = tempfile::TempDir::new().unwrap();
+            git_test_ok(
+                origin.path(),
+                &[
+                    "clone",
+                    origin.path().to_str().unwrap(),
+                    leader.path().to_str().unwrap(),
+                ],
+            );
+            configure_test_identity(leader.path(), "Leader", "leader@test.com");
+            std::fs::write(leader.path().join("main.txt"), "main-v1").unwrap();
+            git_test_ok(leader.path(), &["add", "main.txt"]);
+            git_test_ok(leader.path(), &["commit", "-m", "seed main"]);
+            git_test_ok(leader.path(), &["push", "-u", "origin", "main"]);
+
+            git_test_ok(leader.path(), &["checkout", "-b", "topic"]);
+            std::fs::write(leader.path().join("topic.txt"), "topic").unwrap();
+            git_test_ok(leader.path(), &["add", "topic.txt"]);
+            git_test_ok(leader.path(), &["commit", "-m", "seed topic"]);
+            git_test_ok(leader.path(), &["push", "-u", "origin", "topic"]);
+            git_test_ok(leader.path(), &["checkout", "main"]);
+
+            let follower = tempfile::TempDir::new().unwrap();
+            git_test_ok(
+                origin.path(),
+                &[
+                    "clone",
+                    origin.path().to_str().unwrap(),
+                    follower.path().to_str().unwrap(),
+                ],
+            );
+
+            let configured_origin =
+                "https://x-access-token:cache-secret@github.com/acme/cache-fixture.git".to_string();
+            let file_url = format!("file://{}", origin.path().display());
+            let instead_of_key = format!("url.{file_url}.insteadOf");
+            git_test_ok(
+                leader.path(),
+                &["config", "remote.origin.url", &configured_origin],
+            );
+            git_test_ok(
+                leader.path(),
+                &["config", &instead_of_key, &configured_origin],
+            );
+
+            Self {
+                _origin: origin,
+                leader,
+                follower,
+                configured_origin,
+            }
+        }
+
+        fn leader_storage(&self) -> GitStorage {
+            GitStorage::new(self.leader.path())
+        }
+
+        fn force_push_main_rewrite(&self) -> String {
+            std::fs::write(self.leader.path().join("main.txt"), "main-v2").unwrap();
+            git_test_ok(self.leader.path(), &["add", "main.txt"]);
+            git_test_ok(
+                self.leader.path(),
+                &["commit", "--amend", "-m", "rewrite main"],
+            );
+            git_test_ok(self.leader.path(), &["push", "--force", "origin", "main"]);
+            git_test_output(self.leader.path(), &["rev-parse", "main"])
+        }
+    }
+
+    fn git_test_ok(root: &Path, args: &[&str]) {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_test_output(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn create_large_commit_manifest(
+        cache_path: &Path,
+        commit_count: usize,
+    ) -> BTreeMap<String, String> {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let marks_path = cache_path.parent().unwrap().join("cache-tip-batch.marks");
+        let mut stream = b"blob\nmark :1\ndata 1\nx\n".to_vec();
+        for index in 0..commit_count {
+            let message = format!("tip {index}");
+            let commit = format!(
+                "commit refs/heads/cache-tip-load\nmark :{}\ncommitter Cache Test <cache@test> {} +0000\ndata {}\n{}\n{}\n",
+                index + 2,
+                index + 1,
+                message.len(),
+                message,
+                if index == 0 {
+                    "M 100644 :1 cached"
+                } else {
+                    ""
+                }
+            );
+            stream.extend_from_slice(commit.as_bytes());
+        }
+        stream.extend_from_slice(b"done\n");
+
+        let export_marks = format!("--export-marks={}", marks_path.display());
+        let mut child = std::process::Command::new("git")
+            .args(["fast-import", "--quiet", &export_marks])
+            .current_dir(cache_path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&stream).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "git fast-import failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let marks = std::fs::read_to_string(marks_path).unwrap();
+        let object_ids = marks
+            .lines()
+            .skip(1)
+            .map(|line| line.split_once(' ').unwrap().1.to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(object_ids.len(), commit_count);
+        object_ids
+            .into_iter()
+            .enumerate()
+            .map(|(index, object_id)| (format!("{CACHE_REMOTE_HEADS}/batch-{index:05}"), object_id))
+            .collect()
+    }
+
+    fn enter_isolated_global_config_test(test_name: &str, config: &str) -> bool {
+        const CHILD_TEST_ENV: &str = "GITIM_CACHE_GLOBAL_CONFIG_TEST";
+        if std::env::var(CHILD_TEST_ENV).as_deref() == Ok(test_name) {
+            return true;
+        }
+
+        let isolated = tempfile::TempDir::new().unwrap();
+        let global_config = isolated.path().join("global.gitconfig");
+        std::fs::write(&global_config, config).unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", test_name, "--nocapture"])
+            .env(CHILD_TEST_ENV, test_name)
+            .env("GIT_CONFIG_GLOBAL", &global_config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated test {test_name} failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+
+    fn cache_test_refs(root: &Path, prefix: &str) -> BTreeMap<String, String> {
+        let format_arg = "--format=%(refname)%00%(objectname)";
+        let output = git_test_output(root, &["for-each-ref", format_arg, prefix]);
+        output
+            .lines()
+            .map(|line| {
+                let (name, object_id) = line.split_once('\0').unwrap();
+                (name.to_string(), object_id.to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cache_shadow_fetch_uses_isolated_namespace_and_sorted_manifest() {
+        let fixture = CacheGitFixture::new();
+        let storage = fixture.leader_storage();
+
+        storage.fetch_cache_shadow().unwrap();
+
+        assert_eq!(storage.raw_origin_url().unwrap(), fixture.configured_origin);
+        let refs = cache_test_refs(fixture.leader.path(), CACHE_REMOTE_HEADS);
+        assert_eq!(
+            refs.keys().cloned().collect::<Vec<_>>(),
+            [
+                format!("{CACHE_REMOTE_HEADS}/main"),
+                format!("{CACHE_REMOTE_HEADS}/topic"),
+            ]
+        );
+        assert_eq!(storage.cache_shadow_manifest().unwrap(), refs);
+    }
+
+    #[test]
+    fn cache_shadow_fetch_force_updates_and_prunes_deleted_branches() {
+        let fixture = CacheGitFixture::new();
+        let storage = fixture.leader_storage();
+        storage.fetch_cache_shadow().unwrap();
+        let original_main =
+            storage.cache_shadow_manifest().unwrap()[&format!("{CACHE_REMOTE_HEADS}/main")].clone();
+
+        let rewritten_main = fixture.force_push_main_rewrite();
+        storage.fetch_cache_shadow().unwrap();
+        assert_ne!(rewritten_main, original_main);
+        assert_eq!(
+            storage.cache_shadow_manifest().unwrap()[&format!("{CACHE_REMOTE_HEADS}/main")],
+            rewritten_main
+        );
+
+        git_test_ok(
+            fixture.leader.path(),
+            &["push", "origin", "--delete", "topic"],
+        );
+        storage.fetch_cache_shadow().unwrap();
+        assert_eq!(
+            storage
+                .cache_shadow_manifest()
+                .unwrap()
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [format!("{CACHE_REMOTE_HEADS}/main")]
+        );
+    }
+
+    #[test]
+    fn cache_manifest_parser_rejects_malformed_records() {
+        let malformed: &[&[u8]] = &[
+            b"\xff",
+            b"refs/gitim-fetch-cache/remote/heads/main deadbeef\n",
+            b"refs/heads/main\0deadbeef\n",
+            b"refs/gitim-fetch-cache/remote/heads/\0deadbeef\n",
+            b"refs/gitim-fetch-cache/remote/heads/main\0\n",
+            b"refs/gitim-fetch-cache/remote/heads/main\0dead\0beef\n",
+            concat!(
+                "refs/gitim-fetch-cache/remote/heads/main\0deadbeef\n",
+                "refs/gitim-fetch-cache/remote/heads/main\0cafebabe\n"
+            )
+            .as_bytes(),
+        ];
+
+        for input in malformed {
+            assert_invalid_cache_manifest(parse_cache_ref_manifest(input));
+        }
+    }
+
+    #[test]
+    fn cache_generation_manifest_parser_rejects_malformed_records() {
+        let malformed: &[&[u8]] = &[
+            b"\xff",
+            b"refs/gitim-fetch-cache/generations/1/heads/main deadbeef\n",
+            b"refs/gitim-fetch-cache/generations/2/heads/main\0deadbeef\n",
+            b"refs/gitim-fetch-cache/generations/1/heads/\0deadbeef\n",
+            b"refs/gitim-fetch-cache/generations/1/heads/main\0\n",
+            b"refs/gitim-fetch-cache/generations/1/heads/main\0dead\0beef\n",
+            concat!(
+                "refs/gitim-fetch-cache/generations/1/heads/main\0deadbeef\n",
+                "refs/gitim-fetch-cache/generations/1/heads/main\0cafebabe\n"
+            )
+            .as_bytes(),
+        ];
+
+        for input in malformed {
+            assert_invalid_cache_manifest(parse_cache_generation_manifest(input, 1));
+        }
+    }
+
+    #[test]
+    fn cache_tip_batch_parser_rejects_non_commit_and_malformed_output() {
+        let first = "1111111111111111111111111111111111111111";
+        let second = "2222222222222222222222222222222222222222";
+        let expected = [first, second];
+        let malformed = [
+            format!("{first} commit\n{second} tree\n").into_bytes(),
+            format!("{first} commit\n{second} missing\n").into_bytes(),
+            format!("{first} commit\n").into_bytes(),
+            format!("{first} commit\n{second} commit\n{second} commit\n").into_bytes(),
+            format!("{first} commit\n{first} commit\n").into_bytes(),
+            format!("{first} commit extra\n{second} commit\n").into_bytes(),
+            format!("{first} commit\n{second} commit").into_bytes(),
+            vec![0xff],
+        ];
+
+        for output in malformed {
+            assert_invalid_cache_tip_batch(parse_cache_tip_batch_output(&output, &expected));
+        }
+    }
+
+    #[test]
+    fn cache_tip_batch_validates_multiple_branches_with_one_invocation() {
+        let fixture = CacheGitFixture::new();
+        let storage = fixture.leader_storage();
+        storage.fetch_cache_shadow().unwrap();
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let cache_path = cache_root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        storage.publish_cache_generation(&cache_path, 1).unwrap();
+        let manifest = GitStorage::cache_generation_manifest(&cache_path, 1).unwrap();
+        assert_eq!(
+            manifest
+                .values()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            2
+        );
+
+        reset_cache_tip_batch_invocation_count();
+        GitStorage::cache_commit_tips_are_readable(&cache_path, &manifest).unwrap();
+
+        assert_eq!(cache_tip_batch_invocation_count(), 1);
+    }
+
+    #[test]
+    fn cache_tip_batch_rejects_missing_object_with_one_invocation() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        let manifest = BTreeMap::from([(
+            format!("{CACHE_REMOTE_HEADS}/main"),
+            "1111111111111111111111111111111111111111".to_string(),
+        )]);
+
+        reset_cache_tip_batch_invocation_count();
+        assert_invalid_cache_tip_batch(GitStorage::cache_commit_tips_are_readable(
+            &cache_path,
+            &manifest,
+        ));
+
+        assert_eq!(cache_tip_batch_invocation_count(), 1);
+    }
+
+    #[test]
+    fn cache_tip_batch_maps_nonzero_exit_to_generic_error() {
+        let root = tempfile::TempDir::new().unwrap();
+        let manifest = BTreeMap::from([(
+            format!("{CACHE_REMOTE_HEADS}/main"),
+            "1111111111111111111111111111111111111111".to_string(),
+        )]);
+
+        reset_cache_tip_batch_invocation_count();
+        assert_invalid_cache_tip_batch(GitStorage::cache_commit_tips_are_readable(
+            root.path(),
+            &manifest,
+        ));
+
+        assert_eq!(cache_tip_batch_invocation_count(), 1);
+    }
+
+    #[test]
+    fn cache_tip_batch_drains_large_output_while_writing_input() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        let manifest = create_large_commit_manifest(&cache_path, 30_000);
+        let (sender, receiver) = std::sync::mpsc::channel();
+
+        std::thread::spawn(move || {
+            let result = GitStorage::cache_commit_tips_are_readable(&cache_path, &manifest);
+            let _ = sender.send(result);
+        });
+
+        receiver
+            .recv_timeout(Duration::from_secs(15))
+            .expect("batch validation must drain output while writing input")
+            .unwrap();
+    }
+
+    fn assert_invalid_cache_manifest(result: Result<BTreeMap<String, String>, GitError>) {
+        assert!(matches!(
+            result,
+            Err(GitError::CommandFailed(message))
+                if message == "invalid fetch-cache ref manifest"
+        ));
+    }
+
+    fn assert_invalid_cache_tip_batch(result: Result<(), GitError>) {
+        assert!(matches!(
+            result,
+            Err(GitError::CommandFailed(message))
+                if message == "fetch-cache commit objects are unavailable"
+        ));
+    }
+
+    #[test]
+    fn cache_bare_repository_is_reused_or_recreated_without_remote_config() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        assert_eq!(
+            git_test_output(&cache_path, &["rev-parse", "--is-bare-repository"]),
+            "true"
+        );
+        git_test_ok(&cache_path, &["config", "cache.test-marker", "present"]);
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        assert_eq!(
+            git_test_output(&cache_path, &["config", "--get", "cache.test-marker"]),
+            "present"
+        );
+
+        std::fs::remove_dir_all(&cache_path).unwrap();
+        std::fs::create_dir(&cache_path).unwrap();
+        std::fs::write(cache_path.join("corrupt"), "not a repository").unwrap();
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(&cache_path, &["rev-parse", "--is-bare-repository"]),
+            "true"
+        );
+        assert!(!cache_path.join("corrupt").exists());
+        let remote_config = std::process::Command::new("git")
+            .args(["config", "--local", "--get-regexp", "^remote\\."])
+            .current_dir(&cache_path)
+            .output()
+            .unwrap();
+        assert!(!remote_config.status.success());
+        assert!(remote_config.stdout.is_empty());
+    }
+
+    #[test]
+    fn cache_global_url_rewrite_does_not_invalidate_owned_repository() {
+        const TEST_NAME: &str =
+            "git::tests::cache_global_url_rewrite_does_not_invalidate_owned_repository";
+        if !enter_isolated_global_config_test(
+            TEST_NAME,
+            "[url \"file:///tmp/cache-global-rewrite\"]\n\tinsteadOf = cache-source:\n",
+        ) {
+            return;
+        }
+
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &["init", "--bare", cache_path.to_str().unwrap()],
+        );
+        git_test_ok(
+            &cache_path,
+            &[
+                "config",
+                "--local",
+                CACHE_SCHEMA_MARKER_KEY,
+                CACHE_SCHEMA_MARKER_VALUE,
+            ],
+        );
+        git_test_ok(
+            &cache_path,
+            &["config", "--local", "cache.test-marker", "present"],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", "cache.test-marker"]
+            ),
+            "present"
+        );
+    }
+
+    #[test]
+    fn cache_global_marker_does_not_authenticate_arbitrary_bare() {
+        const TEST_NAME: &str =
+            "git::tests::cache_global_marker_does_not_authenticate_arbitrary_bare";
+        if !enter_isolated_global_config_test(TEST_NAME, "[gitim]\n\tfetch-cache-schema = 1\n") {
+            return;
+        }
+
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &["init", "--bare", cache_path.to_str().unwrap()],
+        );
+        git_test_ok(
+            &cache_path,
+            &["config", "--local", "cache.unowned-marker", "present"],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", CACHE_SCHEMA_MARKER_KEY]
+            ),
+            CACHE_SCHEMA_MARKER_VALUE
+        );
+        let unowned_marker = std::process::Command::new("git")
+            .args(["config", "--local", "--get", "cache.unowned-marker"])
+            .current_dir(&cache_path)
+            .output()
+            .unwrap();
+        assert_eq!(unowned_marker.status.code(), Some(1));
+    }
+
+    #[test]
+    fn cache_global_and_local_markers_do_not_create_multivalue_mismatch() {
+        const TEST_NAME: &str =
+            "git::tests::cache_global_and_local_markers_do_not_create_multivalue_mismatch";
+        if !enter_isolated_global_config_test(TEST_NAME, "[gitim]\n\tfetch-cache-schema = 1\n") {
+            return;
+        }
+
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &["init", "--bare", cache_path.to_str().unwrap()],
+        );
+        git_test_ok(
+            &cache_path,
+            &[
+                "config",
+                "--local",
+                CACHE_SCHEMA_MARKER_KEY,
+                CACHE_SCHEMA_MARKER_VALUE,
+            ],
+        );
+        git_test_ok(
+            &cache_path,
+            &["config", "--local", "cache.test-marker", "present"],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", "cache.test-marker"]
+            ),
+            "present"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_repository_replaces_symlink_without_touching_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let external = root.path().join("external.git");
+        git_test_ok(root.path(), &["init", "--bare", external.to_str().unwrap()]);
+        git_test_ok(
+            &external,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://secret@example.invalid/repo.git",
+            ],
+        );
+        let cache_path = root.path().join("fetch-cache.git");
+        symlink(&external, &cache_path).unwrap();
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert!(std::fs::symlink_metadata(&cache_path)
+            .unwrap()
+            .file_type()
+            .is_dir());
+        assert_eq!(
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", CACHE_SCHEMA_MARKER_KEY]
+            ),
+            CACHE_SCHEMA_MARKER_VALUE
+        );
+        assert_eq!(
+            git_test_output(&external, &["config", "--get", "remote.origin.url"]),
+            "https://secret@example.invalid/repo.git"
+        );
+    }
+
+    #[test]
+    fn cache_repository_rebuilds_arbitrary_bare_with_safe_config() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &["init", "--bare", cache_path.to_str().unwrap()],
+        );
+        git_test_ok(
+            &cache_path,
+            &[
+                "config",
+                "remote.origin.url",
+                "https://secret@example.invalid/repo.git",
+            ],
+        );
+        git_test_ok(
+            &cache_path,
+            &[
+                "config",
+                "url.https://secret@example.invalid/.insteadOf",
+                "cache-source:",
+            ],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(
+                &cache_path,
+                &["config", "--local", "--get", CACHE_SCHEMA_MARKER_KEY]
+            ),
+            CACHE_SCHEMA_MARKER_VALUE
+        );
+        assert_eq!(
+            git_test_output(&cache_path, &["rev-parse", "--show-object-format"]),
+            "sha1"
+        );
+        let unsafe_config = std::process::Command::new("git")
+            .args(["config", "--local", "--get-regexp", "^(remote\\.|url\\.)"])
+            .current_dir(&cache_path)
+            .output()
+            .unwrap();
+        assert_eq!(unsafe_config.status.code(), Some(1));
+        assert!(unsafe_config.stdout.is_empty());
+    }
+
+    #[test]
+    fn cache_repository_rebuilds_object_format_mismatch() {
+        let root = tempfile::TempDir::new().unwrap();
+        let cache_path = root.path().join("fetch-cache.git");
+        git_test_ok(
+            root.path(),
+            &[
+                "init",
+                "--bare",
+                "--object-format=sha256",
+                cache_path.to_str().unwrap(),
+            ],
+        );
+        git_test_ok(
+            &cache_path,
+            &["config", CACHE_SCHEMA_MARKER_KEY, CACHE_SCHEMA_MARKER_VALUE],
+        );
+
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert_eq!(
+            git_test_output(&cache_path, &["rev-parse", "--show-object-format"]),
+            "sha1"
+        );
+    }
+
+    #[test]
+    fn cache_sha256_generation_publishes_and_imports() {
+        let fixture = CacheGitFixture::with_object_format("sha256");
+        let storage = fixture.leader_storage();
+        assert_eq!(storage.object_format().unwrap(), GitObjectFormat::Sha256);
+        storage.fetch_cache_shadow().unwrap();
+        let expected_main =
+            storage.cache_shadow_manifest().unwrap()[&format!("{CACHE_REMOTE_HEADS}/main")].clone();
+        assert_eq!(expected_main.len(), 64);
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let cache_path = cache_root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha256).unwrap();
+
+        storage.publish_cache_generation(&cache_path, 1).unwrap();
+        git_test_ok(
+            fixture.follower.path(),
+            &["update-ref", "-d", "refs/remotes/origin/main"],
+        );
+        GitStorage::new(fixture.follower.path())
+            .import_cache_generation(&cache_path, 1)
+            .unwrap();
+
+        assert_eq!(
+            git_test_output(
+                fixture.follower.path(),
+                &["rev-parse", "refs/remotes/origin/main"],
+            ),
+            expected_main
+        );
+        assert_eq!(
+            git_test_output(&cache_path, &["rev-parse", "--show-object-format"]),
+            "sha256"
+        );
+    }
+
+    #[test]
+    fn cache_generation_publish_and_import_preserve_follower_only_refs_and_head() {
+        let fixture = CacheGitFixture::new();
+        let storage = fixture.leader_storage();
+        storage.fetch_cache_shadow().unwrap();
+        let shadow = storage.cache_shadow_manifest().unwrap();
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let cache_path = cache_root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        storage.publish_cache_generation(&cache_path, 1).unwrap();
+        let generation_refs = cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/1/heads"));
+        let expected_generation_refs = shadow
+            .iter()
+            .map(|(name, object_id)| {
+                (
+                    name.replacen(
+                        CACHE_REMOTE_HEADS,
+                        &format!("{CACHE_GENERATIONS}/1/heads"),
+                        1,
+                    ),
+                    object_id.clone(),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(generation_refs, expected_generation_refs);
+
+        let follower_main = format!("{CACHE_REMOTE_HEADS}/main");
+        let follower_topic = format!("{CACHE_REMOTE_HEADS}/topic");
+        let main_object = shadow[&follower_main].clone();
+        let topic_object = shadow[&follower_topic].clone();
+        git_test_ok(
+            fixture.follower.path(),
+            &["update-ref", "refs/remotes/origin/main", &topic_object],
+        );
+        git_test_ok(
+            fixture.follower.path(),
+            &[
+                "update-ref",
+                "refs/remotes/origin/follower-only",
+                &topic_object,
+            ],
+        );
+        let symbolic_head = git_test_output(
+            fixture.follower.path(),
+            &["symbolic-ref", "refs/remotes/origin/HEAD"],
+        );
+
+        GitStorage::new(fixture.follower.path())
+            .import_cache_generation(&cache_path, 1)
+            .unwrap();
+
+        assert_eq!(
+            git_test_output(
+                fixture.follower.path(),
+                &["rev-parse", "refs/remotes/origin/main"],
+            ),
+            main_object
+        );
+        assert_eq!(
+            git_test_output(
+                fixture.follower.path(),
+                &["rev-parse", "refs/remotes/origin/follower-only"],
+            ),
+            topic_object
+        );
+        assert_eq!(
+            git_test_output(
+                fixture.follower.path(),
+                &["symbolic-ref", "refs/remotes/origin/HEAD"],
+            ),
+            symbolic_head
+        );
+    }
+
+    #[test]
+    fn cache_generation_republish_replaces_complete_namespace() {
+        let fixture = CacheGitFixture::new();
+        let storage = fixture.leader_storage();
+        storage.fetch_cache_shadow().unwrap();
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let cache_path = cache_root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        storage.publish_cache_generation(&cache_path, 7).unwrap();
+        assert_eq!(
+            cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/7/heads"))
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>(),
+            [
+                format!("{CACHE_GENERATIONS}/7/heads/main"),
+                format!("{CACHE_GENERATIONS}/7/heads/topic"),
+            ]
+        );
+
+        git_test_ok(
+            fixture.leader.path(),
+            &["push", "origin", "--delete", "topic"],
+        );
+        storage.fetch_cache_shadow().unwrap();
+        storage.publish_cache_generation(&cache_path, 7).unwrap();
+
+        let generation_refs = cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/7/heads"));
+        let expected = storage
+            .cache_shadow_manifest()
+            .unwrap()
+            .into_iter()
+            .map(|(name, object_id)| {
+                (
+                    name.replacen(
+                        CACHE_REMOTE_HEADS,
+                        &format!("{CACHE_GENERATIONS}/7/heads"),
+                        1,
+                    ),
+                    object_id,
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(generation_refs, expected);
+    }
+
+    #[test]
+    fn cache_cleanup_removes_inactive_generations_and_preserves_active_namespace() {
+        let fixture = CacheGitFixture::new();
+        let storage = fixture.leader_storage();
+        storage.fetch_cache_shadow().unwrap();
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let cache_path = cache_root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+        storage.publish_cache_generation(&cache_path, 1).unwrap();
+        storage.publish_cache_generation(&cache_path, 2).unwrap();
+        let active_before = cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/2/heads"));
+
+        GitStorage::cleanup_cache_generations(&cache_path, 2).unwrap();
+
+        assert!(cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/1")).is_empty());
+        assert_eq!(
+            cache_test_refs(&cache_path, &format!("{CACHE_GENERATIONS}/2/heads")),
+            active_before
+        );
+    }
+
+    #[test]
+    fn cache_generation_operations_reject_zero() {
+        let fixture = CacheGitFixture::new();
+        let storage = fixture.leader_storage();
+        let cache_root = tempfile::TempDir::new().unwrap();
+        let cache_path = cache_root.path().join("fetch-cache.git");
+        GitStorage::ensure_bare_cache(&cache_path, GitObjectFormat::Sha1).unwrap();
+
+        assert!(storage.publish_cache_generation(&cache_path, 0).is_err());
+        assert!(storage.import_cache_generation(&cache_path, 0).is_err());
+        assert!(GitStorage::cleanup_cache_generations(&cache_path, 0).is_err());
+    }
 
     fn configure_test_identity(root: &Path, name: &str, email: &str) {
         for args in [
