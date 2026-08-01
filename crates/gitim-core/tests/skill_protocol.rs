@@ -2,7 +2,7 @@
 
 use gitim_core::skill::{
     parse_skill_reference, scan_skill_references, ProposalId, RequestId, RevisionId,
-    SkillCreateRequest, SkillError, SkillListQuery, SkillMutationRequest,
+    SkillCreateRequest, SkillError, SkillListQuery, SkillLocalState, SkillMutationRequest,
     SkillProposalTransitionRequest, SkillPublicationMeta, SkillReceiptRequest, SkillReference,
     SkillShowQuery, SkillSlug,
 };
@@ -45,6 +45,26 @@ skill:ok@r-01K1D8QG2S8RX4T9M9BDKQ9Z7N"#,
 fn errors_have_stable_codes() {
     assert_eq!(SkillError::NotFound.code(), "skill_not_found");
     assert_eq!(SkillError::RequestIdConflict.code(), "request_id_conflict");
+}
+
+#[test]
+fn local_state_wire_values_match_daemon_responses() {
+    assert_eq!(
+        serde_json::to_string(&SkillLocalState::Current).unwrap(),
+        "\"current\""
+    );
+    assert_eq!(
+        serde_json::to_string(&SkillLocalState::PendingSync).unwrap(),
+        "\"pending_sync\""
+    );
+    assert_eq!(
+        serde_json::from_str::<SkillLocalState>("\"current\"").unwrap(),
+        SkillLocalState::Current
+    );
+    assert_eq!(
+        serde_json::from_str::<SkillLocalState>("\"pending_sync\"").unwrap(),
+        SkillLocalState::PendingSync
+    );
 }
 
 #[test]

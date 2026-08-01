@@ -20,6 +20,8 @@ use gitim_core::skill::{
 };
 use serde::{Deserialize, Serialize};
 
+pub use gitim_core::skill::SkillLocalState;
+
 use super::checkpoint::{
     lock_exclusive_until, validate_incoming_skill_history_with_runner, AcceptedSkillState,
     AcceptedTree, LockedSkillCheckpoint, SkillCheckpointStore, SkillSyncError,
@@ -63,13 +65,6 @@ pub struct RemoteSkillTransactionResult {
     pub commit_id: String,
     pub result: SkillMutationResult,
     pub local_state: SkillLocalState,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillLocalState {
-    Current,
-    PendingSync,
 }
 
 #[doc(hidden)]

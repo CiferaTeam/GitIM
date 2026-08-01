@@ -23,8 +23,8 @@ pub use transition::{
 pub use types::{
     ProposalStatus, ResourceDescriptor, SkillArchiveTransitionRequest, SkillCatalogEntry,
     SkillCreateRequest, SkillHistoryResponse, SkillListQuery, SkillListResponse, SkillLoadResponse,
-    SkillMeta, SkillMetadataUpdateRequest, SkillMutationRequest, SkillMutationResult,
-    SkillOperation, SkillPageQuery, SkillProposalDiff, SkillProposalListQuery,
+    SkillLocalState, SkillMeta, SkillMetadataUpdateRequest, SkillMutationRequest,
+    SkillMutationResult, SkillOperation, SkillPageQuery, SkillProposalDiff, SkillProposalListQuery,
     SkillProposalListResponse, SkillProposalMeta, SkillProposalResourceQuery,
     SkillProposalResourceResponse, SkillProposalShowQuery, SkillProposalShowResponse,
     SkillProposalTransitionRequest, SkillProposeRequest, SkillPublicationMeta, SkillReceipt,

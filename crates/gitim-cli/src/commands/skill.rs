@@ -5,8 +5,8 @@ use gitim_core::skill::{
     canonical_package_sha256, parse_skill_reference, PackageEntry, ProposalId, ProposalStatus,
     RequestId, ResourceDescriptor, RevisionId, SkillArchiveTransitionRequest, SkillCreateRequest,
     SkillError, SkillHistoryResponse, SkillListQuery, SkillListResponse, SkillLoadResponse,
-    SkillMetadataUpdateRequest, SkillMutationResult, SkillOperation, SkillPageQuery,
-    SkillProposalListQuery, SkillProposalListResponse, SkillProposalResourceQuery,
+    SkillLocalState, SkillMetadataUpdateRequest, SkillMutationResult, SkillOperation,
+    SkillPageQuery, SkillProposalListQuery, SkillProposalListResponse, SkillProposalResourceQuery,
     SkillProposalResourceResponse, SkillProposalShowQuery, SkillProposalShowResponse,
     SkillProposalTransitionRequest, SkillProposeRequest, SkillResourceQuery, SkillResourceResponse,
     SkillRevisionListResponse, SkillRoleUpdateRequest, SkillShowQuery, SkillShowResponse,
@@ -1098,14 +1098,7 @@ struct SkillMutationSuccess {
     proposal_id: Option<ProposalId>,
     commit_id: String,
     result: SkillMutationResult,
-    local_state: SkillMutationLocalState,
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum SkillMutationLocalState {
-    Integrated,
-    PendingSync,
+    local_state: SkillLocalState,
 }
 
 fn connect_client() -> Result<(GitimClient, PathBuf), SkillCommandError> {

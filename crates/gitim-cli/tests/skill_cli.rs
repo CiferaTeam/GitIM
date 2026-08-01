@@ -230,7 +230,7 @@ fn mutation_response(request_id: &str) -> Value {
             "control_revision":1,
             "event_revision":1
         },
-        "local_state":"integrated"
+        "local_state":"current"
     })
 }
 
@@ -251,7 +251,7 @@ fn control_mutation_response(
             "control_revision":control_revision,
             "event_revision":8
         },
-        "local_state":"integrated"
+        "local_state":"current"
     })
 }
 
@@ -281,7 +281,7 @@ fn proposal_mutation_response(
             "proposal_state_revision":state_revision,
             "proposal_status":status
         },
-        "local_state":"integrated"
+        "local_state":"current"
     })
 }
 
@@ -1658,7 +1658,7 @@ fn malformed_mutation_success_objects_are_protocol_errors() {
             "request_id":REQUEST,
             "commit_id":"abc123",
             "result":{},
-            "local_state":"integrated"
+            "local_state":"current"
         }),
     ] {
         let clone = fake_clone();
