@@ -4,14 +4,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gitim_core::skill::{
     plan_skill_mutation, validate_package_entries, validate_skill_commit, PackageEntry, ProposalId,
-    ProposalStatus, RequestId, RevisionId, SkillArchiveTransitionRequest, SkillConflictCheckpoint,
-    SkillError, SkillMetadataUpdateRequest, SkillMutationContext, SkillMutationPlan,
-    SkillMutationRequest, SkillOperation, SkillProposalMeta, SkillProposalSnapshot,
-    SkillProposalTransitionRequest, SkillProposeRequest, SkillPublicationMeta, SkillReceipt,
-    SkillReceiptScope, SkillRepairAcceptedState, SkillRepairRequest, SkillRepairScope,
-    SkillRepositorySnapshot, SkillRevisionMeta, SkillRevisionSnapshot, SkillRoleUpdateRequest,
-    SkillSlug, SkillTreeEdit, SkillWorkspaceBootstrapRequest, WorkspaceSkillMeta,
-    SKILL_SCHEMA_VERSION,
+    ProposalStatus, RequestId, RevisionId, SkillArchiveTransitionRequest, SkillCommitEvidence,
+    SkillConflictCheckpoint, SkillError, SkillMetadataUpdateRequest, SkillMutationContext,
+    SkillMutationPlan, SkillMutationRequest, SkillOperation, SkillProposalMeta,
+    SkillProposalSnapshot, SkillProposalTransitionRequest, SkillProposeRequest,
+    SkillPublicationMeta, SkillReceipt, SkillReceiptScope, SkillRepairAcceptedState,
+    SkillRepairRequest, SkillRepairScope, SkillRepositorySnapshot, SkillRevisionMeta,
+    SkillRevisionSnapshot, SkillRoleUpdateRequest, SkillSlug, SkillTreeEdit,
+    SkillWorkspaceBootstrapRequest, WorkspaceSkillMeta, SKILL_SCHEMA_VERSION,
 };
 use gitim_core::types::Handler;
 
@@ -100,6 +100,14 @@ fn create_active_skill() -> SkillRepositorySnapshot {
         .after
 }
 
+fn create_archived_skill() -> SkillRepositorySnapshot {
+    let mut snapshot = create_active_skill();
+    let skill = snapshot.active_skills.remove(&slug()).unwrap();
+    snapshot.archived_skills.insert(slug(), skill);
+    refresh_repository_files(&mut snapshot);
+    snapshot
+}
+
 fn create_skill_with_open_proposal() -> SkillRepositorySnapshot {
     let before = create_active_skill();
     let base_revision = before.active_skills[&slug()].meta.current_revision.clone();
@@ -168,6 +176,92 @@ fn workspace_bootstrap_on_initialized_snapshot_records_only_its_receipt() {
         )])
     );
     validate_skill_commit(&before, &plan.after, &plan.commit_evidence).unwrap();
+}
+
+#[test]
+fn workspace_bootstrap_rejects_initialized_snapshot_with_skills() {
+    let before = create_active_skill();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id('T'),
+    });
+
+    assert_eq!(
+        plan_skill_mutation(&before, &context(BOB, None), &request),
+        Err(SkillError::AdminUninitialized)
+    );
+}
+
+#[test]
+fn workspace_bootstrap_rejects_initialized_snapshot_with_archived_skills() {
+    let before = create_archived_skill();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id('Y'),
+    });
+
+    assert_eq!(
+        plan_skill_mutation(&before, &context(BOB, None), &request),
+        Err(SkillError::AdminUninitialized)
+    );
+}
+
+#[test]
+fn incoming_receipt_only_bootstrap_rejects_initialized_snapshot_with_skills() {
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id('V'),
+    });
+    let receipt = plan_skill_mutation(&initialized_snapshot(), &context(BOB, None), &request)
+        .unwrap()
+        .receipt;
+    let before = create_active_skill();
+    let mut after = before.clone();
+    after.receipts.insert(receipt.id.clone(), receipt.clone());
+    let receipt_path = format!("skills/receipts/{}.meta.yaml", receipt.id.as_str());
+    after.repository_files.insert(
+        receipt_path.clone(),
+        serde_yaml::to_string(&receipt).unwrap().into_bytes(),
+    );
+    let evidence = SkillCommitEvidence {
+        commit_author: BOB.to_owned(),
+        request_trailer: receipt.id.clone(),
+        parent_count: 1,
+        receipt,
+        changed_paths: BTreeSet::from([receipt_path]),
+    };
+
+    assert_eq!(
+        validate_skill_commit(&before, &after, &evidence),
+        Err(SkillError::AdminUninitialized)
+    );
+}
+
+#[test]
+fn incoming_receipt_only_bootstrap_rejects_initialized_snapshot_with_archived_skills() {
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id('Z'),
+    });
+    let receipt = plan_skill_mutation(&initialized_snapshot(), &context(BOB, None), &request)
+        .unwrap()
+        .receipt;
+    let before = create_archived_skill();
+    let mut after = before.clone();
+    after.receipts.insert(receipt.id.clone(), receipt.clone());
+    let receipt_path = format!("skills/receipts/{}.meta.yaml", receipt.id.as_str());
+    after.repository_files.insert(
+        receipt_path.clone(),
+        serde_yaml::to_string(&receipt).unwrap().into_bytes(),
+    );
+    let evidence = SkillCommitEvidence {
+        commit_author: BOB.to_owned(),
+        request_trailer: receipt.id.clone(),
+        parent_count: 1,
+        receipt,
+        changed_paths: BTreeSet::from([receipt_path]),
+    };
+
+    assert_eq!(
+        validate_skill_commit(&before, &after, &evidence),
+        Err(SkillError::AdminUninitialized)
+    );
 }
 
 #[test]

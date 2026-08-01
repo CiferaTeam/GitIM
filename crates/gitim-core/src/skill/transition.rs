@@ -938,9 +938,7 @@ fn authorize_and_check_preconditions(
 
     match receipt.operation {
         SkillOperation::WorkspaceBootstrap => {
-            if before.workspace.is_none()
-                && (!before.active_skills.is_empty() || !before.archived_skills.is_empty())
-            {
+            if !before.active_skills.is_empty() || !before.archived_skills.is_empty() {
                 return Err(SkillError::AdminUninitialized);
             }
         }
