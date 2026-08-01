@@ -149,9 +149,12 @@ async fn production_startup_refuses_to_serve_an_ambiguous_pushed_transaction() {
     let error = recover_skill_transactions_before_serving(clone.path().to_path_buf())
         .await
         .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("pushed transaction has no authoritative receipt"));
+    assert!(
+        error
+            .to_string()
+            .contains("pushed transaction has no authoritative receipt"),
+        "unexpected startup recovery error: {error}"
+    );
     assert!(clone
         .path()
         .join(".gitim/skill-transactions")

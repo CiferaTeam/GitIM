@@ -749,6 +749,11 @@ fn reconcile_pushed_candidate_receipt(
         .candidate_commit
         .clone()
         .ok_or_else(|| checkpoint_error("pushed journal is missing its candidate commit"))?;
+    let Some(remote_receipt) =
+        read_optional_blob(repo, remote_tip, &journal.receipt_path, context)?
+    else {
+        return Ok(None);
+    };
     let receipt_commit = find_receipt_commit(repo, remote_tip, &journal.receipt_path, context)?;
     if receipt_commit != candidate {
         return Err(checkpoint_error(
@@ -758,8 +763,6 @@ fn reconcile_pushed_candidate_receipt(
     let candidate_receipt =
         read_optional_blob(repo, &candidate, &journal.receipt_path, context)?
             .ok_or_else(|| checkpoint_error("journal candidate is missing its receipt"))?;
-    let remote_receipt = read_optional_blob(repo, remote_tip, &journal.receipt_path, context)?
-        .ok_or_else(|| checkpoint_error("published receipt is missing from the remote tip"))?;
     if candidate_receipt != remote_receipt {
         return Err(checkpoint_error(
             "published receipt differs from the journal candidate",
