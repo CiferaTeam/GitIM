@@ -95,6 +95,8 @@ pub struct SkillTransactionTestConfig {
     pub after_repair_snapshot: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_built: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_pushed: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub before_published_journal_save: Option<Arc<dyn Fn() + Send + Sync>>,
+    pub before_completed_journal_removal: Option<Arc<dyn Fn() + Send + Sync>>,
     pub after_repair_compare: Option<Arc<dyn Fn() + Send + Sync>>,
     pub simulate_process_group_kill_failure: bool,
     pub simulated_child_kill_failures: usize,
@@ -113,6 +115,8 @@ impl Default for SkillTransactionTestConfig {
             after_repair_snapshot: None,
             after_built: None,
             after_pushed: None,
+            before_published_journal_save: None,
+            before_completed_journal_removal: None,
             after_repair_compare: None,
             simulate_process_group_kill_failure: false,
             simulated_child_kill_failures: 0,
@@ -218,6 +222,8 @@ struct TransactionContext {
     after_repair_snapshot: Option<Arc<dyn Fn() + Send + Sync>>,
     after_built: Option<Arc<dyn Fn() + Send + Sync>>,
     after_pushed: Option<Arc<dyn Fn() + Send + Sync>>,
+    before_published_journal_save: Option<Arc<dyn Fn() + Send + Sync>>,
+    before_completed_journal_removal: Option<Arc<dyn Fn() + Send + Sync>>,
     after_repair_compare: Option<Arc<dyn Fn() + Send + Sync>>,
     simulate_process_group_kill_failure: bool,
     simulated_child_kill_failures: usize,
@@ -290,6 +296,8 @@ fn recover_remote_skill_transactions_with_config(
         after_repair_snapshot: None,
         after_built: None,
         after_pushed: None,
+        before_published_journal_save: None,
+        before_completed_journal_removal: config.before_completed_journal_removal,
         after_repair_compare: None,
         simulate_process_group_kill_failure: false,
         simulated_child_kill_failures: 0,
@@ -344,6 +352,8 @@ fn execute_remote_skill_transaction_with_config(
         after_repair_snapshot: config.after_repair_snapshot,
         after_built: config.after_built,
         after_pushed: config.after_pushed,
+        before_published_journal_save: config.before_published_journal_save,
+        before_completed_journal_removal: config.before_completed_journal_removal,
         after_repair_compare: config.after_repair_compare,
         simulate_process_group_kill_failure: config.simulate_process_group_kill_failure,
         simulated_child_kill_failures: config.simulated_child_kill_failures,
@@ -447,7 +457,15 @@ fn execute_transaction(
             journal.phase = SkillTransactionPhase::Pushed;
             journal.candidate_commit = Some(commit_id.clone());
             journal.result = Some(plan.result.clone());
-            save_journal(&journal, &request_lock)?;
+            if let Some(local_state) =
+                save_published_journal_or_pending(&journal, &request_lock, context)
+            {
+                return Ok(RemoteSkillTransactionResult {
+                    commit_id,
+                    result: plan.result,
+                    local_state,
+                });
+            }
             let outcome = published_view_outcome(record_published_view(
                 repo,
                 &remote_branch,
@@ -455,7 +473,8 @@ fn execute_transaction(
                 &remote_tip,
                 context,
             ));
-            let local_state = finalize_published_journal(&mut journal, &request_lock, outcome)?;
+            let local_state =
+                finalize_published_journal(repo, &mut journal, &request_lock, outcome, context)?;
             return Ok(RemoteSkillTransactionResult {
                 commit_id,
                 result: plan.result,
@@ -520,7 +539,13 @@ fn execute_transaction(
 
         match publish_result {
             Ok(outcome) => {
-                let local_state = finalize_published_journal(&mut journal, &request_lock, outcome)?;
+                let local_state = finalize_published_journal(
+                    repo,
+                    &mut journal,
+                    &request_lock,
+                    outcome,
+                    context,
+                )?;
                 return Ok(RemoteSkillTransactionResult {
                     commit_id: candidate,
                     result: plan.result,
@@ -576,7 +601,15 @@ fn execute_transaction(
                         journal.phase = SkillTransactionPhase::Pushed;
                         journal.candidate_commit = Some(commit_id.clone());
                         journal.result = Some(duplicate.result.clone());
-                        save_journal(&journal, &request_lock)?;
+                        if let Some(local_state) =
+                            save_published_journal_or_pending(&journal, &request_lock, context)
+                        {
+                            return Ok(RemoteSkillTransactionResult {
+                                commit_id,
+                                result: duplicate.result,
+                                local_state,
+                            });
+                        }
                         let outcome = published_view_outcome(record_published_view(
                             repo,
                             &next_branch,
@@ -584,8 +617,13 @@ fn execute_transaction(
                             &next_tip,
                             context,
                         ));
-                        let local_state =
-                            finalize_published_journal(&mut journal, &request_lock, outcome)?;
+                        let local_state = finalize_published_journal(
+                            repo,
+                            &mut journal,
+                            &request_lock,
+                            outcome,
+                            context,
+                        )?;
                         return Ok(RemoteSkillTransactionResult {
                             commit_id,
                             result: duplicate.result,
@@ -633,11 +671,6 @@ fn recover_current_transaction(
     context: &TransactionContext,
 ) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
     request_lock.ensure_owns(journal.request.request_id())?;
-    if journal.phase == SkillTransactionPhase::Completed {
-        remove_completed_journal(repo, journal, request_lock)?;
-        return Ok(None);
-    }
-    let root = transaction_root(repo.root(), journal.request.request_id())?;
 
     fetch(repo, context)?;
     let start_branch = current_branch(repo, context)?;
@@ -672,15 +705,30 @@ fn recover_current_transaction(
         return Ok(Some(result));
     }
 
-    if journal.phase == SkillTransactionPhase::Pushed {
+    if matches!(
+        journal.phase,
+        SkillTransactionPhase::Pushed | SkillTransactionPhase::Completed
+    ) {
         return Err(checkpoint_error(
             "pushed transaction has no authoritative receipt",
         ));
     }
-    remove_recorded_scratch(journal)?;
-    fs::remove_dir_all(&root)
-        .map_err(|error| checkpoint_io("remove unpublished transaction", error))?;
+    reset_unpublished_journal(journal, request_lock)?;
     Ok(None)
+}
+
+fn reset_unpublished_journal(
+    journal: &mut TransactionJournal,
+    request_lock: &RequestJournalLock,
+) -> Result<(), SkillSyncError> {
+    remove_recorded_scratch(journal)?;
+    journal.phase = SkillTransactionPhase::Prepared;
+    journal.remote_branch = None;
+    journal.remote_tip = None;
+    journal.semantic_oids.clear();
+    journal.candidate_commit = None;
+    journal.result = None;
+    save_journal(journal, request_lock)
 }
 
 fn reconcile_pushed_candidate_receipt(
@@ -691,7 +739,10 @@ fn reconcile_pushed_candidate_receipt(
     request_lock: &RequestJournalLock,
     context: &TransactionContext,
 ) -> Result<Option<RemoteSkillTransactionResult>, SkillSyncError> {
-    if journal.phase != SkillTransactionPhase::Pushed {
+    if !matches!(
+        journal.phase,
+        SkillTransactionPhase::Pushed | SkillTransactionPhase::Completed
+    ) {
         return Ok(None);
     }
     let candidate = journal
@@ -714,23 +765,45 @@ fn reconcile_pushed_candidate_receipt(
             "published receipt differs from the journal candidate",
         ));
     }
-    let package = load_snapshotted_package(journal)?;
-    let active_users = load_active_users(repo, &candidate, context)?;
-    let snapshot = load_snapshot(repo, &candidate, &active_users, context)?;
-    let duplicate = plan_skill_mutation(
-        &snapshot,
-        &SkillMutationContext {
-            actor: journal.actor.clone(),
-            now: journal.now.clone(),
-            package,
-        },
-        &journal.request,
-    )?;
-    if !duplicate.edits.is_empty() {
-        return Err(SkillError::RequestIdConflict.into());
+    let result = if journal.phase == SkillTransactionPhase::Completed {
+        let receipt: SkillReceipt = serde_yaml::from_slice(&remote_receipt)
+            .map_err(|error| checkpoint_error(format!("parse published receipt: {error}")))?;
+        if &receipt.id != journal.request.request_id()
+            || receipt.actor.as_str() != journal.actor
+            || receipt.operation != journal.request.operation()
+            || journal.result.as_ref() != Some(&receipt.result)
+        {
+            return Err(checkpoint_error(
+                "completed journal does not match its published receipt",
+            ));
+        }
+        receipt.result
+    } else {
+        let package = load_snapshotted_package(journal)?;
+        let active_users = load_active_users(repo, &candidate, context)?;
+        let snapshot = load_snapshot(repo, &candidate, &active_users, context)?;
+        let duplicate = plan_skill_mutation(
+            &snapshot,
+            &SkillMutationContext {
+                actor: journal.actor.clone(),
+                now: journal.now.clone(),
+                package,
+            },
+            &journal.request,
+        )?;
+        if !duplicate.edits.is_empty() {
+            return Err(SkillError::RequestIdConflict.into());
+        }
+        duplicate.result
+    };
+    journal.result = Some(result.clone());
+    if let Some(local_state) = save_published_journal_or_pending(journal, request_lock, context) {
+        return Ok(Some(RemoteSkillTransactionResult {
+            commit_id: candidate,
+            result,
+            local_state,
+        }));
     }
-    journal.result = Some(duplicate.result.clone());
-    save_journal(journal, request_lock)?;
     let outcome = published_view_outcome(record_published_view(
         repo,
         remote_branch,
@@ -738,10 +811,10 @@ fn reconcile_pushed_candidate_receipt(
         remote_tip,
         context,
     ));
-    let local_state = finalize_published_journal(journal, request_lock, outcome)?;
+    let local_state = finalize_published_journal(repo, journal, request_lock, outcome, context)?;
     Ok(Some(RemoteSkillTransactionResult {
         commit_id: candidate,
-        result: duplicate.result,
+        result,
         local_state,
     }))
 }
@@ -773,8 +846,10 @@ fn reconcile_authoritative_receipt(
         return Err(SkillError::RequestIdConflict.into());
     }
     let commit_id = find_receipt_commit(repo, remote_tip, &journal.receipt_path, context)?;
-    if journal.phase == SkillTransactionPhase::Pushed
-        && journal.candidate_commit.as_deref() != Some(commit_id.as_str())
+    if matches!(
+        journal.phase,
+        SkillTransactionPhase::Pushed | SkillTransactionPhase::Completed
+    ) && journal.candidate_commit.as_deref() != Some(commit_id.as_str())
     {
         return Err(checkpoint_error(
             "published receipt does not match the journal candidate",
@@ -783,7 +858,13 @@ fn reconcile_authoritative_receipt(
     journal.phase = SkillTransactionPhase::Pushed;
     journal.candidate_commit = Some(commit_id.clone());
     journal.result = Some(duplicate.result.clone());
-    save_journal(journal, request_lock)?;
+    if let Some(local_state) = save_published_journal_or_pending(journal, request_lock, context) {
+        return Ok(Some(RemoteSkillTransactionResult {
+            commit_id,
+            result: duplicate.result,
+            local_state,
+        }));
+    }
     let outcome = published_view_outcome(record_published_view(
         repo,
         remote_branch,
@@ -791,7 +872,7 @@ fn reconcile_authoritative_receipt(
         remote_tip,
         context,
     ));
-    let local_state = finalize_published_journal(journal, request_lock, outcome)?;
+    let local_state = finalize_published_journal(repo, journal, request_lock, outcome, context)?;
     Ok(Some(RemoteSkillTransactionResult {
         commit_id,
         result: duplicate.result,
@@ -872,32 +953,27 @@ fn recover_transaction_journals(
                 "transaction directory does not match journal request",
             ));
         }
-        if journal.phase == SkillTransactionPhase::Completed {
-            remove_completed_journal(repo, &journal, &request_lock)?;
-            continue;
-        }
-        let package = load_snapshotted_package(&journal)?;
-        let fingerprint = request_fingerprint(&journal.request, &journal.actor, package.as_ref())?;
-        if journal.request_fingerprint != fingerprint {
-            return Err(checkpoint_error("transaction journal fingerprint mismatch"));
+        let was_completed = journal.phase == SkillTransactionPhase::Completed;
+        if !was_completed {
+            let package = load_snapshotted_package(&journal)?;
+            let fingerprint =
+                request_fingerprint(&journal.request, &journal.actor, package.as_ref())?;
+            if journal.request_fingerprint != fingerprint {
+                return Err(checkpoint_error("transaction journal fingerprint mismatch"));
+            }
         }
         if let Some(result) =
             recover_current_transaction(repo, guard, &mut journal, &request_lock, context)?
         {
-            recovered.push(result);
+            let root = transaction_root(repo.root(), &request_id)?;
+            if !was_completed || root.exists() {
+                recovered.push(result);
+            }
+        } else {
+            discard_unpublished_journal(&journal, &request_lock)?;
         }
     }
     Ok(recovered)
-}
-
-fn remove_completed_journal(
-    repo: &GitStorage,
-    journal: &TransactionJournal,
-    request_lock: &RequestJournalLock,
-) -> Result<(), SkillSyncError> {
-    request_lock.ensure_owns(journal.request.request_id())?;
-    let root = transaction_root(repo.root(), journal.request.request_id())?;
-    fs::remove_dir_all(&root).map_err(|error| checkpoint_io("remove completed transaction", error))
 }
 
 fn prepare_journal(
@@ -916,18 +992,7 @@ fn prepare_journal(
         if existing.request_fingerprint != fingerprint {
             return Err(SkillError::RequestIdConflict.into());
         }
-        match existing.phase {
-            SkillTransactionPhase::Prepared | SkillTransactionPhase::Built => {
-                remove_recorded_scratch(&existing)?;
-                fs::remove_dir_all(&root)
-                    .map_err(|error| checkpoint_io("remove incomplete transaction", error))?;
-            }
-            SkillTransactionPhase::Pushed => return Ok((existing, true)),
-            SkillTransactionPhase::Completed => {
-                fs::remove_dir_all(&root)
-                    .map_err(|error| checkpoint_io("remove completed transaction", error))?;
-            }
-        }
+        return Ok((existing, true));
     }
 
     create_real_directory(&root)?;
@@ -1167,20 +1232,32 @@ fn load_journal(path: &Path) -> Result<TransactionJournal, SkillSyncError> {
     if journal.schema_version != JOURNAL_SCHEMA_VERSION {
         return Err(checkpoint_error("unsupported transaction journal schema"));
     }
+    let root = path
+        .parent()
+        .ok_or_else(|| checkpoint_error("transaction journal has no parent"))?;
+    if journal.source_directory != root.join("source")
+        || journal.private_index != root.join("private-index")
+    {
+        return Err(checkpoint_error(
+            "transaction journal contains noncanonical local paths",
+        ));
+    }
     Ok(journal)
 }
 
 fn complete_journal(
+    repo: &GitStorage,
     journal: &mut TransactionJournal,
     request_lock: &RequestJournalLock,
+    context: &TransactionContext,
 ) -> Result<(), SkillSyncError> {
     journal.phase = SkillTransactionPhase::Completed;
     save_journal(journal, request_lock)?;
-    let root = journal
-        .source_directory
-        .parent()
-        .ok_or_else(|| checkpoint_error("transaction source has no parent"))?;
-    fs::remove_dir_all(root).map_err(|error| checkpoint_io("remove transaction journal", error))
+    if let Some(before_removal) = &context.before_completed_journal_removal {
+        before_removal();
+    }
+    let root = transaction_root(repo.root(), journal.request.request_id())?;
+    fs::remove_dir_all(&root).map_err(|error| checkpoint_io("remove transaction journal", error))
 }
 
 fn discard_unpublished_journal(
@@ -1783,7 +1860,12 @@ fn push_and_record_candidate(
     }
     push_candidate(repo, candidate, remote_branch, context)?;
     journal.phase = SkillTransactionPhase::Pushed;
-    save_journal(journal, request_lock)?;
+    if let Some(local_state) = save_published_journal_or_pending(journal, request_lock, context) {
+        return Ok(PublishedViewOutcome {
+            local_state,
+            checkpoint_recorded: false,
+        });
+    }
     if let Some(after_pushed) = &context.after_pushed {
         after_pushed();
     }
@@ -1820,25 +1902,44 @@ fn published_view_outcome(
             local_state,
             checkpoint_recorded: true,
         },
-        Err(error) => {
-            if skill_transaction_error_is_retryable(&error) {
-                SKILL_TRANSPORT_FAILURES.fetch_add(1, Ordering::Relaxed);
-            }
-            PublishedViewOutcome {
-                local_state: SkillLocalState::PendingSync,
-                checkpoint_recorded: false,
-            }
-        }
+        Err(error) => PublishedViewOutcome {
+            local_state: pending_sync_after_published_error(&error),
+            checkpoint_recorded: false,
+        },
     }
 }
 
+fn pending_sync_after_published_error(error: &SkillSyncError) -> SkillLocalState {
+    if skill_transaction_error_is_retryable(error) {
+        SKILL_TRANSPORT_FAILURES.fetch_add(1, Ordering::Relaxed);
+    }
+    SkillLocalState::PendingSync
+}
+
+fn save_published_journal_or_pending(
+    journal: &TransactionJournal,
+    request_lock: &RequestJournalLock,
+    context: &TransactionContext,
+) -> Option<SkillLocalState> {
+    if let Some(before_save) = &context.before_published_journal_save {
+        before_save();
+    }
+    save_journal(journal, request_lock)
+        .err()
+        .map(|error| pending_sync_after_published_error(&error))
+}
+
 fn finalize_published_journal(
+    repo: &GitStorage,
     journal: &mut TransactionJournal,
     request_lock: &RequestJournalLock,
     outcome: PublishedViewOutcome,
+    context: &TransactionContext,
 ) -> Result<SkillLocalState, SkillSyncError> {
     if outcome.checkpoint_recorded {
-        complete_journal(journal, request_lock)?;
+        if let Err(error) = complete_journal(repo, journal, request_lock, context) {
+            return Ok(pending_sync_after_published_error(&error));
+        }
     }
     Ok(outcome.local_state)
 }

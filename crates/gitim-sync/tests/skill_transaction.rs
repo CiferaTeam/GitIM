@@ -2024,6 +2024,165 @@ fn startup_recovery_discards_completed_journal_with_missing_source_residue() {
     assert!(!transaction_root.exists());
 }
 
+#[cfg(unix)]
+#[test]
+fn startup_recovery_reports_completed_journal_removal_failure_as_pending() {
+    let fixture = Fixture::new();
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let transaction_root = fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str());
+    let held_root = transaction_root.with_extension("held");
+    let locked_root = transaction_root.clone();
+    let locked_held_root = held_root.clone();
+    let fail_removal: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        fs::rename(&locked_root, &locked_held_root).unwrap();
+        fs::write(&locked_root, b"not a directory").unwrap();
+    });
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let published = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig {
+            before_completed_journal_removal: Some(Arc::clone(&fail_removal)),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+    fs::remove_file(&transaction_root).unwrap();
+    fs::rename(&held_root, &transaction_root).unwrap();
+
+    let recovered = recover_remote_skill_transactions_with_test_config(
+        &repo,
+        &guard,
+        SkillTransactionTestConfig {
+            before_completed_journal_removal: Some(fail_removal),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+    fs::remove_file(&transaction_root).unwrap();
+    fs::rename(&held_root, &transaction_root).unwrap();
+
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].commit_id, published.commit_id);
+    assert_eq!(recovered[0].result, published.result);
+    assert_eq!(recovered[0].local_state, SkillLocalState::PendingSync);
+    assert!(transaction_root.exists());
+
+    assert!(recover_remote_skill_transactions(&repo, &guard)
+        .unwrap()
+        .is_empty());
+    assert!(!transaction_root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_recovery_keeps_completed_journal_when_remote_receipt_disappears() {
+    let fixture = Fixture::new();
+    let remote_before =
+        String::from_utf8(git(fixture.first.path(), ["rev-parse", "origin/main"]).stdout).unwrap();
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let transaction_root = fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str());
+    let held_root = transaction_root.with_extension("held");
+    let locked_root = transaction_root.clone();
+    let locked_held_root = held_root.clone();
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig {
+            before_completed_journal_removal: Some(Arc::new(move || {
+                fs::rename(&locked_root, &locked_held_root).unwrap();
+                fs::write(&locked_root, b"not a directory").unwrap();
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+    fs::remove_file(&transaction_root).unwrap();
+    fs::rename(&held_root, &transaction_root).unwrap();
+    git(
+        fixture._remote.path(),
+        ["update-ref", "refs/heads/main", remote_before.trim()],
+    );
+
+    assert!(recover_remote_skill_transactions(&repo, &guard).is_err());
+    assert!(transaction_root.join("transaction.yaml").is_file());
+    assert!(
+        fs::read_to_string(transaction_root.join("transaction.yaml"))
+            .unwrap()
+            .contains("phase: completed")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn startup_recovery_rejects_completed_journal_with_external_local_paths() {
+    let fixture = Fixture::new();
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let transaction_root = fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str());
+    let held_root = transaction_root.with_extension("held");
+    let locked_root = transaction_root.clone();
+    let locked_held_root = held_root.clone();
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig {
+            before_completed_journal_removal: Some(Arc::new(move || {
+                fs::rename(&locked_root, &locked_held_root).unwrap();
+                fs::write(&locked_root, b"not a directory").unwrap();
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    )
+    .unwrap();
+    fs::remove_file(&transaction_root).unwrap();
+    fs::rename(&held_root, &transaction_root).unwrap();
+
+    let outside = TempDir::new().unwrap();
+    let sentinel = outside.path().join("sentinel");
+    fs::write(&sentinel, b"keep").unwrap();
+    let journal_path = transaction_root.join("transaction.yaml");
+    let canonical_source = transaction_root.join("source");
+    let external_source = outside.path().join("source");
+    let journal = fs::read_to_string(&journal_path).unwrap().replace(
+        canonical_source.to_str().unwrap(),
+        external_source.to_str().unwrap(),
+    );
+    fs::write(&journal_path, journal).unwrap();
+
+    assert!(recover_remote_skill_transactions(&repo, &guard).is_err());
+    assert!(sentinel.is_file());
+    assert!(journal_path.is_file());
+}
+
 #[test]
 fn startup_recovery_fails_closed_when_checkpoint_lock_exceeds_its_deadline() {
     let fixture = Fixture::new();
@@ -2159,6 +2318,304 @@ fn hanging_git_child_with_group_kill_failure_respects_deadline_and_releases_perm
     )
     .unwrap();
     assert_eq!(recovered.result.control_revision, Some(1));
+}
+
+#[cfg(unix)]
+#[test]
+fn pushed_journal_save_failure_returns_pending_sync_and_recovers_from_remote_receipt() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let transaction_root = fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str());
+    let locked_root = transaction_root.clone();
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let published = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request.clone(), None),
+        SkillTransactionTestConfig {
+            after_built: Some(Arc::new(move || {
+                fs::set_permissions(&locked_root, fs::Permissions::from_mode(0o500)).unwrap();
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    );
+    let persistent_retry = published.as_ref().ok().map(|_| {
+        execute_remote_skill_transaction_with_test_config(
+            &repo,
+            &guard,
+            transaction_request(request.clone(), None),
+            SkillTransactionTestConfig::default(),
+        )
+    });
+    fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let published = published.expect("a published receipt must not surface a local save failure");
+    let persistent_retry = persistent_retry
+        .expect("the published request must be retryable")
+        .expect("persistent local save failure must remain pending");
+
+    assert_eq!(published.local_state, SkillLocalState::PendingSync);
+    assert_eq!(persistent_retry.commit_id, published.commit_id);
+    assert_eq!(persistent_retry.result, published.result);
+    assert_eq!(persistent_retry.local_state, SkillLocalState::PendingSync);
+    assert!(
+        fs::read_to_string(transaction_root.join("transaction.yaml"))
+            .unwrap()
+            .contains("phase: built")
+    );
+    git(fixture.first.path(), ["fetch", "origin"]);
+    assert!(git(
+        fixture.first.path(),
+        ["show", "origin/main:skills/workspace.meta.yaml"]
+    )
+    .status
+    .success());
+
+    let recovered = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(recovered.commit_id, published.commit_id);
+    assert_eq!(recovered.result, published.result);
+    assert_eq!(recovered.local_state, SkillLocalState::PendingSync);
+    assert!(!transaction_root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn authoritative_receipt_journal_save_failure_returns_pending_sync_and_recovers() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let first_repo = GitStorage::new(fixture.first.path());
+    let first_guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let published = execute_remote_skill_transaction_with_test_config(
+        &first_repo,
+        &first_guard,
+        transaction_request(request.clone(), None),
+        SkillTransactionTestConfig::default(),
+    )
+    .unwrap();
+
+    let transaction_root = fixture
+        .second
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str());
+    let locked_root = transaction_root.clone();
+    let repo = GitStorage::new(fixture.second.path());
+    let guard = SkillSyncGuard::new(fixture.second.path()).unwrap();
+    let replayed = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request.clone(), None),
+        SkillTransactionTestConfig {
+            before_published_journal_save: Some(Arc::new(move || {
+                fs::set_permissions(&locked_root, fs::Permissions::from_mode(0o500)).unwrap();
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    );
+    let persistent_retry = replayed.as_ref().ok().map(|_| {
+        execute_remote_skill_transaction_with_test_config(
+            &repo,
+            &guard,
+            transaction_request(request.clone(), None),
+            SkillTransactionTestConfig::default(),
+        )
+    });
+    fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let replayed = replayed.expect("an authoritative receipt must survive a local save failure");
+    let persistent_retry = persistent_retry
+        .expect("the authoritative receipt must be retryable")
+        .expect("persistent local save failure must remain pending");
+
+    assert_eq!(replayed.commit_id, published.commit_id);
+    assert_eq!(replayed.result, published.result);
+    assert_eq!(replayed.local_state, SkillLocalState::PendingSync);
+    assert_eq!(persistent_retry.commit_id, published.commit_id);
+    assert_eq!(persistent_retry.result, published.result);
+    assert_eq!(persistent_retry.local_state, SkillLocalState::PendingSync);
+    assert!(
+        fs::read_to_string(transaction_root.join("transaction.yaml"))
+            .unwrap()
+            .contains("phase: prepared")
+    );
+
+    let recovered = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(recovered.commit_id, published.commit_id);
+    assert_eq!(recovered.result, published.result);
+    assert_eq!(recovered.local_state, SkillLocalState::PendingSync);
+    assert!(!transaction_root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn completed_journal_save_failure_returns_pending_sync_and_recovers() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let fixture = Fixture::new();
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let transaction_root = fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str());
+    let locked_root = transaction_root.clone();
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let published = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request.clone(), None),
+        SkillTransactionTestConfig {
+            after_pushed: Some(Arc::new(move || {
+                fs::set_permissions(&locked_root, fs::Permissions::from_mode(0o500)).unwrap();
+            })),
+            ..SkillTransactionTestConfig::default()
+        },
+    );
+    let persistent_retry = published.as_ref().ok().map(|_| {
+        execute_remote_skill_transaction_with_test_config(
+            &repo,
+            &guard,
+            transaction_request(request.clone(), None),
+            SkillTransactionTestConfig::default(),
+        )
+    });
+    fs::set_permissions(&transaction_root, fs::Permissions::from_mode(0o700)).unwrap();
+    let published = published.expect("a published receipt must not surface a completion failure");
+    let persistent_retry = persistent_retry
+        .expect("the published request must be retryable")
+        .expect("persistent local completion failure must remain pending");
+
+    assert_eq!(published.local_state, SkillLocalState::PendingSync);
+    assert_eq!(persistent_retry.commit_id, published.commit_id);
+    assert_eq!(persistent_retry.result, published.result);
+    assert_eq!(persistent_retry.local_state, SkillLocalState::PendingSync);
+    assert!(
+        fs::read_to_string(transaction_root.join("transaction.yaml"))
+            .unwrap()
+            .contains("phase: pushed")
+    );
+    assert!(fixture
+        .first
+        .path()
+        .join(".gitim/skill-validation.json")
+        .is_file());
+
+    let recovered = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(recovered.commit_id, published.commit_id);
+    assert_eq!(recovered.result, published.result);
+    assert_eq!(recovered.local_state, SkillLocalState::PendingSync);
+    assert!(!transaction_root.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn completed_journal_removal_failure_returns_pending_sync_and_recovers() {
+    let fixture = Fixture::new();
+    let request_id = RequestId::generate();
+    let request = SkillMutationRequest::WorkspaceBootstrap(SkillWorkspaceBootstrapRequest {
+        request_id: request_id.clone(),
+    });
+    let transaction_root = fixture
+        .first
+        .path()
+        .join(".gitim/skill-transactions")
+        .join(request_id.as_str());
+    let held_root = transaction_root.with_extension("held");
+    let locked_root = transaction_root.clone();
+    let locked_held_root = held_root.clone();
+    let fail_removal: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        fs::rename(&locked_root, &locked_held_root).unwrap();
+        fs::write(&locked_root, b"not a directory").unwrap();
+    });
+    let repo = GitStorage::new(fixture.first.path());
+    let guard = SkillSyncGuard::new(fixture.first.path()).unwrap();
+    let published = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request.clone(), None),
+        SkillTransactionTestConfig {
+            before_completed_journal_removal: Some(Arc::clone(&fail_removal)),
+            ..SkillTransactionTestConfig::default()
+        },
+    );
+    fs::remove_file(&transaction_root).unwrap();
+    fs::rename(&held_root, &transaction_root).unwrap();
+    let published = published.expect("a published receipt must not surface a removal failure");
+    let persistent_retry = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request.clone(), None),
+        SkillTransactionTestConfig {
+            before_completed_journal_removal: Some(fail_removal),
+            ..SkillTransactionTestConfig::default()
+        },
+    );
+    fs::remove_file(&transaction_root).unwrap();
+    fs::rename(&held_root, &transaction_root).unwrap();
+    let persistent_retry =
+        persistent_retry.expect("persistent local removal failure must remain pending");
+
+    assert_eq!(published.local_state, SkillLocalState::PendingSync);
+    assert_eq!(persistent_retry.commit_id, published.commit_id);
+    assert_eq!(persistent_retry.result, published.result);
+    assert_eq!(persistent_retry.local_state, SkillLocalState::PendingSync);
+    assert!(
+        fs::read_to_string(transaction_root.join("transaction.yaml"))
+            .unwrap()
+            .contains("phase: completed")
+    );
+    assert!(fixture
+        .first
+        .path()
+        .join(".gitim/skill-validation.json")
+        .is_file());
+
+    let recovered = execute_remote_skill_transaction_with_test_config(
+        &repo,
+        &guard,
+        transaction_request(request, None),
+        SkillTransactionTestConfig::default(),
+    )
+    .unwrap();
+    assert_eq!(recovered.commit_id, published.commit_id);
+    assert_eq!(recovered.result, published.result);
+    assert_eq!(recovered.local_state, SkillLocalState::PendingSync);
+    assert!(!transaction_root.exists());
 }
 
 #[cfg(unix)]
