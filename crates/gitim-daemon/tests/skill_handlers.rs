@@ -113,6 +113,9 @@ impl Fixture {
     }
 
     async fn bootstrap(&self) {
+        self.state
+            .is_admin
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let response = self
             .request(serde_json::json!({
                 "method": "skill_workspace_bootstrap",
@@ -261,6 +264,21 @@ fn import_rejects_directory_and_file_symlinks() {
         let error = snapshot_skill_directory(&source, &root.path().join("request")).unwrap_err();
         assert_eq!(error.code(), "skill_invalid_package");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn workspace_bootstrap_rejects_non_admin_daemon_identity() {
+    let fixture = Fixture::new().await;
+    let response = fixture
+        .request(serde_json::json!({
+            "method": "skill_workspace_bootstrap",
+            "request": { "request_id": RequestId::generate() }
+        }))
+        .await;
+
+    assert!(!response.ok);
+    assert_eq!(response.error_code.as_deref(), Some("skill_admin_required"));
+    assert!(!fixture.repo.join("skills/workspace.meta.yaml").exists());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

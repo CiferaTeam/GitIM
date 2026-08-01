@@ -117,6 +117,9 @@ pub async fn handle_skill_workspace_bootstrap(
     state: SharedState,
     request: SkillWorkspaceBootstrapRequest,
 ) -> Response {
+    if !state.is_admin.load(std::sync::atomic::Ordering::SeqCst) {
+        return skill_error(SkillError::AdminRequired);
+    }
     let actor = match resolve_skill_actor(&state).await {
         Ok(actor) => actor,
         Err(response) => return response,
