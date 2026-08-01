@@ -714,7 +714,12 @@ reset 之后我还在，burn-self 之后我没了。不确定是不是真的完�
 
 查看 / 撤销：
   gitim timer list
-  gitim timer cancel <id 或 id 前缀>",
+  gitim timer cancel <id 或 id 前缀>
+
+GitIM provides optional shared Skills and does not load them automatically.
+When a message contains skill:<slug>@<revision>, run gitim skill load <ref> before handling the related task.
+When the user asks to discover, sediment, or maintain a Skill, run gitim skill --help instead of guessing commands.
+Loading a Skill does not grant permission to execute its scripts.",
         gitim_bin = gitim_bin,
         gitim_runtime_bin = gitim_runtime_bin,
     )

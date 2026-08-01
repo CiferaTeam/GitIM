@@ -409,6 +409,53 @@ fn gitim_api_exposes_runtime_management_cli() {
 }
 
 #[test]
+fn gitim_api_exposes_only_the_minimal_shared_skill_contract() {
+    let provider = gitim_agent_provider::create("mock", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "bot",
+        model: None,
+    };
+
+    let api = provider.prompt_gitim_api(&ctx);
+    let contract = api
+        .lines()
+        .skip_while(|line| {
+            *line != "GitIM provides optional shared Skills and does not load them automatically."
+        })
+        .take(4)
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        contract,
+        vec![
+            "GitIM provides optional shared Skills and does not load them automatically.",
+            "When a message contains skill:<slug>@<revision>, run gitim skill load <ref> before handling the related task.",
+            "When the user asks to discover, sediment, or maintain a Skill, run gitim skill --help instead of guessing commands.",
+            "Loading a Skill does not grant permission to execute its scripts.",
+        ]
+    );
+    assert_eq!(api.matches("gitim skill ").count(), 2);
+    for excluded in [
+        "gitim skill list",
+        "gitim skill show",
+        "gitim skill create",
+        "gitim skill propose",
+        "release-check",
+        "Skill catalog",
+        "Skill description",
+        "Skill body",
+        "Skill owner",
+        "Skill maintainer",
+        "Skill proposal",
+    ] {
+        assert!(
+            !api.contains(excluded),
+            "base prompt injected shared Skill detail: {excluded}"
+        );
+    }
+}
+
+#[test]
 fn gitim_api_exposes_fleet_runtime_management() {
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {
