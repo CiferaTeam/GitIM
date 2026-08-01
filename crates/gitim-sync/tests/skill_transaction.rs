@@ -2356,7 +2356,7 @@ fn checkpoint_finalization_validation_obeys_the_overall_deadline() {
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nif [ -e '{}' ] && [ ! -e '{}' ] && [ \"$1\" = \"rev-list\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"--reverse\" ]; then touch '{}'; sleep 10; fi\n  done\nfi\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nif [ -e '{}' ] && [ ! -e '{}' ] && [ \"$1\" = \"rev-list\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"--reverse\" ]; then touch '{}'; sleep 60; fi\n  done\nfi\nexec '{}' \"$@\"\n",
             armed.display(),
             marker.display(),
             marker.display(),
@@ -2378,10 +2378,10 @@ fn checkpoint_finalization_validation_obeys_the_overall_deadline() {
         &guard,
         transaction_request(request, None),
         SkillTransactionTestConfig {
-            transaction_timeout: Duration::from_secs(8),
-            git_command_timeout: Duration::from_secs(10),
+            transaction_timeout: Duration::from_secs(30),
+            git_command_timeout: Duration::from_secs(60),
             git_program: Some(wrapper),
-            after_built: Some(Arc::new(move || {
+            after_pushed: Some(Arc::new(move || {
                 fs::write(&armed, b"armed").unwrap();
             })),
             ..SkillTransactionTestConfig::default()
@@ -2395,7 +2395,7 @@ fn checkpoint_finalization_validation_obeys_the_overall_deadline() {
         "checkpoint validation bypassed the test Git runner"
     );
     assert!(
-        started.elapsed() < Duration::from_secs(10),
+        started.elapsed() < Duration::from_secs(35),
         "checkpoint validation exceeded the transaction deadline"
     );
     assert!(!fixture
