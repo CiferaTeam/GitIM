@@ -7,6 +7,9 @@
 //! immutable generation refs in bare cache
 //!         |
 //!         v
+//! validate published manifest and commit tips
+//!         |
+//!         v
 //! atomic state replacement selects generation
 //!         |
 //!         v
@@ -557,45 +560,26 @@ where
                 progress.reset_contention_retries();
                 PullFetchResult::NeutralSkip(CacheNeutralHint::PreserveSchedule)
             } else if success_is_fresh(&state, now_ms, progress.interval) {
-                if progress.applied_generation != Some(state.generation) {
-                    if state.generation > 0 {
-                        if let Err(error) = validate_active_generation(&context, &state) {
-                            tracing::debug!(
-                                workspace = %context.workspace.display(),
-                                outcome = "repair",
-                                reason = "active_generation_invalid",
-                                generation = state.generation,
-                                error = %error,
-                                "shared pull-fetch cache"
-                            );
-                            return refresh_as_leader_with_hooks(
-                                repo,
-                                &context,
-                                Some(&state),
-                                progress,
-                                clock,
-                                hooks,
-                                false,
-                            );
-                        }
+                match progress.applied_generation {
+                    Some(applied_generation) if state.generation < applied_generation => {
+                        tracing::debug!(
+                            workspace = %context.workspace.display(),
+                            outcome = "older_generation_ignored",
+                            generation = state.generation,
+                            applied_generation,
+                            "shared pull-fetch cache"
+                        );
                     }
-                    if !state.manifest.is_empty() {
-                        match repo
-                            .import_cache_generation(&context.cache_repository, state.generation)
-                        {
-                            Ok(()) => {
-                                log_cache_outcome(
-                                    &context,
-                                    "follower_import",
-                                    Some(state.generation),
-                                );
-                                cleanup_inactive_generations(&context, state.generation);
-                            }
-                            Err(error) => {
+                    Some(applied_generation) if state.generation == applied_generation => {
+                        log_cache_outcome(&context, "fresh_reuse", Some(state.generation));
+                    }
+                    _ => {
+                        if state.generation > 0 {
+                            if let Err(error) = validate_active_generation(&context, &state) {
                                 tracing::debug!(
                                     workspace = %context.workspace.display(),
-                                    outcome = "fallback",
-                                    reason = "import_failed",
+                                    outcome = "repair",
+                                    reason = "active_generation_invalid",
                                     generation = state.generation,
                                     error = %error,
                                     "shared pull-fetch cache"
@@ -607,15 +591,47 @@ where
                                     progress,
                                     clock,
                                     hooks,
-                                    true,
+                                    false,
                                 );
                             }
                         }
+                        if !state.manifest.is_empty() {
+                            match repo.import_cache_generation(
+                                &context.cache_repository,
+                                state.generation,
+                            ) {
+                                Ok(()) => {
+                                    log_cache_outcome(
+                                        &context,
+                                        "follower_import",
+                                        Some(state.generation),
+                                    );
+                                    cleanup_inactive_generations(&context, state.generation);
+                                }
+                                Err(error) => {
+                                    tracing::debug!(
+                                        workspace = %context.workspace.display(),
+                                        outcome = "fallback",
+                                        reason = "import_failed",
+                                        generation = state.generation,
+                                        error = %error,
+                                        "shared pull-fetch cache"
+                                    );
+                                    return refresh_as_leader_with_hooks(
+                                        repo,
+                                        &context,
+                                        Some(&state),
+                                        progress,
+                                        clock,
+                                        hooks,
+                                        true,
+                                    );
+                                }
+                            }
+                        }
+                        progress.applied_generation = Some(state.generation);
                     }
-                } else {
-                    log_cache_outcome(&context, "fresh_reuse", Some(state.generation));
                 }
-                progress.applied_generation = Some(state.generation);
                 PullFetchResult::Ready
             } else {
                 refresh_as_leader_with_hooks(
@@ -804,6 +820,19 @@ where
         }
     }
     let _ = hooks;
+    if needs_publication && state.generation > 0 {
+        if let Err(error) = validate_active_generation(context, &state) {
+            tracing::debug!(
+                workspace = %context.workspace.display(),
+                outcome = "fallback",
+                reason = "published_generation_invalid",
+                generation,
+                error = %error,
+                "shared pull-fetch cache"
+            );
+            return direct_fallback(repo, progress, trustworthy_previous_generation);
+        }
+    }
     if let Err(error) = write_state_atomic(&context.state_file, &state) {
         tracing::debug!(
             workspace = %context.workspace.display(),
@@ -1497,6 +1526,8 @@ mod tests {
         thread_local! {
             static BOUNDARY_EXPECTATION: RefCell<Option<BoundaryExpectation>> =
                 const { RefCell::new(None) };
+            static STATE_REPLACE_TAMPER: RefCell<Option<(PathBuf, u64)>> =
+                const { RefCell::new(None) };
         }
 
         struct OrchestrationFixture {
@@ -2106,6 +2137,20 @@ mod tests {
             })
         }
 
+        fn remove_generation_tip_before_state_replacement() -> Result<(), CacheInfraError> {
+            STATE_REPLACE_TAMPER.with(|slot| {
+                let (cache_repository, generation) = slot.borrow_mut().take().ok_or_else(|| {
+                    CacheInfraError::Io(std::io::Error::other(
+                        "missing state replacement tamper target",
+                    ))
+                })?;
+                let generation_main =
+                    format!("refs/gitim-fetch-cache/generations/{generation}/heads/main");
+                git_ok(&cache_repository, &["update-ref", "-d", &generation_main]);
+                Ok(())
+            })
+        }
+
         #[test]
         fn orchestration_first_eligible_caller_publishes_generation_one() {
             let fixture = OrchestrationFixture::new();
@@ -2347,6 +2392,65 @@ mod tests {
                 )
                 .len(),
                 1
+            );
+        }
+
+        #[test]
+        fn orchestration_older_state_cannot_rewind_applied_generation() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now,
+                PublicationHooks::default(),
+            ));
+            let mut generation_one = read_state(&context.state_file)
+                .expect("read generation one state")
+                .expect("generation one state");
+            let generation_one_main =
+                generation_one.manifest[&format!("{CACHE_SHADOW_HEADS_PREFIX}main")].clone();
+
+            fixture.advance_remote("two\n");
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(30),
+                PublicationHooks::default(),
+            ));
+            let generation_two_main = git_stdout(&fixture.seed, &["rev-parse", "HEAD"]);
+            assert_eq!(progress.applied_generation, Some(2));
+            assert_eq!(
+                git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"]),
+                generation_two_main
+            );
+
+            git_ok(
+                &context.cache_repository,
+                &[
+                    "update-ref",
+                    "refs/gitim-fetch-cache/generations/1/heads/main",
+                    &generation_one_main,
+                ],
+            );
+            generation_one.completed_at_unix_ms = unix_ms(now + Duration::from_secs(31));
+            write_state_atomic(&context.state_file, &generation_one)
+                .expect("restore older cache state");
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(31),
+                PublicationHooks::default(),
+            ));
+
+            assert_eq!(progress.applied_generation, Some(2));
+            assert_eq!(
+                git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"]),
+                generation_two_main
             );
         }
 
@@ -3629,6 +3733,55 @@ mod tests {
                 assert!(
                     slot.borrow().is_none(),
                     "publication boundary hook was not called"
+                );
+            });
+        }
+
+        #[test]
+        fn orchestration_invalid_generation_is_rejected_before_state_replacement() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let now = UNIX_EPOCH + Duration::from_secs(10_000);
+            let mut progress = SyncCacheProgress::new(30);
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now,
+                PublicationHooks::default(),
+            ));
+            let first_state = read_state(&context.state_file)
+                .expect("read first state")
+                .expect("first state");
+            fixture.advance_remote("two\n");
+            let expected_main = git_stdout(&fixture.seed, &["rev-parse", "HEAD"]);
+            STATE_REPLACE_TAMPER.with(|slot| {
+                *slot.borrow_mut() = Some((context.cache_repository.clone(), 2));
+            });
+
+            assert_ready(fetch_for_pull_at(
+                &repo,
+                &mut progress,
+                now + Duration::from_secs(30),
+                PublicationHooks {
+                    before_state_replace: Some(remove_generation_tip_before_state_replacement),
+                },
+            ));
+
+            assert_eq!(
+                read_state(&context.state_file).expect("read selected state"),
+                Some(first_state)
+            );
+            assert_eq!(progress.applied_generation, Some(1));
+            assert!(!progress.disabled);
+            assert_eq!(
+                git_stdout(repo.root(), &["rev-parse", "refs/remotes/origin/main"]),
+                expected_main
+            );
+            STATE_REPLACE_TAMPER.with(|slot| {
+                assert!(
+                    slot.borrow().is_none(),
+                    "state replacement tamper hook was not called"
                 );
             });
         }

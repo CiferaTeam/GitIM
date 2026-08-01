@@ -109,7 +109,9 @@ current direct-fetch behavior.
 Each eligibility check reads live local Git configuration and object format
 through short Git subprocesses. This keeps token rotation, remote changes, and
 clone configuration changes immediately visible without process-shared cache
-invalidation state.
+invalidation state. After a direct fetch succeeds without a trustworthy cache
+generation, the daemon latches the shared lane off for its remaining process
+lifetime; daemon restart creates fresh progress and re-evaluates eligibility.
 
 ### R3 — One fetch leader per freshness window
 
@@ -232,6 +234,9 @@ generation. If the active repository, generation, or tip object is invalid,
 the lock holder refreshes the remote and publishes a repaired `N+1`
 generation, including when the remote manifest is unchanged.
 
+After publication, the lock holder validates the new generation manifest and
+commit tips before atomically selecting it in state.
+
 Published refs live under
 `refs/gitim-fetch-cache/generations/<generation>/heads/*`. State is the commit
 marker naming the active immutable generation. The lock is held across both Git
@@ -249,10 +254,12 @@ configured interval and an in-memory `applied_generation`. The value moves into
 and back out of each blocking sync cycle alongside the existing auth circuit;
 `GitStorage` remains a path-only Git operation wrapper.
 
-- Generation differs from `applied_generation`: atomically import that
+- Generation is greater than `applied_generation`: atomically import that
   generation's cached branches into `refs/remotes/origin/*`, then advance
   `applied_generation`.
 - Generation equals `applied_generation`: skip cache import.
+- Generation is lower than `applied_generation`: preserve the clone's current
+  tracking refs and applied-generation watermark.
 
 If tip validation succeeds but import discovers missing deeper objects, the
 same lock holder performs one forced remote refresh and disposable-cache
@@ -479,7 +486,9 @@ The reviewed 16 new-path groups have implemented coverage:
   `orchestration_stale_empty_generation_rebuilds_cache_symlink`,
   `orchestration_cleanup_rejects_invalid_cache_symlink`,
   `orchestration_publication_failure_keeps_old_generation_active`,
-  `orchestration_state_replacement_selects_only_complete_generation`, and
+  `orchestration_state_replacement_selects_only_complete_generation`,
+  `orchestration_invalid_generation_is_rejected_before_state_replacement`,
+  `orchestration_older_state_cannot_rewind_applied_generation`, and
   `orchestration_cache_artifacts_exclude_credentials`.
 - Loop integration:
   `cache_neutral_skip_does_not_record_auth_observation`,
@@ -610,8 +619,9 @@ finding above.
     `a68fe55a552f9646a7101a5741545e4ed01d80c4`,
     `99c9d48e0b4d5adee3277b3962736873c72e6dcb`,
     `f2f45711a990045c061ede584e1e7a8154d1cb64`,
-    `34833d1882623cfe23a98afedd69ddec376400cd`.
-  - Current commit title: `fix(sync): batch cache tip validation`.
+    `34833d1882623cfe23a98afedd69ddec376400cd`,
+    `2a81b9ba566ff0f621423189e25af3a97331da7d`.
+  - Current commit title: `fix(sync): enforce cache generation ordering`.
   - Verified by: `cargo test -p gitim-sync`;
     `cargo fmt --all -- --check`;
     `cargo clippy -p gitim-sync --all-targets --no-deps --locked`;
@@ -619,7 +629,7 @@ finding above.
 
 ## Final verification
 
-- `cargo test -p gitim-sync` — pass, 229 tests across unit and integration
+- `cargo test -p gitim-sync` — pass, 231 tests across unit and integration
   targets.
 - `cargo fmt --all -- --check` — pass.
 - `cargo clippy -p gitim-sync --all-targets --no-deps --locked` — pass.

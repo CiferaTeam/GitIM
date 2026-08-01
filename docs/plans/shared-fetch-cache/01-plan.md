@@ -522,8 +522,11 @@ Add tests for:
 - direct fallback success records a trustworthy state generation as applied;
 - direct fallback without trustworthy generation disables cache for the
   process lifetime;
+- an older restored state never lowers the applied-generation watermark or
+  imports tracking refs;
 - publication failure before state replacement leaves the old generation
   active;
+- published manifest and tip validation completes before state replacement;
 - state replacement exposes only a complete new generation;
 - `.gitim-runtime/` cache artifacts contain neither the token nor the
   credential-bearing origin URL.
@@ -596,7 +599,8 @@ Execution order:
 6. read and validate state schema and remote identity;
 7. active same-revision failure cooldown returns
    `NeutralSkip(PreserveSchedule)`;
-8. fresh success imports its generation when not yet applied;
+8. fresh success imports its generation only when newer than the applied
+   generation;
 9. stale or missing state performs leader refresh;
 10. import/publication/cache errors run direct fallback;
 11. only an actual remote operation failure returns `RemoteError`.
@@ -646,6 +650,7 @@ compare sorted manifest
 if changed:
     ensure bare cache
     publish generation N refs atomically
+    validate generation N manifest and commit tips
     atomically replace state naming N
 else:
     atomically replace state with same generation and fresh timestamp
@@ -1041,7 +1046,10 @@ Co-authored-by: Codex <codex@openai.com>
   `34833d1882623cfe23a98afedd69ddec376400cd`
   (`fix(sync): repair incomplete cache objects`).
 - Task 5 batch tip validation:
-  `fix(sync): batch cache tip validation`.
+  `2a81b9ba566ff0f621423189e25af3a97331da7d`
+  (`fix(sync): batch cache tip validation`).
+- Task 5 generation ordering:
+  `fix(sync): enforce cache generation ordering`.
 - Whole-branch hardening validates a unique raw origin URL, requires a direct
   canonical runtime directory, matches the source repository's Git object
   format, requires one exact null-delimited fetch refspec, replaces unsafe
@@ -1051,7 +1059,7 @@ Co-authored-by: Codex <codex@openai.com>
   through immutable `N+1` generations, and cleans inactive refs after empty
   snapshots.
 - Scoped verification passed:
-  `cargo test -p gitim-sync` ran 229 tests,
+  `cargo test -p gitim-sync` ran 231 tests,
   `cargo fmt --all -- --check`,
   `cargo clippy -p gitim-sync --all-targets --no-deps --locked`, and
   `git diff --check`.
