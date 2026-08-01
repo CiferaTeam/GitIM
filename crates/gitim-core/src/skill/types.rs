@@ -378,8 +378,31 @@ pub struct SkillProposalShowQuery {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SkillProposalDiff {
     pub text: String,
-    pub changed_resources: Vec<ResourceDescriptor>,
+    pub changed_resources: Vec<SkillProposalResourceChange>,
     pub truncated: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillProposalChangeKind {
+    Added,
+    Removed,
+    Modified,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SkillProposalResourceChange {
+    pub path: String,
+    pub change_kind: SkillProposalChangeKind,
+    #[serde(default)]
+    pub before_byte_size: Option<u64>,
+    #[serde(default)]
+    pub after_byte_size: Option<u64>,
+    pub media_type: String,
+    #[serde(default)]
+    pub before_sha256: Option<String>,
+    #[serde(default)]
+    pub after_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

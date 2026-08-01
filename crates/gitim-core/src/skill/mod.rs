@@ -24,14 +24,14 @@ pub use types::{
     ProposalStatus, ResourceDescriptor, SkillArchiveTransitionRequest, SkillCatalogEntry,
     SkillCreateRequest, SkillHistoryResponse, SkillListQuery, SkillListResponse, SkillLoadResponse,
     SkillLocalState, SkillMeta, SkillMetadataUpdateRequest, SkillMutationRequest,
-    SkillMutationResult, SkillOperation, SkillPageQuery, SkillProposalDiff, SkillProposalListQuery,
-    SkillProposalListResponse, SkillProposalMeta, SkillProposalResourceQuery,
-    SkillProposalResourceResponse, SkillProposalShowQuery, SkillProposalShowResponse,
-    SkillProposalTransitionRequest, SkillProposeRequest, SkillPublicationMeta, SkillReceipt,
-    SkillReceiptRequest, SkillReceiptScope, SkillRepairRequest, SkillRepairScope,
-    SkillResourceQuery, SkillResourceResponse, SkillRevisionListResponse, SkillRevisionMeta,
-    SkillRoleUpdateRequest, SkillShowQuery, SkillShowResponse, SkillWorkspaceBootstrapRequest,
-    WorkspaceSkillMeta,
+    SkillMutationResult, SkillOperation, SkillPageQuery, SkillProposalChangeKind,
+    SkillProposalDiff, SkillProposalListQuery, SkillProposalListResponse, SkillProposalMeta,
+    SkillProposalResourceChange, SkillProposalResourceQuery, SkillProposalResourceResponse,
+    SkillProposalShowQuery, SkillProposalShowResponse, SkillProposalTransitionRequest,
+    SkillProposeRequest, SkillPublicationMeta, SkillReceipt, SkillReceiptRequest,
+    SkillReceiptScope, SkillRepairRequest, SkillRepairScope, SkillResourceQuery,
+    SkillResourceResponse, SkillRevisionListResponse, SkillRevisionMeta, SkillRoleUpdateRequest,
+    SkillShowQuery, SkillShowResponse, SkillWorkspaceBootstrapRequest, WorkspaceSkillMeta,
 };
 
 pub const SKILL_SCHEMA_VERSION: u32 = 1;

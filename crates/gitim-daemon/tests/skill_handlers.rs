@@ -10,8 +10,8 @@ use std::sync::Arc;
 use gitim_core::skill::{
     validate_package_entries, PackageEntry, ProposalId, ProposalStatus, RequestId, RevisionId,
     SkillListQuery, SkillLoadResponse, SkillMutationRequest, SkillMutationResult, SkillOperation,
-    SkillPageQuery, SkillProposalListQuery, SkillProposalResourceQuery, SkillProposalShowQuery,
-    SkillProposeRequest, SkillReference, SkillResourceQuery, SkillSlug,
+    SkillPageQuery, SkillProposalDiff, SkillProposalListQuery, SkillProposalResourceQuery,
+    SkillProposalShowQuery, SkillProposeRequest, SkillReference, SkillResourceQuery, SkillSlug,
 };
 use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
@@ -153,6 +153,10 @@ impl Fixture {
 
     async fn create(&self, slug: &str) -> SkillMutationResult {
         let source = self.package_dir(slug, "initial");
+        self.create_from(slug, &source).await
+    }
+
+    async fn create_from(&self, slug: &str, source: &Path) -> SkillMutationResult {
         let request_id = RequestId::generate();
         let response = self
             .request(serde_json::json!({
@@ -179,6 +183,38 @@ impl Fixture {
             "remote publication should be readable before local worktree integration"
         );
         serde_json::from_value(response.data.unwrap()["result"].clone()).unwrap()
+    }
+
+    async fn proposal_diff(
+        &self,
+        slug: &str,
+        base_revision: &RevisionId,
+        source: &Path,
+    ) -> SkillProposalDiff {
+        let request_id = RequestId::generate();
+        let response = self
+            .request(serde_json::json!({
+                "method": "skill_propose",
+                "request": {
+                    "request_id": request_id,
+                    "slug": slug,
+                    "base_revision": base_revision,
+                    "summary": "Compare package paths",
+                    "source_directory": source,
+                }
+            }))
+            .await;
+        assert!(response.ok, "{:?}", response.error);
+        let proposal_id = ProposalId::new(&format!("p-{}", &request_id.as_str()[2..])).unwrap();
+        self.state
+            .skill_store
+            .proposal_show(SkillProposalShowQuery {
+                proposal_id,
+                diff: true,
+            })
+            .unwrap()
+            .diff
+            .unwrap()
     }
 
     fn mark_skill_archived_in_accepted_view(&self, slug: &str) {
@@ -440,6 +476,175 @@ async fn handlers_bootstrap_create_list_load_resource_and_reject_candidates() {
         .unwrap();
     assert!(!proposal_resource.text);
     assert_eq!(proposal_resource.bytes, [0_u8, 159, 146, 150]);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proposal_diff_compares_every_package_path_by_content() {
+    let fixture = Fixture::new().await;
+    fixture.bootstrap().await;
+    let base_source = fixture.package_dir("release-check", "initial");
+    fs::write(
+        base_source.join("references/note.md"),
+        "zero\none\ntwo\nthree\nold\nfive\nsix\nseven\neight\n",
+    )
+    .unwrap();
+    let created = fixture.create_from("release-check", &base_source).await;
+    let base_revision = created.current_revision.unwrap();
+
+    let source = fixture.package_dir("release-check", "candidate");
+    fs::write(
+        source.join("references/note.md"),
+        "zero\none\ntwo\nthree\nnew\nfive\nsix\nseven\neight\n",
+    )
+    .unwrap();
+    fs::remove_file(source.join("references/raw.txt")).unwrap();
+    fs::write(source.join("references/pixel.bin"), [1_u8, 2, 3, 4]).unwrap();
+    fs::write(source.join("references/added.bin"), [9_u8, 8, 7]).unwrap();
+
+    let diff = fixture
+        .proposal_diff("release-check", &base_revision, &source)
+        .await;
+    let diff = serde_json::to_value(diff).unwrap();
+    let text = diff["text"].as_str().unwrap();
+    assert!(text.contains("--- a/SKILL.md"), "{text}");
+    assert!(text.contains("+++ b/SKILL.md"), "{text}");
+    assert!(text.contains("--- a/references/note.md"), "{text}");
+    assert!(text.contains("+++ b/references/note.md"), "{text}");
+    assert!(text.contains("-old"), "{text}");
+    assert!(text.contains("+new"), "{text}");
+    assert!(text.contains(" one\n two\n three\n"), "{text}");
+    assert!(text.contains(" five\n six\n seven\n"), "{text}");
+    assert!(
+        !text.contains(" zero\n"),
+        "fourth leading context line leaked: {text}"
+    );
+    assert!(
+        !text.contains(" eight\n"),
+        "fourth trailing context line leaked: {text}"
+    );
+    assert!(
+        !text.contains("pixel.bin"),
+        "binary bytes must not be rendered"
+    );
+
+    let changes = diff["changed_resources"].as_array().unwrap();
+    let find = |path: &str| {
+        changes
+            .iter()
+            .find(|change| change["path"] == path)
+            .unwrap_or_else(|| panic!("missing change record for {path}: {changes:?}"))
+    };
+    let added = find("references/added.bin");
+    assert_eq!(added["change_kind"], "added");
+    assert!(added["before_byte_size"].is_null());
+    assert_eq!(added["after_byte_size"], 3);
+    assert!(added["before_sha256"].is_null());
+    assert_eq!(added["after_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(added["media_type"], "application/octet-stream");
+
+    let removed = find("references/raw.txt");
+    assert_eq!(removed["change_kind"], "removed");
+    assert_eq!(removed["before_byte_size"], 4);
+    assert!(removed["after_byte_size"].is_null());
+    assert_eq!(removed["before_sha256"].as_str().unwrap().len(), 64);
+    assert!(removed["after_sha256"].is_null());
+    assert_eq!(removed["media_type"], "text/plain");
+
+    let binary = find("references/pixel.bin");
+    assert_eq!(binary["change_kind"], "modified");
+    assert_eq!(binary["before_byte_size"], 4);
+    assert_eq!(binary["after_byte_size"], 4);
+    assert_ne!(binary["before_sha256"], binary["after_sha256"]);
+    assert_eq!(binary["media_type"], "application/octet-stream");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proposal_diff_describes_large_text_without_rendering_its_bytes() {
+    let fixture = Fixture::new().await;
+    fixture.bootstrap().await;
+    let base_source = fixture.package_dir("release-check", "same index");
+    fs::write(
+        base_source.join("references/large.txt"),
+        vec![b'a'; 1024 * 1024 + 1],
+    )
+    .unwrap();
+    let created = fixture.create_from("release-check", &base_source).await;
+    let base_revision = created.current_revision.unwrap();
+
+    let candidate_source = fixture.package_dir("release-check", "same index");
+    fs::write(
+        candidate_source.join("references/large.txt"),
+        vec![b'b'; 1024 * 1024 + 1],
+    )
+    .unwrap();
+    let diff = fixture
+        .proposal_diff("release-check", &base_revision, &candidate_source)
+        .await;
+    assert!(!diff.text.contains("large.txt"));
+    let value = serde_json::to_value(diff).unwrap();
+    let change = value["changed_resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|change| change["path"] == "references/large.txt")
+        .unwrap();
+    assert_eq!(change["change_kind"], "modified");
+    assert_eq!(change["before_byte_size"], 1024 * 1024 + 1);
+    assert_eq!(change["after_byte_size"], 1024 * 1024 + 1);
+    assert_ne!(change["before_sha256"], change["after_sha256"]);
+    assert_eq!(change["media_type"], "text/plain");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proposal_diff_truncates_a_utf8_unified_diff_deterministically() {
+    let fixture = Fixture::new().await;
+    fixture.bootstrap().await;
+    let base_source = fixture.package_dir("release-check", "same index");
+    let candidate_source = fixture.package_dir("release-check", "same index");
+    let mut before = String::new();
+    let mut after = String::new();
+    for index in 0..4_500 {
+        before.push_str(&format!("anchor-{index}\nold-{index}-界界界界界\n"));
+        after.push_str(&format!("anchor-{index}\nnew-{index}-界界界界界\n"));
+    }
+    fs::write(base_source.join("references/diff.txt"), before).unwrap();
+    fs::write(candidate_source.join("references/diff.txt"), after).unwrap();
+    let created = fixture.create_from("release-check", &base_source).await;
+    let base_revision = created.current_revision.unwrap();
+
+    let first = fixture
+        .proposal_diff("release-check", &base_revision, &candidate_source)
+        .await;
+    assert!(first.truncated);
+    assert!(first.text.len() <= 256 * 1024);
+    assert!(first.text.contains("--- a/references/diff.txt"));
+    assert!(first.text.contains("界"));
+
+    let proposal_id = fixture
+        .state
+        .skill_store
+        .proposal_list(SkillProposalListQuery {
+            slug: SkillSlug::new("release-check").unwrap(),
+            status: Some(ProposalStatus::Open),
+            limit: 1,
+            cursor: None,
+        })
+        .unwrap()
+        .proposals[0]
+        .id
+        .clone();
+    let second = fixture
+        .state
+        .skill_store
+        .proposal_show(SkillProposalShowQuery {
+            proposal_id,
+            diff: true,
+        })
+        .unwrap()
+        .diff
+        .unwrap();
+    assert_eq!(second.text, first.text);
+    assert_eq!(second.truncated, first.truncated);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

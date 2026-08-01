@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
@@ -5,18 +6,19 @@ use gitim_core::parser::parse_thread;
 use gitim_core::skill::{
     media_type_for_path, truncate_utf8_bytes, validate_package_entries, PackageEntry,
     SkillCatalogEntry, SkillError, SkillHistoryResponse, SkillListQuery, SkillListResponse,
-    SkillLoadResponse, SkillMeta, SkillPageQuery, SkillProposalDiff, SkillProposalListQuery,
-    SkillProposalListResponse, SkillProposalMeta, SkillProposalResourceQuery,
-    SkillProposalResourceResponse, SkillProposalShowQuery, SkillProposalShowResponse,
-    SkillPublicationMeta, SkillReference, SkillResourceQuery, SkillResourceResponse,
-    SkillRevisionListResponse, SkillRevisionMeta, SkillShowQuery, SkillShowResponse, SkillSlug,
-    WorkspaceSkillMeta, MAX_PACKAGE_BYTES, MAX_PACKAGE_FILES, MAX_PACKAGE_FILE_BYTES,
-    MAX_SKILL_MD_BYTES,
+    SkillLoadResponse, SkillMeta, SkillPageQuery, SkillProposalChangeKind, SkillProposalDiff,
+    SkillProposalListQuery, SkillProposalListResponse, SkillProposalMeta,
+    SkillProposalResourceChange, SkillProposalResourceQuery, SkillProposalResourceResponse,
+    SkillProposalShowQuery, SkillProposalShowResponse, SkillPublicationMeta, SkillReference,
+    SkillResourceQuery, SkillResourceResponse, SkillRevisionListResponse, SkillRevisionMeta,
+    SkillShowQuery, SkillShowResponse, SkillSlug, WorkspaceSkillMeta, MAX_PACKAGE_BYTES,
+    MAX_PACKAGE_FILES, MAX_PACKAGE_FILE_BYTES, MAX_SKILL_MD_BYTES,
 };
 use gitim_sync::git::GitStorage;
 use gitim_sync::skill::checkpoint::{SkillCheckpointStore, SkillValidationCheckpoint};
 use gitim_sync::skill::git_tree::{list_tree_recursive, read_blob_at, tree_oid_at};
 use sha2::{Digest, Sha256};
+use similar::TextDiff;
 
 #[derive(Clone, Debug)]
 pub struct SkillReadView {
@@ -640,55 +642,108 @@ fn proposal_diff(
         located.root,
         candidate.id.as_str()
     );
-    let (base_markdown, _) = read_package_index(
+    let base_entries = read_revision_package(
         repo,
         &located.source,
         &base_root,
         &proposal.skill,
         &base.resources,
+        &base.content_sha256,
     )?;
-    let (candidate_markdown, _) = read_package_index(
+    let candidate_entries = read_revision_package(
         repo,
         &located.source,
         &candidate_root,
         &proposal.skill,
         &candidate.resources,
+        &candidate.content_sha256,
     )?;
-    let base_markdown =
-        std::str::from_utf8(&base_markdown).map_err(|_| SkillError::RevisionCorrupted)?;
-    let candidate_markdown =
-        std::str::from_utf8(&candidate_markdown).map_err(|_| SkillError::RevisionCorrupted)?;
-    let rendered = if base_markdown == candidate_markdown {
-        String::new()
-    } else {
-        format!(
-            "--- skill:{}@{}\n+++ proposal:{}@{}\n-{}\n+{}",
-            proposal.skill.as_str(),
-            base.id.as_str(),
-            proposal.id.as_str(),
-            candidate.id.as_str(),
-            base_markdown.replace('\n', "\n-"),
-            candidate_markdown.replace('\n', "\n+"),
-        )
-    };
+    let base_by_path = base_entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let candidate_by_path = candidate_entries
+        .iter()
+        .map(|entry| (entry.path.as_str(), entry))
+        .collect::<BTreeMap<_, _>>();
+    let paths = base_by_path
+        .keys()
+        .chain(candidate_by_path.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut rendered = String::new();
+    let mut changed_resources = Vec::new();
+    for path in paths {
+        let before = base_by_path.get(path).copied();
+        let after = candidate_by_path.get(path).copied();
+        if before.map(|entry| entry.bytes.as_slice()) == after.map(|entry| entry.bytes.as_slice()) {
+            continue;
+        }
+        match (before, after) {
+            (Some(before), Some(after)) if renderable_text_change(before, after) => {
+                append_unified_diff(&mut rendered, path, &before.bytes, &after.bytes)?;
+            }
+            (before, after) => changed_resources.push(resource_change(path, before, after)),
+        }
+    }
     let truncated = rendered.len() > 256 * 1024;
     let text = truncate_utf8_bytes(&rendered, 256 * 1024).to_owned();
-    let changed_resources = candidate
-        .resources
-        .iter()
-        .filter(|candidate_resource| {
-            !base
-                .resources
-                .iter()
-                .any(|base_resource| base_resource == *candidate_resource)
-        })
-        .cloned()
-        .collect();
     Ok(SkillProposalDiff {
         text,
         changed_resources,
         truncated,
     })
+}
+
+fn renderable_text_change(before: &PackageEntry, after: &PackageEntry) -> bool {
+    const MAX_TEXT_DIFF_BYTES: usize = 1024 * 1024;
+    before.bytes.len() <= MAX_TEXT_DIFF_BYTES
+        && after.bytes.len() <= MAX_TEXT_DIFF_BYTES
+        && std::str::from_utf8(&before.bytes).is_ok()
+        && std::str::from_utf8(&after.bytes).is_ok()
+}
+
+fn append_unified_diff(
+    output: &mut String,
+    path: &str,
+    before: &[u8],
+    after: &[u8],
+) -> Result<(), SkillError> {
+    let before = std::str::from_utf8(before).map_err(|_| SkillError::RevisionCorrupted)?;
+    let after = std::str::from_utf8(after).map_err(|_| SkillError::RevisionCorrupted)?;
+    let before_header = format!("a/{path}");
+    let after_header = format!("b/{path}");
+    let diff = TextDiff::from_lines(before, after)
+        .unified_diff()
+        .context_radius(3)
+        .header(&before_header, &after_header)
+        .to_string();
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output.push_str(&diff);
+    Ok(())
+}
+
+fn resource_change(
+    path: &str,
+    before: Option<&PackageEntry>,
+    after: Option<&PackageEntry>,
+) -> SkillProposalResourceChange {
+    let change_kind = match (before.is_some(), after.is_some()) {
+        (false, true) => SkillProposalChangeKind::Added,
+        (true, false) => SkillProposalChangeKind::Removed,
+        _ => SkillProposalChangeKind::Modified,
+    };
+    SkillProposalResourceChange {
+        path: path.to_owned(),
+        change_kind,
+        before_byte_size: before.map(|entry| entry.bytes.len() as u64),
+        after_byte_size: after.map(|entry| entry.bytes.len() as u64),
+        media_type: media_type_for_path(path).to_owned(),
+        before_sha256: before.map(|entry| format!("{:x}", Sha256::digest(&entry.bytes))),
+        after_sha256: after.map(|entry| format!("{:x}", Sha256::digest(&entry.bytes))),
+    }
 }
 
 fn located_tree_id(view: &SkillReadView, slug: &SkillSlug) -> Result<String, SkillError> {
@@ -732,6 +787,55 @@ fn paginate<T>(
     let visible = values.into_iter().skip(start).take(limit).collect();
     let next_cursor = has_more.then(|| format!("{collection_revision}:{end}"));
     Ok((visible, next_cursor))
+}
+
+fn read_revision_package(
+    repo: &GitStorage,
+    source: &ReadSource,
+    root: &str,
+    slug: &SkillSlug,
+    expected_resources: &[gitim_core::skill::ResourceDescriptor],
+    expected_sha256: &str,
+) -> Result<Vec<PackageEntry>, SkillError> {
+    let tree =
+        list_tree_recursive(repo, &source.commit, root).map_err(|_| SkillError::LoadUnavailable)?;
+    if tree.is_empty() || tree.len() > MAX_PACKAGE_FILES {
+        return Err(SkillError::RevisionCorrupted);
+    }
+    let prefix = format!("{root}/");
+    let mut entries = Vec::with_capacity(tree.len());
+    let mut total_bytes = 0_u64;
+    for tree_entry in tree {
+        if tree_entry.mode != "100644" || tree_entry.object_type != "blob" {
+            return Err(SkillError::RevisionCorrupted);
+        }
+        let relative = tree_entry
+            .path
+            .strip_prefix(&prefix)
+            .ok_or(SkillError::RevisionCorrupted)?;
+        let byte_size = tree_entry.byte_size.ok_or(SkillError::RevisionCorrupted)?;
+        if byte_size > MAX_PACKAGE_FILE_BYTES as u64 {
+            return Err(SkillError::RevisionCorrupted);
+        }
+        total_bytes = total_bytes
+            .checked_add(byte_size)
+            .ok_or(SkillError::RevisionCorrupted)?;
+        if total_bytes > MAX_PACKAGE_BYTES as u64 {
+            return Err(SkillError::RevisionCorrupted);
+        }
+        let bytes = read_source_bytes(repo, source, &tree_entry.path)?
+            .ok_or(SkillError::RevisionCorrupted)?;
+        if bytes.len() as u64 != byte_size {
+            return Err(SkillError::RevisionCorrupted);
+        }
+        entries.push(PackageEntry::new(relative, bytes));
+    }
+    let validated =
+        validate_package_entries(slug, entries).map_err(|_| SkillError::RevisionCorrupted)?;
+    if validated.content_sha256 != expected_sha256 || validated.resources != expected_resources {
+        return Err(SkillError::RevisionCorrupted);
+    }
+    Ok(validated.entries)
 }
 
 fn read_package_index(
