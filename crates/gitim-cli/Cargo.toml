@@ -16,11 +16,11 @@ clap = { version = "4", features = ["derive"] }
 humantime = "2"
 tokio.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 regex.workspace = true
 tempfile = "3"
 
 [dev-dependencies]
-serde_yaml.workspace = true
 assert_cmd = "2"
 predicates = "3"
 

@@ -249,6 +249,12 @@ enum Commands {
         cmd: commands::labels::LabelsCommand,
     },
 
+    /// Discover, load, and maintain shared Skills
+    Skill {
+        #[command(subcommand)]
+        command: commands::skill::SkillCommand,
+    },
+
     /// Project management — list or create
     Projects {
         #[command(subcommand)]
@@ -1191,6 +1197,7 @@ async fn main() {
             }
         },
         Commands::Labels { cmd } => commands::labels::run(&client, cmd, mode).await,
+        Commands::Skill { command } => commands::skill::run(&client, &mode, command).await,
         Commands::Projects { action } => match action {
             ProjectAction::List => {
                 commands::project::cmd_list_projects(&client, &mode).await;

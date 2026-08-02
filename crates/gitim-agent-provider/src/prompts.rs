@@ -398,6 +398,13 @@ sse 推送、commit + push 时机。你看到 `channels/foo.thread`、`users/<x>
 
 如果 shell 返回 `gitim-runtime: command not found`，改用绝对路径 `{gitim_runtime_bin}`。
 
+### GitIM shared Skills
+
+GitIM shared Skills are optional and are not loaded automatically.
+When a message contains `skill:<slug>@<revision>`, run `gitim skill load <ref>` before using it.
+For discovery or management, run `gitim skill --help` and follow its nested help.
+Loading a Skill does not authorize executing its scripts.
+
 ### 附件
 
 附件消息只携带引用；需要本地工具检查内容时，先把字节取到本地文件：
