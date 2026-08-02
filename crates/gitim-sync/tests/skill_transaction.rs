@@ -2255,7 +2255,7 @@ fn hanging_git_child_with_group_kill_failure_respects_deadline_and_releases_perm
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nif [ ! -e '{}' ] && [ \"$1\" = \"-c\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"fetch\" ]; then touch '{}'; sleep 10; fi\n  done\nfi\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nif [ ! -e '{}' ] && [ \"$1\" = \"-c\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"fetch\" ]; then touch '{}'; exec sleep 10; fi\n  done\nfi\nexec '{}' \"$@\"\n",
             marker.display(),
             marker.display(),
             real_git.trim(),
@@ -2638,7 +2638,7 @@ fn post_push_timeout_returns_pending_sync_and_keeps_the_pushed_journal() {
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nif [ -e '{}' ] && [ ! -e '{}' ] && [ \"$1\" = \"update-ref\" ]; then\n  touch '{}'; sleep 10\nfi\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nif [ -e '{}' ] && [ ! -e '{}' ] && [ \"$1\" = \"update-ref\" ]; then\n  touch '{}'; exec sleep 10\nfi\nexec '{}' \"$@\"\n",
             armed.display(),
             marker.display(),
             marker.display(),
@@ -2751,7 +2751,7 @@ fn post_validation_timeout_returns_pending_sync_and_keeps_the_pushed_journal() {
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nif [ -e '{}' ] && [ ! -e '{}' ] && [ \"$1\" = \"rev-parse\" ]; then\n  touch '{}'; sleep 10\nfi\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nif [ -e '{}' ] && [ ! -e '{}' ] && [ \"$1\" = \"rev-parse\" ]; then\n  touch '{}'; exec sleep 10\nfi\nexec '{}' \"$@\"\n",
             armed.display(),
             marker.display(),
             marker.display(),
@@ -2834,7 +2834,7 @@ fn checkpoint_finalization_timeout_returns_pending_sync_within_the_overall_deadl
     fs::write(
         &wrapper,
         format!(
-            "#!/bin/sh\nif [ -e '{}' ] && [ ! -e '{}' ] && [ \"$1\" = \"rev-list\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"--reverse\" ]; then touch '{}'; sleep 60; fi\n  done\nfi\nexec '{}' \"$@\"\n",
+            "#!/bin/sh\nif [ -e '{}' ] && [ ! -e '{}' ] && [ \"$1\" = \"rev-list\" ]; then\n  for arg in \"$@\"; do\n    if [ \"$arg\" = \"--reverse\" ]; then touch '{}'; exec sleep 60; fi\n  done\nfi\nexec '{}' \"$@\"\n",
             armed.display(),
             marker.display(),
             marker.display(),
