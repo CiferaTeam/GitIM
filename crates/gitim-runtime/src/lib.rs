@@ -7,6 +7,7 @@ pub mod agent;
 pub mod agent_loop;
 pub mod assets;
 pub mod background;
+pub(crate) mod browser_origin;
 pub mod cli;
 pub mod context_window;
 pub mod daemon_log;
@@ -35,6 +36,7 @@ mod usage_accounting;
 pub mod usage_log;
 pub mod user_config;
 pub mod workspace;
+pub mod workspace_picker;
 
 pub use agent::{provision_agent, AgentConfig, AgentHandle};
 pub use agent_loop::{detect_steering_trigger, format_changes_as_prompt, AgentLoop};

@@ -1,0 +1,152 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="900" viewBox="0 0 1600 900">
+  <defs>
+    <radialGradient id="glowB" cx="50%" cy="54%" r="66%">
+      <stop offset="0" stop-color="#60a5fa" stop-opacity=".13"/>
+      <stop offset=".62" stop-color="#60a5fa" stop-opacity=".02"/>
+      <stop offset="1" stop-color="#1c1c1e" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="panelB" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#27272a"/>
+      <stop offset="1" stop-color="#212124"/>
+    </linearGradient>
+    <filter id="shadowB" x="-25%" y="-25%" width="150%" height="150%">
+      <feDropShadow dx="0" dy="20" stdDeviation="28" flood-color="#000" flood-opacity=".36"/>
+    </filter>
+    <filter id="blueShadowB" x="-40%" y="-40%" width="180%" height="180%">
+      <feDropShadow dx="0" dy="0" stdDeviation="7" flood-color="#60a5fa" flood-opacity=".38"/>
+    </filter>
+  </defs>
+  <rect width="1600" height="900" fill="#1c1c1e"/>
+  <rect width="1600" height="900" fill="url(#glowB)"/>
+  <g opacity=".16" stroke="#3c3c40">
+    <path d="M0 720H1600M0 180H1600"/>
+    <path d="M320 0V900M1280 0V900"/>
+  </g>
+
+  <text x="72" y="65" fill="#e4e4e7" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="28" font-weight="700">gitim</text>
+  <rect x="140" y="44" width="206" height="31" rx="15.5" fill="#60a5fa" fill-opacity=".12" stroke="#60a5fa" stroke-opacity=".34"/>
+  <text x="160" y="65" fill="#60a5fa" font-family="JetBrains Mono, monospace" font-size="14">REPOSITORY NATIVE</text>
+  <text x="72" y="132" fill="#e4e4e7" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="42" font-weight="700">The organization is a Git repository.</text>
+  <text x="72" y="171" fill="#a1a1aa" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="19">Agents, conversations, work, and workflows are readable files — cloned by every teammate.</text>
+
+  <!-- left agents -->
+  <g filter="url(#shadowB)">
+    <rect x="64" y="224" width="344" height="540" rx="18" fill="url(#panelB)" stroke="#3c3c40"/>
+  </g>
+  <circle cx="94" cy="258" r="5" fill="#60a5fa"/>
+  <text x="112" y="264" fill="#e4e4e7" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="16" font-weight="600">RUNNING AGENTS</text>
+  <text x="380" y="264" text-anchor="end" fill="#71717a" font-family="JetBrains Mono, monospace" font-size="14">PER-AGENT CLONES</text>
+  <path d="M64 286H408" stroke="#2c2c30"/>
+
+  <rect x="88" y="314" width="296" height="92" rx="12" fill="#2a2a2e"/>
+  <circle cx="120" cy="348" r="18" fill="#60a5fa" fill-opacity=".16" stroke="#60a5fa"/>
+  <text x="120" y="353" text-anchor="middle" fill="#60a5fa" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="14" font-weight="700">CO</text>
+  <text x="150" y="344" fill="#e4e4e7" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="16" font-weight="600">@coordinator</text>
+  <circle cx="357" cy="342" r="5" fill="#4ade80"/>
+  <text x="150" y="366" fill="#71717a" font-family="JetBrains Mono, monospace" font-size="14">provider: claude · working</text>
+  <text x="104" y="389" fill="#a1a1aa" font-family="JetBrains Mono, monospace" font-size="14">.gitim-runtime/agents/coordinator/</text>
+
+  <rect x="88" y="422" width="296" height="92" rx="12" fill="#2a2a2e"/>
+  <circle cx="120" cy="456" r="18" fill="#4ade80" fill-opacity=".14" stroke="#4ade80"/>
+  <text x="120" y="461" text-anchor="middle" fill="#4ade80" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="14" font-weight="700">IN</text>
+  <text x="150" y="452" fill="#e4e4e7" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="16" font-weight="600">@investigator</text>
+  <circle cx="357" cy="450" r="5" fill="#4ade80"/>
+  <text x="150" y="474" fill="#71717a" font-family="JetBrains Mono, monospace" font-size="14">labels: incident, research</text>
+  <text x="104" y="497" fill="#a1a1aa" font-family="JetBrains Mono, monospace" font-size="14">.gitim-runtime/agents/investigator/</text>
+
+  <rect x="88" y="530" width="296" height="92" rx="12" fill="#2a2a2e"/>
+  <circle cx="120" cy="564" r="18" fill="#fbbf24" fill-opacity=".13" stroke="#fbbf24"/>
+  <text x="120" y="569" text-anchor="middle" fill="#fbbf24" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="14" font-weight="700">FX</text>
+  <text x="150" y="560" fill="#e4e4e7" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="16" font-weight="600">@fixer</text>
+  <circle cx="357" cy="558" r="5" fill="#4ade80"/>
+  <text x="150" y="582" fill="#71717a" font-family="JetBrains Mono, monospace" font-size="14">provider: codex · working</text>
+  <text x="104" y="605" fill="#a1a1aa" font-family="JetBrains Mono, monospace" font-size="14">.gitim-runtime/agents/fixer/</text>
+
+  <rect x="88" y="657" width="296" height="74" rx="12" fill="#60a5fa" fill-opacity=".08" stroke="#60a5fa" stroke-opacity=".28"/>
+  <path d="M109 689h28m-7-7 7 7-7 7" fill="none" stroke="#60a5fa" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="154" y="686" fill="#e4e4e7" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="15" font-weight="600">fetch · commit · push</text>
+  <text x="154" y="708" fill="#71717a" font-family="JetBrains Mono, monospace" font-size="14">same protocol, independent runtime</text>
+
+  <!-- center repository -->
+  <g filter="url(#shadowB)">
+    <rect x="448" y="202" width="654" height="616" rx="20" fill="url(#panelB)" stroke="#60a5fa" stroke-opacity=".34"/>
+  </g>
+  <rect x="448" y="202" width="654" height="62" rx="20" fill="#60a5fa" fill-opacity=".075"/>
+  <path d="M448 264H1102" stroke="#3c3c40"/>
+  <path d="M480 234h22l8 9h42v25h-72z" fill="#60a5fa" fill-opacity=".18" stroke="#60a5fa"/>
+  <text x="570" y="244" fill="#e4e4e7" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="19" font-weight="700">gitim-workspace/</text>
+  <text x="1070" y="244" text-anchor="end" fill="#60a5fa" font-family="JetBrains Mono, monospace" font-size="14">SOURCE OF TRUTH</text>
+
+  <g font-family="JetBrains Mono, monospace" font-size="15">
+    <text x="486" y="302" fill="#a1a1aa">├──</text><text x="530" y="302" fill="#e4e4e7">users/</text>
+    <path d="M508 310V382" stroke="#3c3c40"/>
+    <text x="530" y="332" fill="#71717a">├──</text><text x="574" y="332" fill="#60a5fa">coordinator.meta.yaml</text>
+    <text x="530" y="360" fill="#71717a">├──</text><text x="574" y="360" fill="#60a5fa">investigator.meta.yaml</text><rect x="832" y="345" width="86" height="22" rx="11" fill="#4ade80" fill-opacity=".12"/><text x="847" y="360" fill="#4ade80" font-size="14">IDENTITY</text>
+    <text x="530" y="388" fill="#71717a">└──</text><text x="574" y="388" fill="#60a5fa">fixer.meta.yaml</text>
+
+    <text x="486" y="430" fill="#a1a1aa">├──</text><text x="530" y="430" fill="#e4e4e7">channels/</text>
+    <path d="M508 438V586" stroke="#3c3c40"/>
+    <text x="530" y="460" fill="#71717a">├──</text><text x="574" y="460" fill="#fbbf24">release-v2-4.meta.yaml</text>
+    <text x="530" y="490" fill="#71717a">├──</text><text x="574" y="490" fill="#60a5fa">release-v2-4.thread</text><rect x="798" y="475" width="102" height="22" rx="11" fill="#60a5fa" fill-opacity=".12"/><text x="814" y="490" fill="#60a5fa" font-size="14">MESSAGES</text>
+    <text x="530" y="520" fill="#71717a">└──</text><text x="574" y="520" fill="#e4e4e7">release-v2-4/cards/wh-3a92/</text>
+    <text x="574" y="550" fill="#71717a">    ├──</text><text x="650" y="550" fill="#fbbf24">card.meta.yaml</text><rect x="854" y="535" width="77" height="22" rx="11" fill="#fbbf24" fill-opacity=".11"/><text x="870" y="550" fill="#fbbf24" font-size="14">STATE</text>
+    <text x="574" y="580" fill="#71717a">    └──</text><text x="650" y="580" fill="#60a5fa">discussion.thread</text>
+
+    <text x="486" y="622" fill="#a1a1aa">├──</text><text x="530" y="622" fill="#e4e4e7">projects/release.meta.yaml</text>
+    <text x="486" y="662" fill="#a1a1aa">└──</text><text x="530" y="662" fill="#e4e4e7">flows/hotfix/</text>
+    <text x="530" y="696" fill="#71717a">├──</text><text x="574" y="696" fill="#60a5fa">index.md</text><rect x="742" y="681" width="93" height="22" rx="11" fill="#60a5fa" fill-opacity=".12"/><text x="756" y="696" fill="#60a5fa" font-size="14">FLOW DAG</text>
+    <text x="530" y="730" fill="#71717a">└──</text><text x="574" y="730" fill="#e4e4e7">runs/20260730T214500-A7K2P9/state.yaml</text>
+  </g>
+
+  <rect x="480" y="764" width="590" height="32" rx="8" fill="#1c1c1e"/>
+  <circle cx="500" cy="780" r="5" fill="#4ade80"/>
+  <text x="518" y="784" fill="#a1a1aa" font-family="JetBrains Mono, monospace" font-size="14">human-readable · diffable · portable · self-hostable</text>
+
+  <!-- right history -->
+  <g filter="url(#shadowB)">
+    <rect x="1142" y="224" width="394" height="540" rx="18" fill="url(#panelB)" stroke="#3c3c40"/>
+  </g>
+  <circle cx="1172" cy="258" r="5" fill="#4ade80"/>
+  <text x="1190" y="264" fill="#e4e4e7" font-family="Plus Jakarta Sans, Arial, sans-serif" font-size="16" font-weight="600">GIT HISTORY</text>
+  <text x="1508" y="264" text-anchor="end" fill="#71717a" font-family="JetBrains Mono, monospace" font-size="14">16 COMMITS</text>
+  <path d="M1142 286H1536" stroke="#2c2c30"/>
+  <path d="M1182 326V704" stroke="#3c3c40" stroke-width="2"/>
+
+  <g font-family="JetBrains Mono, monospace">
+    <circle cx="1182" cy="332" r="7" fill="#60a5fa" filter="url(#blueShadowB)"/>
+    <text x="1208" y="328" fill="#e4e4e7" font-size="14">msg: @lewis → release-v2-4 L000003</text>
+    <text x="1208" y="347" fill="#71717a" font-size="14">channels/release-v2-4.thread</text>
+
+    <circle cx="1182" cy="400" r="6" fill="#60a5fa"/>
+    <text x="1208" y="396" fill="#e4e4e7" font-size="14">user: register @investigator</text>
+    <text x="1208" y="415" fill="#71717a" font-size="14">users/investigator.meta.yaml</text>
+
+    <circle cx="1182" cy="468" r="6" fill="#60a5fa"/>
+    <text x="1208" y="464" fill="#e4e4e7" font-size="14">user: register @fixer</text>
+    <text x="1208" y="483" fill="#71717a" font-size="14">users/fixer.meta.yaml</text>
+
+    <circle cx="1182" cy="536" r="6" fill="#fbbf24"/>
+    <text x="1208" y="532" fill="#e4e4e7" font-size="14">card: create wh-3a92</text>
+    <text x="1208" y="551" fill="#71717a" font-size="14">card.meta.yaml + discussion.thread</text>
+
+    <circle cx="1182" cy="604" r="6" fill="#4ade80"/>
+    <text x="1208" y="600" fill="#e4e4e7" font-size="14">card: update wh-3a92 → done</text>
+    <text x="1208" y="619" fill="#71717a" font-size="14">status: doing → done</text>
+
+    <circle cx="1182" cy="672" r="7" fill="#4ade80" filter="url(#blueShadowB)"/>
+    <text x="1208" y="668" fill="#e4e4e7" font-size="14">msg: @coordinator → L000007</text>
+    <text x="1208" y="687" fill="#4ade80" font-size="14">incident closed · full trail preserved</text>
+  </g>
+
+  <!-- connections -->
+  <path d="M408 360C430 360 430 334 448 334M408 468C430 468 430 438 448 438M408 576C430 576 430 542 448 542" fill="none" stroke="#60a5fa" stroke-width="2.5" stroke-opacity=".8"/>
+  <circle cx="448" cy="334" r="4" fill="#60a5fa"/>
+  <circle cx="448" cy="438" r="4" fill="#60a5fa"/>
+  <circle cx="448" cy="542" r="4" fill="#60a5fa"/>
+  <path d="M1102 492C1120 492 1120 468 1142 468M1102 550C1120 550 1120 536 1142 536M1102 730C1122 730 1116 672 1142 672" fill="none" stroke="#60a5fa" stroke-width="2.5" stroke-opacity=".8"/>
+  <circle cx="1102" cy="492" r="4" fill="#60a5fa"/>
+  <circle cx="1102" cy="550" r="4" fill="#fbbf24"/>
+  <circle cx="1102" cy="730" r="4" fill="#4ade80"/>
+
+  <text x="800" y="863" text-anchor="middle" fill="#71717a" font-family="JetBrains Mono, monospace" font-size="14">clone the team · inspect the state · audit every change</text>
+</svg>

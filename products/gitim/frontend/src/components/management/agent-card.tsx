@@ -41,7 +41,7 @@ function avatarColor(name: string) {
   return `hsl(${hue} 70% 55%)`;
 }
 
-const INTRODUCTION_PREVIEW_MAX = 72;
+const INTRODUCTION_PREVIEW_MAX = 96;
 
 function introductionPreview(introduction: string | undefined): string | null {
   const value = introduction?.trim();
@@ -72,6 +72,8 @@ export function AgentCard({
   const isRunning = agent.status === "running";
   const introPreview = introductionPreview(agent.introduction);
   const workState = agentWorkState(agent, latestActivity);
+  const showHandler = agent.name !== agent.handler;
+  const modelLine = `${agent.provider ?? "—"} · ${agentModelLabel(agent)}`;
 
   async function handleToggle() {
     if (!activeSlug) return;
@@ -107,58 +109,110 @@ export function AgentCard({
 
         <div
           data-testid="agent-card-summary"
-          className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 p-3 pl-4 md:grid-cols-[auto_minmax(0,1fr)_minmax(10rem,16rem)_auto]"
+          className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] gap-x-3 gap-y-1.5 p-3 pl-4"
         >
           <div
-            className="flex size-8 shrink-0 items-center justify-center rounded-lg text-xs font-bold text-white shadow-sm"
+            className="row-span-2 flex size-9 shrink-0 items-center justify-center self-start rounded-lg text-xs font-bold text-white shadow-sm"
             style={{ backgroundColor: avatarColor(agent.name || agent.id) }}
           >
             {initials(agent.name || agent.id)}
           </div>
+
           <div className="min-w-0">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="truncate text-base font-semibold" title={agent.name}>
-                {agent.name}
-              </span>
-              {agent.name !== agent.handler && (
+            <div
+              data-testid="agent-card-display-name"
+              className="break-words text-base font-semibold leading-snug tracking-tight"
+              title={agent.name}
+            >
+              {agent.name}
+            </div>
+            <div className="mt-0.5 min-w-0 text-xs leading-5 text-text-muted">
+              {showHandler && (
                 <span
-                  className="shrink-0 font-mono text-xs font-normal text-text-muted"
+                  className="break-all font-mono"
                   title={`Handler: @${agent.handler}`}
                 >
                   @{agent.handler}
                 </span>
               )}
-              <span className="flex shrink-0 items-center gap-1 md:hidden">
-                {workBadge(workState)}
-                {presenceBadge(agent.status)}
+              {showHandler && (
+                <span className="mx-1.5 text-text-faint" aria-hidden>
+                  ·
+                </span>
+              )}
+              <span className="break-words" title={modelLine}>
+                {modelLine}
               </span>
             </div>
-            <span
-              className="block truncate text-xs text-text-muted"
-              title={`${agent.provider ?? "—"} · ${agentModelLabel(agent)}`}
-            >
-              {agent.provider ?? "—"} · {agentModelLabel(agent)}
-            </span>
           </div>
+
+          <div className="flex shrink-0 flex-col items-end gap-1.5 self-start">
+            <div className="flex flex-wrap items-center justify-end gap-1">
+              {workBadge(workState)}
+              {presenceBadge(agent.status)}
+            </div>
+            {!readOnly && (
+              <div
+                className="flex items-center justify-end gap-1"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <Button
+                  variant={isRunning ? "outline" : "default"}
+                  size="icon-xs"
+                  aria-label={
+                    isRunning ? `Stop ${agent.name}` : `Start ${agent.name}`
+                  }
+                  title={isRunning ? "Stop" : "Start"}
+                  onClick={handleToggle}
+                  className={
+                    isRunning
+                      ? "border-border-strong hover:bg-surface-hover"
+                      : ""
+                  }
+                >
+                  {isRunning ? (
+                    <Pause className="size-3" />
+                  ) : (
+                    <Play className="size-3" />
+                  )}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="icon-xs"
+                  aria-label={`Details for ${agent.name}`}
+                  title="Details"
+                  onClick={() => navigate(`/management/${agent.id}`)}
+                  className="border-border-strong hover:bg-surface-hover"
+                >
+                  <Settings className="size-3" />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={`Burn ${agent.name}`}
+                  title="Burn"
+                  onClick={() => setBurnOpen(true)}
+                  className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+                >
+                  <Flame className="size-3" />
+                </Button>
+              </div>
+            )}
+          </div>
+
           {introPreview && (
             <div
               data-testid="agent-card-introduction"
               title={agent.introduction?.trim()}
-              className="hidden min-w-0 text-xs leading-5 text-text-secondary md:col-start-3 md:row-start-1 md:row-span-2 md:block"
+              className="col-start-2 min-w-0 text-xs leading-5 text-text-secondary"
             >
-              <span className="block truncate">{introPreview}</span>
+              <span className="line-clamp-2 break-words">{introPreview}</span>
             </div>
           )}
-          <div className="hidden shrink-0 md:col-start-4 md:row-start-1 md:block">
-            <div className="flex items-center justify-end gap-1">
-              {workBadge(workState)}
-              {presenceBadge(agent.status)}
-            </div>
-          </div>
 
           <div
             className={`col-start-2 flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-text-secondary ${
-              readOnly ? "col-span-2" : "col-span-1"
+              readOnly ? "col-span-2" : ""
             }`}
           >
             <span className="whitespace-nowrap text-text-muted">
@@ -167,52 +221,11 @@ export function AgentCard({
             <span className="whitespace-nowrap text-text-muted">
               Msg {agent.messagesProcessed}
             </span>
-            <span className="min-w-0 max-w-full truncate [&>span]:block [&>span]:truncate">
+            <span className="min-w-0 break-words">
               <AgentUsageTag agent={agent} />
             </span>
           </div>
-
-          {!readOnly && (
-            <div
-              className="col-start-3 row-start-2 flex items-center justify-end gap-1 md:col-start-4"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <Button
-                variant={isRunning ? "outline" : "default"}
-                size="icon-xs"
-                aria-label={isRunning ? `Stop ${agent.name}` : `Start ${agent.name}`}
-                title={isRunning ? "Stop" : "Start"}
-                onClick={handleToggle}
-                className={
-                  isRunning ? "border-border-strong hover:bg-surface-hover" : ""
-                }
-              >
-                {isRunning ? <Pause className="size-3" /> : <Play className="size-3" />}
-              </Button>
-              <Button
-                variant="outline"
-                size="icon-xs"
-                aria-label={`Details for ${agent.name}`}
-                title="Details"
-                onClick={() => navigate(`/management/${agent.id}`)}
-                className="border-border-strong hover:bg-surface-hover"
-              >
-                <Settings className="size-3" />
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon-xs"
-                aria-label={`Burn ${agent.name}`}
-                title="Burn"
-                onClick={() => setBurnOpen(true)}
-                className="text-destructive hover:bg-destructive/10 hover:text-destructive"
-              >
-                <Flame className="size-3" />
-              </Button>
-            </div>
-          )}
         </div>
-
       </Card>
 
       {!readOnly && (

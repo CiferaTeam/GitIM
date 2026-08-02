@@ -20,6 +20,7 @@ use crate::agent::{
 };
 use crate::agent_loop::{is_daemon_not_running_poll_error, AgentLoop};
 use crate::assets::AssetError;
+use crate::browser_origin::BrowserOriginPolicy;
 use crate::git_config::{
     mark_excluded_from_backups, validate_workspace_path_from_env, GitConfig, GitProvider,
     WorkspaceConfig,
@@ -29,6 +30,7 @@ use crate::github::{
 };
 use crate::gitignore::ensure_defaults_gitignored;
 use crate::slug::RESERVED;
+use crate::workspace_picker::{PickerError, PickerOutcome};
 use gitim_client::{ensure_daemon_with_log, ClientError, GitimClient};
 use gitim_core::me_json::MeJson;
 use gitim_core::skill::{
@@ -256,6 +258,11 @@ struct WorkspaceCreateResponse {
     workspace_name: String,
     path: String,
     provider: GitProvider,
+}
+
+#[derive(Serialize)]
+struct WorkspaceDirectoryPickerResponse {
+    path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -7143,6 +7150,98 @@ async fn workspaces_create(
     }
 }
 
+async fn workspace_directory_pick() -> axum::response::Response {
+    workspace_directory_pick_with(crate::workspace_picker::pick_workspace_directory).await
+}
+
+fn workspace_directory_picker_origin_allowed(
+    headers: &axum::http::HeaderMap,
+    policy: &BrowserOriginPolicy,
+) -> bool {
+    policy.allows_request(headers)
+}
+
+async fn guard_workspace_directory_picker_origin(
+    State(policy): State<BrowserOriginPolicy>,
+    request: axum::http::Request<axum::body::Body>,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    if workspace_directory_picker_origin_allowed(request.headers(), &policy) {
+        next.run(request).await
+    } else {
+        (
+            StatusCode::FORBIDDEN,
+            Json(ErrorBody::with_code(
+                "Workspace folder picker origin is not allowed.",
+                "directory_picker_origin_forbidden",
+            )),
+        )
+            .into_response()
+    }
+}
+
+async fn workspace_directory_pick_with<F>(picker: F) -> axum::response::Response
+where
+    F: FnOnce() -> Result<PickerOutcome, PickerError> + Send + 'static,
+{
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+
+    match tokio::task::spawn_blocking(picker).await {
+        Ok(Ok(PickerOutcome::Selected(path))) => (
+            StatusCode::OK,
+            Json(WorkspaceDirectoryPickerResponse { path: Some(path) }),
+        )
+            .into_response(),
+        Ok(Ok(PickerOutcome::Cancelled)) => (
+            StatusCode::OK,
+            Json(WorkspaceDirectoryPickerResponse { path: None }),
+        )
+            .into_response(),
+        Ok(Err(PickerError::Unavailable)) => (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorBody::with_code(
+                "Native folder selection is available on macOS.",
+                "directory_picker_unavailable",
+            )),
+        )
+            .into_response(),
+        Ok(Err(PickerError::Busy)) => (
+            StatusCode::CONFLICT,
+            Json(ErrorBody::with_code(
+                "Another workspace folder picker is already open.",
+                "directory_picker_busy",
+            )),
+        )
+            .into_response(),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "native workspace folder picker failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    "Could not open the macOS folder picker.",
+                    "directory_picker_failed",
+                )),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "workspace folder picker task failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorBody::with_code(
+                    "Could not open the macOS folder picker.",
+                    "directory_picker_failed",
+                )),
+            )
+                .into_response()
+        }
+    }
+}
+
 /// HTTP handler for `GET /hermes/llm/providers`.
 ///
 /// Resolves the hermes home directory from `HERMES_HOME` (or `~/.hermes`),
@@ -7405,9 +7504,20 @@ fn build_router_with_asset_router(
         .route("/agents/{id}", get(agents_get).patch(agents_patch));
     let ws_router = ws_router.route("/admin/repair-skill-state", post(admin_repair_skill_state));
 
+    let workspace_picker_router = Router::<SharedRuntimeState>::new()
+        .route(
+            "/runtime/workspace-directory",
+            post(workspace_directory_pick),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            BrowserOriginPolicy::from_environment(),
+            guard_workspace_directory_picker_origin,
+        ));
+
     let router = Router::new()
         .route("/health", get(health))
         .route("/workspaces", get(workspaces_list).post(workspaces_create))
+        .merge(workspace_picker_router)
         .route(
             "/workspaces/{slug}",
             get(workspaces_get).delete(workspaces_delete),
@@ -7576,6 +7686,115 @@ mod tests {
             Some("https://github.com/org/repo")
         );
         assert_eq!(req.git.token.as_deref(), Some("ghp_x"));
+    }
+
+    #[tokio::test]
+    async fn workspace_directory_picker_returns_selected_path() {
+        use http_body_util::BodyExt;
+
+        let response = workspace_directory_pick_with(|| {
+            Ok(crate::workspace_picker::PickerOutcome::Selected(
+                "/Users/dev/Workspaces/team-alpha".to_string(),
+            ))
+        })
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({ "path": "/Users/dev/Workspaces/team-alpha" })
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_directory_picker_returns_null_when_cancelled() {
+        use http_body_util::BodyExt;
+
+        let response =
+            workspace_directory_pick_with(|| Ok(crate::workspace_picker::PickerOutcome::Cancelled))
+                .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body, serde_json::json!({ "path": null }));
+    }
+
+    #[tokio::test]
+    async fn workspace_directory_picker_reports_unsupported_platforms() {
+        use http_body_util::BodyExt;
+
+        let response = workspace_directory_pick_with(|| {
+            Err(crate::workspace_picker::PickerError::Unavailable)
+        })
+        .await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_IMPLEMENTED);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_code"], "directory_picker_unavailable");
+    }
+
+    #[tokio::test]
+    async fn workspace_directory_picker_reports_busy() {
+        use http_body_util::BodyExt;
+
+        let response =
+            workspace_directory_pick_with(|| Err(crate::workspace_picker::PickerError::Busy)).await;
+
+        assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_code"], "directory_picker_busy");
+    }
+
+    #[test]
+    fn workspace_directory_picker_origin_guard_uses_shared_allowlist() {
+        use axum::http::{header, HeaderMap, HeaderValue};
+
+        let policy =
+            crate::browser_origin::BrowserOriginPolicy::new(["https://preview.gitim.example"]);
+        let mut allowed = HeaderMap::new();
+        allowed.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://preview.gitim.example"),
+        );
+        let mut rejected = HeaderMap::new();
+        rejected.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://malicious.example"),
+        );
+
+        assert!(workspace_directory_picker_origin_allowed(&allowed, &policy));
+        assert!(!workspace_directory_picker_origin_allowed(
+            &rejected, &policy
+        ));
+    }
+
+    #[tokio::test]
+    async fn workspace_directory_picker_route_rejects_unknown_browser_origins() {
+        use axum::body::Body;
+        use axum::http::{header, Request, StatusCode};
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (router, _) = create_router();
+        let response = router
+            .oneshot(
+                Request::post("/runtime/workspace-directory")
+                    .header(header::ORIGIN, "https://malicious.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error_code"], "directory_picker_origin_forbidden");
     }
 
     #[test]

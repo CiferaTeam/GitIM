@@ -42,10 +42,10 @@ use serde::Serialize;
 
 use crate::http::SharedRuntimeState;
 
-/// Hard cap for the new-runtime `--version` sanity check. Long enough for
-/// cold-start binary load on a slow disk, short enough that a wedged binary
-/// can't stall the endpoint.
-const SANITY_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+/// Hard cap for the new-runtime `--version` sanity check. macOS may spend
+/// several seconds evaluating a newly downloaded executable before `main`
+/// runs, especially while the machine is under load.
+const SANITY_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 202 body when all sync validation passes and the async phase has been
 /// spawned. The caller waits for the runtime HTTP server to restart (the
@@ -749,6 +749,24 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.error_code, error_codes::SANITY_CHECK_FAILED);
         assert!(err.detail.contains("did not contain"));
+    }
+
+    #[tokio::test]
+    async fn sanity_check_allows_slow_cold_start() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let runtime = tmp.path().join("gitim-runtime");
+        std::fs::write(
+            &runtime,
+            "#!/bin/sh\nsleep 3\nprintf 'gitim-runtime 9.9.9\\n'\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&runtime).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&runtime, permissions).unwrap();
+
+        sanity_check_new_runtime(&runtime, "v9.9.9").await.unwrap();
     }
 
     #[test]

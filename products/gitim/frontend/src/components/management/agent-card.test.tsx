@@ -114,4 +114,33 @@ describe("AgentCard compact layout", () => {
     expect(text).toContain("online");
     expect(text).not.toContain("Running");
   });
+
+  it("keeps the full display name visible beside a long handler", () => {
+    const record: Agent = {
+      ...agent("cursor", "composer-2.5"),
+      id: "dev-qiangzai",
+      handler: "dev-qiangzai",
+      name: "【开源小强】",
+      introduction: "code agent",
+    };
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    act(() => {
+      root?.render(
+        <MemoryRouter>
+          <AgentCard agent={record} />
+        </MemoryRouter>,
+      );
+    });
+
+    const displayName = container.querySelector<HTMLElement>(
+      '[data-testid="agent-card-display-name"]',
+    );
+    expect(displayName?.textContent).toBe("【开源小强】");
+    expect(displayName?.className).not.toMatch(/\btruncate\b/);
+    expect(container.textContent).toContain("@dev-qiangzai");
+    expect(container.textContent).toContain("code agent");
+  });
 });
