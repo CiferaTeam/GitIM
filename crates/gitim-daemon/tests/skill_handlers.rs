@@ -377,6 +377,17 @@ async fn guest_mode_rejects_skill_writes_but_allows_catalog_reads() {
     .await;
     assert!(!denied.ok);
 
+    let validate = handle_request(
+        Request::SkillValidate {
+            slug: "release-check".to_string(),
+            source_directory: source.to_string_lossy().to_string(),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(!validate.ok);
+    assert!(validate.error.unwrap().contains("guest mode"));
+
     let listed = handle_request(
         Request::SkillList {
             archived: false,
@@ -420,6 +431,31 @@ async fn skill_write_waits_for_identity_read_lock() {
 }
 
 #[tokio::test]
+async fn skill_write_without_daemon_identity_has_a_distinct_error_code() {
+    let (tmp, state) = common::setup_repo_alice().await;
+    *state.current_user.write().await = None;
+    let source = write_package(tmp.path(), "release-check", "v1");
+
+    let response = handle_request(
+        Request::SkillCreate {
+            slug: "release-check".to_string(),
+            source_directory: source.to_string_lossy().to_string(),
+            display_name: "Release Check".to_string(),
+            description: "Verify releases.".to_string(),
+            event_id: None,
+        },
+        state,
+    )
+    .await;
+
+    assert!(!response.ok);
+    assert_eq!(
+        response.error_code.as_deref(),
+        Some("skill_identity_required")
+    );
+}
+
+#[tokio::test]
 async fn idempotent_skill_write_does_not_emit_a_second_change_event() {
     let (tmp, state) = common::setup_repo_alice().await;
     common::run_git(tmp.path(), &["config", "user.name", "Test"]);
@@ -429,6 +465,9 @@ async fn idempotent_skill_write_does_not_emit_a_second_change_event() {
     let mut events = state.event_tx.subscribe();
 
     for expected_idempotent in [false, true] {
+        let push_notification = state.push_notify.notified();
+        tokio::pin!(push_notification);
+        let _ = push_notification.as_mut().enable();
         let response = handle_request(
             Request::SkillCreate {
                 slug: "release-check".to_string(),
@@ -449,8 +488,72 @@ async fn idempotent_skill_write_does_not_emit_a_second_change_event() {
                     .await
                     .is_err()
             );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), push_notification)
+                    .await
+                    .is_err()
+            );
         } else {
             events.recv().await.unwrap();
+            tokio::time::timeout(Duration::from_millis(50), push_notification)
+                .await
+                .expect("sync notification");
         }
     }
+}
+
+#[tokio::test]
+async fn depart_requires_transfer_from_a_skills_only_active_owner() {
+    let (tmp, state) = common::setup_repo_alice_bob().await;
+    common::run_git(tmp.path(), &["config", "user.name", "Test"]);
+    common::run_git(tmp.path(), &["config", "user.email", "test@example.com"]);
+    let source = write_package(tmp.path(), "release-check", "v1");
+    let created = handle_request(
+        Request::SkillCreate {
+            slug: "release-check".to_string(),
+            source_directory: source.to_string_lossy().to_string(),
+            display_name: "Release Check".to_string(),
+            description: "Verify releases.".to_string(),
+            event_id: None,
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(created.ok, "{:?}", created.error);
+
+    let denied = handle_request(
+        Request::DepartUser {
+            handler: "alice".to_string(),
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(!denied.ok);
+    assert_eq!(
+        denied.error_code.as_deref(),
+        Some("skill_ownership_transfer_required")
+    );
+    assert!(denied.error.unwrap().contains("release-check"));
+    assert!(tmp.path().join("users/alice.meta.yaml").is_file());
+
+    let transfer = handle_request(
+        Request::SkillOwnerAdd {
+            slug: "release-check".to_string(),
+            handler: "bob".to_string(),
+            event_id: None,
+        },
+        state.clone(),
+    )
+    .await;
+    assert!(transfer.ok, "{:?}", transfer.error);
+
+    let departed = handle_request(
+        Request::DepartUser {
+            handler: "alice".to_string(),
+        },
+        state,
+    )
+    .await;
+    assert!(departed.ok, "{:?}", departed.error);
+    assert!(tmp.path().join("archive/users/alice.meta.yaml").is_file());
 }

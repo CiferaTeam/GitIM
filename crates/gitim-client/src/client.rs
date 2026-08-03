@@ -23,6 +23,10 @@ use crate::types::{build_request, ApiResponse};
 const DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(test)]
 const DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_millis(50);
+#[cfg(not(test))]
+const SKILL_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+#[cfg(test)]
+const SKILL_REQUEST_TIMEOUT: Duration = Duration::from_millis(250);
 
 pub struct GitimClient {
     repo_root: PathBuf,
@@ -38,6 +42,16 @@ impl GitimClient {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<ApiResponse, ClientError> {
+        self.request_with_timeout(method, params, DAEMON_REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        response_timeout: Duration,
+    ) -> Result<ApiResponse, ClientError> {
         let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound
                 || e.kind() == std::io::ErrorKind::ConnectionRefused
@@ -60,7 +74,7 @@ impl GitimClient {
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
 
         let mut line = String::new();
-        tokio::time::timeout(DAEMON_REQUEST_TIMEOUT, reader.read_line(&mut line))
+        tokio::time::timeout(response_timeout, reader.read_line(&mut line))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
@@ -853,13 +867,18 @@ impl GitimClient {
 
     // -- Shared Skills --
 
+    async fn skill_request(&self, method: &str, params: Value) -> Result<ApiResponse, ClientError> {
+        self.request_with_timeout(method, params, SKILL_REQUEST_TIMEOUT)
+            .await
+    }
+
     pub async fn skill_list(
         &self,
         archived: bool,
         limit: usize,
         after: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_list",
             json!({"archived": archived, "limit": limit, "after": after}),
         )
@@ -867,11 +886,12 @@ impl GitimClient {
     }
 
     pub async fn skill_show(&self, slug: &str) -> Result<ApiResponse, ClientError> {
-        self.request("skill_show", json!({"slug": slug})).await
+        self.skill_request("skill_show", json!({"slug": slug}))
+            .await
     }
 
     pub async fn skill_load(&self, reference: &str) -> Result<ApiResponse, ClientError> {
-        self.request("skill_load", json!({"reference": reference}))
+        self.skill_request("skill_load", json!({"reference": reference}))
             .await
     }
 
@@ -880,7 +900,7 @@ impl GitimClient {
         reference: &str,
         path: &str,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_resource",
             json!({"reference": reference, "path": path}),
         )
@@ -893,7 +913,7 @@ impl GitimClient {
         limit: usize,
         after: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_revisions",
             json!({"slug": slug, "limit": limit, "after": after}),
         )
@@ -906,7 +926,7 @@ impl GitimClient {
         limit: usize,
         after: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_history",
             json!({"slug": slug, "limit": limit, "after": after}),
         )
@@ -918,7 +938,7 @@ impl GitimClient {
         slug: &str,
         source_directory: &str,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_validate",
             json!({"slug": slug, "source_directory": source_directory}),
         )
@@ -934,7 +954,7 @@ impl GitimClient {
         description: &str,
         event_id: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_create",
             json!({
                 "slug": slug,
@@ -956,7 +976,7 @@ impl GitimClient {
         summary: &str,
         event_id: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_propose",
             json!({
                 "slug": slug,
@@ -976,7 +996,7 @@ impl GitimClient {
         limit: usize,
         after: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_proposal_list",
             json!({"slug": slug, "status": status, "limit": limit, "after": after}),
         )
@@ -988,7 +1008,7 @@ impl GitimClient {
         slug: &str,
         proposal: &str,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_proposal_show",
             json!({"slug": slug, "proposal": proposal}),
         )
@@ -1001,7 +1021,7 @@ impl GitimClient {
         proposal: &str,
         path: &str,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_proposal_resource",
             json!({"slug": slug, "proposal": proposal, "path": path}),
         )
@@ -1015,7 +1035,7 @@ impl GitimClient {
         body: &str,
         event_id: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_proposal_comment",
             json!({"slug": slug, "proposal": proposal, "body": body, "event_id": event_id}),
         )
@@ -1030,7 +1050,7 @@ impl GitimClient {
         event_id: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
         let method = format!("skill_proposal_{operation}");
-        self.request(
+        self.skill_request(
             &method,
             json!({"slug": slug, "proposal": proposal, "event_id": event_id}),
         )
@@ -1044,7 +1064,7 @@ impl GitimClient {
         description: Option<&str>,
         event_id: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
+        self.skill_request(
             "skill_metadata_update",
             json!({
                 "slug": slug,
@@ -1065,7 +1085,7 @@ impl GitimClient {
         event_id: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
         let method = format!("skill_{operation}");
-        self.request(
+        self.skill_request(
             &method,
             json!({
                 "slug": slug,
@@ -1084,7 +1104,7 @@ impl GitimClient {
         event_id: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
         let method = format!("skill_{operation}");
-        self.request(&method, json!({"slug": slug, "event_id": event_id}))
+        self.skill_request(&method, json!({"slug": slug, "event_id": event_id}))
             .await
     }
 
@@ -1717,6 +1737,43 @@ mod tests {
         let client = GitimClient::new(tmp.path());
         let err = client.status().await.unwrap_err();
         assert!(matches!(err, ClientError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn skill_resource_and_mutation_use_extended_timeout() {
+        let tmp = TempDir::new().unwrap();
+        let run_dir = tmp.path().join(".gitim/run");
+        fs::create_dir_all(&run_dir).unwrap();
+        let listener = UnixListener::bind(run_dir.join("gitim.sock")).unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (reader, mut writer) = stream.into_split();
+                let mut reader = BufReader::new(reader);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                let _ = writer.write_all(b"{\"ok\":true,\"data\":{}}\n").await;
+            }
+        });
+
+        let client = GitimClient::new(tmp.path());
+        let resource = client
+            .skill_resource("release-check", "assets/blob.bin")
+            .await;
+        let create = client
+            .skill_create(
+                "release-check",
+                "/tmp/release-check",
+                "Release Check",
+                "Verify releases.",
+                Some("e-01K1D8QG2S8RX4T9M9BDKQ9Z7N"),
+            )
+            .await;
+        server.await.unwrap();
+
+        assert!(resource.is_ok(), "resource request: {resource:?}");
+        assert!(create.is_ok(), "create request: {create:?}");
     }
 
     /// build_request shapes for the no-param archive-protocol methods.

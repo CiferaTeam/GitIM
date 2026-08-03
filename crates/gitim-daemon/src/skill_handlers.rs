@@ -369,7 +369,7 @@ fn parse_status(value: &str) -> Result<ProposalStatus, SkillStoreError> {
 }
 
 fn with_actor(current_user: Option<&str>) -> Result<Handler, SkillStoreError> {
-    let actor = current_user.ok_or(SkillStoreError::RoleTargetInactive)?;
+    let actor = current_user.ok_or(SkillStoreError::IdentityRequired)?;
     Handler::new(actor)
         .map_err(|error| SkillStoreError::ReadFailed(format!("invalid daemon identity: {error}")))
 }
@@ -454,6 +454,7 @@ fn mutation_response(state: &SharedState, mutation: SkillMutation) -> Response {
             slug: mutation.state.slug.to_string(),
             event_id: mutation.event_id.to_string(),
         });
+        state.push_notify.notify_one();
     }
     Response::json(json!({
         "event_id": mutation.event_id,

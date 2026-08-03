@@ -1,7 +1,12 @@
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
+
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use chrono::{SecondsFormat, Utc};
 use gitim_core::skill::{
     media_type_for_path, reduce_skill, validate_description, validate_display_name,
@@ -49,6 +54,8 @@ pub enum SkillStoreError {
     OwnerIsMaintainer,
     #[error("role target is not an active workspace member")]
     RoleTargetInactive,
+    #[error("daemon identity is required for Skill writes")]
+    IdentityRequired,
     #[error("Skill event ID conflicts with existing history")]
     EventConflict,
     #[error("Skill resource not found")]
@@ -81,6 +88,7 @@ impl SkillStoreError {
             Self::LastOwner => "skill_last_owner",
             Self::OwnerIsMaintainer => "skill_owner_is_maintainer",
             Self::RoleTargetInactive => "skill_role_target_inactive",
+            Self::IdentityRequired => "skill_identity_required",
             Self::EventConflict => "skill_event_conflict",
             Self::ResourceNotFound => "skill_resource_not_found",
             Self::InvalidInput => "skill_invalid_input",
@@ -134,7 +142,7 @@ pub struct SkillResource {
     pub path: String,
     pub media_type: String,
     pub text: bool,
-    pub bytes: Vec<u8>,
+    pub content_base64: String,
     pub archived: bool,
 }
 
@@ -228,6 +236,49 @@ impl<'a> SkillStore<'a> {
         Ok(state)
     }
 
+    pub fn sole_active_owner_skills(
+        &self,
+        handler: &Handler,
+    ) -> Result<Vec<SkillSlug>, SkillStoreError> {
+        let skills_root = self.state.repo_root.join("skills");
+        if !skills_root.exists() {
+            return Ok(Vec::new());
+        }
+        let mut blocked = Vec::new();
+        for entry in fs::read_dir(skills_root).map_err(read_error)? {
+            let entry = entry.map_err(read_error)?;
+            if !entry.file_type().map_err(read_error)?.is_dir() {
+                continue;
+            }
+            let raw_slug = entry.file_name().to_string_lossy().to_string();
+            let Ok(slug) = SkillSlug::new(&raw_slug) else {
+                continue;
+            };
+            let Ok(state) = self.skill_state(&slug) else {
+                continue;
+            };
+            if !state.owners.contains(handler) {
+                continue;
+            }
+            let active_owners = state
+                .owners
+                .iter()
+                .filter(|owner| {
+                    self.state
+                        .repo_root
+                        .join("users")
+                        .join(format!("{}.meta.yaml", owner.as_str()))
+                        .is_file()
+                })
+                .count();
+            if active_owners == 1 {
+                blocked.push(slug);
+            }
+        }
+        blocked.sort();
+        Ok(blocked)
+    }
+
     pub fn revisions(&self, slug: &SkillSlug) -> Result<Vec<SkillRevisionMeta>, SkillStoreError> {
         let (mut revisions, _, _) = self.read_skill(slug)?;
         revisions.sort_by(|left, right| right.id.cmp(&left.id));
@@ -283,7 +334,7 @@ impl<'a> SkillStore<'a> {
             path: entry.path.clone(),
             media_type: media_type_for_path(&entry.path).to_string(),
             text: std::str::from_utf8(&entry.bytes).is_ok(),
-            bytes: entry.bytes,
+            content_base64: BASE64_STANDARD.encode(entry.bytes),
             archived: load.archived,
         })
     }
@@ -306,7 +357,7 @@ impl<'a> SkillStore<'a> {
             path: entry.path.clone(),
             media_type: media_type_for_path(&entry.path).to_string(),
             text: std::str::from_utf8(&entry.bytes).is_ok(),
-            bytes: entry.bytes,
+            content_base64: BASE64_STANDARD.encode(entry.bytes),
             archived: load.archived,
         })
     }
@@ -1098,25 +1149,59 @@ fn collect_directory(
             PackageEntryKind::Socket
         };
         let bytes = if file_type.is_file() {
-            let byte_size = item.metadata().map_err(read_error)?.len();
             let file_limit = if relative == "SKILL.md" {
-                MAX_SKILL_MD_BYTES as u64
+                MAX_SKILL_MD_BYTES
             } else {
-                MAX_PACKAGE_FILE_BYTES as u64
+                MAX_PACKAGE_FILE_BYTES
             };
+            let bytes = read_regular_file_nofollow(&path, file_limit)?;
             *total_bytes = total_bytes
-                .checked_add(byte_size)
+                .checked_add(bytes.len() as u64)
                 .ok_or(SkillError::PackageTooLarge)?;
-            if byte_size > file_limit || *total_bytes > MAX_PACKAGE_BYTES as u64 {
+            if *total_bytes > MAX_PACKAGE_BYTES as u64 {
                 return Err(SkillError::PackageTooLarge.into());
             }
-            fs::read(&path).map_err(read_error)?
+            bytes
         } else {
             Vec::new()
         };
         entries.push(PackageEntry::with_kind(relative, bytes, kind));
     }
     Ok(())
+}
+
+fn read_regular_file_nofollow(path: &Path, max_bytes: usize) -> Result<Vec<u8>, SkillStoreError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+
+    let file = options.open(path).map_err(|error| {
+        #[cfg(unix)]
+        if error.raw_os_error() == Some(libc::ELOOP) {
+            return SkillError::InvalidPackage.into();
+        }
+        read_error(error)
+    })?;
+    let metadata = file.metadata().map_err(read_error)?;
+    if !metadata.file_type().is_file() {
+        return Err(SkillError::InvalidPackage.into());
+    }
+    let max_bytes_u64 = u64::try_from(max_bytes).map_err(|_| SkillError::PackageTooLarge)?;
+    if metadata.len() > max_bytes_u64 {
+        return Err(SkillError::PackageTooLarge.into());
+    }
+    let read_limit = max_bytes_u64
+        .checked_add(1)
+        .ok_or(SkillError::PackageTooLarge)?;
+    let mut bytes = Vec::with_capacity(max_bytes.min(metadata.len() as usize));
+    file.take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(read_error)?;
+    if bytes.len() > max_bytes {
+        return Err(SkillError::PackageTooLarge.into());
+    }
+    Ok(bytes)
 }
 
 fn write_revision(
@@ -1297,4 +1382,23 @@ fn read_error(error: std::io::Error) -> SkillStoreError {
 
 fn write_error(error: std::io::Error) -> SkillStoreError {
     SkillStoreError::WriteFailed(error.to_string())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    #[test]
+    fn regular_file_reader_does_not_follow_symlinks() {
+        let temporary = tempfile::tempdir().unwrap();
+        let target = temporary.path().join("target.txt");
+        let link = temporary.path().join("link.txt");
+        fs::write(&target, b"private").unwrap();
+        symlink(&target, &link).unwrap();
+
+        let error = read_regular_file_nofollow(&link, 1024).unwrap_err();
+        assert_eq!(error.code(), "skill_invalid_package");
+    }
 }

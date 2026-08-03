@@ -100,6 +100,13 @@ async fn create_commits_and_loads_an_immutable_revision() {
     );
     assert!(!loaded.archived);
 
+    let resource = store
+        .resource(&loaded.canonical_ref, "assets/blob.bin")
+        .expect("resource");
+    let resource_wire = serde_json::to_value(resource).expect("resource JSON");
+    assert_eq!(resource_wire["content_base64"], "AJ+Slg==");
+    assert!(resource_wire.get("bytes").is_none());
+
     let catalog = store.catalog(false, 50, None).expect("catalog");
     assert_eq!(catalog.skills.len(), 1);
     assert!(catalog.invalid.is_empty());

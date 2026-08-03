@@ -8,6 +8,7 @@ name = "gitim"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 gitim-client = { path = "../gitim-client" }
 gitim-core = { path = "../gitim-core" }
 gitim-updater = { path = "../gitim-updater" }

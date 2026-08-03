@@ -162,3 +162,39 @@
 - [x] Review requirements coverage, production/test line counts, and verify the implementation stays within the core, daemon, client, CLI, and provider boundaries listed above.
 - [x] Perform a specification review, then a code-quality review; fix all high-confidence findings and repeat affected tests.
 - [x] Commit with a Conventional Commit title, `Test:` footer, and `Co-authored-by: Codex <codex@openai.com>` trailer.
+
+### Task 8: Transport, filesystem, sync, and ownership hardening
+
+**Files:**
+
+- Modify: `Cargo.toml`
+- Modify: `Cargo.lock`
+- Modify: `crates/gitim-client/src/client.rs`
+- Modify: `crates/gitim-cli/src/commands/skill.rs`
+- Modify: `crates/gitim-cli/tests/skill_cli.rs`
+- Modify: `crates/gitim-daemon/src/handlers/mod.rs`
+- Modify: `crates/gitim-daemon/src/handlers/depart.rs`
+- Modify: `crates/gitim-daemon/src/handlers/user.rs`
+- Modify: `crates/gitim-daemon/src/skill_handlers.rs`
+- Modify: `crates/gitim-daemon/src/skill_store.rs`
+- Modify: `crates/gitim-daemon/tests/skill_handlers.rs`
+- Modify: `crates/gitim-daemon/tests/skill_store.rs`
+
+**Interfaces:**
+
+- `SkillResource` carries one bounded Base64 string and the CLI decodes at most `MAX_PACKAGE_FILE_BYTES` bytes.
+- `GitimClient::request_with_timeout` preserves the existing request path while Skill filesystem and mutation methods use a 120-second response timeout.
+- Guest request classification rejects `SkillValidate`; regular package files are opened without following symbolic links.
+- Successful non-idempotent Skill writes notify the existing sync loop.
+- Missing daemon identity returns `skill_identity_required`.
+- `depart_user` rejects departure while the handler is the only active owner of any valid Skill.
+
+- [x] Add failing resource wire and CLI decode tests, then implement bounded Base64 transport.
+- [x] Add failing client timeout-selection tests, then route Skill filesystem and mutation calls through `request_with_timeout`.
+- [x] Add failing guest validation and package race tests, then deny guest validation and open regular files with `O_NOFOLLOW`.
+- [x] Add failing mutation notification and identity error tests, then emit `push_notify` and `skill_identity_required`.
+- [x] Add failing departure ownership tests, then reject departure with the affected Skill slugs until ownership is transferred.
+- [x] Run the scoped Skill, client, CLI, and departure tests.
+- [x] Run `cargo clippy --workspace --all-targets --no-deps --locked`, `cargo fmt --all -- --check`, and `git diff --check`.
+- [x] Run `cargo test --workspace --locked` with loopback proxy bypass.
+- [x] Commit and push the review hardening changes to the existing PR branch.

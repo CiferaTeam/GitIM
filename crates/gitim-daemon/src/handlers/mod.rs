@@ -219,6 +219,7 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::MarkQuickSessionError { .. }
                 | Request::ArchiveQuickSession { .. }
                 | Request::UnarchiveQuickSession { .. }
+                | Request::SkillValidate { .. }
                 | Request::SkillCreate { .. }
                 | Request::SkillPropose { .. }
                 | Request::SkillProposalComment { .. }

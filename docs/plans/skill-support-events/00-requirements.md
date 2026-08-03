@@ -137,6 +137,7 @@ An optional caller-supplied event ID is the idempotency key. Reusing it with the
 | Archive or unarchive | No | No | No | Yes |
 
 The daemon verifies that actors and new role targets are active workspace members when accepting a write. Permissions govern protocol-correct collaboration among workspace members; Git history supplies the audit trail.
+An active user who is the only active owner of a valid Skill must transfer ownership before departure. Guest mode rejects package validation because validation reads a client-supplied host path.
 
 ## CLI surface
 
@@ -179,7 +180,7 @@ Bounds:
 - Lists default to 50 and cap at 100.
 - Proposal lists omit comment bodies; proposal detail returns the latest 100 comments and a truncation flag.
 - Load returns `SKILL.md` plus resource metadata, not resource bodies.
-- Text resources may print to stdout. Binary resources require `--output`.
+- Resource bodies use bounded Base64 on IPC. The CLI decodes at most 5 MiB; text resources may print to stdout and binary resources require `--output`.
 - Display name: 1–80 characters.
 - Description: 1–1024 characters.
 - Proposal summary: 1–500 characters.
@@ -208,7 +209,8 @@ Stable codes include:
 - `skill_revision_not_found`, `skill_revision_unpublished`, `skill_revision_corrupted`
 - `skill_proposal_not_found`, `skill_proposal_terminal`
 - `skill_not_maintainer`, `skill_not_owner`, `skill_last_owner`, `skill_owner_is_maintainer`
-- `skill_role_target_inactive`, `skill_invalid_history`, `skill_event_conflict`
+- `skill_role_target_inactive`, `skill_identity_required`, `skill_ownership_transfer_required`
+- `skill_invalid_history`, `skill_event_conflict`
 - `skill_resource_not_found`, `skill_resource_binary`, `output_exists`
 
 Invalid event or revision metadata blocks only the affected Skill's show/load/write operations. Catalog responses include a bounded `invalid` list so corruption is visible without blocking healthy Skills. Package bytes are hash-checked on load/resource and return `skill_revision_corrupted` without forcing catalog scans to read every historical package.

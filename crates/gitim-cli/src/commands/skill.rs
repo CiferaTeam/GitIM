@@ -4,9 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process;
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::Subcommand;
 use gitim_client::{ApiResponse, GitimClient};
-use gitim_core::skill::{RevisionId, SkillSlug};
+use gitim_core::skill::{RevisionId, SkillSlug, MAX_PACKAGE_FILE_BYTES};
 use serde_json::Value;
 
 use crate::output::OutputMode;
@@ -71,7 +72,7 @@ pub enum SkillCommand {
         display_name: String,
         #[arg(long)]
         description: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Open an improvement proposal from a local package
@@ -83,7 +84,7 @@ pub enum SkillCommand {
         base: String,
         #[arg(long)]
         summary: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Inspect and decide proposals
@@ -133,28 +134,28 @@ pub enum ProposalCommand {
         proposal: String,
         #[arg(long)]
         body: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Publish an open proposal
     Publish {
         slug: String,
         proposal: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Reject an open proposal
     Reject {
         slug: String,
         proposal: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Withdraw your open proposal
     Withdraw {
         slug: String,
         proposal: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
 }
@@ -165,7 +166,7 @@ pub enum RoleCommand {
     OwnerAdd {
         slug: String,
         handler: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Remove an owner
@@ -174,21 +175,21 @@ pub enum RoleCommand {
         handler: String,
         #[arg(long)]
         remove_maintainer: bool,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Add a maintainer
     MaintainerAdd {
         slug: String,
         handler: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Remove a maintainer
     MaintainerRemove {
         slug: String,
         handler: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
 }
@@ -202,19 +203,19 @@ pub enum AdminCommand {
         display_name: Option<String>,
         #[arg(long, required_unless_present = "display_name")]
         description: Option<String>,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Archive a Skill
     Archive {
         slug: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
     /// Restore an archived Skill
     Unarchive {
         slug: String,
-        #[arg(long)]
+        #[arg(long, help = "Stable idempotency key; reuse it when retrying")]
         event_id: Option<String>,
     },
 }
@@ -596,7 +597,11 @@ fn print_load(mode: &OutputMode, data: &Value) {
 }
 
 fn print_resource(mode: &OutputMode, data: &Value, output: Option<&Path>, force: bool) {
-    let bytes = byte_array(&data["bytes"]);
+    let encoded = data["content_base64"]
+        .as_str()
+        .unwrap_or_else(|| exit_error("resource response is missing content_base64"));
+    let bytes = decode_resource_bytes(encoded, MAX_PACKAGE_FILE_BYTES)
+        .unwrap_or_else(|error| exit_error(error));
     let is_text = data["text"].as_bool().unwrap_or(false);
     if output.is_none() && !is_text {
         exit_error_with_code(
@@ -821,18 +826,22 @@ fn string_array(value: &Value) -> Vec<&str> {
         .unwrap_or_default()
 }
 
-fn byte_array(value: &Value) -> Vec<u8> {
-    value
-        .as_array()
-        .unwrap_or_else(|| exit_error("resource response is missing bytes"))
-        .iter()
-        .map(|byte| {
-            byte.as_u64()
-                .filter(|value| *value <= u8::MAX as u64)
-                .map(|value| value as u8)
-                .unwrap_or_else(|| exit_error("resource response contains an invalid byte"))
-        })
-        .collect()
+fn decode_resource_bytes(encoded: &str, max_bytes: usize) -> Result<Vec<u8>, &'static str> {
+    let max_encoded_len = max_bytes
+        .checked_add(2)
+        .and_then(|value| value.checked_div(3))
+        .and_then(|value| value.checked_mul(4))
+        .ok_or("resource exceeds the decoded byte limit")?;
+    if encoded.len() > max_encoded_len {
+        return Err("resource exceeds the decoded byte limit");
+    }
+    let bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|_| "resource response contains invalid Base64")?;
+    if bytes.len() > max_bytes {
+        return Err("resource exceeds the decoded byte limit");
+    }
+    Ok(bytes)
 }
 
 fn exit_error(message: &str) -> ! {
@@ -843,4 +852,15 @@ fn exit_error(message: &str) -> ! {
 fn exit_error_with_code(code: &str, message: &str) -> ! {
     eprintln!("Error [{code}]: {message}");
     process::exit(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_resource_bytes;
+
+    #[test]
+    fn resource_base64_decode_enforces_decoded_limit() {
+        let error = decode_resource_bytes("AAECAw==", 3).unwrap_err();
+        assert_eq!(error, "resource exceeds the decoded byte limit");
+    }
 }

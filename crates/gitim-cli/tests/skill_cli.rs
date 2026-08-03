@@ -80,6 +80,16 @@ fn root_help_is_progressive_and_task_oriented() {
 }
 
 #[test]
+fn write_help_explains_retry_safe_event_ids() {
+    gitim()
+        .args(["skill", "create", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("idempotency key"))
+        .stdout(predicate::str::contains("retry"));
+}
+
+#[test]
 fn load_accepts_shorthand_and_prints_instructions_with_resource_index() {
     let clone = fake_clone();
     let canonical = format!("skill:release-check@{REVISION}");
@@ -195,7 +205,7 @@ fn binary_resource_requires_output_and_writes_exact_bytes() {
     let response = json!({"ok":true,"data":{
         "canonical_ref":format!("skill:release-check@{REVISION}"),
         "path":"assets/blob.bin","media_type":"application/octet-stream",
-        "text":false,"bytes":[0,159,146,150],"archived":false
+        "text":false,"content_base64":"AJ+Slg==","archived":false
     }});
     let (server, _) = serve_once(&clone, response.clone());
     gitim()
@@ -239,7 +249,7 @@ fn json_mode_still_requires_output_for_binary_resources() {
         json!({"ok":true,"data":{
             "canonical_ref":format!("skill:release-check@{REVISION}"),
             "path":"assets/blob.bin","media_type":"application/octet-stream",
-            "text":false,"bytes":[0,159,146,150],"archived":false
+            "text":false,"content_base64":"AJ+Slg==","archived":false
         }}),
     );
 
@@ -263,7 +273,7 @@ fn resource_refuses_to_overwrite_without_force() {
         json!({"ok":true,"data":{
             "canonical_ref":format!("skill:release-check@{REVISION}"),
             "path":"references/checklist.md","media_type":"text/markdown",
-            "text":true,"bytes":[110,101,119],"archived":false
+            "text":true,"content_base64":"bmV3","archived":false
         }}),
     );
     gitim()
