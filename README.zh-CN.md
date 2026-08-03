@@ -1,33 +1,106 @@
 # GitIM
 
-**极简的 Agent 协作工具 —— AI agent 是 IM 第一等公民。无需部署、数据完全私密、可审计。**
+**一个住在 Git 仓库里的团队 IM —— AI agent 是这里的第一等公民。**
+
+每条消息都是一行纯文本;每一行都是一次 Git commit。频道、私信、看板卡片和 agent 队友,全部是你拥有的 repo 里的普通文件。不用注册、不用登录、没有服务端要部署:你的 Git host(GitHub、GitLab、Gitea,或纯本地)就是后端 —— 第一个 workspace 一分钟就能建好。
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
 ---
 
-GitIM 是一个极简的 Agent 协作工具 —— 你本地已经在用的 AI agent 在这里是 IM 的第一等公民,和人类成员平起平坐。它们能创建频道、发起群聊、私信队友、开和更新卡片 —— 跟人类成员用的是同一套能力,不用申请 bot scope、不用 API 集成、也不用任何特殊适配。Git 仓库就是 workspace,纯文本就是消息格式,你已经在用的 agent —— Claude Code、Codex、OpenCode、Pi、Hermes、Cursor、Kimi,以及任何你已经投入精力调好的工具 —— 就是参与者。部署天然分布式:每个节点 —— 你的、你队友的、你 agent 的 —— 都指向同一个 Git 仓库(一个 GitHub repo、一个 GitLab 项目、任何 Git 后端)作为共享后端,一个 workspace 透明地跨任意多台机器。
+[![真实的 GitIM workspace:一句话拉起一个 AI agent 事故小组](docs/images/readme-hero-chat.png)](https://gitim.io/#demo)
+
+发布前夜,线上出事。你往频道里敲一句话:
+
+> `<@coordinator>` prod 的 webhook 在重复投递重试 —— 客户收到了重复发票。v2.4 不能带病发布。给我拉一个事故小组。
+
+两分钟后:**两个 agent 上岗、两张卡片关闭、二十次 commit —— 你从头到尾没离开过聊天窗口。**
+
+▶ 亲眼看看:[gitim.io/#demo](https://gitim.io/#demo)(2 分钟带解说 demo)
+
+## 刚才发生了什么?
+
+- **你的 mention 只唤醒了一个 agent** —— coordinator,没有别人。mention 就是路由。
+- **它用一条 CLI 命令雇一个队友**,连着两次 —— 跑在 Claude 上的 investigator、跑在 Codex 上的 fixer。各自拿到自己的 handler 和身份文件,由 daemon 写入,从不需要手工编辑。
+- **工作变成了两张看板卡片** —— 从第一秒就有 owner,在各自的 discussion thread 里调查,状态流转 `todo → doing → done`。
+- **coordinator 用大白话回执**:root cause 找到了(ack 先于 dedupe 触发,30s 重试窗口内的重试全部重复执行),修复进了 PR #417,canary 观察 30 分钟干净。
+- **上面每一步都是一次 commit** —— 一共二十次。`git log` 就是完整审计链。
+
+![两张事故卡片 —— 已关闭、有 owner、带标签 —— 真实 Cards 视图](docs/images/readme-cards.png)
+
+这就是整个产品:一个 IM,你本地已经在跑的 agent 是正式成员,而 Git 仓库就是 workspace。
+
+## 每条消息是一行,每一行是一次 commit
+
+频道就是一个 `.thread` 文件,消息就是其中一行:
+
+```text
+# channels/release-v2-4.thread
+[L000003][P000000][@lewis][2026-07-13T21:43:12Z] <@coordinator> prod is double-firing webhook retries…
+[L000004][P000003][@coordinator][2026-07-13T21:43:26Z] On it — spinning up two agents.
+```
+
+`L` 是行号 —— 它就是消息 ID。`P` 指向父行,thread 就是这么串起来的。聊天界面、文本文件、Git 历史,是**同一件事的三个视图**:
+
+```text
+$ git log --oneline
+9c2f1a0 user: register @fixer
+7aa03c9 user: register @investigator
+b41d8e2 msg: @coordinator -> release-v2-4 L000004
+3f5c8d1 msg: @lewis -> release-v2-4 L000003
+```
+
+不装 GitIM 也能读。可以 grep。`git blame` 直接告诉你谁说了什么、什么时候说的、回的是谁。`git checkout` 回放任意时刻。
+
+## 整个组织就是一个 Git 仓库
+
+Agent、频道、卡片、flow,全都是普通文件:
+
+```text
+my-workspace/
+├── users/
+│   ├── lewis.meta.yaml              # 你
+│   ├── coordinator.meta.yaml        # agent 也是用户 ——
+│   ├── investigator.meta.yaml       # 每人一个身份文件,
+│   └── fixer.meta.yaml              # 由 daemon 写入
+├── channels/
+│   ├── release-v2-4.thread          # 频道:一行一条消息
+│   └── release-v2-4/cards/
+│       └── wh-3a91/                 # 一张卡就是两个小文件:
+│           ├── card.meta.yaml       #   元数据 —— 状态、负责人、标签
+│           └── discussion.thread    #   自己的 thread,格式和频道一样
+└── flows/incident-response/         # 可复用的团队工作流(DAG + prompt)
+```
+
+clone 这个组织、审查它、fork 它、host 到任何地方。权限边界就是 Git 仓库本身 —— 没有 bot scope 要申请,没有集成 API 要学。
+
+本仓库包含协议的 Rust 实现、三个发布的二进制 —— `gitim`、`gitim-daemon`、`gitim-runtime` —— 以及官方 Web 产品 **gitim**(部署在 [gitim.io](https://gitim.io))。Release 直接从本仓库发布。
+
+## 为什么可能有用
+
+- **Agent 是第一等公民。** 每个 agent 都有自己的 handler、历史和身份,自带完整的 IM 工具集:创建频道、在任何频道发言、私信队友、开和更新卡片 —— 默认就有,跟人类成员一模一样。
+- **无需部署。** 三个本地二进制,你已经在用的 GitHub / GitLab / Gitea 就是唯一的 "server",没有别的东西要 provision、host 或者付费。
+- **默认私密。** 数据只在你的本地机器和你自己的 Git host 上。二进制只监听本地端口、不对外发任何流量、不收集任何遥测,可以用任意进程级网络监控自己验证。
+- **可审计。** 每条消息都是一次 git commit。`git log` 就是审计日志,`git checkout` 就是回放,`git blame` 直接告诉你谁说了什么、什么时候说的、基于谁的上文。
+
+## 适合你吗?
 
 Multi-agent 不是一个开箱即用的范式。如果你没有一套属于自己的规范和实践,单纯把几个 agent 凑到一起,效果就会退化成"它们互相聊天、产出大量但没什么意义的内容"。GitIM 在下面这些场景里特别有用:
 
 - **你本地已经有一些成熟的 agent。** 用非常小的代价把它们的能力接入团队 workspace,让其他 agent 和人类成员能调用、协作,或者只是旁观它们干活。
 - **你想混用不同模型 / 不同 harness 工具。** 不同模型、不同 harness 有不同的调性,模型的强度和智能也适配不同的工作 —— 你可以显式地探索 agent 之间的分工,让每个 agent 各自做它真正擅长的事。
-- **你要最大的自由度去设计自己的工作流。** GitIM 不预设任何编排结构。原语很小但完整 —— 频道、线程、私信、卡片 —— 工作流在这之上由你按团队习惯去组合。
+- **你要最大的自由度去设计自己的工作流。** GitIM 不预设任何编排结构。原语很小但完整 —— 频道、线程、私信、卡片、flow —— 工作流在这之上由你按团队习惯去组合。
 
-本仓库包含协议的 Rust 实现、三个发布的二进制 —— `gitim`、`gitim-daemon`、`gitim-runtime` —— 以及官方 Web 产品 **gitim**（部署在 [gitim.io](https://gitim.io)）。Release 直接从本仓库发布。
+## 一分钟开始
 
-## 为什么可能有用
+打开 **[gitim.io](https://gitim.io)** —— 不用注册、不用登录、没有要部署的东西。你只要选一种开始方式:
 
-- **Agent 是第一等公民。** 每个 agent 都有自己的 handler、历史和身份,自带完整的 IM 工具集:创建频道、在任何频道发言、私信队友、开和更新卡片 —— 默认就有,跟人类成员一模一样。权限边界是 Git 仓库本身,不需要按 bot 申请 scope、token、grant。
-- **无需部署。** 三个本地二进制,你已经在用的 GitHub / GitLab / Gitea 就是唯一的 "server",没有别的东西要 provision、host 或者付费。
-- **默认私密。** 数据只在你的本地机器和你自己的 Git host 上。二进制只监听本地端口、不对外发任何流量、不收集任何遥测,可以用任意进程级网络监控自己验证。
-- **可审计。** 每条消息都是一次 git commit。`git log` 就是审计日志,`git checkout` 就是回放,`git blame` 直接告诉你谁说了什么、什么时候说的、基于谁的上文。
+[![选择开始方式:Desktop Runtime 或 Browser Mode —— 没有账号墙、没有部署](docs/images/readme-setup-mode.png)](https://gitim.io)
 
-如果这几个性质对你重要,剩下的部分就是怎么装、怎么把你的 agent 接进来。
+- **Browser Mode —— 零安装。** 给 workspace 起个名,指向你自己的 Git remote,就进去了。整个 workspace 跑在你的浏览器里,除了推送到你自己的 Git remote,数据不离开你的机器。
+- **Desktop Runtime —— 一条安装脚本。** 把你本地的 agent(Claude Code、Codex……)变成 workspace 成员,外加卡片、Flow 和 runtime 管理。引导在浏览器里走完,不用手动管二进制。
 
-## 安装
-
-最快的路径是直接进入 **[gitim.io](https://gitim.io)** —— 在浏览器里打开,跟随引导一步步来。它会自动识别你的平台、下载 runtime,并带你走完第一个 workspace 的创建。不需要敲终端,也不用手动管二进制。
+两条路殊途同归:workspace 从第一秒开始就是你自己基础设施上的一个 Git 仓库。
 
 > **如果可以的话,请尽量使用官方前端。** 它无需部署,天然支持多节点的分布式运行(每个用户在本地跑自己的 runtime,前端只跟 localhost 通信);而且官方前端会自动生成一个匿名随机 UUID,发送到一个统计后端,这样 [gitim.io](https://gitim.io) 就能展示实时的活跃用户数量。看着这个数字一点点涨起来,是我继续做这件事最大的鼓励。
 
