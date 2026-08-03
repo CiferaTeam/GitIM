@@ -13,11 +13,11 @@ GitIM is an IM protocol that models messages as **plain text lines + Git commits
 | Concept     | What it is                                                                              |
 | ----------- | --------------------------------------------------------------------------------------- |
 | Workspace   | A Git repository. Every message, channel, and user lives inside it.                      |
-| Channel     | A `.thread` file in the repo, e.g. `general.thread`, `eng.thread`.                       |
+| Channel     | A `.thread` file under `channels/`, e.g. `channels/general.thread`.                            |
 | Message     | One line in a `.thread` file.                                                            |
 | Thread      | A chain of messages linked by a "parent line" pointer. No separate thread ID.             |
 | Handler     | User identity. Lowercase `a-z0-9-`, 1–39 chars (`system` reserved). Usually a GitHub handle. |
-| DM          | Private chat between two handlers. Filename joins them in lexicographic order with `--` (e.g. `alice--bob`). |
+| DM          | Private chat between two handlers. A `.thread` file under `dm/`; the filename joins them in lexicographic order with `--` (e.g. `dm/alice--bob.thread`). |
 
 ## Message format
 
@@ -50,14 +50,24 @@ A typical workspace looks like this:
 
 ```
 my-workspace/
-├── general.thread          # channel
-├── random.thread
-├── alice--bob.thread       # DM between alice and bob
+├── channels/
+│   ├── general.meta.yaml      # channel metadata
+│   ├── general.thread         # the channel: one line per message
+│   └── general/               # channel-owned content
+│       └── cards/
+│           └── 20260801-162232-c18/
+│               ├── card.meta.yaml      # card metadata: status, assignee, labels
+│               └── discussion.thread   # the card's own thread
+├── dm/
+│   └── alice--bob.thread      # DM between alice and bob
 ├── users/
-│   ├── alice.meta.yaml     # user metadata
+│   ├── alice.meta.yaml        # user metadata
 │   └── bob.meta.yaml
+├── flows/
+│   └── incident-response/     # a reusable team workflow (template + runs)
+├── archive/                   # archived channels / cards / DMs / users
 └── .gitim/
-    └── config.yaml         # local config (gitignored)
+    └── config.yaml            # local config (gitignored)
 ```
 
 ## Getting started
@@ -160,8 +170,8 @@ Run `gitim onboard` against the **same** remote Git repository on multiple machi
 Because every message is a Git commit, any Git tool is an audit tool:
 
 ```sh
-git log general.thread                # every change on this channel
-git blame general.thread               # which commit/author produced each line
+git log channels/general.thread           # every change on this channel
+git blame channels/general.thread          # which commit/author produced each line
 git log --all --author=alice           # every message alice sent
 git show <commit>                      # the full context of one change
 ```
@@ -182,7 +192,7 @@ gitim --help       # full command list
 
 ### Why "one line per message"?
 
-- `cat general.thread` *is* opening the channel
+- `cat channels/general.thread` *is* opening the channel
 - `grep` *is* search
 - Any diff tool reviews message changes
 - Any text editor reads it (writes go through the daemon, which validates format)
