@@ -13,11 +13,11 @@ GitIM 是一套把消息建模成"**纯文本行 + Git commit**"的 IM 协议。
 | 概念        | 是什么                                                                 |
 | ----------- | ---------------------------------------------------------------------- |
 | Workspace   | 一个 Git 仓库。所有消息、频道、用户都在里面。                           |
-| Channel     | 仓库里一个 `.thread` 文件,如 `general.thread`、`eng.thread`。           |
+| Channel     | `channels/` 下的一个 `.thread` 文件,如 `channels/general.thread`。      |
 | Message     | `.thread` 文件里的一行。                                                |
 | Thread      | 通过"父消息指针"串起来的消息链。不需要独立的 thread ID。                  |
 | Handler     | 用户身份,小写 `a-z0-9-`,1–39 字符(`system` 保留)。通常等于 GitHub handle。 |
-| DM          | 两人私聊。文件名把两个 handler 按字典序用 `--` 拼起来(如 `alice--bob`)。 |
+| DM          | 两人私聊。`dm/` 下的 `.thread` 文件,文件名把两个 handler 按字典序用 `--` 拼起来(如 `dm/alice--bob.thread`)。 |
 
 ## 消息格式
 
@@ -50,14 +50,24 @@ GitIM 是一套把消息建模成"**纯文本行 + Git commit**"的 IM 协议。
 
 ```
 my-workspace/
-├── general.thread          # 频道
-├── random.thread
-├── alice--bob.thread       # alice ↔ bob 的 DM
+├── channels/
+│   ├── general.meta.yaml      # 频道元信息
+│   ├── general.thread         # 频道本体:一行一条消息
+│   └── general/               # 频道持有的内容
+│       └── cards/
+│           └── 20260801-162232-c18/
+│               ├── card.meta.yaml      # 卡片元信息:状态、负责人、标签
+│               └── discussion.thread   # 卡片自己的 thread
+├── dm/
+│   └── alice--bob.thread      # alice ↔ bob 的 DM
 ├── users/
-│   ├── alice.meta.yaml     # 用户元信息
+│   ├── alice.meta.yaml        # 用户元信息
 │   └── bob.meta.yaml
+├── flows/
+│   └── incident-response/     # 可复用的团队工作流(模板 + runs)
+├── archive/                   # 归档的频道 / 卡片 / DM / 用户
 └── .gitim/
-    └── config.yaml         # 本地配置(被 .gitignore 忽略)
+    └── config.yaml            # 本地配置(被 .gitignore 忽略)
 ```
 
 ## 上手
@@ -238,8 +248,8 @@ gitim search "rate limit"
 消息就是 git commit,任何 git 工具都是你的审计工具:
 
 ```sh
-git log general.thread                # 这个频道的所有变更
-git blame general.thread               # 每行消息的 commit / 作者
+git log channels/general.thread           # 这个频道的所有变更
+git blame channels/general.thread          # 每行消息的 commit / 作者
 git log --all --author=alice           # alice 的所有发言
 git show <commit>                      # 看某次具体变更的上下文
 ```
@@ -260,7 +270,7 @@ gitim --help       # 完整命令列表
 
 ### 为什么消息是"一行文本"?
 
-- `cat general.thread` 就是打开频道
+- `cat channels/general.thread` 就是打开频道
 - `grep` 就是搜索
 - 任意 diff 工具都能 review 消息变更
 - 任意文本编辑器都能读(写入由 daemon 校验合规)
