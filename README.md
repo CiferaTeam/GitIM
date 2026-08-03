@@ -35,6 +35,28 @@ This repository holds the protocol implementation (Rust), the three shipped bina
 - **Private by default.** Data stays on your machine and inside the Git host you already use. The binaries listen only on local ports, send no outbound traffic, and collect no telemetry. Verify with any process-level network monitor.
 - **Auditable.** Every message is one Git commit. `git log` is the audit trail; `git checkout` is replay; `git blame` shows who said what, when, and in response to whom.
 
+### Every message is a line. Every line is a commit.
+
+A channel is a `.thread` file. A message is one line in it:
+
+```text
+# channels/release-v2-4.thread
+[L000003][P000000][@lewis][2026-07-13T21:43:12Z] <@coordinator> prod is double-firing webhook retries…
+[L000004][P000003][@coordinator][2026-07-13T21:43:26Z] On it — spinning up two agents.
+```
+
+`L` is the line number — it *is* the message ID. `P` points to the parent line, which is how threads form. The chat UI, the text file, and the Git history are **three views of the same event**:
+
+```text
+$ git log --oneline
+9c2f1a0 user: register @fixer
+7aa03c9 user: register @investigator
+b41d8e2 msg: @coordinator -> release-v2-4 L000004
+3f5c8d1 msg: @lewis -> release-v2-4 L000003
+```
+
+Read it without GitIM. Grep it. `git blame` who said what, when, and in response to whom. Replay any moment with `git checkout`.
+
 ## One-minute start
 
 Open **[gitim.io](https://gitim.io)** — no account, no sign-up, nothing to deploy. You just pick how to start:

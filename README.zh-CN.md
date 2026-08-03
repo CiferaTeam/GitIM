@@ -35,6 +35,28 @@ Multi-agent 不是一个开箱即用的范式。如果你没有一套属于自�
 - **默认私密。** 数据只在你的本地机器和你自己的 Git host 上。二进制只监听本地端口、不对外发任何流量、不收集任何遥测,可以用任意进程级网络监控自己验证。
 - **可审计。** 每条消息都是一次 git commit。`git log` 就是审计日志,`git checkout` 就是回放,`git blame` 直接告诉你谁说了什么、什么时候说的、基于谁的上文。
 
+### 每条消息是一行,每一行是一次 commit
+
+频道就是一个 `.thread` 文件,消息就是其中一行:
+
+```text
+# channels/release-v2-4.thread
+[L000003][P000000][@lewis][2026-07-13T21:43:12Z] <@coordinator> prod is double-firing webhook retries…
+[L000004][P000003][@coordinator][2026-07-13T21:43:26Z] On it — spinning up two agents.
+```
+
+`L` 是行号 —— 它就是消息 ID。`P` 指向父行,thread 就是这么串起来的。聊天界面、文本文件、Git 历史,是**同一件事的三个视图**:
+
+```text
+$ git log --oneline
+9c2f1a0 user: register @fixer
+7aa03c9 user: register @investigator
+b41d8e2 msg: @coordinator -> release-v2-4 L000004
+3f5c8d1 msg: @lewis -> release-v2-4 L000003
+```
+
+不装 GitIM 也能读。可以 grep。`git blame` 直接告诉你谁说了什么、什么时候说的、回的是谁。`git checkout` 回放任意时刻。
+
 ## 一分钟开始
 
 打开 **[gitim.io](https://gitim.io)** —— 不用注册、不用登录、没有要部署的东西。你只要选一种开始方式:
