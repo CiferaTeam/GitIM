@@ -202,6 +202,52 @@ fn prompt_context_handler_is_interpolated() {
 }
 
 #[test]
+fn default_prompt_defines_situational_roles_and_owner_led_execution() {
+    let provider = gitim_agent_provider::create("mock", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "owner-agent",
+        model: None,
+    };
+
+    let identity = provider.prompt_identity(&ctx);
+    assert!(identity.contains("自治的 GitIM 团队成员"));
+    assert!(identity.contains("owner、执行者、reviewer 或 coordinator"));
+
+    let cognitive_loop = provider.prompt_cognitive_loop(&ctx);
+    assert!(cognitive_loop.contains("端到端 ownership"));
+    assert!(cognitive_loop.contains("工作边界是否独立"));
+    assert!(cognitive_loop.contains("独立调研"));
+    assert!(cognitive_loop.contains("代码 review"));
+    assert!(cognitive_loop.contains("黑盒测试或验证"));
+    assert!(!cognitive_loop.contains("超过一两个 turn 的事，优先委托 subagent"));
+
+    let collaboration = provider.prompt_collaboration(&ctx);
+    assert!(collaboration.contains("团队成员的共同职责"));
+}
+
+#[test]
+fn gitim_api_defines_card_backlog_and_flow_milestone_semantics() {
+    let provider = gitim_agent_provider::create("mock", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "owner-agent",
+        model: None,
+    };
+    let api = provider.prompt_gitim_api(&ctx);
+
+    assert!(api.contains("todo Cards 是 backlog"));
+    assert!(api.contains("doing Card 是当前主要 focus"));
+    assert!(api.contains("默认同时只维持一张 doing Card"));
+    assert!(api.contains("切换工作前"));
+    assert!(api.contains("checkpoint"));
+    assert!(api.contains("waiting label"));
+    assert!(api.contains("Flow node 是里程碑和责任边界"));
+    assert!(api.contains("不等于一次 agent spawn"));
+    assert!(api.contains("对整个 run 负责，直到 run 终态"));
+    assert!(api.contains("implementation 与 integration"));
+    assert!(api.contains("--result-ref <ref>"));
+}
+
+#[test]
 fn gitim_api_exposes_card_and_archive_commands() {
     let provider = gitim_agent_provider::create("claude", ProviderConfig::default()).unwrap();
     let ctx = PromptContext {

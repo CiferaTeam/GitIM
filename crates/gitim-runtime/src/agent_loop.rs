@@ -1654,6 +1654,10 @@ pub fn format_changes_as_prompt(changes: &[ChannelChange], self_handler: &str) -
             "\n（对外说话只能走 `gitim` CLI —— 直接写文件 / 手动 commit \
              不算；忘了用法 `gitim --help` 现查。）\n",
         );
+        prompt.push_str(
+            "（先判断这是短回复、当前 doing Card 的续作，还是应进入 todo 的新工作；\
+             新消息不会自动打断当前 focus，owner 工作保持端到端上下文。）\n",
+        );
         Some(prompt)
     } else {
         None
@@ -2016,7 +2020,7 @@ pub fn build_post_reset_preamble() -> String {
          \n\
          请按这个顺序判断：\n\
          1. 读一下你的记忆文件，看上一窗口留了什么方向感 / 未决事项；\n\
-         2. 如果有明确的未完工作 → 自然接回去推进；\n\
+         2. 检查分配给你的 doing Card 和最近 checkpoint；有明确的未完工作就自然接回去推进；\n\
          3. 如果没有指引、或上下文已经收尾 → 不要发任何消息、\
             不要找事做，直接结束本轮即可（runtime 会回到 idle，\
             等下一个外部事件再唤醒你）。\n\
@@ -2110,6 +2114,10 @@ mod tests {
         assert!(
             p.contains("记忆文件"),
             "preamble must point at the memory file as the handoff medium: {p}"
+        );
+        assert!(
+            p.contains("doing Card"),
+            "preamble must recover the currently focused durable work: {p}"
         );
         assert!(
             p.contains("不要发") || p.contains("idle"),
