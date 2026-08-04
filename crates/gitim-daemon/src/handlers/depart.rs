@@ -1,4 +1,5 @@
 use crate::api::{Event, Response};
+use crate::skill_store::SkillStore;
 use crate::state::SharedState;
 use gitim_core::dm::parse_dm_filename;
 use gitim_core::formatter::format_event;
@@ -88,6 +89,10 @@ pub async fn handle_depart_user(state: SharedState, handler: String) -> Response
     let active_meta = state.repo_root.join(format!("users/{}.meta.yaml", handler));
     if !active_meta.exists() {
         return Response::error(format!("user @{} not found", handler));
+    }
+
+    if let Err(response) = ensure_skill_ownership_transfer(&state, &handler) {
+        return response;
     }
 
     // 4. Run phases. Each phase returns `Result<u64, Response>` where the
@@ -617,6 +622,8 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
     {
         let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
 
+        ensure_skill_ownership_transfer(state, handler)?;
+
         if let Err(e) = state.git_storage.mv(&from_rel, &to_rel) {
             return Err(Response::error(format!("phase4: git mv failed: {}", e)));
         }
@@ -689,6 +696,32 @@ async fn phase4_archive_user(state: &SharedState, handler: &str) -> Result<u64, 
     });
 
     Ok(1)
+}
+
+pub(crate) fn ensure_skill_ownership_transfer(
+    state: &SharedState,
+    handler: &str,
+) -> Result<(), Response> {
+    let handler = Handler::new(handler)
+        .map_err(|error| Response::error(format!("invalid handler: {error}")))?;
+    let blocked = SkillStore::new(state.as_ref())
+        .sole_active_owner_skills(&handler)
+        .map_err(|error| Response::error_with_code(error.to_string(), error.code()))?;
+    if blocked.is_empty() {
+        return Ok(());
+    }
+    let slugs = blocked
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(Response::error_with_code(
+        format!(
+            "transfer Skill ownership before @{} departs: {}",
+            handler, slugs
+        ),
+        "skill_ownership_transfer_required",
+    ))
 }
 
 /// Push-with-retry helper used by every depart_user phase. Same shape as

@@ -8,6 +8,7 @@ name = "gitim"
 path = "src/main.rs"
 
 [dependencies]
+base64.workspace = true
 gitim-client = { path = "../gitim-client" }
 gitim-core = { path = "../gitim-core" }
 gitim-updater = { path = "../gitim-updater" }
@@ -16,11 +17,11 @@ clap = { version = "4", features = ["derive"] }
 humantime = "2"
 tokio.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 regex.workspace = true
 tempfile = "3"
 
 [dev-dependencies]
-serde_yaml.workspace = true
 assert_cmd = "2"
 predicates = "3"
 

@@ -219,6 +219,20 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 | Request::MarkQuickSessionError { .. }
                 | Request::ArchiveQuickSession { .. }
                 | Request::UnarchiveQuickSession { .. }
+                | Request::SkillValidate { .. }
+                | Request::SkillCreate { .. }
+                | Request::SkillPropose { .. }
+                | Request::SkillProposalComment { .. }
+                | Request::SkillProposalPublish { .. }
+                | Request::SkillProposalReject { .. }
+                | Request::SkillProposalWithdraw { .. }
+                | Request::SkillMetadataUpdate { .. }
+                | Request::SkillOwnerAdd { .. }
+                | Request::SkillOwnerRemove { .. }
+                | Request::SkillMaintainerAdd { .. }
+                | Request::SkillMaintainerRemove { .. }
+                | Request::SkillArchive { .. }
+                | Request::SkillUnarchive { .. }
         );
         if is_write {
             return Response::error("guest mode: write operations are not allowed");
@@ -907,6 +921,31 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
                 Err(r) => return r,
             };
             project::handle_set_channel_project(state, channel, project, resolved_author).await
+        }
+        request @ (Request::SkillList { .. }
+        | Request::SkillShow { .. }
+        | Request::SkillLoad { .. }
+        | Request::SkillResource { .. }
+        | Request::SkillRevisions { .. }
+        | Request::SkillHistory { .. }
+        | Request::SkillValidate { .. }
+        | Request::SkillCreate { .. }
+        | Request::SkillPropose { .. }
+        | Request::SkillProposalList { .. }
+        | Request::SkillProposalShow { .. }
+        | Request::SkillProposalResource { .. }
+        | Request::SkillProposalComment { .. }
+        | Request::SkillProposalPublish { .. }
+        | Request::SkillProposalReject { .. }
+        | Request::SkillProposalWithdraw { .. }
+        | Request::SkillMetadataUpdate { .. }
+        | Request::SkillOwnerAdd { .. }
+        | Request::SkillOwnerRemove { .. }
+        | Request::SkillMaintainerAdd { .. }
+        | Request::SkillMaintainerRemove { .. }
+        | Request::SkillArchive { .. }
+        | Request::SkillUnarchive { .. }) => {
+            crate::skill_handlers::handle_skill_request(request, state).await
         }
     }
 }

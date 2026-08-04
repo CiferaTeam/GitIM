@@ -135,6 +135,9 @@ pub enum Event {
         status: gitim_core::types::QuickSessionStatus,
         revision: u64,
     },
+
+    #[serde(rename = "skill_changed")]
+    SkillChanged { slug: String, event_id: String },
 }
 
 #[derive(Debug, Deserialize)]
@@ -695,6 +698,161 @@ pub enum Request {
     /// Excludes departed handlers.
     #[serde(rename = "agents_with_labels")]
     AgentsWithLabels { labels: Vec<String> },
+
+    // -- Shared Skills --
+    #[serde(rename = "skill_list")]
+    SkillList {
+        #[serde(default)]
+        archived: bool,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        after: Option<String>,
+    },
+    #[serde(rename = "skill_show")]
+    SkillShow { slug: String },
+    #[serde(rename = "skill_load")]
+    SkillLoad { reference: String },
+    #[serde(rename = "skill_resource")]
+    SkillResource { reference: String, path: String },
+    #[serde(rename = "skill_revisions")]
+    SkillRevisions {
+        slug: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        after: Option<String>,
+    },
+    #[serde(rename = "skill_history")]
+    SkillHistory {
+        slug: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        after: Option<String>,
+    },
+    #[serde(rename = "skill_validate")]
+    SkillValidate {
+        slug: String,
+        source_directory: String,
+    },
+    #[serde(rename = "skill_create")]
+    SkillCreate {
+        slug: String,
+        source_directory: String,
+        display_name: String,
+        description: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_propose")]
+    SkillPropose {
+        slug: String,
+        source_directory: String,
+        base_revision: String,
+        summary: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_proposal_list")]
+    SkillProposalList {
+        slug: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        after: Option<String>,
+    },
+    #[serde(rename = "skill_proposal_show")]
+    SkillProposalShow { slug: String, proposal: String },
+    #[serde(rename = "skill_proposal_resource")]
+    SkillProposalResource {
+        slug: String,
+        proposal: String,
+        path: String,
+    },
+    #[serde(rename = "skill_proposal_comment")]
+    SkillProposalComment {
+        slug: String,
+        proposal: String,
+        body: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_proposal_publish")]
+    SkillProposalPublish {
+        slug: String,
+        proposal: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_proposal_reject")]
+    SkillProposalReject {
+        slug: String,
+        proposal: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_proposal_withdraw")]
+    SkillProposalWithdraw {
+        slug: String,
+        proposal: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_metadata_update")]
+    SkillMetadataUpdate {
+        slug: String,
+        #[serde(default)]
+        display_name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_owner_add")]
+    SkillOwnerAdd {
+        slug: String,
+        handler: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_owner_remove")]
+    SkillOwnerRemove {
+        slug: String,
+        handler: String,
+        #[serde(default)]
+        remove_maintainer: bool,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_maintainer_add")]
+    SkillMaintainerAdd {
+        slug: String,
+        handler: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_maintainer_remove")]
+    SkillMaintainerRemove {
+        slug: String,
+        handler: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_archive")]
+    SkillArchive {
+        slug: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
+    #[serde(rename = "skill_unarchive")]
+    SkillUnarchive {
+        slug: String,
+        #[serde(default)]
+        event_id: Option<String>,
+    },
 }
 
 fn default_archived_dms_limit() -> usize {
