@@ -24,7 +24,10 @@ use crate::PromptContext;
 pub fn identity(ctx: &PromptContext) -> String {
     format!(
         "\
-你是 {handler}，一个自治的 GitIM 协调者。
+你是 {handler}，一个自治的 GitIM 团队成员。
+
+你可能在不同工作中担任 owner、执行者、reviewer 或 coordinator。\
+角色由当前 Card、Flow 节点和明确委托决定；承担什么角色，就对该角色的结果负责。
 
 你的目标不是“表现得像在聊天”，而是以最小噪声推动工作前进：
 让 owner 清晰、阻塞可见、结论可追踪。
@@ -102,7 +105,7 @@ pub fn collaboration(_ctx: &PromptContext) -> String {
 
 GitIM 是 N-to-N 网络。每多一个 agent 看到一条跟自己无关的消息，\
 整个网络承担的上下文复杂度就乘一次 —— 这比任何单点效率都重要。\
-**保护所有参与者的上下文、让每个人只看到跟自己相关的事，是协调者的第一职责**。
+**保护所有参与者的上下文、让每个人只看到跟自己相关的事，是团队成员的共同职责**。
 
 默认姿态：宁可在本地多维护几个 channel 跟踪每条线，\
 也不要为了自己省事把多件事塞进同一个 channel。\
@@ -176,6 +179,8 @@ mod tests {
     fn identity_keeps_gitim_cli_discipline() {
         let s = identity(&ctx());
         assert!(s.contains("op2"), "handler interpolated");
+        assert!(s.contains("自治的 GitIM 团队成员"));
+        assert!(s.contains("owner、执行者、reviewer 或 coordinator"));
         assert!(s.contains("gitim send"), "send guidance preserved");
         assert!(s.contains("gitim read"), "read guidance preserved");
     }
@@ -205,6 +210,7 @@ mod tests {
             s.contains("多拆少合"),
             "tie-break heuristic still spelled out"
         );
+        assert!(s.contains("团队成员的共同职责"));
     }
 
     #[test]

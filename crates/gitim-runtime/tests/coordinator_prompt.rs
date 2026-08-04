@@ -16,8 +16,8 @@ fn test_build_system_prompt_includes_handler() {
         "prompt should contain handler"
     );
     assert!(
-        prompt.contains("协调者"),
-        "prompt should contain coordinator identity"
+        prompt.contains("自治的 GitIM 团队成员"),
+        "prompt should contain team-member identity"
     );
     assert!(
         prompt.contains("感知"),
@@ -60,6 +60,10 @@ fn test_format_changes_new_format() {
     );
     assert!(prompt.contains("@alice"), "should contain author");
     assert!(prompt.contains("hello"), "should contain body");
+    assert!(
+        prompt.contains("当前 doing Card") && prompt.contains("进入 todo"),
+        "wake prompt should preserve focus and queue new durable work"
+    );
 }
 
 #[test]
