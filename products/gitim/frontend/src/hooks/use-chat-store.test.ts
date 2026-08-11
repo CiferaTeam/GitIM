@@ -742,10 +742,12 @@ describe("useChatStore card change events", () => {
   });
 
   it("restores persisted card change events after store reset", () => {
+    const now = Date.now();
     const event = makeEvent("c1", "general", 10, {
+      firstReceivedAt: now - 1000,
       targetLine: 7,
       cardTitle: "Recovery review",
-      receivedAt: Date.now(),
+      receivedAt: now,
     });
 
     writeStoredCardChangeEvents("runtime:room", { general: [event] });
@@ -755,6 +757,23 @@ describe("useChatStore card change events", () => {
     );
 
     expect(useChatStore.getState().cardChangeEvents.general).toEqual([event]);
+  });
+
+  it("keeps the first receive time when reminders merge", () => {
+    const now = Date.now();
+    useChatStore.getState().addCardChangeEvent(
+      makeEvent("c1", "general", 0, { receivedAt: now }),
+    );
+    useChatStore.getState().addCardChangeEvent(
+      makeEvent("c1", "general", 0, { receivedAt: now + 1000 }),
+    );
+
+    expect(useChatStore.getState().cardChangeEvents.general).toMatchObject([
+      {
+        firstReceivedAt: now,
+        receivedAt: now + 1000,
+      },
+    ]);
   });
 
   it("appends persisted card change events with the store merge semantics", () => {
@@ -810,6 +829,90 @@ describe("mergeCardChangeEvents", () => {
     expect(merged.map((m) => m.line_number)).toEqual([1, 2, 2, 3]);
     expect(merged[2].type).toBe("event");
     expect(merged[2]._ephemeralId).toBe("c1:2");
+  });
+
+  it("keeps off-channel card reminders before messages sent later", () => {
+    const before = msg(470, "Crewargo merged", {
+      timestamp: "20260811T150435Z",
+    });
+    const pending = msg(-1, "https://github.com/amplifthq/opentag", {
+      timestamp: "20260811T151759Z",
+      _pendingId: "outbound-471",
+      _status: "sending",
+    });
+    const firstReminder = {
+      ...makeEvent("20260811-144930-7b8", 0),
+      receivedAt: Date.parse("2026-08-11T15:04:40Z"),
+    };
+    const secondReminder = {
+      ...makeEvent("20260811-145635-fa3", 0),
+      receivedAt: Date.parse("2026-08-11T15:04:41Z"),
+    };
+    const events = [firstReminder, secondReminder];
+
+    expect(
+      mergeCardChangeEvents([before, pending], events).map(
+        (m) => m._ephemeralId ?? m.line_number,
+      ),
+    ).toEqual([
+      470,
+      "20260811-144930-7b8:0",
+      "20260811-145635-fa3:0",
+      -1,
+    ]);
+
+    const confirmed = {
+      ...pending,
+      line_number: 471,
+      _status: "sent" as const,
+    };
+    const merged = mergeCardChangeEvents([before, confirmed], events);
+
+    expect(merged.map((m) => m._ephemeralId ?? m.line_number)).toEqual([
+      470,
+      "20260811-144930-7b8:0",
+      "20260811-145635-fa3:0",
+      471,
+    ]);
+  });
+
+  it("keeps an off-channel reminder before a later message in the same second", () => {
+    const second = Date.parse("2026-08-11T15:04:40Z");
+    const message = msg(471, "later in the same second", {
+      timestamp: "20260811T150440Z",
+      _pendingId: "outbound-471",
+      _status: "sent",
+    });
+    const reminder = {
+      ...makeEvent("c1", 0),
+      receivedAt: second + 500,
+    };
+
+    const merged = mergeCardChangeEvents([message], [reminder]);
+
+    expect(merged.map((m) => m._ephemeralId ?? m.line_number)).toEqual([
+      "c1:0",
+      471,
+    ]);
+  });
+
+  it("keeps a grouped reminder at its first receive position", () => {
+    const firstReceive = Date.parse("2026-08-11T15:04:40Z");
+    const groupedReminder = {
+      ...makeEvent("c1", 0),
+      firstReceivedAt: firstReceive,
+      receivedAt: Date.parse("2026-08-11T15:06:40Z"),
+    };
+    const message = msg(471, "sent between the grouped replies", {
+      timestamp: "20260811T150540Z",
+    });
+
+    const merged = mergeCardChangeEvents([message], [groupedReminder]);
+
+    expect(merged.map((m) => m._ephemeralId ?? m.line_number)).toEqual([
+      "c1:0",
+      471,
+    ]);
   });
 
   it("appends events whose anchor is beyond loaded messages before pending messages", () => {

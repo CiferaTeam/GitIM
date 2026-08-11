@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { ArchivedDmEntry } from "../lib/client";
 import type { ChatViewportAnchor } from "../lib/chat-ui-state";
+import { parseUtcTimestamp } from "../lib/timezone";
 import type { Channel, Message, UserInfo } from "../lib/types";
 import { onWorkspaceSwitch } from "../lib/workspace-lifecycle";
 
@@ -15,6 +16,7 @@ export interface CardChangeEvent {
   cardId: string;
   cardChannel: string;
   anchorLine: number;
+  firstReceivedAt?: number;
   targetLine?: number;
   cardTitle?: string;
   authors: string[];
@@ -64,6 +66,7 @@ function parseStoredCardChangeEvent(raw: unknown, now: number): CardChangeEvent 
   const authors = Array.isArray(obj.authors)
     ? Array.from(new Set(obj.authors.filter((a): a is string => typeof a === "string")))
     : [];
+  const firstReceivedAt = finiteNumber(obj.firstReceivedAt);
   const targetLine = finiteNumber(obj.targetLine);
   const cardTitle = typeof obj.cardTitle === "string" ? obj.cardTitle : undefined;
 
@@ -72,6 +75,7 @@ function parseStoredCardChangeEvent(raw: unknown, now: number): CardChangeEvent 
     cardId,
     cardChannel,
     anchorLine: Math.floor(anchorLine),
+    ...(firstReceivedAt !== null && firstReceivedAt > 0 && { firstReceivedAt }),
     ...(targetLine !== null && targetLine > 0 && { targetLine: Math.floor(targetLine) }),
     ...(cardTitle !== undefined && { cardTitle }),
     authors,
@@ -118,10 +122,15 @@ function mergeCardChangeEventMap(
   let next: CardChangeEvent[];
   if (existingIndex >= 0) {
     const existing = list[existingIndex];
+    const firstReceivedAt = Math.min(
+      existing.firstReceivedAt ?? existing.receivedAt,
+      event.firstReceivedAt ?? event.receivedAt,
+    );
     const merged: CardChangeEvent = {
       ...existing,
       count: existing.count + event.count,
       authors: Array.from(new Set([...existing.authors, ...event.authors])),
+      firstReceivedAt,
       receivedAt: Math.max(existing.receivedAt, event.receivedAt),
       targetLine: event.targetLine ?? existing.targetLine,
       cardTitle: event.cardTitle ?? existing.cardTitle,
@@ -836,13 +845,17 @@ function cardChangeEventToMessage(event: CardChangeEvent): Message {
   };
 }
 
+function cardChangeEventPlacementTime(event: CardChangeEvent): number {
+  return event.firstReceivedAt ?? event.receivedAt;
+}
+
 /** Merge front-end card-change reminders into a real message list.
  *
- *  Each event is rendered immediately after the message whose `line_number`
- *  equals `anchorLine`. If that message isn't currently loaded, the event is
- *  appended after the loaded real messages (and will automatically reposition
- *  once the anchor line is fetched). Pending/optimistic messages are kept at
- *  the very bottom.
+ *  Anchored events render immediately after their matching message. Events
+ *  received while their channel was not visible have no anchor, so they use
+ *  their first receive time to stay ahead of messages sent later. Missing
+ *  positive anchors remain after the loaded real messages, and
+ *  pending/optimistic messages stay at the very bottom.
  */
 export function mergeCardChangeEvents(
   messages: Message[],
@@ -861,15 +874,35 @@ export function mergeCardChangeEvents(
   }
 
   const byAnchor = new Map<number, CardChangeEvent[]>();
+  const unanchored: CardChangeEvent[] = [];
   for (const e of events) {
-    const anchor = e.anchorLine > 0 ? e.anchorLine : Number.MAX_SAFE_INTEGER;
-    const list = byAnchor.get(anchor) ?? [];
+    if (e.anchorLine <= 0) {
+      unanchored.push(e);
+      continue;
+    }
+    const list = byAnchor.get(e.anchorLine) ?? [];
     list.push(e);
-    byAnchor.set(anchor, list);
+    byAnchor.set(e.anchorLine, list);
   }
+  unanchored.sort(
+    (a, b) => cardChangeEventPlacementTime(a) - cardChangeEventPlacementTime(b),
+  );
 
   const merged: Message[] = [];
+  let unanchoredIndex = 0;
   for (const m of real) {
+    const messageTime = parseUtcTimestamp(m.timestamp)?.getTime();
+    if (messageTime !== undefined) {
+      const messageSecond = Math.floor(messageTime / 1000);
+      while (
+        unanchoredIndex < unanchored.length &&
+        Math.floor(cardChangeEventPlacementTime(unanchored[unanchoredIndex]) / 1000) <=
+          messageSecond
+      ) {
+        merged.push(cardChangeEventToMessage(unanchored[unanchoredIndex]));
+        unanchoredIndex += 1;
+      }
+    }
     merged.push(m);
     const inserted = byAnchor.get(m.line_number);
     if (inserted) {
@@ -882,6 +915,7 @@ export function mergeCardChangeEvents(
   for (const [, evs] of remaining) {
     merged.push(...evs.map(cardChangeEventToMessage));
   }
+  merged.push(...unanchored.slice(unanchoredIndex).map(cardChangeEventToMessage));
   merged.push(...pending);
   return merged;
 }
