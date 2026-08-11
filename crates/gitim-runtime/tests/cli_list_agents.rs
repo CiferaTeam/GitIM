@@ -65,7 +65,7 @@ fn inject_workspace(state: &SharedRuntimeState, slug: &str, name: &str) {
 /// Build a fully-populated `AgentInfo` so projection tests can confirm
 /// both "sensitive fields exist on the wire" and "the CLI projection drops
 /// or redacts them". Defaulting the operationally-internal fields
-/// (`loop_handle`, `last_activity`) lets the test stay focused on the
+/// (`loop_lifecycle`, `last_activity`) lets the test stay focused on the
 /// fields we actually project.
 fn make_agent_with_env(
     id: &str,
@@ -95,7 +95,7 @@ fn make_agent_with_env(
         usage_summary: None,
         saturation_summary: None,
         is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        loop_handle: None,
+        loop_lifecycle: Default::default(),
     }
 }
 

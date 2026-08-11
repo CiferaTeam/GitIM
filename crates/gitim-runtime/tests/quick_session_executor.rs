@@ -770,7 +770,7 @@ fn shared_runtime_state(
             usage_summary: None,
             saturation_summary: None,
             is_working: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            loop_handle: None,
+            loop_lifecycle: Default::default(),
         },
     );
     let state = Arc::new(Mutex::new(RuntimeState::default()));

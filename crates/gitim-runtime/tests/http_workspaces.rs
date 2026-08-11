@@ -2267,26 +2267,27 @@ async fn delete_workspace_aborts_agent_loop_handles() {
         GitProvider::Local,
     );
 
-    // Spawn a tokio task that runs until aborted, and hand its AbortHandle to
-    // the injected agent's `loop_handle`. This stands in for a real
-    // `start_agent_loop`-spawned task: what we care about is that DELETE flips
-    // the abort bit.
+    // Spawn the same Abortable task shape used by start_agent_loop and install
+    // its handle in the injected agent lifecycle.
     let notify = Arc::new(Notify::new());
     let notify_clone = notify.clone();
-    let task = tokio::spawn(async move {
-        notify_clone.notify_one();
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-    });
-    let abort_handle = task.abort_handle();
+    let (abort_handle, registration) = futures::future::AbortHandle::new_pair();
+    let task = tokio::spawn(futures::future::Abortable::new(
+        async move {
+            notify_clone.notify_one();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+        },
+        registration,
+    ));
 
     notify.notified().await;
 
     {
         let mut s = state.lock().unwrap();
         let ctx = s.workspaces.get_mut("loop-test").unwrap();
-        let mut agent_info = gitim_runtime::http::AgentInfo {
+        let agent_info = gitim_runtime::http::AgentInfo {
             id: "a".into(),
             handler: "a".into(),
             display_name: "a".into(),
@@ -2307,22 +2308,22 @@ async fn delete_workspace_aborts_agent_loop_handles() {
             usage_summary: None,
             saturation_summary: None,
             is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            loop_handle: None,
+            loop_lifecycle: gitim_runtime::http::LoopLifecycle::Running {
+                generation: 1,
+                abort_handle,
+            },
         };
-        agent_info.loop_handle = Some(abort_handle);
         ctx.agents.insert("a".into(), agent_info);
     }
 
     let (status, _) = send(router, "DELETE", "/workspaces/loop-test", None).await;
     assert_eq!(status, StatusCode::OK);
 
-    // After DELETE, the spawned task must observe its abort flag. Awaiting the
-    // JoinHandle yields `Err(JoinError::is_cancelled)` once the abort fires.
-    // Give it a bounded wait so this test stays fast if the fix regresses.
+    // After DELETE, the Abortable wrapper must finish with Aborted.
     let result = tokio::time::timeout(std::time::Duration::from_secs(2), task).await;
     let join_result = result.expect("agent loop task was not aborted within 2s");
     assert!(
-        join_result.is_err() && join_result.unwrap_err().is_cancelled(),
+        matches!(join_result, Ok(Err(futures::future::Aborted))),
         "task should have been aborted",
     );
 }

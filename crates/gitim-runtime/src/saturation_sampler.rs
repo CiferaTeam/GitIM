@@ -176,7 +176,7 @@ mod tests {
             usage_summary: None,
             saturation_summary: None,
             is_working: Arc::new(AtomicBool::new(working)),
-            loop_handle: None,
+            loop_lifecycle: Default::default(),
         }
     }
 

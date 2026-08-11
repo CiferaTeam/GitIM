@@ -73,8 +73,11 @@ async fn test_recover_missing_provider_marks_error() {
         "error_message should mention provider: {msg}"
     );
     assert!(
-        info.loop_handle.is_none(),
-        "loop_handle must be None on error"
+        matches!(
+            &info.loop_lifecycle,
+            gitim_runtime::http::LoopLifecycle::Idle
+        ),
+        "loop lifecycle must be idle on error"
     );
 }
 
@@ -111,7 +114,10 @@ async fn test_recover_unknown_provider_marks_error() {
         "error_message should echo the bad provider value: {msg}"
     );
     assert_eq!(info.provider.as_deref(), Some("gemini"));
-    assert!(info.loop_handle.is_none());
+    assert!(matches!(
+        &info.loop_lifecycle,
+        gitim_runtime::http::LoopLifecycle::Idle
+    ));
 }
 
 #[tokio::test]

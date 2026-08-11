@@ -57,7 +57,7 @@ fn has_active_agents_with_running() {
                 usage_summary: None,
                 saturation_summary: None,
                 is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                loop_handle: None,
+                loop_lifecycle: Default::default(),
             },
         );
         s.workspaces.insert("test-ws".to_string(), ctx);
