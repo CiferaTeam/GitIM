@@ -770,6 +770,8 @@ fn shared_runtime_state(
             usage_summary: None,
             saturation_summary: None,
             is_working: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            loop_generation: 0,
+            loop_starting: false,
             loop_handle: None,
         },
     );

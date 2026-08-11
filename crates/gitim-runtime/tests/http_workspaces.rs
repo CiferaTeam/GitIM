@@ -2307,6 +2307,8 @@ async fn delete_workspace_aborts_agent_loop_handles() {
             usage_summary: None,
             saturation_summary: None,
             is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            loop_generation: 0,
+            loop_starting: false,
             loop_handle: None,
         };
         agent_info.loop_handle = Some(abort_handle);

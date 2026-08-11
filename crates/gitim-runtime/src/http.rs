@@ -406,8 +406,92 @@ pub struct AgentInfo {
     /// `Arc::new(AtomicBool::new(false))`.
     #[serde(skip)]
     pub is_working: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Generation token for the currently reserved or installed loop. Stop
+    /// advances it so an older start cannot publish its handle or failure.
+    #[serde(skip)]
+    pub loop_generation: u64,
+    /// True while a start owns the lifecycle reservation but has not yet
+    /// installed its abort handle.
+    #[serde(skip)]
+    pub loop_starting: bool,
     #[serde(skip)]
     pub loop_handle: Option<AbortHandle>,
+}
+
+enum LoopStartCommit {
+    Started,
+    Cancelled(AbortHandle),
+    TaskExited,
+}
+
+impl AgentInfo {
+    fn advance_loop_generation(&mut self) -> u64 {
+        self.loop_generation = self.loop_generation.wrapping_add(1);
+        if self.loop_generation == 0 {
+            self.loop_generation = 1;
+        }
+        self.loop_generation
+    }
+
+    fn reserve_loop_start(&mut self) -> Option<u64> {
+        if self.loop_starting || self.loop_handle.is_some() || self.status == "running" {
+            return None;
+        }
+        let generation = self.advance_loop_generation();
+        self.loop_starting = true;
+        self.is_working = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        Some(generation)
+    }
+
+    fn owns_loop_start(&self, generation: u64) -> bool {
+        self.loop_starting && self.loop_generation == generation
+    }
+
+    fn install_loop_start(
+        &mut self,
+        generation: u64,
+        handle: AbortHandle,
+    ) -> Result<(), AbortHandle> {
+        if !self.loop_starting || self.loop_generation != generation {
+            return Err(handle);
+        }
+        self.loop_starting = false;
+        self.loop_handle = Some(handle);
+        self.status = "running".to_string();
+        Ok(())
+    }
+
+    fn commit_loop_start(
+        &mut self,
+        generation: u64,
+        handle: AbortHandle,
+        start_tx: tokio::sync::oneshot::Sender<()>,
+    ) -> LoopStartCommit {
+        match self.install_loop_start(generation, handle) {
+            Ok(()) if start_tx.send(()).is_ok() => LoopStartCommit::Started,
+            Ok(()) => {
+                self.fail_loop_start(generation);
+                LoopStartCommit::TaskExited
+            }
+            Err(handle) => LoopStartCommit::Cancelled(handle),
+        }
+    }
+
+    fn stop_loop(&mut self) -> Option<AbortHandle> {
+        self.advance_loop_generation();
+        self.loop_starting = false;
+        self.status = "idle".to_string();
+        self.loop_handle.take()
+    }
+
+    fn fail_loop_start(&mut self, generation: u64) {
+        if self.loop_generation != generation {
+            return;
+        }
+        self.loop_starting = false;
+        self.loop_handle = None;
+        self.status = "error".to_string();
+    }
 }
 
 pub struct RuntimeState {
@@ -3661,7 +3745,7 @@ async fn agents_add(
             // failure, and the default-introduction case uniformly).
             let introduction = read_user_introduction(&handle.repo_root, &req.handler);
 
-            let info = AgentInfo {
+            let mut info = AgentInfo {
                 id: req.handler.clone(),
                 handler: req.handler.clone(),
                 display_name: req.display_name.clone(),
@@ -3699,8 +3783,11 @@ async fn agents_add(
                 usage_summary: None,
                 saturation_summary: None,
                 is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                loop_generation: 0,
+                loop_starting: false,
                 loop_handle: None,
             };
+            let auto_start_generation = info.reserve_loop_start();
             {
                 let mut s = crate::preconditions::arc_mutex_lock(&state);
                 if let Some(ctx) = s.workspaces.get_mut(&slug) {
@@ -3718,8 +3805,12 @@ async fn agents_add(
                 tracing::warn!(error = %e, "token propagation after add_agent failed");
             }
 
-            if let Err(e) = start_agent_loop(&state, &slug, &req.handler) {
-                tracing::warn!("agent @{} created but auto-start failed: {e}", req.handler);
+            if let Some(loop_generation) = auto_start_generation {
+                if let Err(e) =
+                    start_reserved_agent_loop(&state, &slug, &req.handler, loop_generation)
+                {
+                    tracing::warn!("agent @{} created but auto-start failed: {e}", req.handler);
+                }
             }
 
             Json(AgentAddResponse {
@@ -3851,8 +3942,34 @@ struct AgentRemoveRequest {
     hard_delete: bool,
 }
 
-/// Start the agent loop for a given agent ID. Shared by add, start, and recover.
+/// Reserve and start the agent loop for an explicit start or recovery request.
 fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> Result<(), String> {
+    let loop_generation = {
+        let mut s = crate::preconditions::arc_mutex_lock(state);
+        let info = s
+            .workspaces
+            .get_mut(slug)
+            .ok_or_else(|| format!("unknown workspace: {slug}"))?
+            .agents
+            .get_mut(agent_id)
+            .ok_or_else(|| format!("agent not found: {agent_id}"))?;
+        let Some(loop_generation) = info.reserve_loop_start() else {
+            return Ok(());
+        };
+        loop_generation
+    };
+
+    start_reserved_agent_loop(state, slug, agent_id, loop_generation)
+}
+
+/// Complete a lifecycle reservation made by the caller. A stop that advances
+/// the generation before this function runs cancels the start.
+fn start_reserved_agent_loop(
+    state: &SharedRuntimeState,
+    slug: &str,
+    agent_id: &str,
+    loop_generation: u64,
+) -> Result<(), String> {
     let (
         repo_root,
         handler,
@@ -3863,6 +3980,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
         env,
         activity_tx,
         workspace_root,
+        is_working,
     ) = {
         let s = crate::preconditions::arc_mutex_lock(state);
         let ctx = s
@@ -3870,23 +3988,26 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
             .get(slug)
             .ok_or_else(|| format!("unknown workspace: {slug}"))?;
         let workspace_root = ctx.path.clone();
-        match ctx.agents.get(agent_id) {
-            None => return Err(format!("agent not found: {agent_id}")),
-            Some(info) if info.status == "running" => {
-                return Ok(()); // idempotent: already running is ok
-            }
-            Some(info) => (
-                PathBuf::from(&info.repo_path),
-                info.handler.clone(),
-                info.provider.clone(),
-                info.model.clone(),
-                info.effort.clone(),
-                info.system_prompt.clone(),
-                info.env.clone(),
-                ctx.activity_tx.clone(),
-                workspace_root,
-            ),
+        let activity_tx = ctx.activity_tx.clone();
+        let info = ctx
+            .agents
+            .get(agent_id)
+            .ok_or_else(|| format!("agent not found: {agent_id}"))?;
+        if !info.owns_loop_start(loop_generation) {
+            return Ok(());
         }
+        (
+            PathBuf::from(&info.repo_path),
+            info.handler.clone(),
+            info.provider.clone(),
+            info.model.clone(),
+            info.effort.clone(),
+            info.system_prompt.clone(),
+            info.env.clone(),
+            activity_tx,
+            workspace_root,
+            info.is_working.clone(),
+        )
     };
 
     let loop_config = crate::agent_loop::AgentLoopConfig {
@@ -3897,8 +4018,20 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
         system_prompt,
         env,
     };
-    let mut agent_loop = AgentLoop::with_config(&repo_root, &loop_config)
-        .map_err(|e| format!("failed to create agent loop: {e}"))?;
+    let mut agent_loop = match AgentLoop::with_config(&repo_root, &loop_config) {
+        Ok(agent_loop) => agent_loop,
+        Err(error) => {
+            let mut s = crate::preconditions::arc_mutex_lock(state);
+            if let Some(info) = s
+                .workspaces
+                .get_mut(slug)
+                .and_then(|ctx| ctx.agents.get_mut(agent_id))
+            {
+                info.fail_loop_start(loop_generation);
+            }
+            return Err(format!("failed to create agent loop: {error}"));
+        }
+    };
 
     agent_loop.set_activity_tx_with_workspace(activity_tx, slug.to_string());
     agent_loop.set_runtime_state(state.clone());
@@ -3906,22 +4039,17 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
 
     // Inject the same Arc<AtomicBool> stored on AgentInfo so the sampler
     // and the loop read/write the same flag without a lock.
-    let is_working = {
-        let s = crate::preconditions::arc_mutex_lock(state);
-        s.workspaces
-            .get(slug)
-            .and_then(|ctx| ctx.agents.get(agent_id))
-            .map(|info| info.is_working.clone())
-    };
-    if let Some(flag) = is_working {
-        agent_loop.set_is_working(flag);
-    }
+    agent_loop.set_is_working(is_working);
 
     let owned_id = agent_id.to_string();
     let owned_slug = slug.to_string();
     let state_clone = state.clone();
+    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
 
     let handle = tokio::spawn(async move {
+        if start_rx.await.is_err() {
+            return;
+        }
         match agent_loop.init().await {
             Ok(()) => {}
             Err(crate::error::RuntimeError::SelfDeparted) => {
@@ -3984,8 +4112,7 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                 let mut s = crate::preconditions::arc_mutex_lock(&state_clone);
                 if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
                     if let Some(info) = ctx.agents.get_mut(&owned_id) {
-                        info.loop_handle = None;
-                        info.status = "error".to_string();
+                        info.fail_loop_start(loop_generation);
                     }
                 }
                 return;
@@ -4010,8 +4137,10 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
                     if let Ok(mut s) = state_clone.try_lock() {
                         if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
                             if let Some(info) = ctx.agents.get_mut(&owned_id) {
-                                info.messages_processed += 1;
-                                info.last_activity = Some(chrono::Utc::now().to_rfc3339());
+                                if info.loop_generation == loop_generation {
+                                    info.messages_processed += 1;
+                                    info.last_activity = Some(chrono::Utc::now().to_rfc3339());
+                                }
                             }
                         }
                     }
@@ -4154,18 +4283,27 @@ fn start_agent_loop(state: &SharedRuntimeState, slug: &str, agent_id: &str) -> R
         }
     });
 
-    let abort_handle = handle.abort_handle();
-    {
+    let start_commit = {
+        let abort_handle = handle.abort_handle();
         let mut s = crate::preconditions::arc_mutex_lock(state);
-        if let Some(ctx) = s.workspaces.get_mut(slug) {
-            if let Some(info) = ctx.agents.get_mut(agent_id) {
-                info.loop_handle = Some(abort_handle);
-                info.status = "running".to_string();
-            }
+        match s
+            .workspaces
+            .get_mut(slug)
+            .and_then(|ctx| ctx.agents.get_mut(agent_id))
+        {
+            Some(info) => info.commit_loop_start(loop_generation, abort_handle, start_tx),
+            None => LoopStartCommit::Cancelled(abort_handle),
         }
-    }
+    };
 
-    Ok(())
+    match start_commit {
+        LoopStartCommit::Started => Ok(()),
+        LoopStartCommit::Cancelled(abort_handle) => {
+            abort_handle.abort();
+            Ok(())
+        }
+        LoopStartCommit::TaskExited => Err(format!("agent loop exited before startup: {agent_id}")),
+    }
 }
 
 async fn agents_start(
@@ -4758,8 +4896,7 @@ async fn agents_remove(
         };
         match ctx.agents.get_mut(&req.id) {
             Some(info) => {
-                let loop_handle = info.loop_handle.take();
-                info.status = "idle".to_string();
+                let loop_handle = info.stop_loop();
                 (
                     ctx.path.clone(),
                     PathBuf::from(&info.repo_path),
@@ -4877,8 +5014,7 @@ async fn agents_burn(
         };
         match ctx.agents.get_mut(&req.id) {
             Some(info) => {
-                let loop_handle = info.loop_handle.take();
-                info.status = "idle".to_string();
+                let loop_handle = info.stop_loop();
                 (
                     ctx.path.clone(),
                     PathBuf::from(&info.repo_path),
@@ -5220,11 +5356,7 @@ async fn agents_stop(
                 return Json(ErrorBody::new(format!("agent not found: {}", req.id)))
                     .into_response();
             }
-            Some(info) => {
-                let handle = info.loop_handle.take();
-                info.status = "idle".to_string();
-                handle
-            }
+            Some(info) => info.stop_loop(),
         }
     };
 
@@ -5718,6 +5850,8 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                             is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                                 false,
                             )),
+                            loop_generation: 0,
+                            loop_starting: false,
                             loop_handle: None,
                         },
                     );
@@ -5788,6 +5922,8 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                             is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                                 false,
                             )),
+                            loop_generation: 0,
+                            loop_starting: false,
                             loop_handle: None,
                         },
                     );
@@ -7430,6 +7566,7 @@ mod tests {
     //! `tests/http_workspaces.rs`.
 
     use super::*;
+    use std::sync::atomic::AtomicBool;
 
     fn write_persistent_human_repo(workspace: &Path) {
         let human = workspace.join(".gitim-runtime").join("human");
@@ -8247,6 +8384,183 @@ mod tests {
             !should_cleanup_after_burn_timeout(false),
             "local archive absent must NOT trigger cleanup after timeout"
         );
+    }
+
+    fn lifecycle_test_agent() -> AgentInfo {
+        AgentInfo {
+            id: "reviewer".to_string(),
+            handler: "reviewer".to_string(),
+            display_name: "Reviewer".to_string(),
+            status: "idle".to_string(),
+            last_activity: None,
+            messages_processed: 0,
+            repo_path: "/tmp/reviewer".to_string(),
+            provider: Some("mock".to_string()),
+            model: None,
+            effort: None,
+            system_prompt: None,
+            introduction: None,
+            env: HashMap::new(),
+            error_message: None,
+            session_usage: None,
+            llm_provider: None,
+            llm_model: None,
+            usage_summary: None,
+            saturation_summary: None,
+            is_working: Arc::new(AtomicBool::new(false)),
+            loop_generation: 0,
+            loop_starting: false,
+            loop_handle: None,
+        }
+    }
+
+    #[test]
+    fn concurrent_start_reservations_are_idempotent() {
+        let mut agent = lifecycle_test_agent();
+
+        let first_generation = agent.reserve_loop_start();
+        let second_generation = agent.reserve_loop_start();
+
+        assert_eq!(first_generation, Some(1));
+        assert_eq!(second_generation, None);
+    }
+
+    #[test]
+    fn each_loop_reservation_gets_a_distinct_working_flag() {
+        let mut agent = lifecycle_test_agent();
+        let initial_flag = agent.is_working.clone();
+
+        agent.reserve_loop_start().unwrap();
+        let first_loop_flag = agent.is_working.clone();
+        assert!(!Arc::ptr_eq(&initial_flag, &first_loop_flag));
+
+        agent.stop_loop();
+        agent.reserve_loop_start().unwrap();
+        assert!(!Arc::ptr_eq(&first_loop_flag, &agent.is_working));
+    }
+
+    #[test]
+    fn stop_cancels_a_pre_reserved_auto_start() {
+        let mut agent = lifecycle_test_agent();
+        let auto_start_generation = agent.reserve_loop_start().unwrap();
+
+        assert!(agent.owns_loop_start(auto_start_generation));
+        agent.stop_loop();
+        assert!(!agent.owns_loop_start(auto_start_generation));
+    }
+
+    #[test]
+    fn cancelled_auto_start_does_not_create_a_new_reservation() {
+        let state = Arc::new(Mutex::new(RuntimeState::default()));
+        let mut agent = lifecycle_test_agent();
+        let auto_start_generation = agent.reserve_loop_start().unwrap();
+        agent.stop_loop();
+        let stopped_generation = agent.loop_generation;
+
+        let mut workspace = crate::workspace::WorkspaceContext::new(
+            "room".to_string(),
+            "Room".to_string(),
+            PathBuf::from("/tmp/room"),
+        );
+        workspace.agents.insert(agent.id.clone(), agent);
+        crate::preconditions::arc_mutex_lock(&state)
+            .workspaces
+            .insert("room".to_string(), workspace);
+
+        assert!(
+            start_reserved_agent_loop(&state, "room", "reviewer", auto_start_generation).is_ok()
+        );
+
+        let state = crate::preconditions::arc_mutex_lock(&state);
+        let agent = &state.workspaces["room"].agents["reviewer"];
+        assert_eq!(agent.loop_generation, stopped_generation);
+        assert!(!agent.loop_starting);
+        assert!(agent.loop_handle.is_none());
+        assert_eq!(agent.status, "idle");
+    }
+
+    #[tokio::test]
+    async fn stop_invalidates_an_in_flight_start() {
+        let mut agent = lifecycle_test_agent();
+        let stale_generation = agent.reserve_loop_start().unwrap();
+
+        assert!(agent.stop_loop().is_none());
+        let current_generation = agent.reserve_loop_start().unwrap();
+
+        let stale_task = tokio::spawn(std::future::pending::<()>());
+        let (stale_tx, mut stale_rx) = tokio::sync::oneshot::channel();
+        let stale_commit =
+            agent.commit_loop_start(stale_generation, stale_task.abort_handle(), stale_tx);
+        assert!(matches!(&stale_commit, LoopStartCommit::Cancelled(_)));
+        if let LoopStartCommit::Cancelled(stale_handle) = stale_commit {
+            stale_handle.abort();
+        }
+        assert!(matches!(
+            stale_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ));
+
+        let current_task = tokio::spawn(std::future::pending::<()>());
+        let (current_tx, mut current_rx) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            agent.commit_loop_start(current_generation, current_task.abort_handle(), current_tx),
+            LoopStartCommit::Started
+        ));
+        assert_eq!(current_rx.try_recv(), Ok(()));
+        assert_eq!(agent.status, "running");
+
+        agent.stop_loop().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn installing_a_loop_opens_its_gate_before_stop_can_take_the_handle() {
+        let mut agent = lifecycle_test_agent();
+        let generation = agent.reserve_loop_start().unwrap();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let (start_tx, mut start_rx) = tokio::sync::oneshot::channel();
+
+        assert!(matches!(
+            agent.commit_loop_start(generation, task.abort_handle(), start_tx),
+            LoopStartCommit::Started
+        ));
+        assert_eq!(start_rx.try_recv(), Ok(()));
+
+        agent.stop_loop().unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn closed_start_gate_rolls_back_the_installed_handle() {
+        let mut agent = lifecycle_test_agent();
+        let generation = agent.reserve_loop_start().unwrap();
+        let task = tokio::spawn(std::future::pending::<()>());
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        drop(start_rx);
+
+        assert!(matches!(
+            agent.commit_loop_start(generation, task.abort_handle(), start_tx),
+            LoopStartCommit::TaskExited
+        ));
+        assert!(!agent.loop_starting);
+        assert!(agent.loop_handle.is_none());
+        assert_eq!(agent.status, "error");
+
+        task.abort();
+    }
+
+    #[test]
+    fn stale_start_failure_does_not_overwrite_current_generation() {
+        let mut agent = lifecycle_test_agent();
+        let stale_generation = agent.reserve_loop_start().unwrap();
+        agent.stop_loop();
+        let current_generation = agent.reserve_loop_start().unwrap();
+
+        agent.fail_loop_start(stale_generation);
+        assert!(agent.loop_starting);
+        assert_eq!(agent.status, "idle");
+
+        agent.fail_loop_start(current_generation);
+        assert!(!agent.loop_starting);
+        assert_eq!(agent.status, "error");
     }
 
     // ── P1: clear_session deserialization + CLI body builder ─────────────────
