@@ -39,9 +39,7 @@ fn make_agent(handler: &str, working_flag: Arc<AtomicBool>) -> AgentInfo {
         usage_summary: None,
         saturation_summary: None,
         is_working: working_flag,
-        loop_generation: 0,
-        loop_starting: false,
-        loop_handle: None,
+        loop_lifecycle: Default::default(),
     }
 }
 

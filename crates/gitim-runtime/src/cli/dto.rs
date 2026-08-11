@@ -3,9 +3,8 @@
 //! Architecture context (see `docs/plans/runtime-cli/00-requirements.md` §2, §3):
 //!
 //! - These types are intentionally **separate** from the server-side
-//!   `crate::http::AgentInfo`. The server struct is `Serialize`-only and
-//!   carries internal fields (`loop_handle: Option<AbortHandle>`, etc.) the
-//!   CLI must never deserialize. Keeping the CLI surface a parallel type
+//!   `crate::http::AgentInfo`, which mixes wire fields with runtime-only state.
+//!   Keeping the CLI surface a parallel type
 //!   tree means we can evolve the wire format without ABI-coupling the two
 //!   sides through a shared crate type.
 //! - `AgentView` is the **default redacted projection** used by `list-agents`

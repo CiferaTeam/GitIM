@@ -5,13 +5,13 @@ use axum::{
     routing::{delete, get, patch, post},
     Json, Router,
 };
+use futures::future::{AbortHandle, Abortable};
 use futures::stream::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::task::AbortHandle;
 use tower_http::cors::CorsLayer;
 
 use crate::agent::{
@@ -406,90 +406,90 @@ pub struct AgentInfo {
     /// `Arc::new(AtomicBool::new(false))`.
     #[serde(skip)]
     pub is_working: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// Generation token for the currently reserved or installed loop. Stop
-    /// advances it so an older start cannot publish its handle or failure.
+    /// In-memory state for the agent's polling loop.
     #[serde(skip)]
-    pub loop_generation: u64,
-    /// True while a start owns the lifecycle reservation but has not yet
-    /// installed its abort handle.
-    #[serde(skip)]
-    pub loop_starting: bool,
-    #[serde(skip)]
-    pub loop_handle: Option<AbortHandle>,
+    pub loop_lifecycle: LoopLifecycle,
 }
 
-enum LoopStartCommit {
-    Started,
-    Cancelled(AbortHandle),
-    TaskExited,
+/// Represents loop transitions and keeps stale starts scoped to their generation.
+#[derive(Clone, Debug, Default)]
+pub enum LoopLifecycle {
+    #[default]
+    Idle,
+    Starting {
+        generation: u64,
+    },
+    Running {
+        generation: u64,
+        abort_handle: AbortHandle,
+    },
+}
+
+impl LoopLifecycle {
+    fn owns_generation(&self, generation: u64) -> bool {
+        matches!(
+            self,
+            Self::Starting {
+                generation: current
+            } | Self::Running {
+                generation: current,
+                ..
+            } if *current == generation
+        )
+    }
+}
+
+static NEXT_LOOP_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_loop_generation() -> u64 {
+    NEXT_LOOP_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl AgentInfo {
-    fn advance_loop_generation(&mut self) -> u64 {
-        self.loop_generation = self.loop_generation.wrapping_add(1);
-        if self.loop_generation == 0 {
-            self.loop_generation = 1;
-        }
-        self.loop_generation
-    }
-
     fn reserve_loop_start(&mut self) -> Option<u64> {
-        if self.loop_starting || self.loop_handle.is_some() || self.status == "running" {
+        if !matches!(&self.loop_lifecycle, LoopLifecycle::Idle) {
             return None;
         }
-        let generation = self.advance_loop_generation();
-        self.loop_starting = true;
+        let generation = next_loop_generation();
+        self.loop_lifecycle = LoopLifecycle::Starting { generation };
         self.is_working = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         Some(generation)
     }
 
     fn owns_loop_start(&self, generation: u64) -> bool {
-        self.loop_starting && self.loop_generation == generation
+        matches!(
+            &self.loop_lifecycle,
+            LoopLifecycle::Starting {
+                generation: current
+            } if *current == generation
+        )
     }
 
-    fn install_loop_start(
-        &mut self,
-        generation: u64,
-        handle: AbortHandle,
-    ) -> Result<(), AbortHandle> {
-        if !self.loop_starting || self.loop_generation != generation {
-            return Err(handle);
+    fn commit_reserved_loop(&mut self, generation: u64, abort_handle: AbortHandle) -> bool {
+        if !self.owns_loop_start(generation) {
+            return false;
         }
-        self.loop_starting = false;
-        self.loop_handle = Some(handle);
+        self.loop_lifecycle = LoopLifecycle::Running {
+            generation,
+            abort_handle,
+        };
         self.status = "running".to_string();
-        Ok(())
+        true
     }
 
-    fn commit_loop_start(
-        &mut self,
-        generation: u64,
-        handle: AbortHandle,
-        start_tx: tokio::sync::oneshot::Sender<()>,
-    ) -> LoopStartCommit {
-        match self.install_loop_start(generation, handle) {
-            Ok(()) if start_tx.send(()).is_ok() => LoopStartCommit::Started,
-            Ok(()) => {
-                self.fail_loop_start(generation);
-                LoopStartCommit::TaskExited
-            }
-            Err(handle) => LoopStartCommit::Cancelled(handle),
-        }
-    }
-
-    fn stop_loop(&mut self) -> Option<AbortHandle> {
-        self.advance_loop_generation();
-        self.loop_starting = false;
+    fn stop_loop(&mut self) {
+        let previous = std::mem::replace(&mut self.loop_lifecycle, LoopLifecycle::Idle);
         self.status = "idle".to_string();
-        self.loop_handle.take()
+        if let LoopLifecycle::Running { abort_handle, .. } = previous {
+            abort_handle.abort();
+        }
     }
 
     fn fail_loop_start(&mut self, generation: u64) {
-        if self.loop_generation != generation {
+        if !self.loop_lifecycle.owns_generation(generation) {
             return;
         }
-        self.loop_starting = false;
-        self.loop_handle = None;
+        self.loop_lifecycle = LoopLifecycle::Idle;
         self.status = "error".to_string();
     }
 }
@@ -3783,9 +3783,7 @@ async fn agents_add(
                 usage_summary: None,
                 saturation_summary: None,
                 is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                loop_generation: 0,
-                loop_starting: false,
-                loop_handle: None,
+                loop_lifecycle: LoopLifecycle::default(),
             };
             let auto_start_generation = info.reserve_loop_start();
             {
@@ -4044,12 +4042,9 @@ fn start_reserved_agent_loop(
     let owned_id = agent_id.to_string();
     let owned_slug = slug.to_string();
     let state_clone = state.clone();
-    let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+    let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
-    let handle = tokio::spawn(async move {
-        if start_rx.await.is_err() {
-            return;
-        }
+    let loop_task = async move {
         match agent_loop.init().await {
             Ok(()) => {}
             Err(crate::error::RuntimeError::SelfDeparted) => {
@@ -4137,7 +4132,7 @@ fn start_reserved_agent_loop(
                     if let Ok(mut s) = state_clone.try_lock() {
                         if let Some(ctx) = s.workspaces.get_mut(&owned_slug) {
                             if let Some(info) = ctx.agents.get_mut(&owned_id) {
-                                if info.loop_generation == loop_generation {
+                                if info.loop_lifecycle.owns_generation(loop_generation) {
                                     info.messages_processed += 1;
                                     info.last_activity = Some(chrono::Utc::now().to_rfc3339());
                                 }
@@ -4281,29 +4276,26 @@ fn start_reserved_agent_loop(
             };
             tokio::time::sleep(sleep_dur).await;
         }
-    });
+    };
 
-    let start_commit = {
-        let abort_handle = handle.abort_handle();
+    let committed = {
         let mut s = crate::preconditions::arc_mutex_lock(state);
         match s
             .workspaces
             .get_mut(slug)
             .and_then(|ctx| ctx.agents.get_mut(agent_id))
         {
-            Some(info) => info.commit_loop_start(loop_generation, abort_handle, start_tx),
-            None => LoopStartCommit::Cancelled(abort_handle),
+            Some(info) => info.commit_reserved_loop(loop_generation, abort_handle),
+            None => false,
         }
     };
 
-    match start_commit {
-        LoopStartCommit::Started => Ok(()),
-        LoopStartCommit::Cancelled(abort_handle) => {
-            abort_handle.abort();
-            Ok(())
-        }
-        LoopStartCommit::TaskExited => Err(format!("agent loop exited before startup: {agent_id}")),
+    if committed {
+        let handle = tokio::spawn(Abortable::new(loop_task, abort_registration));
+        drop(handle);
     }
+
+    Ok(())
 }
 
 async fn agents_start(
@@ -4888,7 +4880,7 @@ async fn agents_remove(
         "agents/remove is deprecated; use POST /agents/burn (archive-protocol) or POST /agents/stop (pause)"
     );
 
-    let (workspace_path, repo_path, loop_handle, provider) = {
+    let (workspace_path, repo_path, provider) = {
         let mut s = crate::preconditions::arc_mutex_lock(&state);
         let ctx = match s.workspaces.get_mut(&slug) {
             Some(c) => c,
@@ -4896,11 +4888,10 @@ async fn agents_remove(
         };
         match ctx.agents.get_mut(&req.id) {
             Some(info) => {
-                let loop_handle = info.stop_loop();
+                info.stop_loop();
                 (
                     ctx.path.clone(),
                     PathBuf::from(&info.repo_path),
-                    loop_handle,
                     info.provider.clone(),
                 )
             }
@@ -4910,9 +4901,6 @@ async fn agents_remove(
         }
     };
 
-    if let Some(handle) = loop_handle {
-        handle.abort();
-    }
     kill_agent_daemon(&repo_path);
 
     if req.hard_delete {
@@ -5006,7 +4994,7 @@ async fn agents_burn(
     // not_an_agent makes WebUI's "Burn" button safe even if the operator
     // somehow types a human handler — it can't accidentally archive a
     // human user via this path.
-    let (workspace_path, repo_path, loop_handle, provider, activity_tx) = {
+    let (workspace_path, repo_path, provider, activity_tx) = {
         let mut s = crate::preconditions::arc_mutex_lock(&state);
         let ctx = match s.workspaces.get_mut(&slug) {
             Some(c) => c,
@@ -5014,11 +5002,12 @@ async fn agents_burn(
         };
         match ctx.agents.get_mut(&req.id) {
             Some(info) => {
-                let loop_handle = info.stop_loop();
+                // Step 2: cancel under the lifecycle lock before cleanup can
+                // race with a delayed spawn.
+                info.stop_loop();
                 (
                     ctx.path.clone(),
                     PathBuf::from(&info.repo_path),
-                    loop_handle,
                     info.provider.clone(),
                     ctx.activity_tx.clone(),
                 )
@@ -5035,14 +5024,6 @@ async fn agents_burn(
             }
         }
     };
-
-    // Step 2: abort the in-process agent loop. Stops the agent from
-    // sending or polling while the daemon performs its multi-commit
-    // depart sequence. We deliberately leave the daemon process
-    // running for now — depart_user needs a live socket.
-    if let Some(handle) = loop_handle {
-        handle.abort();
-    }
 
     // Step 3: ensure the daemon is up, then RPC depart_user.
     //
@@ -5345,7 +5326,7 @@ async fn agents_stop(
     Json(req): Json<AgentIdRequest>,
 ) -> axum::response::Response {
     use axum::response::IntoResponse;
-    let abort_handle = {
+    {
         let mut s = crate::preconditions::arc_mutex_lock(&state);
         let ctx = match s.workspaces.get_mut(&slug) {
             Some(c) => c,
@@ -5358,10 +5339,6 @@ async fn agents_stop(
             }
             Some(info) => info.stop_loop(),
         }
-    };
-
-    if let Some(handle) = abort_handle {
-        handle.abort();
     }
 
     Json(OkAckResponse { ok: true }).into_response()
@@ -5850,9 +5827,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                             is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                                 false,
                             )),
-                            loop_generation: 0,
-                            loop_starting: false,
-                            loop_handle: None,
+                            loop_lifecycle: LoopLifecycle::default(),
                         },
                     );
                 }
@@ -5922,9 +5897,7 @@ pub async fn recover_agents_for_workspace(state: SharedRuntimeState, slug: &str,
                             is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
                                 false,
                             )),
-                            loop_generation: 0,
-                            loop_starting: false,
-                            loop_handle: None,
+                            loop_lifecycle: LoopLifecycle::default(),
                         },
                     );
                 }
@@ -6204,9 +6177,7 @@ async fn workspaces_delete(
     // this the tokio tasks survive workspace removal and keep polling repos
     // whose daemons are gone (silently erroring forever).
     for agent in removed.agents.values_mut() {
-        if let Some(handle) = agent.loop_handle.take() {
-            handle.abort();
-        }
+        agent.stop_loop();
     }
 
     crate::workspace::kill_daemons(&removed).await;
@@ -8408,9 +8379,7 @@ mod tests {
             usage_summary: None,
             saturation_summary: None,
             is_working: Arc::new(AtomicBool::new(false)),
-            loop_generation: 0,
-            loop_starting: false,
-            loop_handle: None,
+            loop_lifecycle: LoopLifecycle::default(),
         }
     }
 
@@ -8421,8 +8390,21 @@ mod tests {
         let first_generation = agent.reserve_loop_start();
         let second_generation = agent.reserve_loop_start();
 
-        assert_eq!(first_generation, Some(1));
+        assert!(first_generation.is_some());
         assert_eq!(second_generation, None);
+    }
+
+    #[test]
+    fn recreated_agent_rejects_a_stale_start_reservation() {
+        let mut original = lifecycle_test_agent();
+        let stale_generation = original.reserve_loop_start().unwrap();
+
+        let mut replacement = lifecycle_test_agent();
+        let replacement_generation = replacement.reserve_loop_start().unwrap();
+        let (stale_handle, _stale_registration) = AbortHandle::new_pair();
+
+        assert!(!replacement.commit_reserved_loop(stale_generation, stale_handle));
+        assert!(replacement.owns_loop_start(replacement_generation));
     }
 
     #[test]
@@ -8455,7 +8437,7 @@ mod tests {
         let mut agent = lifecycle_test_agent();
         let auto_start_generation = agent.reserve_loop_start().unwrap();
         agent.stop_loop();
-        let stopped_generation = agent.loop_generation;
+        assert!(matches!(&agent.loop_lifecycle, LoopLifecycle::Idle));
 
         let mut workspace = crate::workspace::WorkspaceContext::new(
             "room".to_string(),
@@ -8473,78 +8455,69 @@ mod tests {
 
         let state = crate::preconditions::arc_mutex_lock(&state);
         let agent = &state.workspaces["room"].agents["reviewer"];
-        assert_eq!(agent.loop_generation, stopped_generation);
-        assert!(!agent.loop_starting);
-        assert!(agent.loop_handle.is_none());
+        assert!(matches!(&agent.loop_lifecycle, LoopLifecycle::Idle));
         assert_eq!(agent.status, "idle");
     }
 
-    #[tokio::test]
-    async fn stop_invalidates_an_in_flight_start() {
+    #[test]
+    fn stop_invalidates_an_in_flight_start() {
         let mut agent = lifecycle_test_agent();
         let stale_generation = agent.reserve_loop_start().unwrap();
 
-        assert!(agent.stop_loop().is_none());
+        agent.stop_loop();
         let current_generation = agent.reserve_loop_start().unwrap();
 
-        let stale_task = tokio::spawn(std::future::pending::<()>());
-        let (stale_tx, mut stale_rx) = tokio::sync::oneshot::channel();
-        let stale_commit =
-            agent.commit_loop_start(stale_generation, stale_task.abort_handle(), stale_tx);
-        assert!(matches!(&stale_commit, LoopStartCommit::Cancelled(_)));
-        if let LoopStartCommit::Cancelled(stale_handle) = stale_commit {
-            stale_handle.abort();
-        }
-        assert!(matches!(
-            stale_rx.try_recv(),
-            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
-        ));
+        let (stale_handle, _stale_registration) = AbortHandle::new_pair();
+        assert!(!agent.commit_reserved_loop(stale_generation, stale_handle));
 
-        let current_task = tokio::spawn(std::future::pending::<()>());
-        let (current_tx, mut current_rx) = tokio::sync::oneshot::channel();
-        assert!(matches!(
-            agent.commit_loop_start(current_generation, current_task.abort_handle(), current_tx),
-            LoopStartCommit::Started
-        ));
-        assert_eq!(current_rx.try_recv(), Ok(()));
+        let (current_handle, _current_registration) = AbortHandle::new_pair();
+        assert!(agent.commit_reserved_loop(current_generation, current_handle));
         assert_eq!(agent.status, "running");
+        assert!(matches!(
+            &agent.loop_lifecycle,
+            LoopLifecycle::Running {
+                generation,
+                ..
+            } if *generation == current_generation
+        ));
 
-        agent.stop_loop().unwrap().abort();
+        agent.stop_loop();
     }
 
     #[tokio::test]
-    async fn installing_a_loop_opens_its_gate_before_stop_can_take_the_handle() {
+    async fn stop_after_install_before_spawn_prevents_loop_poll() {
         let mut agent = lifecycle_test_agent();
         let generation = agent.reserve_loop_start().unwrap();
-        let task = tokio::spawn(std::future::pending::<()>());
-        let (start_tx, mut start_rx) = tokio::sync::oneshot::channel();
+        let (abort_handle, registration) = futures::future::AbortHandle::new_pair();
 
-        assert!(matches!(
-            agent.commit_loop_start(generation, task.abort_handle(), start_tx),
-            LoopStartCommit::Started
-        ));
-        assert_eq!(start_rx.try_recv(), Ok(()));
+        assert!(agent.commit_reserved_loop(generation, abort_handle));
+        agent.stop_loop();
 
-        agent.stop_loop().unwrap().abort();
+        let was_polled = Arc::new(AtomicBool::new(false));
+        let task_flag = was_polled.clone();
+        let result = futures::future::Abortable::new(
+            async move {
+                task_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+            registration,
+        )
+        .await;
+
+        assert_eq!(result, Err(futures::future::Aborted));
+        assert!(!was_polled.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    #[tokio::test]
-    async fn closed_start_gate_rolls_back_the_installed_handle() {
+    #[test]
+    fn stop_aborts_the_installed_handle_before_returning() {
         let mut agent = lifecycle_test_agent();
         let generation = agent.reserve_loop_start().unwrap();
-        let task = tokio::spawn(std::future::pending::<()>());
-        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
-        drop(start_rx);
+        let (abort_handle, registration) = AbortHandle::new_pair();
+        let observer = registration.handle();
 
-        assert!(matches!(
-            agent.commit_loop_start(generation, task.abort_handle(), start_tx),
-            LoopStartCommit::TaskExited
-        ));
-        assert!(!agent.loop_starting);
-        assert!(agent.loop_handle.is_none());
-        assert_eq!(agent.status, "error");
+        assert!(agent.commit_reserved_loop(generation, abort_handle));
+        agent.stop_loop();
 
-        task.abort();
+        assert!(observer.is_aborted());
     }
 
     #[test]
@@ -8555,11 +8528,16 @@ mod tests {
         let current_generation = agent.reserve_loop_start().unwrap();
 
         agent.fail_loop_start(stale_generation);
-        assert!(agent.loop_starting);
+        assert!(matches!(
+            &agent.loop_lifecycle,
+            LoopLifecycle::Starting {
+                generation
+            } if *generation == current_generation
+        ));
         assert_eq!(agent.status, "idle");
 
         agent.fail_loop_start(current_generation);
-        assert!(!agent.loop_starting);
+        assert!(matches!(&agent.loop_lifecycle, LoopLifecycle::Idle));
         assert_eq!(agent.status, "error");
     }
 

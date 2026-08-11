@@ -92,9 +92,7 @@ fn seed_agent(
         usage_summary: None,
         saturation_summary: None,
         is_working: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        loop_generation: 0,
-        loop_starting: false,
-        loop_handle: None,
+        loop_lifecycle: Default::default(),
     };
     state
         .lock()
