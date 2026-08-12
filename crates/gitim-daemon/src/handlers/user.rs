@@ -1,7 +1,7 @@
 use crate::api::{Event, Response};
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
-use gitim_core::types::{Handler, UserMeta, MAX_INTRODUCTION_LEN};
+use gitim_core::types::{Handler, UserKind, UserMeta, MAX_INTRODUCTION_LEN};
 use gitim_sync::git::GitError;
 use tracing::{info, warn};
 
@@ -58,6 +58,7 @@ pub async fn handle_register_user(
         role,
         introduction,
         labels: Vec::new(),
+        kind: UserKind::Unknown,
     };
     let meta_str = match Response::yaml_string(&meta, "user meta") {
         Ok(meta_str) => meta_str,

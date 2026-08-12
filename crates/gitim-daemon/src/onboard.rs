@@ -3,7 +3,7 @@ use crate::identity::{GitServer, InferredIdentity};
 use crate::state::{AppState, SharedState};
 use gitim_core::auth_payload::AuthPayload;
 use gitim_core::me_json::MeJson;
-use gitim_core::types::{ChannelMeta, Handler, UserMeta};
+use gitim_core::types::{ChannelMeta, Handler, UserKind, UserMeta};
 use gitim_sync::git::GitError;
 use tracing::{info, warn};
 
@@ -374,6 +374,7 @@ fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Resu
         role: "member".to_string(),
         introduction: "GitIM user".to_string(),
         labels: Vec::new(),
+        kind: UserKind::Unknown,
     };
     let meta_str = Response::yaml_string(&meta, "user meta")?;
     std::fs::write(&meta_path, &meta_str)
