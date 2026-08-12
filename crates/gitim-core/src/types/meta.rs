@@ -18,6 +18,29 @@ pub enum UserMetaError {
     Label(#[from] LabelError),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UserKind {
+    #[default]
+    Unknown,
+    Human,
+    Agent,
+}
+
+impl UserKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            UserKind::Unknown => "unknown",
+            UserKind::Human => "human",
+            UserKind::Agent => "agent",
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, UserKind::Unknown)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UserMeta {
     pub display_name: String,
@@ -28,6 +51,9 @@ pub struct UserMeta {
     /// See `docs/plans/unified-labels/00-requirements.md` (P3, P4).
     #[serde(default)]
     pub labels: Vec<String>,
+    /// Account kind. Written once at register/onboard. Missing → Unknown.
+    #[serde(default, skip_serializing_if = "UserKind::is_unknown")]
+    pub kind: UserKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -148,6 +174,7 @@ mod tests {
             role: "backend".into(),
             introduction: "hello".into(),
             labels: vec!["rust".into(), "backend".into()],
+            kind: UserKind::Unknown,
         };
         let yaml = serde_yaml::to_string(&meta).unwrap();
         let parsed: UserMeta = serde_yaml::from_str(&yaml).unwrap();
@@ -173,6 +200,7 @@ mod tests {
             role: "r".into(),
             introduction: String::new(),
             labels: vec![],
+            kind: UserKind::Unknown,
         };
         assert!(validate_user_meta(&meta).is_ok());
     }
@@ -184,6 +212,7 @@ mod tests {
             role: "r".into(),
             introduction: String::new(),
             labels: vec!["rust".into(), "backend".into(), "mobile_ios".into()],
+            kind: UserKind::Unknown,
         };
         assert!(validate_user_meta(&meta).is_ok());
     }
@@ -196,6 +225,7 @@ mod tests {
             role: "r".into(),
             introduction: String::new(),
             labels,
+            kind: UserKind::Unknown,
         };
         let err = validate_user_meta(&meta).unwrap_err();
         assert!(matches!(
@@ -211,6 +241,7 @@ mod tests {
             role: "r".into(),
             introduction: String::new(),
             labels: vec!["Rust!".into()],
+            kind: UserKind::Unknown,
         };
         let err = validate_user_meta(&meta).unwrap_err();
         assert!(matches!(
@@ -226,8 +257,45 @@ mod tests {
             role: "r".into(),
             introduction: "x".repeat(MAX_INTRODUCTION_LEN + 1),
             labels: vec![],
+            kind: UserKind::Unknown,
         };
         let err = validate_user_meta(&meta).unwrap_err();
         assert!(matches!(err, UserMetaError::IntroductionTooLong(_, _)));
+    }
+
+    #[test]
+    fn old_yaml_without_kind_deserializes_as_unknown() {
+        let yaml = "display_name: Alice\nrole: member\nintroduction: hi\n";
+        let meta: UserMeta = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(meta.kind, UserKind::Unknown);
+    }
+
+    #[test]
+    fn human_kind_roundtrip_and_omits_unknown_on_serialize() {
+        let human = UserMeta {
+            display_name: "Alice".into(),
+            role: "member".into(),
+            introduction: "hi".into(),
+            labels: vec![],
+            kind: UserKind::Human,
+        };
+        let yaml = serde_yaml::to_string(&human).unwrap();
+        assert!(yaml.contains("kind: human"));
+        let back: UserMeta = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.kind, UserKind::Human);
+
+        let unknown = UserMeta {
+            kind: UserKind::Unknown,
+            ..human.clone()
+        };
+        let yaml_u = serde_yaml::to_string(&unknown).unwrap();
+        assert!(!yaml_u.contains("kind:"));
+    }
+
+    #[test]
+    fn user_kind_as_str_matches_serde() {
+        assert_eq!(UserKind::Human.as_str(), "human");
+        assert_eq!(UserKind::Agent.as_str(), "agent");
+        assert_eq!(UserKind::Unknown.as_str(), "unknown");
     }
 }
