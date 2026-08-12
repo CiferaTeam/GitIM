@@ -782,8 +782,8 @@ mod tests {
 
         {
             let _writer_guard = commit_lock
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .try_lock()
+                .expect("commit_lock must be released before archive starts");
             std::fs::write(clone.path().join("during-archive.thread"), "message").unwrap();
             git(clone.path(), &["add", "during-archive.thread"]);
             git(clone.path(), &["commit", "-m", "write during archive"]);
