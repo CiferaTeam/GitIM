@@ -160,7 +160,7 @@ pub async fn provision_human(
 
     let client = GitimClient::new(&human_dir);
     let onboard_resp = client
-        .onboard(git_server, Some(auth), true, false, true)
+        .onboard(git_server, Some(auth), true, false, true, Some("human"))
         .await
         .map_err(|e| RuntimeError::OnboardFailed(e.to_string()))?;
 
@@ -261,7 +261,7 @@ pub async fn provision_agent(
 
     let client = GitimClient::new(&repo_root);
     let onboard_resp = client
-        .onboard("git", Some(auth), false, false, join_general)
+        .onboard("git", Some(auth), false, false, join_general, Some("agent"))
         .await
         .map_err(|e| RuntimeError::OnboardFailed(e.to_string()))?;
 

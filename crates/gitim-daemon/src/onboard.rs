@@ -23,6 +23,7 @@ pub async fn handle_onboard(
     admin: bool,
     guest: bool,
     join_general: bool,
+    kind: UserKind,
 ) -> Response {
     // --- Guest mode: write me.json and start sync, skip everything else ---
     if guest {
@@ -102,7 +103,7 @@ pub async fn handle_onboard(
     info!("onboard: repo structure ensured");
 
     // --- Step D: RegisterUser (idempotent) ---
-    let created = match register_user(&state, &handler, &display_name) {
+    let created = match register_user(&state, &handler, &display_name, kind) {
         Ok(created) => created,
         Err(resp) => return resp,
     };
@@ -345,7 +346,12 @@ fn ensure_repo(state: &SharedState, handler: &str) -> Result<(), Response> {
 // Step D: RegisterUser
 // ---------------------------------------------------------------------------
 
-fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Result<bool, Response> {
+fn register_user(
+    state: &SharedState,
+    handler: &str,
+    display_name: &str,
+    kind: UserKind,
+) -> Result<bool, Response> {
     // Archive Contract 2: terminal handler uniqueness — onboard mirrors
     // handle_register_user's archive guard so the workflow that drives the
     // composite path can't smuggle a departed handler back in.
@@ -374,7 +380,7 @@ fn register_user(state: &SharedState, handler: &str, display_name: &str) -> Resu
         role: "member".to_string(),
         introduction: "GitIM user".to_string(),
         labels: Vec::new(),
-        kind: UserKind::Unknown,
+        kind,
     };
     let meta_str = Response::yaml_string(&meta, "user meta")?;
     std::fs::write(&meta_path, &meta_str)
@@ -704,7 +710,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_test_state(tmp.path());
 
-        let created = register_user(&state, "bob", "Bob Builder").unwrap();
+        let created = register_user(&state, "bob", "Bob Builder", UserKind::Human).unwrap();
         assert!(created);
         assert!(state.repo_root.join("users/bob.meta.yaml").exists());
 
@@ -714,6 +720,19 @@ mod tests {
         .unwrap();
         assert_eq!(content["display_name"], "Bob Builder");
         assert_eq!(content["role"], "member");
+        assert_eq!(content["kind"], "human");
+    }
+
+    #[tokio::test]
+    async fn register_user_omits_unknown_kind() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_test_state(tmp.path());
+
+        let created = register_user(&state, "bob", "Bob Builder", UserKind::Unknown).unwrap();
+        assert!(created);
+
+        let content = std::fs::read_to_string(state.repo_root.join("users/bob.meta.yaml")).unwrap();
+        assert!(!content.lines().any(|line| line.starts_with("kind:")));
     }
 
     #[tokio::test]
@@ -722,12 +741,15 @@ mod tests {
         let state = setup_test_state(tmp.path());
 
         // First registration
-        let created = register_user(&state, "bob", "Bob").unwrap();
+        let created = register_user(&state, "bob", "Bob", UserKind::Human).unwrap();
         assert!(created);
+        let meta_path = state.repo_root.join("users/bob.meta.yaml");
+        let original = std::fs::read_to_string(&meta_path).unwrap();
 
         // Second registration — should skip
-        let created = register_user(&state, "bob", "Bob").unwrap();
+        let created = register_user(&state, "bob", "Bob", UserKind::Agent).unwrap();
         assert!(!created);
+        assert_eq!(std::fs::read_to_string(meta_path).unwrap(), original);
     }
 
     #[tokio::test]
@@ -742,6 +764,7 @@ mod tests {
             false,
             false,
             true,
+            UserKind::Human,
         )
         .await;
         assert!(resp.ok, "response should be ok: {:?}", resp.error);
@@ -754,6 +777,9 @@ mod tests {
         assert!(state.repo_root.join(".gitim/me.json").exists());
         assert!(state.repo_root.join("channels/general.meta.yaml").exists());
         assert!(state.repo_root.join("users/alice.meta.yaml").exists());
+        let user_meta =
+            std::fs::read_to_string(state.repo_root.join("users/alice.meta.yaml")).unwrap();
+        assert!(user_meta.lines().any(|line| line == "kind: human"));
 
         let current = state.current_user.read().await;
         assert_eq!(current.as_deref(), Some("alice"));
@@ -776,6 +802,7 @@ mod tests {
             false,
             false,
             true,
+            UserKind::Agent,
         )
         .await;
         assert!(resp2.ok);
@@ -862,6 +889,7 @@ mod tests {
             false,
             false,
             true,
+            UserKind::Unknown,
         )
         .await;
         assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
@@ -875,6 +903,7 @@ mod tests {
             false,
             false,
             true,
+            UserKind::Unknown,
         )
         .await;
         assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
@@ -888,6 +917,7 @@ mod tests {
             false,
             false,
             true,
+            UserKind::Unknown,
         )
         .await;
         assert!(resp_c.ok, "bot-c onboard failed: {:?}", resp_c.error);
@@ -1045,6 +1075,7 @@ mod tests {
             false,
             false,
             true,
+            UserKind::Unknown,
         )
         .await;
         assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
@@ -1061,6 +1092,7 @@ mod tests {
             false,
             false,
             true,
+            UserKind::Unknown,
         )
         .await;
         assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
@@ -1141,6 +1173,7 @@ mod tests {
             false,
             false,
             true,
+            UserKind::Unknown,
         )
         .await;
         assert!(resp_a.ok, "bot-a onboard failed: {:?}", resp_a.error);
@@ -1157,6 +1190,7 @@ mod tests {
             false,
             false,
             false,
+            UserKind::Unknown,
         )
         .await;
         assert!(resp_b.ok, "bot-b onboard failed: {:?}", resp_b.error);
@@ -1200,6 +1234,7 @@ mod tests {
             true,
             false,
             true,
+            UserKind::Unknown,
         )
         .await;
         assert!(resp.ok, "onboard should succeed: {:?}", resp.error);
@@ -1219,7 +1254,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_test_state(tmp.path());
 
-        let resp = handle_onboard(state.clone(), "git".to_string(), None, false, true, true).await;
+        let resp = handle_onboard(
+            state.clone(),
+            "git".to_string(),
+            None,
+            false,
+            true,
+            true,
+            UserKind::Unknown,
+        )
+        .await;
         assert!(resp.ok, "guest onboard should succeed: {:?}", resp.error);
 
         let data = resp.data.unwrap();

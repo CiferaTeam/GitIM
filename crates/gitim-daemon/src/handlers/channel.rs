@@ -1207,6 +1207,7 @@ mod tests {
             "Display".to_string(),
             "member".to_string(),
             "GitIM user".to_string(),
+            gitim_core::types::UserKind::Unknown,
         )
         .await;
         assert!(resp.ok, "register_user failed: {:?}", resp.error);

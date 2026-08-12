@@ -466,7 +466,14 @@ pub async fn cmd_onboard(args: OnboardArgs) {
         };
 
         match client
-            .onboard(git_server.as_str(), auth, args.admin, args.guest, true)
+            .onboard(
+                git_server.as_str(),
+                auth,
+                args.admin,
+                args.guest,
+                true,
+                Some("human"),
+            )
             .await
         {
             Ok(resp) => {
@@ -532,7 +539,14 @@ pub async fn cmd_onboard(args: OnboardArgs) {
     };
 
     match client
-        .onboard(git_server.as_str(), auth, args.admin, args.guest, true)
+        .onboard(
+            git_server.as_str(),
+            auth,
+            args.admin,
+            args.guest,
+            true,
+            Some("human"),
+        )
         .await
     {
         Ok(resp) => {

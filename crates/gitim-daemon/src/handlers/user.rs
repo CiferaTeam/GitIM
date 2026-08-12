@@ -13,6 +13,7 @@ pub async fn handle_register_user(
     display_name: String,
     role: String,
     introduction: String,
+    kind: UserKind,
 ) -> Response {
     // Validate handler format
     if let Err(e) = Handler::new(&handler) {
@@ -58,7 +59,7 @@ pub async fn handle_register_user(
         role,
         introduction,
         labels: Vec::new(),
-        kind: UserKind::Unknown,
+        kind,
     };
     let meta_str = match Response::yaml_string(&meta, "user meta") {
         Ok(meta_str) => meta_str,
@@ -612,6 +613,7 @@ mod tests {
             "Display".to_string(),
             "member".to_string(),
             "GitIM user".to_string(),
+            UserKind::Unknown,
         )
         .await;
         assert!(resp.ok, "register_user failed: {:?}", resp.error);

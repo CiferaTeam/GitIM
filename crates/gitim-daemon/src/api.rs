@@ -1,5 +1,5 @@
 use gitim_core::auth_payload::AuthPayload;
-use gitim_core::types::QuickSessionStatus;
+use gitim_core::types::{QuickSessionStatus, UserKind};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
@@ -274,6 +274,8 @@ pub enum Request {
         role: String,
         #[serde(default = "default_introduction")]
         introduction: String,
+        #[serde(default)]
+        kind: UserKind,
     },
     /// Overwrite an already-registered user's `introduction` field.
     /// Used by `PATCH /workspaces/{slug}/agents/{id}` and by the post-onboard
@@ -306,6 +308,8 @@ pub enum Request {
         /// provision via POST /agents/add) need to send `false`.
         #[serde(default = "default_true")]
         join_general: bool,
+        #[serde(default)]
+        kind: UserKind,
     },
     #[serde(rename = "join_channel")]
     JoinChannel {

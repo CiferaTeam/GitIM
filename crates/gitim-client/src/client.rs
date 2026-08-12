@@ -146,17 +146,18 @@ impl GitimClient {
         display_name: &str,
         role: Option<&str>,
         introduction: Option<&str>,
+        kind: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
-            "register_user",
-            json!({
-                "handler": handler,
-                "display_name": display_name,
-                "role": role.unwrap_or("member"),
-                "introduction": introduction.unwrap_or("GitIM user"),
-            }),
-        )
-        .await
+        let mut body = json!({
+            "handler": handler,
+            "display_name": display_name,
+            "role": role.unwrap_or("member"),
+            "introduction": introduction.unwrap_or("GitIM user"),
+        });
+        if let Some(kind) = kind {
+            body["kind"] = json!(kind);
+        }
+        self.request("register_user", body).await
     }
 
     /// Patch an already-registered user's profile fields.
@@ -187,18 +188,19 @@ impl GitimClient {
         admin: bool,
         guest: bool,
         join_general: bool,
+        kind: Option<&str>,
     ) -> Result<ApiResponse, ClientError> {
-        self.request(
-            "onboard",
-            json!({
-                "git_server": git_server,
-                "auth": auth,
-                "admin": admin,
-                "guest": guest,
-                "join_general": join_general,
-            }),
-        )
-        .await
+        let mut body = json!({
+            "git_server": git_server,
+            "auth": auth,
+            "admin": admin,
+            "guest": guest,
+            "join_general": join_general,
+        });
+        if let Some(kind) = kind {
+            body["kind"] = json!(kind);
+        }
+        self.request("onboard", body).await
     }
 
     pub async fn join_channel(
