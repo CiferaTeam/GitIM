@@ -903,6 +903,20 @@ async fn title_and_reply_complete_the_claim_and_emit_scoped_events() {
 }
 
 #[tokio::test]
+async fn quick_session_turn_emits_thinking_as_default_activity_detail() {
+    let (_temp, _backend, _factory, executor, mut rx) = harness(ProviderAction::Complete, false);
+
+    executor.execute(SESSION_ID).await.unwrap();
+
+    let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+    let thinking = events
+        .iter()
+        .find(|event| event.event_type == "thinking")
+        .expect("quick session turn should emit a thinking event");
+    assert_eq!(thinking.detail, "thinking...");
+}
+
+#[tokio::test]
 async fn missing_title_or_reply_marks_error_once() {
     for action in [ProviderAction::MissingTitle, ProviderAction::MissingReply] {
         let (_temp, backend, _factory, executor, _rx) = harness(action, false);

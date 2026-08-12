@@ -404,7 +404,7 @@ impl QuickSessionExecutor {
 
         self.emit(
             "thinking",
-            "processing...",
+            "thinking...",
             session_id,
             &attempt_id,
             claim.revision,

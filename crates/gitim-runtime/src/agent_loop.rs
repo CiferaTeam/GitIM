@@ -940,7 +940,7 @@ impl AgentLoop {
         };
 
         info!(prompt = %prompt, "sending to provider");
-        self.emit_activity("thinking", "processing...");
+        self.emit_activity("thinking", "thinking...");
 
         let opts = self.build_exec_options();
 
@@ -1182,8 +1182,8 @@ impl AgentLoop {
         // Cursor is preserved — the messages in this cycle have been consumed.
         //
         // Reset is invisible to IM (no chat message), but the WebUI HUD still
-        // needs a terminal signal — otherwise the `thinking`/`processing...`
-        // spinner stays on indefinitely and the pre-reset `used_percent`
+        // needs a terminal signal — otherwise the `thinking...` spinner stays
+        // on indefinitely and the pre-reset `used_percent`
         // sticks on screen. Emit a `done` activity with `detail="reset"` so
         // reactive clients can terminate the spinner without showing a
         // user-facing completion message, and clear the in-memory

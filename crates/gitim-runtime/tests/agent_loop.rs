@@ -196,6 +196,37 @@ async fn polled_primary_batch_executes_once_when_recovery_scan_fails() {
     daemon.abort();
 }
 
+#[tokio::test]
+async fn primary_turn_emits_thinking_as_default_activity_detail() {
+    let temp = tempfile::tempdir().unwrap();
+    let repo_root = temp.path().join("bot");
+    std::fs::create_dir_all(repo_root.join(".gitim")).unwrap();
+    std::fs::write(repo_root.join(".gitim/me.json"), r#"{"handler":"bot"}"#).unwrap();
+    gitim_runtime::AgentState {
+        cursor: Some("cursor-0".to_string()),
+        ..gitim_runtime::AgentState::default()
+    }
+    .save(&repo_root)
+    .unwrap();
+    let daemon = spawn_poll_daemon(&repo_root);
+    let prompts = Arc::new(Mutex::new(Vec::new()));
+    let mut agent_loop =
+        gitim_runtime::AgentLoop::with_provider(&repo_root, "mock", "bot").unwrap();
+    agent_loop.replace_provider_for_test(Box::new(RecordingPrimaryProvider { prompts }));
+    let (activity_tx, mut activity_rx) = tokio::sync::broadcast::channel(16);
+    agent_loop.set_activity_tx_with_workspace(activity_tx, "workspace".to_string());
+
+    assert!(agent_loop.run_once().await.unwrap());
+
+    let events: Vec<_> = std::iter::from_fn(|| activity_rx.try_recv().ok()).collect();
+    let thinking = events
+        .iter()
+        .find(|event| event.event_type == "thinking")
+        .expect("primary turn should emit a thinking event");
+    assert_eq!(thinking.detail, "thinking...");
+    daemon.abort();
+}
+
 #[test]
 fn quick_session_changes_are_not_formatted_into_primary_prompt() {
     let quick_change = ChannelChange {

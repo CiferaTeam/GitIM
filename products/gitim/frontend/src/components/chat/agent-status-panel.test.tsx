@@ -126,7 +126,7 @@ describe("AgentStatusPanel", () => {
       agent_id: "cfo",
       workspace_id: "room",
       event_type: "thinking",
-      detail: "processing...",
+      detail: "thinking...",
       timestamp: "2026-05-18T11:19:35Z",
     });
 
