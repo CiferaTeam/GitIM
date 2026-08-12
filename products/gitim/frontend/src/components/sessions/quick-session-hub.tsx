@@ -171,7 +171,7 @@ function QuickSessionHubWorkspace({
         onPointerLeave={scheduleHoverClose}
         onEscapeKeyDown={handleEscapeKeyDown}
       >
-        <section className="flex w-[280px] min-w-0 flex-col border-r border-border bg-card/80">
+        <section className="flex w-[280px] min-w-0 shrink-0 flex-col border-r border-border bg-card/80">
           <div className="flex items-center justify-between border-b border-border px-3 py-2.5">
             <div>
               <h2 className="text-sm font-semibold text-foreground">Quick Sessions</h2>

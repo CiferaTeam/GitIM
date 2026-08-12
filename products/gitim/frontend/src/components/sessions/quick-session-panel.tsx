@@ -35,18 +35,18 @@ export function QuickSessionPanel({
 
   if (loading && !detail) {
     return (
-      <div className="flex flex-1 items-center justify-center gap-2 text-xs text-text-muted">
+      <div className="flex min-w-0 flex-1 items-center justify-center gap-2 text-xs text-text-muted">
         <Loader2 className="size-3.5 animate-spin" />
         Loading conversation…
       </div>
     );
   }
   if (error && !detail) {
-    return <div className="flex flex-1 items-center justify-center px-4 text-xs text-destructive">{error}</div>;
+    return <div className="flex min-w-0 flex-1 items-center justify-center px-4 text-xs text-destructive [overflow-wrap:anywhere]">{error}</div>;
   }
   if (!detail) {
     return (
-      <div className="flex flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-text-muted">
+      <div className="flex min-w-0 flex-1 items-center justify-center px-6 text-center text-xs leading-relaxed text-text-muted">
         Select a session or start a focused conversation.
       </div>
     );
@@ -55,7 +55,7 @@ export function QuickSessionPanel({
   const ref = formatQuickSessionRef(detail.meta.id);
   const activity = runtime?.latestEvent;
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="flex items-start justify-between gap-3 border-b border-border px-3 py-2.5">
         <div className="min-w-0">
           <h3 className="truncate text-sm font-semibold text-foreground">
@@ -84,7 +84,7 @@ export function QuickSessionPanel({
       </div>
 
       {detail.meta.summary ? (
-        <div className="border-b border-border bg-primary/5 px-3 py-2 text-xs leading-relaxed text-text-secondary">
+        <div className="border-b border-border bg-primary/5 px-3 py-2 text-xs leading-relaxed text-text-secondary [overflow-wrap:anywhere]">
           {detail.meta.summary}
         </div>
       ) : null}
@@ -97,7 +97,7 @@ export function QuickSessionPanel({
               <span className="font-mono">L{String(entry.line_number).padStart(6, "0")}</span>
               <span>{formatTimestamp(entry.timestamp, timezone)}</span>
             </div>
-            <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-relaxed text-foreground/90">
+            <div className="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-foreground/90 [overflow-wrap:anywhere]">
               {entry.body}
             </div>
           </div>
@@ -107,11 +107,11 @@ export function QuickSessionPanel({
             {activity.event_type !== "done" && activity.event_type !== "error" ? (
               <Loader2 className="size-3 animate-spin" />
             ) : null}
-            <span>{activity.detail}</span>
+            <span className="min-w-0 [overflow-wrap:anywhere]">{activity.detail}</span>
           </div>
         ) : null}
         {error ? (
-          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] text-destructive">
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-2.5 py-2 text-[11px] text-destructive [overflow-wrap:anywhere]">
             {error}
           </div>
         ) : null}

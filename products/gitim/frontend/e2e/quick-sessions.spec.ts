@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 const runtimePort = 49328;
 const slug = "quick-room";
 
-async function stubRuntime(page: Page) {
+async function stubRuntime(page: Page, agentReply = "Ready to investigate") {
   let session: Record<string, unknown> | null = null;
   let sessionId = "";
   let archived = false;
@@ -126,7 +126,7 @@ async function stubRuntime(page: Page) {
           point_to: 1,
           author: "alice",
           timestamp: "20260711T000002Z",
-          body: "Ready to investigate",
+          body: agentReply,
         });
         agentReplyVisible = true;
         processedPolls += 1;
@@ -306,4 +306,43 @@ test("creates, references, and archives a Quick Session", async ({ page }) => {
   await page.getByRole("button", { name: "Archive session" }).click();
   await page.getByLabel("Show archived").check();
   await expect(page.getByRole("listitem").filter({ hasText: "Investigate flakes" })).toBeVisible();
+});
+
+test("keeps the session list width when an agent reply has an unbroken token", async ({
+  page,
+}) => {
+  const longReply = `result-${"x".repeat(600)}`;
+  const runtime = await stubRuntime(page, longReply);
+  await page.goto("/chat");
+
+  await page.getByRole("button", { name: "Quick Sessions" }).click();
+  await page.getByRole("button", { name: "New Quick Session" }).click();
+  await page
+    .getByPlaceholder("What should this session focus on?")
+    .fill("Investigate layout");
+  await page.getByRole("button", { name: "Start session" }).click();
+
+  const sessionList = page
+    .getByRole("heading", { name: "Quick Sessions" })
+    .locator("xpath=ancestor::section[1]");
+  const sessionPanel = sessionList.locator("xpath=following-sibling::div[1]");
+  await expect(sessionList).toHaveCSS("width", "280px");
+  const initialPanelWidth = await sessionPanel.evaluate(
+    (element) => element.getBoundingClientRect().width,
+  );
+  expect(initialPanelWidth).toBeGreaterThan(470);
+
+  runtime.releaseAgentReply();
+  await expect
+    .poll(() => runtime.processedPollCount(), { timeout: 10_000 })
+    .toBe(1);
+  await expect(page.getByText(longReply, { exact: true }).last()).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(sessionList).toHaveCSS("width", "280px");
+  await expect
+    .poll(() =>
+      sessionPanel.evaluate((element) => element.getBoundingClientRect().width),
+    )
+    .toBe(initialPanelWidth);
 });
