@@ -364,11 +364,11 @@ function seedState() {
   );
   files.set(
     "/repo/users/alice.meta.yaml",
-    "display_name: Alice\nrole: member\nintroduction: hi\n",
+    "display_name: Alice\nrole: member\nintroduction: hi\nkind: human\n",
   );
   files.set(
     "/repo/users/lewis.meta.yaml",
-    "display_name: Lewis\nrole: member\nintroduction: hi\n",
+    "display_name: Lewis\nrole: member\nintroduction: hi\nkind: human\n",
   );
   files.set("/repo/dm/alice--lewis.thread", dmThread);
   files.set("/repo/dm/cfo--flame4.thread", dmThread);
@@ -441,14 +441,15 @@ describe("daemon-web handlers", () => {
     // poll loop's index-based diff relies on `users[i] === user_infos[i]`.
     expect(res.data?.users).toEqual(["alice", "lewis"]);
     // Additive enrichment mirrors the Rust daemon wire shape — one
-    // {handler, display_name} row per active user, in the same sorted order.
+    // {handler, display_name, kind?} row per active user, in the same sorted order.
     const infos = res.data?.user_infos as Array<{
       handler: string;
       display_name?: string;
+      kind?: string;
     }>;
     expect(infos).toEqual([
-      { handler: "alice", display_name: "Alice" },
-      { handler: "lewis", display_name: "Lewis" },
+      { handler: "alice", display_name: "Alice", kind: "human" },
+      { handler: "lewis", display_name: "Lewis", kind: "human" },
     ]);
   });
 

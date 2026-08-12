@@ -72,6 +72,10 @@ pub kind: UserKind,
 - `unknown` 不落盘（skip），与旧文件「缺字段」同形。
 - `update_user` / labels RMW **不得**改 `kind`（读写时保留原值）。
 
+### Trust boundary
+
+`kind` is **client-supplied** at `register_user` / `onboard` — the daemon accepts the caller's declaration and does not independently classify human vs agent. v1 uses it only for roster grouping. Do not treat it as an authoritative input for permission, routing, or billing until daemon-side classification exists (e.g. infer from onboard auth variant / agent provision path).
+
 ### 写入路径
 
 | Caller | kind |
@@ -177,6 +181,7 @@ pub kind: UserKind,
 | Outside 全 unknown | 文案只有 `unclassified` |
 | user_infos 缺席（老 runtime） | Humans/Outside 空；Local/Fleet 照旧 |
 | 手改 yaml kind | 允许；无 API；冲突靠 git |
+| kind 信任边界 | client-supplied；仅 roster 分组。permission / routing / 计费归因需先收归 daemon 判定 |
 
 ---
 

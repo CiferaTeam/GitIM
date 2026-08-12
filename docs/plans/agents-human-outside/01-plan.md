@@ -14,6 +14,7 @@
 - Stable Rust only（仓库 `rust-toolchain.toml`）
 - 不做旧数据回填 / set-kind API / browser Agents 页
 - `kind` 创建后 API 不可改；`update_user` / labels RMW 必须保留字段
+- `kind` 为 client-supplied（调用方声明）；v1 仅 roster 分组，不作 permission / routing / 计费权威字段
 - 改 `gitim-core` UserMeta 后必须 `npm run build:wasm`（frontend）并 commit `crates/gitim-wasm/pkg/`
 - Commit 格式：`feat(scope): …` + footer `Test: <cmd>` + `Co-authored-by: Cursor <cursoragent@cursor.com>`（若 Cursor 提交）
 - 禁止 `git commit --no-verify`；验证用 scoped tests，不跑全量 `cargo test`

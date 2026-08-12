@@ -742,10 +742,15 @@ export async function users(): Promise<ApiResponse> {
   // `users` stays the bare handler list for backward compat; `user_infos` is
   // the additive enrichment the frontend directory consumes. In-memory
   // `s.users` already holds full UserMeta.
-  const userInfos = userList.map((handler) => ({
-    handler,
-    display_name: s.users.get(handler)?.display_name,
-  }));
+  const userInfos = userList.map((handler) => {
+    const meta = s.users.get(handler);
+    return {
+      handler,
+      display_name: meta?.display_name,
+      // Mirror Rust `ActiveUserEntry.kind` (skip unknown / absent).
+      ...(meta?.kind && meta.kind !== "unknown" ? { kind: meta.kind } : {}),
+    };
+  });
   return ok({ users: userList, user_infos: userInfos });
 }
 

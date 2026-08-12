@@ -1,4 +1,6 @@
-export type UserKind = "human" | "agent" | "unknown";
+import type { UserKind } from "@/lib/types";
+
+export type { UserKind };
 
 export interface RosterUser {
   handler: string;
@@ -86,7 +88,9 @@ export function formatOutsideSummary(
   unknownCount: number,
 ): string | null {
   const parts: string[] = [];
-  if (agentCount > 0) parts.push(`${agentCount} agents`);
+  if (agentCount > 0) {
+    parts.push(`${agentCount} agent${agentCount === 1 ? "" : "s"}`);
+  }
   if (unknownCount > 0) parts.push(`${unknownCount} unclassified`);
   if (parts.length === 0) return null;
   return `Outside · ${parts.join(" · ")}`;

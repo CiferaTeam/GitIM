@@ -55,6 +55,7 @@ describe("partitionAgentsRoster", () => {
 describe("formatOutsideSummary", () => {
   it("omits zero segments and returns null when empty", () => {
     expect(formatOutsideSummary(0, 0)).toBeNull();
+    expect(formatOutsideSummary(1, 0)).toBe("Outside · 1 agent");
     expect(formatOutsideSummary(3, 0)).toBe("Outside · 3 agents");
     expect(formatOutsideSummary(0, 2)).toBe("Outside · 2 unclassified");
     expect(formatOutsideSummary(3, 2)).toBe("Outside · 3 agents · 2 unclassified");

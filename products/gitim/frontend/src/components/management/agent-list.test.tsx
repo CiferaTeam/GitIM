@@ -344,7 +344,7 @@ describe("AgentList fleet grouping", () => {
     );
     expect(toggle).not.toBeNull();
     expect(toggle?.getAttribute("aria-expanded")).toBe("false");
-    expect(toggle?.textContent).toContain("Outside · 1 agents · 1 unclassified");
+    expect(toggle?.textContent).toContain("Outside · 1 agent · 1 unclassified");
     expect(container.querySelector('[data-testid="agents-outside"]')).toBeNull();
 
     act(() => {
