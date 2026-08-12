@@ -1,6 +1,7 @@
 import { useMemo, useState, type ReactNode } from "react";
 import { useAgentActivityStore } from "@/hooks/use-agent-activity";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useChatStore } from "@/hooks/use-chat-store";
 import { fleetActivityKey, useFleetStore } from "@/hooks/use-fleet-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import {
@@ -8,6 +9,11 @@ import {
   summarizeAgentWorkload,
 } from "@/lib/agent-runtime-state";
 import * as client from "@/lib/client";
+import {
+  formatOutsideSummary,
+  partitionAgentsRoster,
+  type RosterUser,
+} from "@/lib/agents-roster";
 import type { Agent, FleetAgentSnapshot, FleetNodeStatus } from "@/lib/types";
 import type { ArchivedUserEntry } from "@/lib/client";
 import { AddAgentDialog } from "./add-agent-dialog";
@@ -21,6 +27,7 @@ import {
   Search,
   Server,
   SlidersHorizontal,
+  User,
 } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -31,9 +38,12 @@ export function AgentList() {
   const activities = useAgentActivityStore((s) => s.activities);
   const fleetAgents = useFleetStore((s) => s.agents);
   const fleetStatuses = useFleetStore((s) => s.statuses);
+  const userInfos = useChatStore((s) => s.userInfos);
+  const currentUser = useChatStore((s) => s.currentUser);
   const activeSlug = useWorkspaceStore((s) => s.activeSlug);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string | null>(null);
+  const [outsideOpen, setOutsideOpen] = useState(false);
   // Dual-source toggle: when on, we fetch archived users from the daemon
   // (via runtime proxy) and render them read-only alongside the active
   // ctx.agents list. We never mix the two arrays — the runtime has rich
@@ -72,6 +82,21 @@ export function AgentList() {
   const remoteStatuses = useMemo(
     () => fleetStatuses.filter((status) => status.workspaceId === activeSlug),
     [activeSlug, fleetStatuses],
+  );
+  const roster = useMemo(
+    () =>
+      partitionAgentsRoster({
+        userInfos,
+        localAgents: agents,
+        fleetSnapshots: remoteSnapshots,
+        query,
+        statusFilter,
+      }),
+    [agents, query, remoteSnapshots, statusFilter, userInfos],
+  );
+  const outsideLabel = formatOutsideSummary(
+    roster.outsideAgentCount,
+    roster.outsideUnknownCount,
   );
   const allAgentsForUsage = useMemo(
     () => [...agents, ...remoteSnapshots.map((snapshot) => snapshot.agent)],
@@ -205,6 +230,30 @@ export function AgentList() {
         label={hasFleetUsageContext ? "Fleet Usage" : "Workspace Usage"}
       />
 
+      {roster.showHumansAndOutside && roster.humans.length > 0 && (
+        <RosterSection
+          data-testid="agents-humans"
+          title="Humans"
+          subtitle="Workspace members"
+          icon={<User className="size-4 text-text-secondary" />}
+          count={roster.humans.length}
+        >
+          {roster.humans.map((human) => (
+            <RosterRow
+              key={human.handler}
+              user={human}
+              trailing={
+                human.handler === currentUser ? (
+                  <Badge variant="outline" className="border-border-strong text-text-secondary">
+                    you
+                  </Badge>
+                ) : undefined
+              }
+            />
+          ))}
+        </RosterSection>
+      )}
+
       {filteredAgents.length > 0 && (
         <AgentNodeSection
           title="Local"
@@ -246,8 +295,57 @@ export function AgentList() {
         </AgentNodeSection>
       ))}
 
+      {roster.showHumansAndOutside && outsideLabel && (
+        <section className="mb-6">
+          <button
+            type="button"
+            data-testid="agents-outside-toggle"
+            aria-expanded={outsideOpen}
+            onClick={() => setOutsideOpen((open) => !open)}
+            className="mb-3 flex w-full items-center gap-3 rounded-lg text-left hover:bg-surface-hover"
+          >
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface">
+              <Bot className="size-4 text-text-secondary" />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-base font-semibold">
+                {outsideLabel}
+              </span>
+              <span className="block truncate text-xs text-text-muted">
+                Known workspace users not running here
+              </span>
+            </span>
+            <ChevronDown
+              className={`mr-2 size-4 text-text-muted transition-transform ${
+                outsideOpen ? "rotate-180" : ""
+              }`}
+            />
+          </button>
+          {outsideOpen && (
+            <div
+              data-testid="agents-outside"
+              className="grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3"
+            >
+              {roster.outside.map((user) => (
+                <RosterRow
+                  key={user.handler}
+                  user={user}
+                  trailing={
+                    <Badge variant="outline" className="border-border-strong text-text-muted">
+                      {user.kind}
+                    </Badge>
+                  }
+                />
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
       {filteredAgents.length === 0 &&
         remoteGroups.length === 0 &&
+        (!roster.showHumansAndOutside ||
+          (roster.humans.length === 0 && !outsideLabel)) &&
         (!showArchived || filteredArchived.length === 0) && (
           <div className="flex flex-col items-center justify-center py-16 text-center">
             <div className="w-14 h-14 rounded-2xl bg-surface flex items-center justify-center mb-4 border border-border">
@@ -303,6 +401,69 @@ export function AgentList() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+interface RosterSectionProps {
+  "data-testid": string;
+  title: string;
+  subtitle: string;
+  icon: ReactNode;
+  count: number;
+  children: ReactNode;
+}
+
+function RosterSection({
+  "data-testid": testId,
+  title,
+  subtitle,
+  icon,
+  count,
+  children,
+}: RosterSectionProps) {
+  return (
+    <section data-testid={testId} className="mb-6">
+      <div className="mb-3 flex items-center gap-3">
+        <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface">
+          {icon}
+        </div>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h2 className="truncate text-base font-semibold">{title}</h2>
+            <Badge variant="outline" className="border-border-strong text-text-secondary">
+              {count}
+            </Badge>
+          </div>
+          <p className="truncate text-xs text-text-muted">{subtitle}</p>
+        </div>
+      </div>
+      <div className="grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3">
+        {children}
+      </div>
+    </section>
+  );
+}
+
+function RosterRow({
+  user,
+  trailing,
+}: {
+  user: RosterUser;
+  trailing?: ReactNode;
+}) {
+  return (
+    <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-surface px-4 py-3">
+      <p className="min-w-0 truncate text-sm">
+        {user.displayName && (
+          <>
+            <span className="font-medium text-foreground">{user.displayName}</span>
+            <span className="text-text-muted"> · </span>
+          </>
+        )}
+        <span className="font-mono text-xs text-text-secondary">@{user.handler}</span>
+      </p>
+      {trailing}
     </div>
   );
 }

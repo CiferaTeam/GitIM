@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { MemoryRouter } from "react-router";
 import { AgentList } from "./agent-list";
 import { useAgentStore } from "@/hooks/use-agent-store";
+import { useChatStore } from "@/hooks/use-chat-store";
 import { useFleetStore } from "@/hooks/use-fleet-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
 import type { Agent, UsageSummary } from "@/lib/types";
@@ -121,6 +122,7 @@ describe("AgentList fleet grouping", () => {
     root = null;
     container.remove();
     useAgentStore.getState().resetForWorkspaceSwitch();
+    useChatStore.getState().resetForWorkspaceSwitch();
     useFleetStore.getState().resetForWorkspaceSwitch();
   });
 
@@ -270,5 +272,119 @@ describe("AgentList fleet grouping", () => {
     expect(localToggle?.getAttribute("aria-expanded")).toBe("true");
     expect(container.textContent ?? "").toContain("Local Usage");
     expect(container.textContent ?? "").not.toContain("mac-mini Usage");
+  });
+
+  it("renders an always-expanded Humans section above local agents", () => {
+    useChatStore.setState({
+      currentUser: "alice",
+      userInfos: [
+        { handler: "alice", display_name: "Alice", kind: "human" },
+        { handler: "remote-bot", kind: "agent" },
+        { handler: "legacy" },
+      ],
+    });
+
+    act(() => {
+      root?.render(
+        <MemoryRouter>
+          <AgentList />
+        </MemoryRouter>,
+      );
+    });
+
+    const humans = container.querySelector('[data-testid="agents-humans"]');
+    const text = container.textContent ?? "";
+    expect(humans).not.toBeNull();
+    expect(humans?.textContent).toContain("Humans");
+    expect(humans?.textContent).toContain("Alice");
+    expect(text.indexOf("Humans")).toBeLessThan(text.indexOf("Local"));
+  });
+
+  it("marks the current human with a you badge", () => {
+    useChatStore.setState({
+      currentUser: "alice",
+      userInfos: [
+        { handler: "alice", display_name: "Alice", kind: "human" },
+      ],
+    });
+
+    act(() => {
+      root?.render(
+        <MemoryRouter>
+          <AgentList />
+        </MemoryRouter>,
+      );
+    });
+
+    expect(
+      container.querySelector('[data-testid="agents-humans"]')?.textContent,
+    ).toContain("you");
+  });
+
+  it("collapses Outside by default and expands its roster on click", () => {
+    useChatStore.setState({
+      currentUser: "alice",
+      userInfos: [
+        { handler: "alice", display_name: "Alice", kind: "human" },
+        { handler: "remote-bot", kind: "agent" },
+        { handler: "legacy" },
+      ],
+    });
+
+    act(() => {
+      root?.render(
+        <MemoryRouter>
+          <AgentList />
+        </MemoryRouter>,
+      );
+    });
+
+    const toggle = container.querySelector<HTMLButtonElement>(
+      '[data-testid="agents-outside-toggle"]',
+    );
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute("aria-expanded")).toBe("false");
+    expect(toggle?.textContent).toContain("Outside · 1 agents · 1 unclassified");
+    expect(container.querySelector('[data-testid="agents-outside"]')).toBeNull();
+
+    act(() => {
+      toggle?.click();
+    });
+
+    const outside = container.querySelector('[data-testid="agents-outside"]');
+    expect(toggle?.getAttribute("aria-expanded")).toBe("true");
+    expect(outside?.textContent).toContain("remote-bot");
+    expect(outside?.textContent).toContain("legacy");
+  });
+
+  it("hides Humans and Outside while a status filter is active", () => {
+    useChatStore.setState({
+      currentUser: "alice",
+      userInfos: [
+        { handler: "alice", display_name: "Alice", kind: "human" },
+        { handler: "remote-bot", kind: "agent" },
+      ],
+    });
+
+    act(() => {
+      root?.render(
+        <MemoryRouter>
+          <AgentList />
+        </MemoryRouter>,
+      );
+    });
+
+    const online = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent === "online",
+    );
+    act(() => {
+      online?.click();
+    });
+
+    expect(container.querySelector('[data-testid="agents-humans"]')).toBeNull();
+    expect(
+      container.querySelector('[data-testid="agents-outside-toggle"]'),
+    ).toBeNull();
+    expect(container.querySelector('[data-testid="agents-outside"]')).toBeNull();
   });
 });
