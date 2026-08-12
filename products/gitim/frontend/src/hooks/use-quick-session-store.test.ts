@@ -172,6 +172,533 @@ describe("useQuickSessionStore", () => {
     expect(useQuickSessionStore.getState().errors.archive).toBeNull();
   });
 
+  it("keeps an acknowledged message queued until the agent claims it", async () => {
+    const waiting = detail({
+      status: "active",
+      attempt_id: undefined,
+      revision: 4,
+      last_human_line: 2,
+    });
+    useQuickSessionStore.getState().applyDetail(
+      detail({ status: "active", attempt_id: undefined, revision: 3 }),
+    );
+    api.sendQuickSessionMessage.mockResolvedValue(
+      ok({
+        session_id: SESSION_ID,
+        line_number: 2,
+        status: "active",
+        revision: 4,
+        ref: `session:${SESSION_ID}:L000002`,
+      }),
+    );
+    api.readQuickSession.mockResolvedValue(ok({ session: waiting }));
+
+    await expect(
+      useQuickSessionStore
+        .getState()
+        .send("alpha", SESSION_ID, "continue"),
+    ).resolves.toBe(true);
+
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toMatchObject({
+      status: "queued",
+    });
+  });
+
+  it("marks the first message queued when a session is created", async () => {
+    const created = detail({
+      status: "needs_title",
+      attempt_id: undefined,
+      processing_input_line: undefined,
+      processing_started_at: undefined,
+      revision: 1,
+      last_human_line: 1,
+    });
+    api.createQuickSession.mockResolvedValue(
+      ok({
+        session: created,
+        line_number: 1,
+        ref: `session:${SESSION_ID}`,
+      }),
+    );
+
+    await expect(
+      useQuickSessionStore
+        .getState()
+        .create("alpha", "alice", "Investigate flakes"),
+    ).resolves.toBe(SESSION_ID);
+
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toMatchObject({
+      status: "queued",
+      queuedInputLine: 1,
+    });
+  });
+
+  it("replays early activity after the matching claim detail arrives", async () => {
+    const waiting = detail({
+      status: "active",
+      attempt_id: undefined,
+      revision: 4,
+      last_human_line: 2,
+    });
+    useQuickSessionStore.getState().applyDetail(waiting);
+    api.sendQuickSessionMessage.mockResolvedValue(
+      ok({
+        session_id: SESSION_ID,
+        line_number: 2,
+        status: "active",
+        revision: 4,
+        ref: `session:${SESSION_ID}:L000002`,
+      }),
+    );
+    api.readQuickSession.mockResolvedValue(ok({ session: waiting }));
+    await useQuickSessionStore
+      .getState()
+      .send("alpha", SESSION_ID, "continue");
+
+    const earlyThinking = quickEvent({
+      session_revision: 5,
+      detail: "starting the queued turn",
+    });
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(earlyThinking),
+    ).toBe(true);
+    expect(
+      useQuickSessionStore.getState().runtimeById[SESSION_ID]?.status,
+    ).toBe("queued");
+
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "running",
+        revision: 5,
+        processing_input_line: 2,
+        attempt_id: ATTEMPT_ID,
+        last_human_line: 2,
+      }),
+    );
+
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toMatchObject({
+      status: "thinking",
+      attemptId: ATTEMPT_ID,
+      contextGeneration: 2,
+      latestEvent: earlyThinking,
+    });
+  });
+
+  it("replays activity that arrives before the session detail loads", () => {
+    useQuickSessionStore.setState({ activeSlug: "alpha" });
+    const earlyThinking = quickEvent({
+      workspace_id: "alpha",
+      session_revision: 3,
+      detail: "activity before detail",
+    });
+
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(earlyThinking),
+    ).toBe(true);
+    useQuickSessionStore.getState().applyDetail(detail({ revision: 3 }));
+
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toMatchObject({
+      status: "thinking",
+      attemptId: ATTEMPT_ID,
+      latestEvent: earlyThinking,
+    });
+  });
+
+  it("does not carry buffered activity across a workspace switch", () => {
+    useQuickSessionStore.setState({ activeSlug: "alpha" });
+    const oldWorkspaceEvent = quickEvent({
+      workspace_id: "alpha",
+      session_revision: 3,
+    });
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(oldWorkspaceEvent),
+    ).toBe(true);
+
+    useQuickSessionStore.getState().resetForWorkspaceSwitch();
+    useQuickSessionStore.setState({ activeSlug: "beta" });
+
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(oldWorkspaceEvent),
+    ).toBe(false);
+    expect(useQuickSessionStore.getState().pendingActivityById).toEqual({});
+  });
+
+  it("keeps a newer message queued while the previous attempt finishes", async () => {
+    const previousAttempt = "qa-01JXXXXXXXXXXXXXXXXXXXXXXX";
+    const runningPrevious = detail({
+      status: "running",
+      revision: 5,
+      processing_input_line: 1,
+      attempt_id: previousAttempt,
+      last_human_line: 1,
+    });
+    useQuickSessionStore.getState().applyDetail(runningPrevious);
+    useQuickSessionStore.getState().applyActivityEvent(
+      quickEvent({
+        attempt_id: previousAttempt,
+        session_revision: 5,
+        context_generation: 1,
+        detail: "finishing the previous turn",
+      }),
+    );
+    api.sendQuickSessionMessage.mockResolvedValue(
+      ok({
+        session_id: SESSION_ID,
+        line_number: 2,
+        status: "running",
+        revision: 6,
+        ref: `session:${SESSION_ID}:L000002`,
+      }),
+    );
+    api.readQuickSession.mockResolvedValue(
+      ok({
+        session: detail({
+          status: "running",
+          revision: 6,
+          processing_input_line: 1,
+          attempt_id: previousAttempt,
+          last_human_line: 2,
+        }),
+      }),
+    );
+
+    await useQuickSessionStore
+      .getState()
+      .send("alpha", SESSION_ID, "next turn");
+    expect(
+      useQuickSessionStore.getState().runtimeById[SESSION_ID]?.status,
+    ).toBe("queued");
+
+    useQuickSessionStore.getState().applyActivityEvent(
+      quickEvent({
+        event_type: "tool_use",
+        attempt_id: previousAttempt,
+        session_revision: 5,
+        context_generation: 1,
+        detail: "old attempt still working",
+      }),
+    );
+    expect(
+      useQuickSessionStore.getState().runtimeById[SESSION_ID]?.status,
+    ).toBe("queued");
+
+    const nextThinking = quickEvent({
+      attempt_id: ATTEMPT_ID,
+      session_revision: 9,
+      context_generation: 2,
+      detail: "starting the next turn",
+    });
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(nextThinking),
+    ).toBe(true);
+    useQuickSessionStore.getState().applyActivityEvent(
+      quickEvent({
+        event_type: "status",
+        attempt_id: previousAttempt,
+        session_revision: 5,
+        context_generation: 1,
+        detail: "previous turn wrapping up",
+      }),
+    );
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "running",
+        revision: 7,
+        processing_input_line: 1,
+        attempt_id: previousAttempt,
+        last_human_line: 2,
+      }),
+    );
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "active",
+        revision: 8,
+        processing_input_line: undefined,
+        attempt_id: undefined,
+        last_completed_attempt_id: previousAttempt,
+        last_completed_input_line: 1,
+        last_completed_line: 3,
+        last_human_line: 2,
+      }),
+    );
+    expect(
+      useQuickSessionStore.getState().runtimeById[SESSION_ID]?.status,
+    ).toBe("queued");
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "running",
+        revision: 9,
+        processing_input_line: 2,
+        attempt_id: ATTEMPT_ID,
+        last_completed_attempt_id: previousAttempt,
+        last_completed_input_line: 1,
+        last_completed_line: 3,
+        last_human_line: 2,
+      }),
+    );
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toMatchObject({
+      status: "thinking",
+      attemptId: ATTEMPT_ID,
+      latestEvent: nextThinking,
+    });
+  });
+
+  it("marks an acknowledged input queued when the previous activity revision is newer", async () => {
+    const previousAttempt = "qa-01JXXXXXXXXXXXXXXXXXXXXXXX";
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "running",
+        revision: 5,
+        processing_input_line: 1,
+        attempt_id: previousAttempt,
+        last_human_line: 1,
+      }),
+    );
+    useQuickSessionStore.getState().applyActivityEvent(
+      quickEvent({
+        event_type: "status",
+        attempt_id: previousAttempt,
+        session_revision: 9,
+        context_generation: 1,
+        detail: "previous attempt still running",
+      }),
+    );
+    api.sendQuickSessionMessage.mockResolvedValue(
+      ok({
+        session_id: SESSION_ID,
+        line_number: 2,
+        status: "running",
+        revision: 6,
+        ref: `session:${SESSION_ID}:L000002`,
+      }),
+    );
+    api.readQuickSession.mockResolvedValue(
+      ok({
+        session: detail({
+          status: "running",
+          revision: 6,
+          processing_input_line: 1,
+          attempt_id: previousAttempt,
+          last_human_line: 2,
+        }),
+      }),
+    );
+
+    await useQuickSessionStore
+      .getState()
+      .send("alpha", SESSION_ID, "next turn");
+
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toMatchObject({
+      status: "queued",
+      queuedInputLine: 2,
+      attemptId: previousAttempt,
+    });
+  });
+
+  it("replays a durably completed attempt over an older runtime attempt", () => {
+    const previousAttempt = "qa-01JXXXXXXXXXXXXXXXXXXXXXXX";
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "running",
+        revision: 5,
+        attempt_id: previousAttempt,
+      }),
+    );
+    useQuickSessionStore.getState().applyActivityEvent(
+      quickEvent({
+        attempt_id: previousAttempt,
+        session_revision: 5,
+        context_generation: 1,
+      }),
+    );
+    const earlyDone = quickEvent({
+      event_type: "done",
+      attempt_id: ATTEMPT_ID,
+      session_revision: 6,
+      context_generation: 2,
+      detail: "new attempt completed",
+    });
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(earlyDone),
+    ).toBe(true);
+
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "active",
+        revision: 7,
+        processing_input_line: undefined,
+        attempt_id: undefined,
+        last_completed_attempt_id: ATTEMPT_ID,
+        last_completed_input_line: 2,
+      }),
+    );
+
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toMatchObject({
+      status: "done",
+      attemptId: ATTEMPT_ID,
+      latestEvent: earlyDone,
+    });
+  });
+
+  it("replays terminal activity when a queued turn completes between polls", async () => {
+    const previousAttempt = "qa-01JXXXXXXXXXXXXXXXXXXXXXXX";
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "running",
+        revision: 5,
+        processing_input_line: 1,
+        attempt_id: previousAttempt,
+        last_human_line: 1,
+      }),
+    );
+    api.sendQuickSessionMessage.mockResolvedValue(
+      ok({
+        session_id: SESSION_ID,
+        line_number: 2,
+        status: "running",
+        revision: 6,
+        ref: `session:${SESSION_ID}:L000002`,
+      }),
+    );
+    api.readQuickSession.mockResolvedValue(
+      ok({
+        session: detail({
+          status: "running",
+          revision: 6,
+          processing_input_line: 1,
+          attempt_id: previousAttempt,
+          last_human_line: 2,
+        }),
+      }),
+    );
+    await useQuickSessionStore
+      .getState()
+      .send("alpha", SESSION_ID, "next turn");
+    useQuickSessionStore.getState().applyActivityEvent(
+      quickEvent({
+        event_type: "status",
+        attempt_id: previousAttempt,
+        session_revision: 5,
+        context_generation: 1,
+        detail: "previous turn completing",
+      }),
+    );
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "active",
+        revision: 8,
+        processing_input_line: undefined,
+        attempt_id: undefined,
+        last_completed_attempt_id: previousAttempt,
+        last_completed_input_line: 1,
+        last_completed_line: 3,
+        last_human_line: 2,
+      }),
+    );
+
+    const earlyDone = quickEvent({
+      event_type: "done",
+      attempt_id: ATTEMPT_ID,
+      session_revision: 9,
+      context_generation: 2,
+      detail: "done",
+    });
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(earlyDone),
+    ).toBe(true);
+    useQuickSessionStore.getState().applyDetail(
+      detail({
+        status: "active",
+        revision: 11,
+        processing_input_line: undefined,
+        attempt_id: undefined,
+        last_completed_attempt_id: ATTEMPT_ID,
+        last_completed_input_line: 2,
+        last_completed_line: 4,
+        last_human_line: 2,
+      }),
+    );
+
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toMatchObject({
+      status: "done",
+      attemptId: ATTEMPT_ID,
+      latestEvent: earlyDone,
+    });
+  });
+
+  it("clears queued and buffered activity when the session is archived", async () => {
+    const waiting = detail({
+      status: "active",
+      attempt_id: undefined,
+      revision: 4,
+      last_human_line: 2,
+    });
+    useQuickSessionStore.getState().applyDetail(waiting);
+    api.sendQuickSessionMessage.mockResolvedValue(
+      ok({
+        session_id: SESSION_ID,
+        line_number: 2,
+        status: "active",
+        revision: 4,
+        ref: `session:${SESSION_ID}:L000002`,
+      }),
+    );
+    api.readQuickSession.mockResolvedValue(ok({ session: waiting }));
+    await useQuickSessionStore
+      .getState()
+      .send("alpha", SESSION_ID, "continue");
+    useQuickSessionStore.getState().applyActivityEvent(
+      quickEvent({ session_revision: 5 }),
+    );
+    api.archiveQuickSession.mockResolvedValue(
+      ok({
+        session_id: SESSION_ID,
+        status: "archived",
+        revision: 5,
+        archived_at: "2026-07-11T00:00:05Z",
+      }),
+    );
+    api.listQuickSessions.mockResolvedValue(ok({ sessions: [] }));
+
+    await expect(
+      useQuickSessionStore.getState().archive("alpha", SESSION_ID),
+    ).resolves.toBe(true);
+
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toBeUndefined();
+    expect(
+      useQuickSessionStore.getState().pendingActivityById[SESSION_ID],
+    ).toBeUndefined();
+  });
+
+  it("rejects late activity after an archive acknowledgement", async () => {
+    useQuickSessionStore.getState().applyDetail(detail());
+    api.archiveQuickSession.mockResolvedValue(
+      ok({
+        session_id: SESSION_ID,
+        status: "archived",
+        revision: 4,
+        archived_at: "2026-07-11T00:00:05Z",
+      }),
+    );
+    const pendingList = deferred<
+      ApiResponse<{ sessions: QuickSessionListItem[] }>
+    >();
+    api.listQuickSessions.mockReturnValue(pendingList.promise);
+
+    const archiving = useQuickSessionStore
+      .getState()
+      .archive("alpha", SESSION_ID);
+    await vi.waitFor(() => expect(api.listQuickSessions).toHaveBeenCalled());
+
+    expect(
+      useQuickSessionStore.getState().applyActivityEvent(quickEvent()),
+    ).toBe(false);
+    expect(useQuickSessionStore.getState().runtimeById[SESSION_ID]).toBeUndefined();
+
+    pendingList.resolve(ok({ sessions: [] }));
+    await expect(archiving).resolves.toBe(true);
+  });
+
   it("discards async results after a workspace switch", async () => {
     const pending = deferred<ApiResponse<{ sessions: QuickSessionListItem[] }>>();
     api.listQuickSessions.mockReturnValue(pending.promise);

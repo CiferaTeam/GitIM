@@ -3,6 +3,7 @@ import { create } from "zustand";
 import * as client from "../lib/client";
 import type {
   AgentActivityEvent,
+  ArchiveQuickSessionResponse,
   PollChange,
   QuickSessionDetail,
   QuickSessionListItem,
@@ -39,12 +40,21 @@ interface PendingSendOperation {
   requestId: string;
 }
 
+type ScopedQuickSessionActivity = AgentActivityEvent & {
+  scope: "quick_session";
+  session_id: string;
+  attempt_id: string;
+  context_generation: number;
+  session_revision: number;
+};
+
 export interface QuickSessionRuntimeOverlay {
-  status: QuickSessionStatus | AgentActivityEvent["event_type"];
+  status: QuickSessionStatus | AgentActivityEvent["event_type"] | "queued";
   revision: number;
   attemptId?: string;
   contextGeneration?: number;
   latestEvent?: AgentActivityEvent;
+  queuedInputLine?: number;
 }
 
 interface QuickSessionState {
@@ -53,6 +63,7 @@ interface QuickSessionState {
   selectedId: string | null;
   detailById: Record<string, QuickSessionDetail>;
   runtimeById: Record<string, QuickSessionRuntimeOverlay>;
+  pendingActivityById: Record<string, ScopedQuickSessionActivity>;
   showArchived: boolean;
   loading: OperationFlags;
   errors: OperationErrors;
@@ -91,6 +102,7 @@ const EMPTY_ERRORS: OperationErrors = {
 };
 
 const QUICK_SESSION_HUB_TRANSCRIPT_LIMIT = 50;
+const MAX_PENDING_ACTIVITIES = 64;
 
 let workspaceGeneration = 0;
 const operationSequence: Record<QuickSessionOperation, number> = {
@@ -202,12 +214,238 @@ function sameSendPayload(
   );
 }
 
+function isScopedQuickSessionActivity(
+  event: AgentActivityEvent,
+): event is ScopedQuickSessionActivity {
+  return (
+    event.scope === "quick_session" &&
+    event.session_id !== undefined &&
+    event.session_id !== "" &&
+    event.attempt_id !== undefined &&
+    event.attempt_id !== "" &&
+    event.context_generation !== undefined &&
+    event.session_revision !== undefined
+  );
+}
+
+function detailOwnsActivity(
+  detail: QuickSessionDetail,
+  event: ScopedQuickSessionActivity,
+): boolean {
+  const ownsActiveAttempt =
+    detail.meta.status === "running" &&
+    detail.meta.attempt_id === event.attempt_id;
+  const ownsCompletedAttempt =
+    detail.meta.status !== "running" &&
+    detail.meta.status !== "archived" &&
+    (event.event_type === "usage" || event.event_type === "done") &&
+    detail.meta.last_completed_attempt_id === event.attempt_id;
+  const ownsFailedAttempt =
+    detail.meta.status !== "running" &&
+    detail.meta.status !== "archived" &&
+    event.event_type === "error" &&
+    detail.meta.last_failed_attempt_id === event.attempt_id;
+  return ownsActiveAttempt || ownsCompletedAttempt || ownsFailedAttempt;
+}
+
+function activityMatchesRuntimeGeneration(
+  runtime: QuickSessionRuntimeOverlay | undefined,
+  event: ScopedQuickSessionActivity,
+): boolean {
+  return !(
+    runtime?.attemptId === event.attempt_id &&
+    runtime.contextGeneration !== undefined &&
+    runtime.contextGeneration !== event.context_generation
+  );
+}
+
+function activityCanUpdateRuntime(
+  runtime: QuickSessionRuntimeOverlay | undefined,
+  event: ScopedQuickSessionActivity,
+  allowAttemptReplacement = false,
+): boolean {
+  return (
+    (allowAttemptReplacement ||
+      runtime?.attemptId === undefined ||
+      runtime.attemptId === event.attempt_id) &&
+    activityMatchesRuntimeGeneration(runtime, event)
+  );
+}
+
+function hasQueuedInput(
+  detail: QuickSessionDetail,
+  runtime: QuickSessionRuntimeOverlay | undefined,
+): runtime is QuickSessionRuntimeOverlay & { queuedInputLine: number } {
+  if (
+    runtime?.queuedInputLine === undefined ||
+    detail.archived ||
+    detail.meta.status === "archived" ||
+    detail.meta.status === "error"
+  ) {
+    return false;
+  }
+  return (
+    (detail.meta.processing_input_line ?? 0) < runtime.queuedInputLine &&
+    (detail.meta.last_completed_input_line ?? 0) < runtime.queuedInputLine
+  );
+}
+
+function runtimeFromActivity(
+  detail: QuickSessionDetail,
+  current: QuickSessionRuntimeOverlay | undefined,
+  event: ScopedQuickSessionActivity,
+): QuickSessionRuntimeOverlay {
+  const queuedInputLine = hasQueuedInput(detail, current)
+    ? current.queuedInputLine
+    : undefined;
+  return {
+    status: queuedInputLine === undefined ? event.event_type : "queued",
+    revision: Math.max(
+      detail.meta.revision,
+      current?.revision ?? 0,
+      event.session_revision,
+    ),
+    attemptId: event.attempt_id,
+    contextGeneration: event.context_generation,
+    latestEvent: event,
+    ...(queuedInputLine === undefined ? {} : { queuedInputLine }),
+  };
+}
+
+function withoutPendingActivity(
+  pending: Record<string, ScopedQuickSessionActivity>,
+  sessionId: string,
+): Record<string, ScopedQuickSessionActivity> {
+  if (!(sessionId in pending)) return pending;
+  const next = { ...pending };
+  delete next[sessionId];
+  return next;
+}
+
+function withoutRuntimeOverlay(
+  runtimeById: Record<string, QuickSessionRuntimeOverlay>,
+  sessionId: string,
+): Record<string, QuickSessionRuntimeOverlay> {
+  if (!(sessionId in runtimeById)) return runtimeById;
+  const next = { ...runtimeById };
+  delete next[sessionId];
+  return next;
+}
+
+function archivedDetailFromResponse(
+  detail: QuickSessionDetail,
+  archived: ArchiveQuickSessionResponse,
+): QuickSessionDetail {
+  const archivedFrom =
+    detail.meta.status === "running"
+      ? detail.meta.title
+        ? "active"
+        : "needs_title"
+      : detail.meta.status;
+  return {
+    ...detail,
+    archived: true,
+    meta: {
+      ...detail.meta,
+      status: "archived",
+      revision: Math.max(detail.meta.revision, archived.revision),
+      updated_at: archived.archived_at,
+      archived_at: archived.archived_at,
+      archived_from: archivedFrom,
+      processing_input_line: undefined,
+      processing_started_at: undefined,
+      attempt_id: undefined,
+    },
+  };
+}
+
+function withPendingActivity(
+  pending: Record<string, ScopedQuickSessionActivity>,
+  event: ScopedQuickSessionActivity,
+): Record<string, ScopedQuickSessionActivity> | null {
+  const current = pending[event.session_id];
+  if (current) {
+    if (event.session_revision < current.session_revision) return null;
+    if (
+      event.attempt_id === current.attempt_id &&
+      event.context_generation !== current.context_generation
+    ) {
+      return null;
+    }
+    if (
+      event.session_revision === current.session_revision &&
+      event.attempt_id !== current.attempt_id
+    ) {
+      return null;
+    }
+  }
+
+  const next = { ...pending };
+  if (!current && Object.keys(next).length >= MAX_PENDING_ACTIVITIES) {
+    const oldestSessionId = Object.keys(next)[0];
+    if (oldestSessionId !== undefined) delete next[oldestSessionId];
+  }
+  next[event.session_id] = event;
+  return next;
+}
+
+function pendingAfterAppliedActivity(
+  pending: Record<string, ScopedQuickSessionActivity>,
+  detail: QuickSessionDetail,
+  event: ScopedQuickSessionActivity,
+): Record<string, ScopedQuickSessionActivity> {
+  const current = pending[event.session_id];
+  if (!current) return pending;
+  const sameContext =
+    current.attempt_id === event.attempt_id &&
+    current.context_generation === event.context_generation;
+  if (
+    current.session_revision <= detail.meta.revision ||
+    (sameContext && current.session_revision <= event.session_revision)
+  ) {
+    return withoutPendingActivity(pending, event.session_id);
+  }
+  return pending;
+}
+
+function runtimeWithQueuedInput(
+  current: QuickSessionRuntimeOverlay | undefined,
+  detail: QuickSessionDetail | undefined,
+  inputLine: number,
+  revision: number,
+): QuickSessionRuntimeOverlay {
+  const detailAlreadyOwnsInput =
+    detail !== undefined &&
+    detail.meta.revision >= revision &&
+    ((detail.meta.processing_input_line ?? 0) >= inputLine ||
+      (detail.meta.last_completed_input_line ?? 0) >= inputLine ||
+      detail.archived ||
+      detail.meta.status === "archived");
+  if (detailAlreadyOwnsInput) {
+    return current ?? {
+      status: detail?.meta.status ?? "active",
+      revision: Math.max(detail?.meta.revision ?? 0, revision),
+    };
+  }
+
+  const preservesEarlierAttempt =
+    detail?.meta.status === "running" &&
+    (detail.meta.processing_input_line ?? 0) < inputLine;
+  return {
+    ...(preservesEarlierAttempt ? current : undefined),
+    status: "queued",
+    revision: Math.max(current?.revision ?? 0, revision),
+    queuedInputLine: inputLine,
+  };
+}
+
 export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
   activeSlug: null,
   items: [],
   selectedId: null,
   detailById: {},
   runtimeById: {},
+  pendingActivityById: {},
   showArchived: false,
   loading: { ...EMPTY_LOADING },
   errors: { ...EMPTY_ERRORS },
@@ -335,6 +573,15 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
       get().applyDetail(response.data.session);
       set((state) => ({
         selectedId: response.data!.session.meta.id,
+        runtimeById: {
+          ...state.runtimeById,
+          [response.data!.session.meta.id]: runtimeWithQueuedInput(
+            state.runtimeById[response.data!.session.meta.id],
+            state.detailById[response.data!.session.meta.id],
+            response.data!.line_number,
+            response.data!.session.meta.revision,
+          ),
+        },
         pendingCreate:
           state.pendingCreate?.sessionId === pending.sessionId
             ? null
@@ -378,7 +625,7 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
         pending.requestId,
       );
       if (!operationIsCurrent(slug, "send", request)) return false;
-      if (!response.ok) {
+      if (!response.ok || !response.data) {
         setOperation(
           set,
           "send",
@@ -387,7 +634,17 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
         );
         return false;
       }
+      const acknowledged = response.data;
       set((state) => ({
+        runtimeById: {
+          ...state.runtimeById,
+          [id]: runtimeWithQueuedInput(
+            state.runtimeById[id],
+            state.detailById[id],
+            acknowledged.line_number,
+            acknowledged.revision,
+          ),
+        },
         pendingSend:
           state.pendingSend?.requestId === pending.requestId
             ? null
@@ -441,7 +698,7 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
     try {
       const response = await client.archiveQuickSession(slug, id);
       if (!operationIsCurrent(slug, "archive", request)) return false;
-      if (!response.ok) {
+      if (!response.ok || !response.data) {
         setOperation(
           set,
           "archive",
@@ -450,6 +707,23 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
         );
         return false;
       }
+      const archived = response.data;
+      set((state) => {
+        const detail = state.detailById[id];
+        return {
+          detailById: detail
+            ? {
+                ...state.detailById,
+                [id]: archivedDetailFromResponse(detail, archived),
+              }
+            : state.detailById,
+          runtimeById: withoutRuntimeOverlay(state.runtimeById, id),
+          pendingActivityById: withoutPendingActivity(
+            state.pendingActivityById,
+            id,
+          ),
+        };
+      });
       await get().refreshList(slug);
       if (!operationIsCurrent(slug, "archive", request)) return false;
       setOperation(set, "archive", false, null);
@@ -530,13 +804,27 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
         detail.archived === state.showArchived ? [...without, incoming] : without,
       );
       const previousRuntime = state.runtimeById[id];
+      const pendingActivity = state.pendingActivityById[id];
+      const replaysPendingActivity =
+        pendingActivity !== undefined &&
+        pendingActivity.session_revision <= detail.meta.revision &&
+        detailOwnsActivity(detail, pendingActivity) &&
+        activityCanUpdateRuntime(previousRuntime, pendingActivity, true);
+      const preservesQueuedMessage = hasQueuedInput(detail, previousRuntime);
       const preservesPreviousAttempt =
         previousRuntime?.attemptId !== undefined &&
         (detail.meta.attempt_id !== undefined
           ? detail.meta.attempt_id === previousRuntime.attemptId
           : detail.meta.last_completed_attempt_id === previousRuntime.attemptId ||
             detail.meta.last_failed_attempt_id === previousRuntime.attemptId);
-      const runtime: QuickSessionRuntimeOverlay = preservesPreviousAttempt
+      const runtime: QuickSessionRuntimeOverlay = replaysPendingActivity
+        ? runtimeFromActivity(detail, previousRuntime, pendingActivity)
+        : preservesQueuedMessage
+        ? {
+            ...previousRuntime,
+            revision: Math.max(previousRuntime.revision, detail.meta.revision),
+          }
+        : preservesPreviousAttempt
         ? {
             ...previousRuntime,
             status: detail.meta.status,
@@ -549,58 +837,61 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
               ? { attemptId: detail.meta.attempt_id }
               : {}),
           };
+      const pendingIsResolved =
+        pendingActivity !== undefined &&
+        (replaysPendingActivity ||
+          detail.archived ||
+          pendingActivity.session_revision <= detail.meta.revision);
       return {
         items,
         detailById: { ...state.detailById, [id]: detail },
         runtimeById: { ...state.runtimeById, [id]: runtime },
+        pendingActivityById: pendingIsResolved
+          ? withoutPendingActivity(state.pendingActivityById, id)
+          : state.pendingActivityById,
       };
     });
     return true;
   },
 
   applyActivityEvent: (event) => {
+    if (!isScopedQuickSessionActivity(event)) {
+      return false;
+    }
+    const activeSlug = get().activeSlug;
     if (
-      event.scope !== "quick_session" ||
-      !event.session_id ||
-      !event.attempt_id ||
-      event.context_generation === undefined ||
-      event.session_revision === undefined
+      event.workspace_id !== undefined &&
+      event.workspace_id !== activeSlug
     ) {
       return false;
     }
     const detail = get().detailById[event.session_id];
     if (!detail) {
-      return false;
+      if (activeSlug === null) return false;
+      const pendingActivityById = withPendingActivity(
+        get().pendingActivityById,
+        event,
+      );
+      if (!pendingActivityById) return false;
+      set({ pendingActivityById });
+      return true;
     }
-    const ownsActiveAttempt =
-      detail.meta.status === "running" &&
-      detail.meta.attempt_id === event.attempt_id;
-    const ownsCompletedAttempt =
-      detail.meta.status !== "running" &&
-      detail.meta.status !== "archived" &&
-      (event.event_type === "usage" || event.event_type === "done") &&
-      detail.meta.last_completed_attempt_id === event.attempt_id;
-    const ownsFailedAttempt =
-      detail.meta.status !== "running" &&
-      detail.meta.status !== "archived" &&
-      event.event_type === "error" &&
-      detail.meta.last_failed_attempt_id === event.attempt_id;
-    if (!ownsActiveAttempt && !ownsCompletedAttempt && !ownsFailedAttempt) {
-      return false;
-    }
+    const ownsActivity = detailOwnsActivity(detail, event);
     const previous = get().runtimeById[event.session_id];
-    if (
-      !ownsActiveAttempt &&
-      previous?.attemptId !== undefined &&
-      previous.attemptId !== event.attempt_id
-    ) {
-      return false;
+    if (!ownsActivity) {
+      const canBuffer =
+        !detail.archived &&
+        event.session_revision > detail.meta.revision;
+      if (!canBuffer) return false;
+      const pendingActivityById = withPendingActivity(
+        get().pendingActivityById,
+        event,
+      );
+      if (!pendingActivityById) return false;
+      set({ pendingActivityById });
+      return true;
     }
-    if (
-      previous?.attemptId === event.attempt_id &&
-      previous.contextGeneration !== undefined &&
-      previous.contextGeneration !== event.context_generation
-    ) {
+    if (!activityCanUpdateRuntime(previous, event)) {
       return false;
     }
     set((state) => {
@@ -608,18 +899,13 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
       return {
         runtimeById: {
           ...state.runtimeById,
-          [event.session_id!]: {
-            status: event.event_type,
-            revision: Math.max(
-              detail.meta.revision,
-              current?.revision ?? 0,
-              event.session_revision!,
-            ),
-            attemptId: event.attempt_id,
-            contextGeneration: event.context_generation,
-            latestEvent: event,
-          },
+          [event.session_id]: runtimeFromActivity(detail, current, event),
         },
+        pendingActivityById: pendingAfterAppliedActivity(
+          state.pendingActivityById,
+          detail,
+          event,
+        ),
       };
     });
     return true;
@@ -636,6 +922,7 @@ export const useQuickSessionStore = create<QuickSessionState>((set, get) => ({
       selectedId: null,
       detailById: {},
       runtimeById: {},
+      pendingActivityById: {},
       showArchived: false,
       loading: { ...EMPTY_LOADING },
       errors: { ...EMPTY_ERRORS },

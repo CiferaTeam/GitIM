@@ -291,6 +291,7 @@ describe("QuickSessionHub", () => {
       "follow up",
       expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/),
     );
+    expect(container.textContent).toContain("queued");
 
     await act(async () => {
       (container.querySelector(
@@ -307,6 +308,79 @@ describe("QuickSessionHub", () => {
         archived: true,
       });
     });
+  });
+
+  it("sends with Command+Enter while plain Enter remains a newline", async () => {
+    api.listQuickSessions.mockResolvedValue({
+      ok: true,
+      data: {
+        sessions: [
+          {
+            id: session.meta.id,
+            title: session.meta.title,
+            agent_id: session.meta.agent_id,
+            created_by: session.meta.created_by,
+            status: session.meta.status,
+            updated_at: session.meta.updated_at,
+            last_message_preview: session.meta.last_message_preview,
+            revision: session.meta.revision,
+            archived: false,
+            ref: `session:${session.meta.id}`,
+          },
+        ],
+      },
+    });
+    await act(async () => root.render(<QuickSessionHub />));
+    await act(async () => {
+      (container.querySelector(
+        "button[aria-label='Quick Sessions']",
+      ) as HTMLButtonElement).click();
+      await vi.waitFor(() =>
+        expect(container.textContent).toContain("Investigate flakes"),
+      );
+    });
+    const rowButton = Array.from(container.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("Investigate flakes"),
+    )!;
+    await act(async () => {
+      rowButton.click();
+      await vi.waitFor(() => expect(api.readQuickSession).toHaveBeenCalled());
+    });
+
+    const composer = Array.from(container.querySelectorAll("textarea")).find(
+      (element) => element.placeholder.includes("Continue"),
+    )!;
+    await act(async () => setValue(composer, "keyboard follow up"));
+    const plainEnterAccepted = composer.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "Enter",
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(plainEnterAccepted).toBe(true);
+    expect(api.sendQuickSessionMessage).not.toHaveBeenCalled();
+
+    let commandEnterAccepted = true;
+    await act(async () => {
+      commandEnterAccepted = composer.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await vi.waitFor(() =>
+        expect(api.sendQuickSessionMessage).toHaveBeenCalledWith(
+          "room",
+          SESSION_ID,
+          "keyboard follow up",
+          expect.stringMatching(/^[0-9A-HJKMNP-TV-Z]{26}$/),
+        ),
+      );
+    });
+    expect(commandEnterAccepted).toBe(false);
   });
 
   it("offers deduplicated local and matching-workspace fleet agents", async () => {
