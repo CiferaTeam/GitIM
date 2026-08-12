@@ -171,7 +171,7 @@ pub kind: UserKind,
 
 | Case | 行为 |
 |------|------|
-| 混版本 workspace | 新写 kind，老 daemon 忽略字段；老写无 kind，新 UI 显示 unknown |
+| 混版本 workspace | 不支持 — 旧 daemon 对 `users/*.meta.yaml` 的 RMW 会丢掉 `kind` 字段；所有节点需升级到带 kind 的版本。新写 kind 老 daemon 读时忽略；老写无 kind 新 UI 显示 unknown |
 | handler 同时在 live 与 user_infos(agent) | 只出现在 Local/Fleet，不进 Outside |
 | kind=human 却误出现在 /agents | 仍在 Humans 展示；Local 若 runtime 真返回该卡则也显示（配置错误可见，不静默吞） |
 | Outside 全 unknown | 文案只有 `unclassified` |
