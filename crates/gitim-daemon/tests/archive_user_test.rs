@@ -791,10 +791,12 @@ async fn test_list_users_carries_display_name() {
             gitim_core::responses::ActiveUserEntry {
                 handler: "alice".to_string(),
                 display_name: Some("Alice".to_string()),
+                kind: gitim_core::types::UserKind::Unknown,
             },
             gitim_core::responses::ActiveUserEntry {
                 handler: "bob".to_string(),
                 display_name: Some("Bob".to_string()),
+                kind: gitim_core::types::UserKind::Unknown,
             },
         ],
         "user_infos must mirror sorted handlers with their display_name"

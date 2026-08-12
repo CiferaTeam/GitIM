@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::types::{QuickSessionMeta, QuickSessionStatus, ThreadEntry};
+use crate::types::{QuickSessionMeta, QuickSessionStatus, ThreadEntry, UserKind};
 
 /// Response payload for `Request::Status`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -160,6 +160,8 @@ pub struct ActiveUserEntry {
     pub handler: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "UserKind::is_unknown")]
+    pub kind: UserKind,
 }
 
 /// Response payload for `Request::GetThread`. `entries` keep the same
@@ -1033,12 +1035,14 @@ mod tests {
                 ActiveUserEntry {
                     handler: "alice".to_string(),
                     display_name: Some("Alice Chen".to_string()),
+                    kind: UserKind::Human,
                 },
                 // display_name omitted on the wire when None (meta missing /
                 // unparseable) — the frontend falls back to the bare handler.
                 ActiveUserEntry {
                     handler: "bob".to_string(),
                     display_name: None,
+                    kind: UserKind::Unknown,
                 },
             ]),
         };
@@ -1056,6 +1060,8 @@ mod tests {
         // None display_name is skipped, not serialized as null.
         assert_eq!(infos[1].get("handler").unwrap().as_str(), Some("bob"));
         assert!(!infos[1].as_object().unwrap().contains_key("display_name"));
+        assert_eq!(infos[0].get("kind").unwrap().as_str(), Some("human"));
+        assert!(!infos[1].as_object().unwrap().contains_key("kind"));
         // Round-trips losslessly.
         let back: ListUsersResponse = serde_json::from_value(v).unwrap();
         assert_eq!(back, r);
