@@ -177,11 +177,17 @@ describe("parseChannelMeta/parseUserMeta — lenient deserialize via wasm", () =
     ).toThrow();
   });
 
-  it("parses a user meta and tolerates a missing optional labels field", () => {
+  it("parses a user kind and tolerates legacy meta without kind", () => {
     const meta = parseUserMeta(
-      "display_name: Alice\nrole: member\nintroduction: hi\n",
-    ) as { display_name: string; role: string };
+      "display_name: Alice\nrole: member\nintroduction: hi\nkind: human\n",
+    ) as { display_name: string; role: string; kind?: string };
     expect(meta.display_name).toBe("Alice");
     expect(meta.role).toBe("member");
+    expect(meta.kind).toBe("human");
+
+    const legacy = parseUserMeta(
+      "display_name: Alice\nrole: member\nintroduction: hi\n",
+    ) as { kind?: string };
+    expect(legacy.kind === undefined || legacy.kind === "unknown").toBe(true);
   });
 });

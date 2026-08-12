@@ -15,6 +15,8 @@ export interface UserMeta {
   display_name: string;
   role: string;
   introduction: string;
+  labels?: string[];
+  kind?: string;
 }
 
 export interface DaemonWebState {
