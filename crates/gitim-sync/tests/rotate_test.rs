@@ -1,7 +1,9 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use gitim_sync::git::GitStorage;
-use gitim_sync::rotate::{check_push_fence, follow_redirect, try_fire_rotation, RotationOutcome};
+use gitim_sync::rotate::{
+    check_push_fence, follow_redirect, run_archive, try_fire_rotation, RotationOutcome,
+};
 use std::process::Command;
 
 // === helpers (shared by later tasks in this file) ===
@@ -79,7 +81,7 @@ fn under_threshold_returns_not_ready() {
 }
 
 #[test]
-fn solo_fire_wins_switches_branch_tags_and_bundles() {
+fn solo_fire_wins_before_archive_runs() {
     let (_bare, clone) = setup_bare_and_clone(5);
     let storage = GitStorage::new(clone.path());
     let arch = tempfile::TempDir::new().unwrap();
@@ -93,6 +95,7 @@ fn solo_fire_wins_switches_branch_tags_and_bundles() {
     )
     .unwrap();
     let RotationOutcome::Won {
+        archive,
         new_branch,
         new_epoch,
         sealed_branch,
@@ -113,7 +116,74 @@ fn solo_fire_wins_switches_branch_tags_and_bundles() {
     );
     let yaml = std::fs::read_to_string(clone.path().join("gitim.epoch.yaml")).unwrap();
     assert!(yaml.contains("status: active") && yaml.contains("epoch: 2"));
+    assert!(!arch.path().join("epoch-1.bundle").exists());
+
+    run_archive(&storage, &archive);
     assert!(arch.path().join("epoch-1.bundle").exists());
+}
+
+#[test]
+fn delayed_archive_stays_pinned_to_the_sealed_epoch() {
+    let (bare, clone) = setup_bare_and_clone(5);
+    let storage = GitStorage::new(clone.path());
+    let arch = tempfile::TempDir::new().unwrap();
+    let sealed_tip_before_rotation = storage.rev_parse("main").unwrap();
+    let o = try_fire_rotation(
+        &storage,
+        "main",
+        3,
+        arch.path(),
+        ("d", "d@g"),
+        "2026-06-10T00:00:00Z",
+    )
+    .unwrap();
+    let RotationOutcome::Won {
+        archive,
+        sealed_commit_sha,
+        ..
+    } = o
+    else {
+        panic!("expected Won, got {o:?}");
+    };
+    assert_eq!(sealed_commit_sha, sealed_tip_before_rotation);
+
+    commit_file(&clone, "after-rotation.thread", "new epoch content");
+    let active_head = storage.rev_parse("HEAD").unwrap();
+    let redirect_tip = Command::new("git")
+        .args(["rev-parse", "refs/heads/main"])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    let redirect_tip = String::from_utf8_lossy(&redirect_tip.stdout)
+        .trim()
+        .to_string();
+    run_archive(&storage, &archive);
+
+    let bundle = arch.path().join("epoch-1.bundle");
+    let heads = Command::new("git")
+        .args(["bundle", "list-heads", bundle.to_str().unwrap()])
+        .current_dir(clone.path())
+        .output()
+        .unwrap();
+    let heads = String::from_utf8_lossy(&heads.stdout);
+    assert!(heads.contains(&sealed_tip_before_rotation));
+    assert!(!heads.contains(&redirect_tip));
+    assert!(!heads.contains(active_head.trim()));
+
+    let archive_tag = format!(
+        "refs/tags/archive/epoch-1/{}",
+        &sealed_tip_before_rotation[..7]
+    );
+    let remote_tag = Command::new("git")
+        .args(["rev-parse", &archive_tag])
+        .current_dir(bare.path())
+        .output()
+        .unwrap();
+    assert!(remote_tag.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&remote_tag.stdout).trim(),
+        sealed_tip_before_rotation
+    );
 }
 
 #[test]
