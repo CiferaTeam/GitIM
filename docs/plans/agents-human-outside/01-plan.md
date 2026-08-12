@@ -940,7 +940,7 @@ Plan saved to `docs/plans/agents-human-outside/01-plan.md`.
 
 **Two execution options:**
 
-1. **Subagent-Driven (recommended)** — fresh subagent per task + two-stage review  
-2. **Inline Execution** — this session, executing-plans with checkpoints  
+1. **Subagent-Driven (recommended)** — fresh subagent per task + two-stage review
+2. **Inline Execution** — this session, executing-plans with checkpoints
 
 Which approach?
