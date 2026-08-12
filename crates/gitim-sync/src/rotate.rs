@@ -5,7 +5,7 @@
 
 use crate::git::{GitError, GitStorage};
 use gitim_core::epoch::{EpochFile, EpochStatus};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const EPOCH_FILE: &str = "gitim.epoch.yaml";
 /// Multi-hop follow guard (design scenario 6). 32 is unreachable in
@@ -26,6 +26,7 @@ fn seal_commit_message(current_epoch: u32, new_branch: &str, orphan_short: &str)
 pub enum RotationOutcome {
     NotReady,
     Won {
+        archive: ArchivePlan,
         sealed_branch: String,
         new_branch: String,
         new_epoch: u32,
@@ -35,12 +36,34 @@ pub enum RotationOutcome {
     Lost,
 }
 
+#[derive(Debug)]
+pub struct ArchivePlan {
+    tag: String,
+    sealed_commit_sha: String,
+    bundle_path: PathBuf,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RotationError {
     #[error("git: {0}")]
     Git(#[from] GitError),
     #[error("epoch: {0}")]
     Epoch(String),
+}
+
+/// Persist the sealed epoch behind its immutable archive tag.
+///
+/// Rotation is already durable before this runs, so each archive step is
+/// best-effort and reports failures without changing the rotation outcome.
+pub fn run_archive(storage: &GitStorage, archive: &ArchivePlan) {
+    if let Err(e) = storage.tag_archive(&archive.tag, &archive.sealed_commit_sha) {
+        tracing::warn!("rotation: tag_archive failed (non-fatal): {e}");
+    } else if let Err(e) = storage.push_tag(&archive.tag) {
+        tracing::warn!("rotation: push_tag failed (non-fatal): {e}");
+    }
+    if let Err(e) = storage.bundle_to_path(&archive.bundle_path, &archive.tag) {
+        tracing::warn!("rotation: bundle failed (non-fatal): {e}");
+    }
 }
 
 /// Parse `gitim.epoch.yaml` as committed at `<ref>` (not the working tree —
@@ -230,18 +253,12 @@ pub fn try_fire_rotation(
                     );
                 }
             }
-            // Best-effort archive: tag + push + bundle. Failure warns, never
-            // blocks — the rotation itself is already durable on origin.
-            if let Err(e) = storage.tag_archive(&archive_tag, &sealed_commit_sha) {
-                tracing::warn!("rotation: tag_archive failed (non-fatal): {e}");
-            } else if let Err(e) = storage.push_tag(&archive_tag) {
-                tracing::warn!("rotation: push_tag failed (non-fatal): {e}");
-            }
-            let bundle_path = archive_dir.join(format!("epoch-{current_epoch}.bundle"));
-            if let Err(e) = storage.bundle_to_path(&bundle_path, &archive_tag) {
-                tracing::warn!("rotation: bundle failed (non-fatal): {e}");
-            }
             Ok(RotationOutcome::Won {
+                archive: ArchivePlan {
+                    tag: archive_tag,
+                    sealed_commit_sha: sealed_commit_sha.clone(),
+                    bundle_path: archive_dir.join(format!("epoch-{current_epoch}.bundle")),
+                },
                 sealed_branch: current_branch.to_string(),
                 new_branch,
                 new_epoch,
