@@ -12,6 +12,7 @@ import {
   QuickSessionReferenceLink,
 } from "./reference-preview";
 import {
+  getCardReplyPreviewReadQuery,
   getCardPreviewReadQuery,
   selectCardPreviewMessages,
 } from "./reference-preview-utils";
@@ -80,6 +81,51 @@ vi.mock("@/components/ui/hover-card", async () => {
   };
 });
 
+vi.mock("@/components/ui/popover", async () => {
+  const React = await import("react");
+  const PopoverOpenContext = React.createContext(false);
+  return {
+    Popover: ({
+      open,
+      children,
+    }: {
+      open?: boolean;
+      children?: React.ReactNode;
+    }) => (
+      <PopoverOpenContext.Provider value={Boolean(open)}>
+        <div data-popover-open={String(open)}>{children}</div>
+      </PopoverOpenContext.Provider>
+    ),
+    PopoverTrigger: ({ children }: { children?: React.ReactNode }) => (
+      <>{children}</>
+    ),
+    PopoverContent: ({
+      children,
+      onPointerEnter,
+      onPointerLeave,
+      "aria-label": ariaLabel,
+    }: {
+      children?: React.ReactNode;
+      onPointerEnter?: React.PointerEventHandler<HTMLDivElement>;
+      onPointerLeave?: React.PointerEventHandler<HTMLDivElement>;
+      "aria-label"?: string;
+    }) => {
+      const isOpen = React.useContext(PopoverOpenContext);
+      if (!isOpen) return null;
+      return (
+        <div
+          role="dialog"
+          aria-label={ariaLabel}
+          onPointerEnter={onPointerEnter}
+          onPointerLeave={onPointerLeave}
+        >
+          {children}
+        </div>
+      );
+    },
+  };
+});
+
 describe("CardReferenceLink", () => {
   let container: HTMLDivElement;
   let root: Root;
@@ -112,6 +158,7 @@ describe("CardReferenceLink", () => {
       root.unmount();
     });
     container.remove();
+    vi.restoreAllMocks();
   });
 
   it("renders an uncached card reference without re-rendering forever", async () => {
@@ -202,6 +249,284 @@ describe("CardReferenceLink", () => {
     );
   });
 
+  it("shows sparse grouped replies in an isolated scrollable card change preview", async () => {
+    const onOuterWheel = vi.fn();
+    const onOpen = vi.fn();
+    const longReply = [
+      "first recent reply",
+      "context line two",
+      "context line three",
+      "context line four",
+      "context line five",
+      "context line six",
+    ].join("\n");
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(
+      function clientHeight(this: HTMLElement) {
+        return this.textContent === longReply ? 72 : 18;
+      },
+    );
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(
+      function scrollHeight(this: HTMLElement) {
+        return this.textContent === longReply ? 144 : 18;
+      },
+    );
+    const entries: Message[] = [
+      {
+        line_number: 2,
+        point_to: 0,
+        author: "alice",
+        timestamp: "20260811T150000Z",
+        body: longReply,
+      },
+      {
+        line_number: 40,
+        point_to: 2,
+        author: "bob",
+        timestamp: "20260811T150100Z",
+        body: "second recent reply",
+      },
+      {
+        line_number: 90,
+        point_to: 40,
+        author: "cfo",
+        timestamp: "20260811T150200Z",
+        body: "latest recent reply",
+      },
+      {
+        line_number: 140,
+        point_to: 90,
+        author: "alice",
+        timestamp: "20260811T150300Z",
+        body: "unrelated later reply",
+      },
+    ];
+    api.readCard.mockImplementation(
+      async (_slug: string, _channel: string, _cardId: string, query: {
+        limit?: number;
+        since?: number;
+      }) => {
+        const afterCursor = query.since == null
+          ? entries
+          : entries.filter((message) => message.line_number > query.since!);
+        const selected = query.since == null
+          ? afterCursor.slice(-(query.limit ?? afterCursor.length))
+          : afterCursor.slice(0, query.limit);
+        return {
+          ok: true,
+          data: {
+            meta: {
+              card_id: "20260811-145635-fa3",
+              channel: "awesome-agents-team-0519",
+              title: "Review PR #51: Crewargo",
+              status: "done",
+              labels: [],
+              assignee: "opencode-dsflash-paid",
+              created_by: "cfo",
+              created_at: "20260811T145635Z",
+              updated_at: "20260811T150200Z",
+            },
+            entries: selected,
+            archived: false,
+          },
+        };
+      },
+    );
+
+    await act(async () => {
+      root.render(
+        <div onWheel={onOuterWheel}>
+          <CardReferenceLink
+            reference={{
+              channel: "awesome-agents-team-0519",
+              cardId: "20260811-145635-fa3",
+              line: 90,
+            }}
+            latestReplyCount={7}
+            previewStartLine={2}
+            onOpen={onOpen}
+          />
+        </div>,
+      );
+      await Promise.resolve();
+    });
+
+    const trigger = container.querySelector("button");
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger?.click();
+      await Promise.resolve();
+    });
+
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain("first recent reply");
+      });
+    });
+
+    expect(onOpen).not.toHaveBeenCalled();
+
+    expect(api.readCard).toHaveBeenCalledWith(
+      "room",
+      "awesome-agents-team-0519",
+      "20260811-145635-fa3",
+      { since: 1, limit: 12 },
+    );
+    expect(document.body.textContent).toContain("second recent reply");
+    expect(document.body.textContent).toContain("latest recent reply");
+    expect(document.body.textContent).not.toContain("unrelated later reply");
+    expect(document.body.textContent).toContain("7 new replies");
+
+    const firstReply = document.body.querySelector<HTMLButtonElement>(
+      'button[title="Open full card at L000002"]',
+    );
+    expect(firstReply).not.toBeNull();
+    const firstReplyBody = firstReply?.querySelector<HTMLElement>(
+      ".whitespace-pre-wrap",
+    );
+    expect(firstReplyBody).toBeDefined();
+    expect(firstReplyBody?.className).toContain("line-clamp-4");
+
+    const expandButtons = Array.from(document.body.querySelectorAll("button")).filter(
+      (button) => button.textContent?.trim() === "Show more",
+    );
+    expect(expandButtons).toHaveLength(1);
+    expect(expandButtons[0]?.getAttribute("aria-expanded")).toBe("false");
+    await act(async () => {
+      expandButtons[0]?.click();
+    });
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(firstReplyBody?.className).not.toContain("line-clamp-");
+    expect(expandButtons[0]?.textContent?.trim()).toBe("Show less");
+    expect(expandButtons[0]?.getAttribute("aria-expanded")).toBe("true");
+    await act(async () => {
+      expandButtons[0]?.click();
+    });
+    expect(firstReplyBody?.className).toContain("line-clamp-4");
+    expect(document.body.textContent).not.toContain("Scroll to browse");
+
+    const selectionSpy = vi.spyOn(window, "getSelection").mockReturnValue({
+      anchorNode: firstReplyBody?.firstChild ?? null,
+      focusNode: firstReplyBody?.firstChild ?? null,
+      isCollapsed: false,
+      toString: () => longReply,
+    } as Selection);
+    await act(async () => {
+      firstReply?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, detail: 1 }),
+      );
+    });
+    expect(onOpen).not.toHaveBeenCalled();
+    selectionSpy.mockRestore();
+
+    const secondReply = document.body.querySelector<HTMLButtonElement>(
+      'button[title="Open full card at L000040"]',
+    );
+    expect(secondReply).not.toBeNull();
+    await act(async () => {
+      secondReply?.click();
+    });
+    expect(onOpen).toHaveBeenCalledWith(40);
+    onOpen.mockClear();
+
+    const scroller = document.body.querySelector<HTMLElement>(
+      '[aria-label="Recent card discussion"]',
+    );
+    expect(scroller).not.toBeNull();
+    expect(scroller?.getAttribute("role")).toBe("region");
+    expect(scroller?.className).toContain("overflow-y-auto");
+    await act(async () => {
+      scroller?.dispatchEvent(new WheelEvent("wheel", { bubbles: true }));
+    });
+    expect(onOuterWheel).not.toHaveBeenCalled();
+
+    const viewAll = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent?.includes("View all"),
+    );
+    expect(viewAll).toBeDefined();
+    await act(async () => {
+      viewAll?.click();
+    });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(onOpen).toHaveBeenCalledWith();
+  });
+
+  it("fetches the full merged range and displays its latest replies", async () => {
+    const entries: Message[] = Array.from({ length: 16 }, (_, index) => ({
+      line_number: 2 + index * 10,
+      point_to: index === 0 ? 0 : 2 + (index - 1) * 10,
+      author: index % 2 === 0 ? "alice" : "bob",
+      timestamp: `20260811T15${String(index).padStart(2, "0")}00Z`,
+      body: index === 15 ? "unrelated later reply" : `merged reply ${index + 1}`,
+    }));
+    api.readCard.mockImplementation(
+      async (_slug: string, _channel: string, _cardId: string, query: {
+        limit?: number;
+        since?: number;
+      }) => {
+        const afterCursor = entries.filter(
+          (message) => query.since == null || message.line_number > query.since,
+        );
+        return {
+          ok: true,
+          data: {
+            meta: {
+              card_id: "20260811-145635-fa3",
+              channel: "awesome-agents-team-0519",
+              title: "Review PR #51: Crewargo",
+              status: "done",
+              labels: [],
+              assignee: "opencode-dsflash-paid",
+              created_by: "cfo",
+              created_at: "20260811T145635Z",
+              updated_at: "20260811T151400Z",
+            },
+            entries: afterCursor.slice(0, query.limit),
+            archived: false,
+          },
+        };
+      },
+    );
+
+    await act(async () => {
+      root.render(
+        <CardReferenceLink
+          reference={{
+            channel: "awesome-agents-team-0519",
+            cardId: "20260811-145635-fa3",
+            line: 142,
+          }}
+          latestReplyCount={15}
+          previewStartLine={2}
+          onOpen={vi.fn()}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const trigger = container.querySelector("button");
+    await act(async () => {
+      trigger?.click();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain("merged reply 15");
+      });
+    });
+
+    expect(api.readCard).toHaveBeenCalledWith(
+      "room",
+      "awesome-agents-team-0519",
+      "20260811-145635-fa3",
+      { since: 1, limit: 15 },
+    );
+    expect(document.body.textContent).not.toContain("L000002");
+    expect(document.body.textContent).not.toContain("L000022");
+    expect(document.body.textContent).toContain("merged reply 4");
+    expect(document.body.textContent).toContain("merged reply 15");
+    expect(document.body.textContent).not.toContain("unrelated later reply");
+  });
+
   it("reads a window of card discussion messages around the target line", () => {
     const messages: Message[] = [
       {
@@ -232,6 +557,8 @@ describe("CardReferenceLink", () => {
       1, 2, 3,
     ]);
     expect(getCardPreviewReadQuery()).toEqual({ limit: 12 });
+    expect(getCardReplyPreviewReadQuery(2, 15)).toEqual({ since: 1, limit: 15 });
+    expect(getCardReplyPreviewReadQuery(2, 5000)).toEqual({ since: 1, limit: 1000 });
     expect(selectCardPreviewMessages(messages).map((msg) => msg.line_number)).toEqual([
       1, 2, 3,
     ]);

@@ -745,6 +745,7 @@ describe("useChatStore card change events", () => {
     const now = Date.now();
     const event = makeEvent("c1", "general", 10, {
       firstReceivedAt: now - 1000,
+      firstTargetLine: 2,
       targetLine: 7,
       cardTitle: "Recovery review",
       receivedAt: now,
@@ -757,6 +758,58 @@ describe("useChatStore card change events", () => {
     );
 
     expect(useChatStore.getState().cardChangeEvents.general).toEqual([event]);
+  });
+
+  it("keeps the first and latest discussion lines when reminders merge", () => {
+    const now = Date.now();
+    useChatStore.getState().addCardChangeEvent(
+      makeEvent("c1", "general", 10, {
+        firstTargetLine: 2,
+        targetLine: 40,
+        receivedAt: now,
+      }),
+    );
+    useChatStore.getState().addCardChangeEvent(
+      makeEvent("c1", "general", 10, {
+        firstTargetLine: 90,
+        targetLine: 120,
+        count: 2,
+        receivedAt: now + 1000,
+      }),
+    );
+
+    expect(useChatStore.getState().cardChangeEvents.general).toMatchObject([
+      {
+        firstTargetLine: 2,
+        targetLine: 120,
+        count: 3,
+      },
+    ]);
+  });
+
+  it("keeps the discussion start unknown when a legacy reminder merges", () => {
+    const now = Date.now();
+    useChatStore.getState().addCardChangeEvent(
+      makeEvent("c1", "general", 10, {
+        targetLine: 40,
+        receivedAt: now,
+      }),
+    );
+    useChatStore.getState().addCardChangeEvent(
+      makeEvent("c1", "general", 10, {
+        firstTargetLine: 90,
+        targetLine: 120,
+        receivedAt: now + 1000,
+      }),
+    );
+
+    expect(useChatStore.getState().cardChangeEvents.general).toMatchObject([
+      {
+        firstTargetLine: undefined,
+        targetLine: 120,
+        count: 2,
+      },
+    ]);
   });
 
   it("keeps the first receive time when reminders merge", () => {

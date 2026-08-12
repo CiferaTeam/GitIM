@@ -624,6 +624,7 @@ export function usePollLoop(): void {
                 others.length === 1
                   ? "new message"
                   : `${others.length} new messages`;
+              const firstTargetLine = others[0]?.line_number;
               const targetLine = others[others.length - 1]?.line_number;
               toast.info(`Card ${cardLabel}: ${noun} from ${authors}`, {
                 action: {
@@ -653,6 +654,7 @@ export function usePollLoop(): void {
                 cardId: parsed.cardId,
                 cardChannel: parsed.channel,
                 anchorLine,
+                ...(firstTargetLine !== undefined && { firstTargetLine }),
                 ...(targetLine !== undefined && { targetLine }),
                 ...(cardTitle !== undefined && { cardTitle }),
                 authors: Array.from(new Set(others.map((e) => e.author))),

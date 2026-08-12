@@ -65,6 +65,7 @@ type CardChangeMeta = {
   cardId: string;
   cardChannel: string;
   count: number;
+  firstTargetLine?: number;
   targetLine?: number;
   cardTitle?: string;
 };
@@ -96,9 +97,11 @@ function CardChangeEventPill({
           ...(targetLine !== undefined && { line: targetLine }),
           label: title,
         }}
-        onOpen={() =>
-          onCardChangeClick?.(meta.cardChannel, meta.cardId, targetLine)
+        onOpen={(line) =>
+          onCardChangeClick?.(meta.cardChannel, meta.cardId, line ?? targetLine)
         }
+        latestReplyCount={meta.count}
+        previewStartLine={meta.firstTargetLine}
         className="max-w-[min(520px,80vw)] rounded-full bg-surface/50 px-2 py-0.5 text-[11px] text-text-muted/80 transition-colors hover:bg-surface hover:text-text-muted hover:no-underline"
       >
         <LayoutGrid className="h-3 w-3 shrink-0" />

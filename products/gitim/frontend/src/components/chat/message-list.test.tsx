@@ -682,7 +682,7 @@ describe("MessageList card change events", () => {
     document.body.innerHTML = "";
   });
 
-  it("renders the card title and opens the changed discussion line", async () => {
+  it("renders the card title and opens the full discussion from its preview", async () => {
     const onCardChangeClick = vi.fn();
     const card: Card = {
       card_id: "card-123",
@@ -696,6 +696,11 @@ describe("MessageList card change events", () => {
       updated_at: "20260511T120000Z",
     };
     useCardStore.getState().upsertCard(card);
+    useCardStore.getState().setCardMessages("general/card-123", [
+      msg(5, "first reply"),
+      msg(6, "reply to open"),
+      msg(7, "latest reply"),
+    ]);
     const messages = [
       msg(1, "a"),
       msg(2, "b"),
@@ -714,6 +719,29 @@ describe("MessageList card change events", () => {
 
     await act(async () => {
       button!.click();
+      await Promise.resolve();
+    });
+
+    expect(button!.getAttribute("aria-expanded")).toBe("true");
+    expect(onCardChangeClick).not.toHaveBeenCalled();
+
+    const replyRow = document.body.querySelector<HTMLButtonElement>(
+      'button[title="Open full card at L000006"]',
+    );
+    expect(replyRow).not.toBeNull();
+    await act(async () => {
+      replyRow?.click();
+      await Promise.resolve();
+    });
+    expect(onCardChangeClick).toHaveBeenCalledWith("general", "card-123", 6);
+    onCardChangeClick.mockClear();
+
+    const viewAll = Array.from(document.body.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent?.includes("View all"),
+    );
+    expect(viewAll).toBeDefined();
+    await act(async () => {
+      viewAll?.click();
       await Promise.resolve();
     });
 

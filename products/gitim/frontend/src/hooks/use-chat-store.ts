@@ -17,6 +17,7 @@ export interface CardChangeEvent {
   cardChannel: string;
   anchorLine: number;
   firstReceivedAt?: number;
+  firstTargetLine?: number;
   targetLine?: number;
   cardTitle?: string;
   authors: string[];
@@ -67,6 +68,7 @@ function parseStoredCardChangeEvent(raw: unknown, now: number): CardChangeEvent 
     ? Array.from(new Set(obj.authors.filter((a): a is string => typeof a === "string")))
     : [];
   const firstReceivedAt = finiteNumber(obj.firstReceivedAt);
+  const firstTargetLine = finiteNumber(obj.firstTargetLine);
   const targetLine = finiteNumber(obj.targetLine);
   const cardTitle = typeof obj.cardTitle === "string" ? obj.cardTitle : undefined;
 
@@ -76,6 +78,9 @@ function parseStoredCardChangeEvent(raw: unknown, now: number): CardChangeEvent 
     cardChannel,
     anchorLine: Math.floor(anchorLine),
     ...(firstReceivedAt !== null && firstReceivedAt > 0 && { firstReceivedAt }),
+    ...(firstTargetLine !== null && firstTargetLine > 0 && {
+      firstTargetLine: Math.floor(firstTargetLine),
+    }),
     ...(targetLine !== null && targetLine > 0 && { targetLine: Math.floor(targetLine) }),
     ...(cardTitle !== undefined && { cardTitle }),
     authors,
@@ -126,12 +131,17 @@ function mergeCardChangeEventMap(
       existing.firstReceivedAt ?? existing.receivedAt,
       event.firstReceivedAt ?? event.receivedAt,
     );
+    const firstTargetLine =
+      existing.firstTargetLine !== undefined && event.firstTargetLine !== undefined
+        ? Math.min(existing.firstTargetLine, event.firstTargetLine)
+        : undefined;
     const merged: CardChangeEvent = {
       ...existing,
       count: existing.count + event.count,
       authors: Array.from(new Set([...existing.authors, ...event.authors])),
       firstReceivedAt,
       receivedAt: Math.max(existing.receivedAt, event.receivedAt),
+      firstTargetLine,
       targetLine: event.targetLine ?? existing.targetLine,
       cardTitle: event.cardTitle ?? existing.cardTitle,
     };
@@ -836,6 +846,7 @@ function cardChangeEventToMessage(event: CardChangeEvent): Message {
       cardId: event.cardId,
       cardChannel: event.cardChannel,
       anchorLine: event.anchorLine,
+      firstTargetLine: event.firstTargetLine,
       targetLine: event.targetLine,
       cardTitle: event.cardTitle,
       authors: event.authors,

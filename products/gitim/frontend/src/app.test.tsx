@@ -362,6 +362,13 @@ describe("App card thread toasts", () => {
         }),
       }),
     );
+    expect(useChatStore.getState().cardChangeEvents.general).toMatchObject([
+      {
+        firstTargetLine: 1,
+        targetLine: 1,
+        count: 1,
+      },
+    ]);
 
     const [, options] = mocks.toast.info.mock.calls[0];
     await act(async () => {
