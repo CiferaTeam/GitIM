@@ -607,13 +607,17 @@ mod tests {
     }
 
     async fn register(state: &SharedState, handler: &str) {
+        register_with_kind(state, handler, UserKind::Unknown).await;
+    }
+
+    async fn register_with_kind(state: &SharedState, handler: &str, kind: UserKind) {
         let resp = handle_register_user(
             state.clone(),
             handler.to_string(),
             "Display".to_string(),
             "member".to_string(),
             "GitIM user".to_string(),
-            UserKind::Unknown,
+            kind,
         )
         .await;
         assert!(resp.ok, "register_user failed: {:?}", resp.error);
@@ -861,6 +865,31 @@ mod tests {
             resp.error.unwrap_or_default().contains("invalid handler"),
             "error should flag invalid handler"
         );
+    }
+
+    #[tokio::test]
+    async fn update_user_preserves_kind_human() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register_with_kind(&state, "alice", UserKind::Human).await;
+
+        let resp = handle_update_user(
+            state.clone(),
+            "alice".to_string(),
+            Some("Alice Human".to_string()),
+            Some("Updated intro".to_string()),
+        )
+        .await;
+        assert!(resp.ok, "update_user failed: {:?}", resp.error);
+
+        let meta_path = state.repo_root.join("users/alice.meta.yaml");
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        assert!(
+            content.contains("kind: human"),
+            "kind: human must survive update_user RMW; got:\n{content}"
+        );
+        let meta: UserMeta = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(meta.kind, UserKind::Human);
     }
 
     #[tokio::test]

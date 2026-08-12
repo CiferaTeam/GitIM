@@ -542,4 +542,123 @@ mod tests {
         let got = scan_active_for_labels(tmp.path(), &active, vec!["rust".into()]);
         assert!(got.is_empty());
     }
+
+    // --- Integration-style RMW tests: kind must survive labels add/remove ---
+
+    use crate::handlers::user::handle_register_user;
+    use crate::state::AppState;
+    use gitim_core::types::{config::Config, UserKind};
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+
+    fn setup_labels_state(tmp: &std::path::Path, handler: &str) -> SharedState {
+        let remote = tmp.join("remote.git");
+        std::fs::create_dir_all(&remote).unwrap();
+        std::process::Command::new("git")
+            .args(["init", "--bare"])
+            .current_dir(&remote)
+            .output()
+            .unwrap();
+        let repo = tmp.join("repo");
+        std::process::Command::new("git")
+            .args(["clone", remote.to_str().unwrap(), repo.to_str().unwrap()])
+            .output()
+            .unwrap();
+        for (k, v) in [("user.email", "test@test.com"), ("user.name", "Test")] {
+            std::process::Command::new("git")
+                .args(["config", k, v])
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+        }
+        std::fs::write(repo.join(".keep"), "").unwrap();
+        std::process::Command::new("git")
+            .args(["add", ".keep"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["push", "-u", "origin", "HEAD"])
+            .current_dir(&repo)
+            .output()
+            .unwrap();
+        let (tx, _) = broadcast::channel(16);
+        Arc::new(AppState::new(
+            repo,
+            Config::default(),
+            tx,
+            Some(handler.to_string()),
+        ))
+    }
+
+    async fn register_human_with_labels(state: &SharedState, handler: &str, labels: &[&str]) {
+        let resp = handle_register_user(
+            state.clone(),
+            handler.to_string(),
+            "Display".to_string(),
+            "member".to_string(),
+            "GitIM user".to_string(),
+            UserKind::Human,
+        )
+        .await;
+        assert!(resp.ok, "register_user failed: {:?}", resp.error);
+
+        if !labels.is_empty() {
+            let resp = handle_labels_add(
+                state.clone(),
+                handler.to_string(),
+                labels.iter().map(|l| (*l).to_string()).collect(),
+            )
+            .await;
+            assert!(resp.ok, "labels_add failed: {:?}", resp.error);
+        }
+    }
+
+    fn assert_kind_human_in_yaml(state: &SharedState, handler: &str) {
+        let meta_path = state
+            .repo_root
+            .join("users")
+            .join(format!("{handler}.meta.yaml"));
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        assert!(
+            content.contains("kind: human"),
+            "kind: human must survive labels RMW; got:\n{content}"
+        );
+        let meta: UserMeta = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(meta.kind, UserKind::Human);
+    }
+
+    #[tokio::test]
+    async fn labels_add_preserves_kind_human() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_labels_state(tmp.path(), "alice");
+        register_human_with_labels(&state, "alice", &["rust"]).await;
+
+        let resp = handle_labels_add(
+            state.clone(),
+            "alice".to_string(),
+            vec!["backend".to_string()],
+        )
+        .await;
+        assert!(resp.ok, "labels_add failed: {:?}", resp.error);
+        assert_kind_human_in_yaml(&state, "alice");
+    }
+
+    #[tokio::test]
+    async fn labels_remove_preserves_kind_human() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_labels_state(tmp.path(), "alice");
+        register_human_with_labels(&state, "alice", &["rust", "backend"]).await;
+
+        let resp =
+            handle_labels_remove(state.clone(), "alice".to_string(), vec!["rust".to_string()])
+                .await;
+        assert!(resp.ok, "labels_remove failed: {:?}", resp.error);
+        assert_kind_human_in_yaml(&state, "alice");
+    }
 }
