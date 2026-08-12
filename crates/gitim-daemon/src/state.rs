@@ -246,39 +246,56 @@ impl AppState {
         self.try_rotate_inner(threshold).map_err(|e| e.to_string())
     }
 
-    /// Acquire commit_lock and run the fire/follow state machine once.
+    /// Run the fire/follow state machine once, then archive a winning rotation.
     /// Blocking (git shell-outs throughout) — async callers go through
     /// `tokio::task::spawn_blocking`.
     fn try_rotate_inner(&self, threshold: u64) -> Result<bool, gitim_sync::rotate::RotationError> {
-        let _guard = self
-            .commit_lock
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let storage = GitStorage::new(&self.repo_root);
-        let branch = storage.current_branch()?;
-        // Per-clone, git-ignored archive landing zone for epoch bundles.
-        let archive_dir = self.repo_root.join(".gitim").join("archive");
-        let (name, email) = self.rotation_author();
-        let created_at = chrono::Utc::now().to_rfc3339();
+        self.try_rotate_inner_with_archiver(threshold, gitim_sync::rotate::run_archive)
+    }
 
-        let outcome = gitim_sync::rotate::try_fire_rotation(
-            &storage,
-            &branch,
-            threshold,
-            &archive_dir,
-            (name.as_str(), email.as_str()),
-            &created_at,
-        )?;
-        let fired = match outcome {
-            gitim_sync::rotate::RotationOutcome::Won { .. } => true,
-            gitim_sync::rotate::RotationOutcome::Lost => {
-                gitim_sync::rotate::follow_redirect(&storage, &branch)?;
-                false
+    fn try_rotate_inner_with_archiver<F>(
+        &self,
+        threshold: u64,
+        archiver: F,
+    ) -> Result<bool, gitim_sync::rotate::RotationError>
+    where
+        F: FnOnce(&GitStorage, &gitim_sync::rotate::ArchivePlan),
+    {
+        let storage = GitStorage::new(&self.repo_root);
+        let (fired, archive) = {
+            let _guard = self
+                .commit_lock
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let branch = storage.current_branch()?;
+            let archive_dir = self.repo_root.join(".gitim").join("archive");
+            let (name, email) = self.rotation_author();
+            let created_at = chrono::Utc::now().to_rfc3339();
+
+            let outcome = gitim_sync::rotate::try_fire_rotation(
+                &storage,
+                &branch,
+                threshold,
+                &archive_dir,
+                (name.as_str(), email.as_str()),
+                &created_at,
+            )?;
+            let result = match outcome {
+                gitim_sync::rotate::RotationOutcome::Won { archive, .. } => (true, Some(archive)),
+                gitim_sync::rotate::RotationOutcome::Lost => {
+                    gitim_sync::rotate::follow_redirect(&storage, &branch)?;
+                    (false, None)
+                }
+                gitim_sync::rotate::RotationOutcome::NotReady => return Ok(false),
+            };
+            if let Err(e) = self.refresh_epoch_status() {
+                tracing::warn!("rotation: epoch status refresh failed: {}", e);
             }
-            gitim_sync::rotate::RotationOutcome::NotReady => return Ok(false),
+            result
         };
-        if let Err(e) = self.refresh_epoch_status() {
-            tracing::warn!("rotation: epoch status refresh failed: {}", e);
+
+        if let Some(archive) = archive {
+            archiver(&storage, &archive);
         }
         Ok(fired)
     }
@@ -667,6 +684,7 @@ fn is_ancestor(ancestor: &str, descendant: &str, repo_root: &PathBuf) -> bool {
 mod tests {
     use super::*;
     use gitim_core::types::Config;
+    use std::process::Command;
 
     fn make_state(github_email: Option<String>) -> AppState {
         let tmp = tempfile::tempdir().unwrap();
@@ -678,6 +696,32 @@ mod tests {
             None,
             github_email,
         )
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) {
+        assert!(Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    fn setup_rotation_repo() -> (tempfile::TempDir, tempfile::TempDir) {
+        let bare = tempfile::tempdir().unwrap();
+        let clone = tempfile::tempdir().unwrap();
+        git(bare.path(), &["init", "--bare", "-b", "main"]);
+        git(clone.path(), &["clone", bare.path().to_str().unwrap(), "."]);
+        git(clone.path(), &["config", "user.email", "test@gitim"]);
+        git(clone.path(), &["config", "user.name", "test"]);
+        git(clone.path(), &["config", "commit.gpgsign", "false"]);
+        for i in 0..3 {
+            std::fs::write(clone.path().join(format!("f{i}.txt")), format!("{i}")).unwrap();
+            git(clone.path(), &["add", "."]);
+            git(clone.path(), &["commit", "-m", &format!("f{i}")]);
+        }
+        git(clone.path(), &["push", "-u", "origin", "main"]);
+        (bare, clone)
     }
 
     #[test]
@@ -708,6 +752,49 @@ mod tests {
             .write()
             .unwrap_or_else(|e| e.into_inner()) = Some("alice@example.com".to_string());
         assert_eq!(state.author_for("alice").1, "alice@example.com");
+    }
+
+    #[test]
+    fn archive_runs_after_commit_lock_is_released() {
+        let (_bare, clone) = setup_rotation_repo();
+        let (tx, _) = broadcast::channel(16);
+        let state = Arc::new(AppState::new(
+            clone.path().to_path_buf(),
+            Config::default(),
+            tx,
+            None,
+        ));
+        let commit_lock = state.commit_lock.clone();
+        let (archive_entered_tx, archive_entered_rx) = std::sync::mpsc::channel();
+        let (release_archive_tx, release_archive_rx) = std::sync::mpsc::channel();
+        let rotation_state = state.clone();
+
+        let rotation = std::thread::spawn(move || {
+            rotation_state.try_rotate_inner_with_archiver(3, move |storage, archive| {
+                archive_entered_tx.send(()).unwrap();
+                release_archive_rx.recv().unwrap();
+                gitim_sync::rotate::run_archive(storage, archive);
+            })
+        });
+        archive_entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+
+        {
+            let _writer_guard = commit_lock
+                .try_lock()
+                .expect("commit_lock must be released before archive starts");
+            std::fs::write(clone.path().join("during-archive.thread"), "message").unwrap();
+            git(clone.path(), &["add", "during-archive.thread"]);
+            git(clone.path(), &["commit", "-m", "write during archive"]);
+        }
+        assert!(clone.path().join("during-archive.thread").exists());
+
+        release_archive_tx.send(()).unwrap();
+        let fired = rotation.join().unwrap().unwrap();
+
+        assert!(fired);
+        assert!(clone.path().join(".gitim/archive/epoch-1.bundle").exists());
     }
 
     #[test]
