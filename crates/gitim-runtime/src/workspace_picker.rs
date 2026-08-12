@@ -30,11 +30,13 @@ impl fmt::Display for PickerError {
     }
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn workspace_picker_script() -> &'static str {
     r#"set selectedFolder to choose folder with prompt "Choose a folder for this GitIM workspace. Use New Folder to create an empty folder."
 POSIX path of selectedFolder"#
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn interpret_osascript_output(
     success: bool,
     stdout: &[u8],
