@@ -24,6 +24,17 @@ const DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(test)]
 const DAEMON_REQUEST_TIMEOUT: Duration = Duration::from_millis(50);
 
+/// `depart_user` push-es after every thread / DM / channel / archive step.
+/// Against a real GitHub remote that is tens of sequential pushes — far
+/// past the 8s default sized for send/read/status. 5 minutes matches the
+/// runtime preflight budget; the CLI wraps burn in a 6-minute HTTP
+/// envelope so the transport outlives this RPC.
+const DEPART_USER_TIMEOUT_SECS: u64 = 300;
+#[cfg(not(test))]
+const DEPART_USER_TIMEOUT: Duration = Duration::from_secs(DEPART_USER_TIMEOUT_SECS);
+#[cfg(test)]
+const DEPART_USER_TIMEOUT: Duration = DAEMON_REQUEST_TIMEOUT;
+
 pub struct GitimClient {
     repo_root: PathBuf,
     socket_path: PathBuf,
@@ -38,6 +49,16 @@ impl GitimClient {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<ApiResponse, ClientError> {
+        self.request_with_timeout(method, params, DAEMON_REQUEST_TIMEOUT)
+            .await
+    }
+
+    async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> Result<ApiResponse, ClientError> {
         let stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound
                 || e.kind() == std::io::ErrorKind::ConnectionRefused
@@ -60,7 +81,7 @@ impl GitimClient {
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
 
         let mut line = String::new();
-        tokio::time::timeout(DAEMON_REQUEST_TIMEOUT, reader.read_line(&mut line))
+        tokio::time::timeout(timeout, reader.read_line(&mut line))
             .await
             .map_err(|_| ClientError::Timeout)?
             .map_err(|e| ClientError::ConnectionFailed(e.to_string()))?;
@@ -675,8 +696,12 @@ impl GitimClient {
     /// for "depart complete" — so retrying after a partial failure is
     /// safe and resumes from the first incomplete step.
     pub async fn depart_user(&self, handler: &str) -> Result<ApiResponse, ClientError> {
-        self.request("depart_user", json!({ "handler": handler }))
-            .await
+        self.request_with_timeout(
+            "depart_user",
+            json!({ "handler": handler }),
+            DEPART_USER_TIMEOUT,
+        )
+        .await
     }
 
     /// Read this client's own handler from `<repo_root>/.gitim/me.json` and
@@ -1482,6 +1507,13 @@ mod tests {
         let client = GitimClient::new(tmp.path());
         let err = client.status().await.unwrap_err();
         assert!(matches!(err, ClientError::Timeout));
+    }
+
+    #[test]
+    fn depart_user_production_timeout_outlives_default_rpc() {
+        // 300s > 8s fast-RPC default; keep aligned with runtime preflight
+        // (5m) so CLI LONG_REQUEST_TIMEOUT (6m) still wraps it.
+        assert_eq!(DEPART_USER_TIMEOUT_SECS, 300);
     }
 
     /// build_request shapes for the no-param archive-protocol methods.

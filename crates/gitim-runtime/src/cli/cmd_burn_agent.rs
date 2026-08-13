@@ -28,7 +28,7 @@
 
 use serde_json::json;
 
-use crate::cli::http::{CliError, Client};
+use crate::cli::http::{CliError, Client, LONG_REQUEST_TIMEOUT};
 use crate::cli::workspace::resolve_workspace;
 
 /// Entry point. Sequence:
@@ -50,7 +50,17 @@ pub async fn run(
 ) -> Result<i32, CliError> {
     let slug = resolve_workspace(client, workspace.as_deref()).await?;
     let (path, body) = build_burn_request(&slug, &id, hard);
-    let response = client.post(&path, &body).await?;
+    // Ritual burn blocks on daemon `depart_user`, which push-es after every
+    // thread / DM / channel / archive step. The 30s fast-verb default would
+    // abort the HTTP wait while the daemon is still pushing. `--hard` is
+    // local-only and stays on the default.
+    let response = if hard {
+        client.post(&path, &body).await?
+    } else {
+        client
+            .post_with_timeout(&path, &body, LONG_REQUEST_TIMEOUT)
+            .await?
+    };
     let out = serde_json::to_string(&response)
         .map_err(|e| CliError::Parse(format!("serialize burn response: {e}")))?;
     println!("{out}");

@@ -5092,10 +5092,10 @@ async fn agents_burn(
             //
             // Safety reason: depart.rs Phase 4 writes the archive file via
             // `git mv` + `add_and_commit_as` and only then calls
-            // `push_with_retry`. The 8-second RPC window can expire while the
-            // push is still in progress, leaving the local clone ahead of the
-            // remote. Proceeding to cleanup at that point (steps 4-7, which
-            // rm-rf the clone) would destroy the only local copy of an
+            // `push_with_retry`. The depart_user RPC timeout can expire while
+            // the push is still in progress, leaving the local clone ahead of
+            // the remote. Proceeding to cleanup at that point (steps 4-7,
+            // which rm-rf the clone) would destroy the only local copy of an
             // unpushed commit — exactly the regression described in
             // `depart_user_test.rs:945-952`.
             //

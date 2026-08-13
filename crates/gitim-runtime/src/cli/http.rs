@@ -42,22 +42,25 @@ const ERROR_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
 /// Default per-request timeout, applied via the reqwest client builder. Sized
 /// for the fast verbs (`status`, `runtime-id`, `workspaces`, `list-agents`,
-/// `burn-agent`, `preflight`) that hit synchronous in-memory state on the
-/// runtime side. 30s is generous compared to the millisecond-scale handlers
-/// they call but tight enough that an accepted-but-stuck listener fails fast
-/// instead of hanging the agent's Bash tool call for minutes.
+/// `preflight`, `burn-agent --hard`) that hit synchronous in-memory or
+/// local-only state on the runtime side. 30s is generous compared to the
+/// millisecond-scale handlers they call but tight enough that an
+/// accepted-but-stuck listener fails fast instead of hanging the agent's
+/// Bash tool call for minutes.
 ///
-/// Provisioning verbs (`add-agent`, `update-agent`) opt out of this default
-/// via `Client::post_with_timeout` / `Client::patch_with_timeout` — see those
-/// methods for the long-running regime.
+/// Long verbs (`add-agent`, `update-agent`, ritual `burn-agent`) opt out of
+/// this default via `Client::post_with_timeout` / `Client::patch_with_timeout`
+/// — see those methods for the long-running regime.
 pub(crate) const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Long-running per-request timeout for handlers that block on filesystem or
 /// network IO the runtime can't bound (`add-agent` runs provider preflight and
 /// `git clone`s the workspace remote inline; `update-agent` writes
-/// potentially-large dotenv content to disk). 6 minutes gives the runtime's
-/// 5-minute provider preflight a transport margin while still surfacing a hung
-/// server without burning the whole agent turn. Callers thread this through
+/// potentially-large dotenv content to disk; ritual `burn-agent` waits on
+/// daemon `depart_user`, which push-es after every archive-protocol step).
+/// 6 minutes gives the runtime's 5-minute provider / depart_user budget a
+/// transport margin while still surfacing a hung server without burning the
+/// whole agent turn. Callers thread this through
 /// `Client::post_with_timeout` or `Client::patch_with_timeout`.
 pub(crate) const LONG_REQUEST_TIMEOUT: Duration = Duration::from_secs(360);
 
@@ -171,9 +174,10 @@ impl Client {
         //   state — they should fail fast on a stuck listener, not hang the
         //   agent's Bash tool call for minutes.
         // - Per-request override = 360s, used by `post_with_timeout` for the
-        //   provisioning verbs (`add-agent`, `update-agent`) whose runtime
-        //   handlers block on `git clone` or large file writes that we can't
-        //   meaningfully bound below the wall clock.
+        //   long verbs (`add-agent`, `update-agent`, ritual `burn-agent`)
+        //   whose runtime handlers block on `git clone`, large file writes,
+        //   or daemon `depart_user` pushes that we can't meaningfully bound
+        //   below the wall clock.
         //
         // Without the per-verb split, a generous 360s default would penalize
         // every fast verb on an accepted-but-not-responding runtime. Without
@@ -204,10 +208,10 @@ impl Client {
 
     /// POST `<base>/<path>` with JSON body. Inherits the 30s
     /// `DEFAULT_REQUEST_TIMEOUT` from the client builder — appropriate for
-    /// the fast POST verbs (`burn-agent`). For provisioning POSTs that may
-    /// take minutes (`add-agent`), use [`Client::post_with_timeout`] with
-    /// `LONG_REQUEST_TIMEOUT` instead. See module docs for error
-    /// classification.
+    /// the fast POST verbs (`burn-agent --hard`). For POSTs that may take
+    /// minutes (`add-agent`, ritual `burn-agent`), use
+    /// [`Client::post_with_timeout`] with `LONG_REQUEST_TIMEOUT` instead.
+    /// See module docs for error classification.
     pub async fn post(
         &self,
         path: &str,
@@ -225,12 +229,13 @@ impl Client {
     }
 
     /// POST `<base>/<path>` with JSON body and an explicit per-request
-    /// timeout that overrides the builder default. Use for provisioning
-    /// handlers that legitimately block for minutes — currently `add-agent`
-    /// (runtime `git clone`s inline) and `update-agent` (runtime can write
-    /// up to 64KB dotenv content to disk).
+    /// timeout that overrides the builder default. Use for handlers that
+    /// legitimately block for minutes — currently `add-agent` (runtime
+    /// `git clone`s inline), ritual `burn-agent` (daemon `depart_user`
+    /// sequential pushes), and `update-agent` (runtime can write up to
+    /// 64KB dotenv content to disk).
     ///
-    /// Picking the timeout: pass [`LONG_REQUEST_TIMEOUT`] for those two verbs;
+    /// Picking the timeout: pass [`LONG_REQUEST_TIMEOUT`] for those verbs;
     /// the constant is the canonical envelope. We accept
     /// a `Duration` parameter rather than a hardcoded value here so that
     /// future verbs with different bounds (e.g. a `migrate-agent` with a
