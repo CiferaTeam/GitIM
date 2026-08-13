@@ -184,7 +184,7 @@ export function AgentList() {
           <Input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search agents..."
+            placeholder="Search workspace members..."
             className="pl-9 bg-background border-border"
           />
         </div>
@@ -452,16 +452,23 @@ function RosterRow({
   user: RosterUser;
   trailing?: ReactNode;
 }) {
+  const title = user.displayName
+    ? `${user.displayName} (@${user.handler})`
+    : `@${user.handler}`;
   return (
     <div className="flex min-w-0 items-center justify-between gap-3 rounded-lg border border-border bg-surface px-4 py-3">
-      <p className="min-w-0 truncate text-sm">
+      <p className="flex min-w-0 items-center gap-1.5 text-sm" title={title}>
         {user.displayName && (
           <>
-            <span className="font-medium text-foreground">{user.displayName}</span>
-            <span className="text-text-muted"> · </span>
+            <span className="min-w-0 truncate font-medium text-foreground">
+              {user.displayName}
+            </span>
+            <span className="shrink-0 text-text-muted"> · </span>
           </>
         )}
-        <span className="font-mono text-xs text-text-secondary">@{user.handler}</span>
+        <span className="shrink-0 font-mono text-xs text-text-secondary">
+          @{user.handler}
+        </span>
       </p>
       {trailing}
     </div>

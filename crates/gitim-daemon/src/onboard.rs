@@ -390,10 +390,18 @@ fn register_user(
     let commit_msg = format!("user: register @{}", handler);
 
     let (name, email) = state.author_for(handler);
-    state
-        .git_storage
-        .add_and_commit_as(&[&rel_path], &commit_msg, Some((&name, &email)))
-        .map_err(|e| Response::error(format!("register_user commit failed: {}", e)))?;
+    if let Err(e) =
+        state
+            .git_storage
+            .add_and_commit_as(&[&rel_path], &commit_msg, Some((&name, &email)))
+    {
+        // Drop the uncommitted meta so a retry does not hit the exists short-circuit.
+        let _ = std::fs::remove_file(&meta_path);
+        return Err(Response::error(format!(
+            "register_user commit failed: {}",
+            e
+        )));
+    }
 
     // Push with retry on conflict (skip if no remote, e.g. local git mode)
     if !state.git_storage.has_remote() {

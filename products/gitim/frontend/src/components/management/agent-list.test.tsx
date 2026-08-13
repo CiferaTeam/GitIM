@@ -321,6 +321,38 @@ describe("AgentList fleet grouping", () => {
     ).toContain("you");
   });
 
+  it("keeps handler visible via title and uses workspace-member search placeholder", () => {
+    useChatStore.setState({
+      currentUser: "alice",
+      userInfos: [
+        {
+          handler: "alice",
+          display_name: "A Very Long Display Name That Would Truncate",
+          kind: "human",
+        },
+      ],
+    });
+
+    act(() => {
+      root?.render(
+        <MemoryRouter>
+          <AgentList />
+        </MemoryRouter>,
+      );
+    });
+
+    const input = container.querySelector<HTMLInputElement>(
+      'input[placeholder="Search workspace members..."]',
+    );
+    expect(input).not.toBeNull();
+
+    const titled = container.querySelector(
+      '[data-testid="agents-humans"] [title="A Very Long Display Name That Would Truncate (@alice)"]',
+    );
+    expect(titled).not.toBeNull();
+    expect(titled?.textContent).toContain("@alice");
+  });
+
   it("collapses Outside by default and expands its roster on click", () => {
     useChatStore.setState({
       currentUser: "alice",
