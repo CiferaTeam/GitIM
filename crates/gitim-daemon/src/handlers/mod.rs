@@ -303,7 +303,8 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             display_name,
             role,
             introduction,
-        } => handle_register_user(state, handler, display_name, role, introduction).await,
+            kind,
+        } => handle_register_user(state, handler, display_name, role, introduction, kind).await,
         Request::UpdateUser {
             handler,
             display_name,
@@ -451,9 +452,18 @@ pub async fn handle_request(req: Request, state: SharedState) -> Response {
             admin,
             guest,
             join_general,
+            kind,
         } => {
-            crate::onboard::handle_onboard(state, git_server, auth, admin, guest, join_general)
-                .await
+            crate::onboard::handle_onboard(
+                state,
+                git_server,
+                auth,
+                admin,
+                guest,
+                join_general,
+                kind,
+            )
+            .await
         }
         Request::JoinChannel {
             channel,

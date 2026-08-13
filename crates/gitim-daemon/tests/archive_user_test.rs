@@ -791,13 +791,68 @@ async fn test_list_users_carries_display_name() {
             gitim_core::responses::ActiveUserEntry {
                 handler: "alice".to_string(),
                 display_name: Some("Alice".to_string()),
+                kind: gitim_core::types::UserKind::Unknown,
             },
             gitim_core::responses::ActiveUserEntry {
                 handler: "bob".to_string(),
                 display_name: Some("Bob".to_string()),
+                kind: gitim_core::types::UserKind::Unknown,
             },
         ],
         "user_infos must mirror sorted handlers with their display_name"
+    );
+}
+
+#[tokio::test]
+async fn test_list_users_propagates_user_kind() {
+    use gitim_core::types::UserKind;
+
+    let (_tmp, state) = setup_test_repo().await;
+    let root = &state.repo_root;
+
+    // alice: explicit human kind in meta.yaml
+    std::fs::write(
+        root.join("users/alice.meta.yaml"),
+        "display_name: Alice\nrole: dev\nintroduction: hi\nkind: human\n",
+    )
+    .unwrap();
+    // bob: explicit agent kind
+    std::fs::write(
+        root.join("users/bob.meta.yaml"),
+        "display_name: Bob\nrole: dev\nintroduction: hello\nkind: agent\n",
+    )
+    .unwrap();
+    // carol: no kind field → Unknown (omitted on wire)
+    common::write_user(root, "carol", "Carol", "dev", "hey");
+    {
+        let mut users = state.users.write().await;
+        users.push("carol".to_string());
+        users.sort();
+    }
+
+    let resp = list_users(state.clone()).await;
+    assert!(resp.ok, "list_users failed: {:?}", resp.error);
+    let data = resp.data.unwrap();
+    let infos: Vec<gitim_core::responses::ActiveUserEntry> =
+        serde_json::from_value(data["user_infos"].clone()).unwrap();
+
+    let alice = infos.iter().find(|e| e.handler == "alice").unwrap();
+    assert_eq!(alice.kind, UserKind::Human);
+    let bob = infos.iter().find(|e| e.handler == "bob").unwrap();
+    assert_eq!(bob.kind, UserKind::Agent);
+    let carol = infos.iter().find(|e| e.handler == "carol").unwrap();
+    assert_eq!(carol.kind, UserKind::Unknown);
+
+    // Wire shape: kind serializes as snake_case; Unknown is omitted.
+    let raw_infos = data["user_infos"].as_array().unwrap();
+    let raw_alice = raw_infos.iter().find(|e| e["handler"] == "alice").unwrap();
+    assert_eq!(raw_alice["kind"], "human");
+    let raw_bob = raw_infos.iter().find(|e| e["handler"] == "bob").unwrap();
+    assert_eq!(raw_bob["kind"], "agent");
+    let raw_carol = raw_infos.iter().find(|e| e["handler"] == "carol").unwrap();
+    assert!(
+        raw_carol.get("kind").is_none(),
+        "Unknown kind should be omitted on wire, got {raw_carol:?}"
     );
 }
 

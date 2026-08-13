@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use gitim_core::types::config::Config;
-use gitim_core::types::{ChannelMeta, UserMeta};
+use gitim_core::types::{ChannelMeta, UserKind, UserMeta};
 use gitim_daemon::api::Request;
 use gitim_daemon::handlers::handle_request;
 use gitim_daemon::state::{AppState, SharedState};
@@ -64,6 +64,7 @@ async fn register_test_user(state: &SharedState, handler: &str) {
         role: "member".to_string(),
         introduction: "test user".to_string(),
         labels: Vec::new(),
+        kind: UserKind::Unknown,
     };
     std::fs::write(
         users_dir.join(format!("{}.meta.yaml", handler)),

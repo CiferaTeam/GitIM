@@ -178,6 +178,8 @@ export interface Project {
   channel_count: number;
 }
 
+export type UserKind = "human" | "agent" | "unknown";
+
 export interface UserInfo {
   handler: string;
   /** Best-effort on the wire: the Rust daemon omits it (serde
@@ -185,6 +187,7 @@ export interface UserInfo {
    *  unparseable, so it arrives as `undefined`. Renderers fall back to the
    *  bare handler. */
   display_name?: string;
+  kind?: UserKind;
 }
 
 export interface AgentActivityEvent {

@@ -835,7 +835,8 @@ export function usePollLoop(): void {
           nextInfos.some(
             (u, i) =>
               u.handler !== currentInfos[i]?.handler ||
-              u.display_name !== currentInfos[i]?.display_name,
+              u.display_name !== currentInfos[i]?.display_name ||
+              u.kind !== currentInfos[i]?.kind,
           );
         if (infosChanged) useChatStore.getState().setUserInfos(nextInfos);
       }

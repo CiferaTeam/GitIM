@@ -1,7 +1,7 @@
 use crate::api::{Event, Response};
 use crate::handlers::ensure_author_not_departed;
 use crate::state::SharedState;
-use gitim_core::types::{Handler, UserMeta, MAX_INTRODUCTION_LEN};
+use gitim_core::types::{Handler, UserKind, UserMeta, MAX_INTRODUCTION_LEN};
 use gitim_sync::git::GitError;
 use tracing::{info, warn};
 
@@ -13,6 +13,7 @@ pub async fn handle_register_user(
     display_name: String,
     role: String,
     introduction: String,
+    kind: UserKind,
 ) -> Response {
     // Validate handler format
     if let Err(e) = Handler::new(&handler) {
@@ -58,6 +59,7 @@ pub async fn handle_register_user(
         role,
         introduction,
         labels: Vec::new(),
+        kind,
     };
     let meta_str = match Response::yaml_string(&meta, "user meta") {
         Ok(meta_str) => meta_str,
@@ -77,13 +79,21 @@ pub async fn handle_register_user(
         }
     }
 
-    // Git add + commit (best effort)
+    // Git add + commit. On failure roll back the new meta + in-memory entry so
+    // a retry can recreate (exists-path must not fire with an uncommitted file).
     let (author_name, author_email) = state.author_for(&handler);
-    let _ = state.git_storage.add_and_commit_as(
+    if let Err(e) = state.git_storage.add_and_commit_as(
         &[&format!("users/{}.meta.yaml", handler)],
         &format!("user: register @{}", handler),
         Some((&author_name, &author_email)),
-    );
+    ) {
+        let _ = std::fs::remove_file(&meta_path);
+        {
+            let mut users = state.users.write().await;
+            users.retain(|h| h != &handler);
+        }
+        return Response::error(format!("register_user commit failed: {}", e));
+    }
 
     let payload = gitim_core::responses::RegisterUserResponse {
         handler,
@@ -605,12 +615,17 @@ mod tests {
     }
 
     async fn register(state: &SharedState, handler: &str) {
+        register_with_kind(state, handler, UserKind::Unknown).await;
+    }
+
+    async fn register_with_kind(state: &SharedState, handler: &str, kind: UserKind) {
         let resp = handle_register_user(
             state.clone(),
             handler.to_string(),
             "Display".to_string(),
             "member".to_string(),
             "GitIM user".to_string(),
+            kind,
         )
         .await;
         assert!(resp.ok, "register_user failed: {:?}", resp.error);
@@ -861,6 +876,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn update_user_preserves_kind_human() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+        register_with_kind(&state, "alice", UserKind::Human).await;
+
+        let resp = handle_update_user(
+            state.clone(),
+            "alice".to_string(),
+            Some("Alice Human".to_string()),
+            Some("Updated intro".to_string()),
+        )
+        .await;
+        assert!(resp.ok, "update_user failed: {:?}", resp.error);
+
+        let meta_path = state.repo_root.join("users/alice.meta.yaml");
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        assert!(
+            content.contains("kind: human"),
+            "kind: human must survive update_user RMW; got:\n{content}"
+        );
+        let meta: UserMeta = serde_yaml::from_str(&content).unwrap();
+        assert_eq!(meta.kind, UserKind::Human);
+    }
+
+    #[tokio::test]
     async fn update_user_writes_commit_to_git_log() {
         let tmp = tempfile::tempdir().unwrap();
         let state = setup_state(tmp.path());
@@ -946,6 +986,49 @@ mod tests {
                 .join("archive/showboards/alice/board.md")
                 .exists(),
             "archive board should not exist after rollback"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_user_rollbacks_meta_on_commit_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = setup_state(tmp.path());
+
+        install_failing_precommit_hook(&state.repo_root);
+
+        let resp = handle_register_user(
+            state.clone(),
+            "carol".to_string(),
+            "Carol".to_string(),
+            "member".to_string(),
+            "GitIM user".to_string(),
+            UserKind::Human,
+        )
+        .await;
+        assert!(!resp.ok, "expected commit failure, got ok");
+        let err = resp.error.unwrap_or_default();
+        assert!(
+            err.contains("register_user commit failed"),
+            "expected commit failure error, got: {}",
+            err
+        );
+        assert!(
+            !state.repo_root.join("users/carol.meta.yaml").exists(),
+            "uncommitted meta must be removed so retry can recreate"
+        );
+        assert!(
+            !state.users.read().await.iter().any(|h| h == "carol"),
+            "in-memory users must not keep a rolled-back handler"
+        );
+
+        remove_precommit_hook(&state.repo_root);
+
+        // Retry after clearing the hook must succeed and persist kind.
+        register_with_kind(&state, "carol", UserKind::Human).await;
+        let yaml = std::fs::read_to_string(state.repo_root.join("users/carol.meta.yaml")).unwrap();
+        assert!(
+            yaml.contains("kind: human"),
+            "retry after rollback should commit kind; got:\n{yaml}"
         );
     }
 }

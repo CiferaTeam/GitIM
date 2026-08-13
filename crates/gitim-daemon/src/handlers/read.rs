@@ -3,7 +3,7 @@ use crate::handlers::{enrich_entries_with_recipients, resolve_thread_path};
 use crate::state::SharedState;
 
 use gitim_core::parser::parse_thread;
-use gitim_core::types::{ChannelMeta, ChannelName, ThreadEntry, UserMeta};
+use gitim_core::types::{ChannelMeta, ChannelName, ThreadEntry, UserKind, UserMeta};
 
 pub async fn handle_read(
     state: SharedState,
@@ -248,14 +248,16 @@ pub async fn handle_list_users(state: SharedState, include_archived: bool) -> Re
     let user_infos: Vec<gitim_core::responses::ActiveUserEntry> = sorted
         .iter()
         .map(|handler| {
-            let display_name =
+            let (display_name, kind) =
                 std::fs::read_to_string(users_dir.join(format!("{handler}.meta.yaml")))
                     .ok()
                     .and_then(|c| serde_yaml::from_str::<UserMeta>(&c).ok())
-                    .map(|m| m.display_name);
+                    .map(|m| (Some(m.display_name), m.kind))
+                    .unwrap_or((None, UserKind::Unknown));
             gitim_core::responses::ActiveUserEntry {
                 handler: handler.clone(),
                 display_name,
+                kind,
             }
         })
         .collect();
