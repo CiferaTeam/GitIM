@@ -1560,7 +1560,7 @@ fn sync_with_push(
                                     parent.display(),
                                     e
                                 );
-                                return SyncOutcome::Normal;
+                                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                             }
                         }
                         if let Err(e) = std::fs::write(&abs_path, local_content) {
