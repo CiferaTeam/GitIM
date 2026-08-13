@@ -6,6 +6,7 @@ import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { MessageBody } from "./message-body";
 import { HandlerName } from "./handler-name";
+import { UserCard } from "./user-card";
 import { useDirectory } from "../../hooks/use-display-name-directory";
 import { formatHandlerLabel } from "../../lib/format-handler-display";
 
@@ -20,10 +21,9 @@ interface MessageItemProps {
   onScrollTo: (lineNumber: number) => void;
   onCopy: (body: string, lineNumber: number) => void;
   copied: boolean;
-  onMentionClick?: (handler: string, event: React.MouseEvent) => void;
+  onStartDm?: (handler: string) => void;
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
-  onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
   onActionSheet?: (msg: Message) => void;
 }
 
@@ -71,10 +71,9 @@ export function MessageItem({
   onScrollTo,
   onCopy,
   copied,
-  onMentionClick,
+  onStartDm,
   onChannelClick,
   onMessageLinkClick,
-  onUserProfileClick,
   onActionSheet,
 }: MessageItemProps) {
   const directory = useDirectory();
@@ -213,13 +212,14 @@ export function MessageItem({
           data-message-avatar-column
           className="shrink-0 w-10 flex flex-col items-center gap-1 pt-0.5"
         >
-          <div
-            className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold text-white shadow-sm"
-            style={{ backgroundColor: avatarColor(message.author) }}
-            title={message.author}
-          >
-            {initials(message.author)}
-          </div>
+          <UserCard handler={message.author} onStartDm={onStartDm}>
+            <div
+              className="w-8 h-8 rounded-full flex items-center justify-center text-[10px] font-bold text-white shadow-sm cursor-pointer"
+              style={{ backgroundColor: avatarColor(message.author) }}
+            >
+              {initials(message.author)}
+            </div>
+          </UserCard>
           {message.line_number > 0 && (
             <span
               data-message-line-badge
@@ -234,10 +234,14 @@ export function MessageItem({
         <div className="flex-1 min-w-0">
           {/* Message header */}
           <div className="flex items-baseline gap-2 mb-0.5">
-            <HandlerName
-              handler={message.author}
-              className="font-semibold text-sm text-foreground"
-            />
+            <UserCard handler={message.author} onStartDm={onStartDm}>
+              <span className="cursor-pointer hover:underline">
+                <HandlerName
+                  handler={message.author}
+                  className="font-semibold text-sm text-foreground"
+                />
+              </span>
+            </UserCard>
             <span className="text-[11px] text-text-muted font-mono">
               {formatTimestamp(message.timestamp, timezone)}
             </span>
@@ -281,10 +285,9 @@ export function MessageItem({
           >
             <MessageBody
               body={message.body}
-              onMentionClick={onMentionClick}
+              onStartDm={onStartDm}
               onChannelClick={onChannelClick}
               onMessageLinkClick={onMessageLinkClick}
-              onUserProfileClick={onUserProfileClick}
             />
           </div>
 

@@ -23,7 +23,6 @@ import { MessageList } from "./message-list";
 import { ScrollToBottomButton } from "./scroll-to-bottom-button";
 import { Sidebar } from "./sidebar";
 import { ThreadPanel } from "./thread-panel";
-import { UserCard } from "./user-card";
 import { useScrollAtBottom } from "../../hooks/use-scroll-at-bottom";
 
 export function ChatLayout() {
@@ -135,11 +134,6 @@ export function ChatLayout() {
 
   // Component-local transient UI state — these aren't tied to channel ops, so
   // they stay here rather than getting pulled into useChannelOperations.
-  const [userCardHandler, setUserCardHandler] = useState<string | null>(null);
-  const [userCardPosition, setUserCardPosition] = useState<{
-    x: number;
-    y: number;
-  } | null>(null);
   const [cardDrawerOpen, setCardDrawerOpen] = useState(false);
   useEffect(() => {
     // Intentional: UX contract is "switching context closes transient
@@ -157,27 +151,6 @@ export function ChatLayout() {
     },
     [setReplyTo],
   );
-
-  const handleMentionClick = useCallback(
-    (handler: string, event: React.MouseEvent) => {
-      setUserCardHandler(handler);
-      setUserCardPosition({ x: event.clientX, y: event.clientY });
-    },
-    [],
-  );
-
-  const handleUserProfileClick = useCallback(
-    (handler: string, event: React.MouseEvent) => {
-      setUserCardHandler(handler);
-      setUserCardPosition({ x: event.clientX, y: event.clientY });
-    },
-    [],
-  );
-
-  const handleCloseUserCard = useCallback(() => {
-    setUserCardHandler(null);
-    setUserCardPosition(null);
-  }, []);
 
   const handlePendingScrollClear = useCallback(() => {
     setPendingScrollLine(null);
@@ -355,10 +328,9 @@ export function ChatLayout() {
           onViewportAnchorChange={handleViewportAnchorChange}
           onReply={handleReply}
           onShowThread={handleShowThread}
-          onMentionClick={handleMentionClick}
+          onStartDm={handleStartDm}
           onChannelClick={handleChannelClick}
           onMessageLinkClick={handleMessageLinkClick}
-          onUserProfileClick={handleUserProfileClick}
           onCardChangeClick={handleCardChangeClick}
           onActionSheet={isMobile ? setActionSheetMessage : undefined}
           onLoadOlder={handleLoadOlder}
@@ -394,10 +366,9 @@ export function ChatLayout() {
           messages={threadMessages}
           onClose={handleThreadClose}
           onReplyInThread={handleReply}
-          onMentionClick={handleMentionClick}
+          onStartDm={handleStartDm}
           onChannelClick={handleChannelClick}
           onMessageLinkClick={handleMessageLinkClick}
-          onUserProfileClick={handleUserProfileClick}
         />
       </div>
 
@@ -412,6 +383,7 @@ export function ChatLayout() {
         messages={threadMessages}
         onClose={handleThreadClose}
         onReplyInThread={handleReply}
+        onStartDm={handleStartDm}
       />
       <MobileActionSheet
         message={actionSheetMessage}
@@ -419,15 +391,6 @@ export function ChatLayout() {
         onReply={handleMobileReply}
         onShowThread={handleMobileShowThread}
       />
-
-      {userCardHandler && userCardPosition && (
-        <UserCard
-          handler={userCardHandler}
-          position={userCardPosition}
-          onClose={handleCloseUserCard}
-          onStartDm={handleStartDm}
-        />
-      )}
 
       {currentChannel && currentChannelData?.kind === "channel" && (
         <ChannelCardDrawer

@@ -36,9 +36,9 @@ import { useWorkspaceStore } from "./use-workspace-store";
  *
  * The hook reads workspace / chat state via Zustand selectors so its callers
  * don't need to thread inputs through — the same selectors ChatLayout would
- * have subscribed to anyway. Trivial UI handlers (replyTo wrapper, UserCard
- * popover state, mobile bottom-sheet toggles) stay in ChatLayout because
- * they're tied to component-local transient state.
+ * have subscribed to anyway. Trivial UI handlers (replyTo wrapper, mobile
+ * bottom-sheet toggles) stay in ChatLayout because they're tied to
+ * component-local transient state.
  *
  * Returns a `restoreAnchor` value alongside the handlers so MessageList can
  * still restore scroll position on tab/route remount — the anchor cache and

@@ -6,6 +6,7 @@ import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { MessageBody } from "../chat/message-body";
 import { HandlerName } from "../chat/handler-name";
+import { UserCard } from "../chat/user-card";
 
 function initials(name: string) {
   return name.slice(0, 2).toUpperCase();
@@ -24,9 +25,16 @@ interface MobileThreadOverlayProps {
   messages: Message[];
   onClose: () => void;
   onReplyInThread: (msg: Message) => void;
+  onStartDm?: (handler: string) => void;
 }
 
-export function MobileThreadOverlay({ root, messages, onClose, onReplyInThread }: MobileThreadOverlayProps) {
+export function MobileThreadOverlay({
+  root,
+  messages,
+  onClose,
+  onReplyInThread,
+  onStartDm,
+}: MobileThreadOverlayProps) {
   const timezone = useTimezoneStore((s) => s.timezone);
   const msgByLine = useMemo(() => {
     const map = new Map<number, Message>();
@@ -89,23 +97,25 @@ export function MobileThreadOverlay({ root, messages, onClose, onReplyInThread }
               )}
 
               <div className="flex items-center gap-2 mb-1">
-                <div
-                  className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
-                  style={{ backgroundColor: avatarColor(msg.author) }}
-                >
-                  {initials(msg.author)}
-                </div>
-                <div className="flex items-baseline gap-2 min-w-0">
-                  <HandlerName
-                    handler={msg.author}
-                    className="font-medium text-foreground truncate text-sm"
-                  />
-                  <span className="text-[11px] text-text-muted">{formatTimestamp(msg.timestamp, timezone)}</span>
-                </div>
+                <UserCard handler={msg.author} onStartDm={onStartDm}>
+                  <div className="flex items-center gap-2 min-w-0 cursor-pointer">
+                    <div
+                      className="shrink-0 w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold text-white"
+                      style={{ backgroundColor: avatarColor(msg.author) }}
+                    >
+                      {initials(msg.author)}
+                    </div>
+                    <HandlerName
+                      handler={msg.author}
+                      className="font-medium text-foreground truncate text-sm"
+                    />
+                  </div>
+                </UserCard>
+                <span className="text-[11px] text-text-muted">{formatTimestamp(msg.timestamp, timezone)}</span>
               </div>
 
               <div className="leading-relaxed text-foreground/95 pl-9 text-[15px]">
-                <MessageBody body={msg.body} />
+                <MessageBody body={msg.body} onStartDm={onStartDm} />
               </div>
 
               {!isRoot && (

@@ -6,16 +6,16 @@ import { formatTimestamp } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { MessageBody } from "./message-body";
 import { HandlerName } from "./handler-name";
+import { UserCard } from "./user-card";
 
 interface ThreadPanelProps {
   root: Message | null;
   messages: Message[];
   onClose: () => void;
   onReplyInThread: (msg: Message) => void;
-  onMentionClick?: (handler: string, event: React.MouseEvent) => void;
+  onStartDm?: (handler: string) => void;
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
-  onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
 }
 
 function initials(name: string) {
@@ -35,10 +35,9 @@ export function ThreadPanel({
   messages,
   onClose,
   onReplyInThread,
-  onMentionClick,
+  onStartDm,
   onChannelClick,
   onMessageLinkClick,
-  onUserProfileClick,
 }: ThreadPanelProps) {
   const timezone = useTimezoneStore((s) => s.timezone);
   const msgByLine = useMemo(() => {
@@ -106,30 +105,31 @@ export function ThreadPanel({
               )}
 
               <div className="flex items-center gap-2 mb-1">
-                <div
-                  className="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold text-white"
-                  style={{ backgroundColor: avatarColor(msg.author) }}
-                >
-                  {initials(msg.author)}
-                </div>
-                <div className="flex items-baseline gap-2 min-w-0">
-                  <HandlerName
-                    handler={msg.author}
-                    className="font-medium text-foreground truncate"
-                  />
-                  <span className="text-[11px] text-text-muted">
-                    {formatTimestamp(msg.timestamp, timezone)}
-                  </span>
-                </div>
+                <UserCard handler={msg.author} onStartDm={onStartDm}>
+                  <div className="flex items-center gap-2 min-w-0 cursor-pointer">
+                    <div
+                      className="shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-[9px] font-bold text-white"
+                      style={{ backgroundColor: avatarColor(msg.author) }}
+                    >
+                      {initials(msg.author)}
+                    </div>
+                    <HandlerName
+                      handler={msg.author}
+                      className="font-medium text-foreground truncate"
+                    />
+                  </div>
+                </UserCard>
+                <span className="text-[11px] text-text-muted">
+                  {formatTimestamp(msg.timestamp, timezone)}
+                </span>
               </div>
 
               <div className="leading-relaxed text-foreground/95 pl-8">
                 <MessageBody
                   body={msg.body}
-                  onMentionClick={onMentionClick}
+                  onStartDm={onStartDm}
                   onChannelClick={onChannelClick}
                   onMessageLinkClick={onMessageLinkClick}
-                  onUserProfileClick={onUserProfileClick}
                 />
               </div>
 

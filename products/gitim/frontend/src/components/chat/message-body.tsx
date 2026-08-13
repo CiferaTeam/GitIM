@@ -3,6 +3,7 @@ import { Copy, Check } from "lucide-react";
 import { useNavigate } from "react-router";
 import { parseMessageBody, type Fragment } from "../../lib/message-parser";
 import { HandlerName } from "./handler-name";
+import { UserCard } from "./user-card";
 import { useDirectory } from "../../hooks/use-display-name-directory";
 import { resolveDisplayName } from "../../lib/format-handler-display";
 import {
@@ -16,10 +17,9 @@ import { AssetFragment } from "./asset-fragment";
 
 export interface MessageBodyProps {
   body: string;
-  onMentionClick?: (handler: string, event: React.MouseEvent) => void;
+  onStartDm?: (handler: string) => void;
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
-  onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
 }
 
 function InlineCode({ code }: { code: string }) {
@@ -99,10 +99,9 @@ interface FragmentRendererProps {
   fragment: Fragment;
   index: number;
   fragments: Fragment[];
-  onMentionClick?: (handler: string, event: React.MouseEvent) => void;
+  onStartDm?: (handler: string) => void;
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
-  onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
 }
 
 function hasNearbyCardCue(fragments: Fragment[], index: number): boolean {
@@ -183,10 +182,9 @@ function FragmentRenderer({
   fragment,
   index,
   fragments,
-  onMentionClick,
+  onStartDm,
   onChannelClick,
   onMessageLinkClick,
-  onUserProfileClick,
 }: FragmentRendererProps) {
   const directory = useDirectory();
   const currentChannel = useChatStore((s) => s.currentChannel);
@@ -215,16 +213,14 @@ function FragmentRenderer({
 
     case "mention":
       return (
-        <span
-          key={index}
-          className="text-primary font-medium cursor-pointer hover:underline"
-          onClick={(e) => {
-            e.stopPropagation();
-            onMentionClick?.(fragment.handler, e);
-          }}
-        >
-          <HandlerName handler={fragment.handler} />
-        </span>
+        <UserCard key={index} handler={fragment.handler} onStartDm={onStartDm}>
+          <span
+            className="text-primary font-medium cursor-pointer hover:underline"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <HandlerName handler={fragment.handler} />
+          </span>
+        </UserCard>
       );
 
     case "channel-link":
@@ -268,19 +264,17 @@ function FragmentRenderer({
 
     case "user-profile":
       return (
-        <span
-          key={index}
-          className="text-primary/70 cursor-pointer hover:underline"
-          onClick={(e) => {
-            e.stopPropagation();
-            onUserProfileClick?.(fragment.handler, e);
-          }}
-        >
-          {/* Keep the `~` profile-link sigil (distinct from an `@` mention) and
-              enrich with display_name when known. Falls back to the bare
-              handle. */}
-          ~{resolveDisplayName(fragment.handler, directory) ?? fragment.handler}
-        </span>
+        <UserCard key={index} handler={fragment.handler} onStartDm={onStartDm}>
+          <span
+            className="text-primary/70 cursor-pointer hover:underline"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Keep the `~` profile-link sigil (distinct from an `@` mention) and
+                enrich with display_name when known. Falls back to the bare
+                handle. */}
+            ~{resolveDisplayName(fragment.handler, directory) ?? fragment.handler}
+          </span>
+        </UserCard>
       );
 
     case "external-link": {
@@ -355,10 +349,9 @@ function FragmentRenderer({
 
 export function MessageBody({
   body,
-  onMentionClick,
+  onStartDm,
   onChannelClick,
   onMessageLinkClick,
-  onUserProfileClick,
 }: MessageBodyProps) {
   // Agents that drive `gitim send` via shell-quoted argv often emit literal
   // backslash-n sequences in the body because bash double-quotes don't process
@@ -376,10 +369,9 @@ export function MessageBody({
           fragment={fragment}
           index={index}
           fragments={fragments}
-          onMentionClick={onMentionClick}
+          onStartDm={onStartDm}
           onChannelClick={onChannelClick}
           onMessageLinkClick={onMessageLinkClick}
-          onUserProfileClick={onUserProfileClick}
         />
       ))}
     </span>

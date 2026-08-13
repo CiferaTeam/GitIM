@@ -137,10 +137,6 @@ vi.mock("./thread-panel", () => ({
   ThreadPanel: () => null,
 }));
 
-vi.mock("./user-card", () => ({
-  UserCard: () => null,
-}));
-
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {

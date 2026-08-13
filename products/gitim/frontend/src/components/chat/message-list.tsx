@@ -44,10 +44,9 @@ interface MessageListProps {
 
   onReply: (msg: Message) => void;
   onShowThread: (msg: Message) => void;
-  onMentionClick?: (handler: string, event: React.MouseEvent) => void;
+  onStartDm?: (handler: string) => void;
   onChannelClick?: (channel: string) => void;
   onMessageLinkClick?: (channel: string, line: number) => void;
-  onUserProfileClick?: (handler: string, event: React.MouseEvent) => void;
   onCardChangeClick?: (channel: string, cardId: string, line?: number) => void;
   onActionSheet?: (msg: Message) => void;
   /** Fired when the user scrolls within `SCROLL_TOP_THRESHOLD_PX` of the top.
@@ -153,10 +152,9 @@ export function MessageList({
   noScopeHint,
   onReply,
   onShowThread,
-  onMentionClick,
+  onStartDm,
   onChannelClick,
   onMessageLinkClick,
-  onUserProfileClick,
   onCardChangeClick,
   onActionSheet,
   onLoadOlder,
@@ -440,10 +438,9 @@ export function MessageList({
             onScrollTo={handleScrollTo}
             onCopy={handleCopy}
             copied={copiedLine === msg.line_number}
-            onMentionClick={onMentionClick}
+            onStartDm={onStartDm}
             onChannelClick={onChannelClick}
             onMessageLinkClick={onMessageLinkClick}
-            onUserProfileClick={onUserProfileClick}
             onActionSheet={onActionSheet}
           />
         );
