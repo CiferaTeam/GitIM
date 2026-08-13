@@ -560,14 +560,14 @@ fn run_sync_cycle_with_cache_inner(
     };
 
     let cycle_result = if has_unpushed {
-        CacheAwareCycleResult::regular(sync_with_push(
+        sync_with_push(
             repo,
             circuit,
             commit_lock,
             on_pushed,
             on_renumbered,
             rebase_author,
-        ))
+        )
     } else {
         sync_pull_only(repo, circuit, commit_lock, cache_progress)
     };
@@ -938,6 +938,10 @@ fn enforce_divergence_threshold(
     true
 }
 
+fn remote_slot_skip_cycle() -> CacheAwareCycleResult {
+    CacheAwareCycleResult::neutral(CacheNeutralHint::PreserveSchedule)
+}
+
 fn skip_for_remote_slot(error: &GitError, what: &str) -> bool {
     match error {
         GitError::RemoteSlotBusy => {
@@ -1153,14 +1157,14 @@ fn sync_with_push(
     on_pushed: &dyn Fn(String, String),
     on_renumbered: &dyn Fn(PathBuf, u64, u64),
     rebase_author: Option<&(String, String)>,
-) -> SyncOutcome {
+) -> CacheAwareCycleResult {
     // Epoch fence, checkpoint (1): R may already sit in the local chain (a
     // prior cycle's pull, or stranded fire residue). Publishing from here
     // would put commits after R on the sealed branch — invariant 1 forbids
     // it. Follow first; local messages migrate inside follow_redirect and
     // publish next cycle from the new branch.
     if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
-        return SyncOutcome::Normal;
+        return CacheAwareCycleResult::regular(SyncOutcome::Normal);
     }
 
     let mut included_head_before_rewrite: Option<String> = None;
@@ -1174,7 +1178,7 @@ fn sync_with_push(
                     Ok(head) => head,
                     Err(error) => {
                         warn!("sync: failed to resolve pushed upstream HEAD: {}", error);
-                        return SyncOutcome::Normal;
+                        return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                     }
                 };
                 let included_head = included_head_before_rewrite
@@ -1182,28 +1186,28 @@ fn sync_with_push(
                     .unwrap_or_else(|| pushed_head.clone());
                 on_pushed(pushed_head, included_head);
                 info!("sync: push complete (attempt {})", attempt);
-                return SyncOutcome::Normal;
+                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
             }
             Err(GitError::RateLimited) => {
                 warn!("sync: push rate limited (attempt {})", attempt);
-                return SyncOutcome::RateLimited;
+                return CacheAwareCycleResult::regular(SyncOutcome::RateLimited);
             }
             Err(GitError::AuthFailed(_)) => {
                 warn!("sync: push auth failed (attempt {})", attempt);
                 if circuit.is_tripped() {
-                    return SyncOutcome::AuthCircuitOpen;
+                    return CacheAwareCycleResult::regular(SyncOutcome::AuthCircuitOpen);
                 }
-                return SyncOutcome::Normal;
+                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
             }
             Err(GitError::PushConflict) => {
                 // Remote has diverged, need to sync
             }
             Err(e) if skip_for_remote_slot(&e, "push") => {
-                return SyncOutcome::Normal;
+                return remote_slot_skip_cycle();
             }
             Err(e) => {
                 warn!("sync: push failed (non-conflict): {}", e);
-                return SyncOutcome::Normal;
+                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
             }
         }
 
@@ -1213,21 +1217,21 @@ fn sync_with_push(
         match fetch_result {
             Err(GitError::RateLimited) => {
                 warn!("sync: fetch rate limited (attempt {})", attempt);
-                return SyncOutcome::RateLimited;
+                return CacheAwareCycleResult::regular(SyncOutcome::RateLimited);
             }
             Err(GitError::AuthFailed(_)) => {
                 warn!("sync: fetch auth failed (attempt {})", attempt);
                 if circuit.is_tripped() {
-                    return SyncOutcome::AuthCircuitOpen;
+                    return CacheAwareCycleResult::regular(SyncOutcome::AuthCircuitOpen);
                 }
-                return SyncOutcome::Normal;
+                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
             }
             Err(e) if skip_for_remote_slot(&e, "fetch") => {
-                return SyncOutcome::Normal;
+                return remote_slot_skip_cycle();
             }
             Err(e) => {
                 warn!("sync: fetch failed: {}", e);
-                return SyncOutcome::Normal;
+                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
             }
             Ok(()) => {}
         }
@@ -1239,7 +1243,7 @@ fn sync_with_push(
         // the new epoch branch. Must run before the divergence safety net —
         // that path hard-discards local work, while follow preserves it.
         if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
-            return SyncOutcome::Normal;
+            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
         }
 
         // Hard safety net before we touch the commit tree: if a previous
@@ -1249,7 +1253,7 @@ fn sync_with_push(
         // work and reset to upstream, then end this cycle so the next one
         // starts from a clean slate.
         if enforce_max_divergence(repo, commit_lock) {
-            return SyncOutcome::Normal;
+            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
         }
 
         // Local snapshot + rebase mutates the local commit tree; hold
@@ -1263,7 +1267,7 @@ fn sync_with_push(
             Ok(head) => head,
             Err(error) => {
                 warn!("sync: failed to snapshot pre-rebase HEAD: {}", error);
-                return SyncOutcome::Normal;
+                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
             }
         };
 
@@ -1272,7 +1276,7 @@ fn sync_with_push(
             Ok(v) => v,
             Err(e) => {
                 warn!("sync: failed to diff unpushed additions: {}", e);
-                return SyncOutcome::Normal;
+                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
             }
         };
 
@@ -1296,7 +1300,7 @@ fn sync_with_push(
             Ok(v) => v,
             Err(e) => {
                 warn!("sync: failed to list unpushed files: {}", e);
-                return SyncOutcome::Normal;
+                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
             }
         };
 
@@ -1321,7 +1325,7 @@ fn sync_with_push(
                 // replayed local messages on top of a just-pulled R. Never
                 // publish that chain (invariant 1); follow migrates instead.
                 if epoch_fence_and_follow(repo, commit_lock, rebase_author) {
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
                 let push_after_rebase = repo.push();
                 observe_auth(circuit, &push_after_rebase);
@@ -1331,7 +1335,7 @@ fn sync_with_push(
                             Ok(head) => head,
                             Err(error) => {
                                 warn!("sync: failed to resolve pushed upstream HEAD: {}", error);
-                                return SyncOutcome::Normal;
+                                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                             }
                         };
                         on_pushed(
@@ -1341,21 +1345,21 @@ fn sync_with_push(
                                 .unwrap_or_else(|| local_head_before_rebase.clone()),
                         );
                         info!("sync: push complete after rebase (attempt {})", attempt);
-                        return SyncOutcome::Normal;
+                        return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                     }
                     Err(GitError::RateLimited) => {
                         warn!("sync: push rate limited after rebase (attempt {})", attempt);
-                        return SyncOutcome::RateLimited;
+                        return CacheAwareCycleResult::regular(SyncOutcome::RateLimited);
                     }
                     Err(GitError::AuthFailed(_)) => {
                         warn!("sync: push auth failed after rebase (attempt {})", attempt);
                         if circuit.is_tripped() {
-                            return SyncOutcome::AuthCircuitOpen;
+                            return CacheAwareCycleResult::regular(SyncOutcome::AuthCircuitOpen);
                         }
-                        return SyncOutcome::Normal;
+                        return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                     }
                     Err(e) if skip_for_remote_slot(&e, "push after rebase") => {
-                        return SyncOutcome::Normal;
+                        return remote_slot_skip_cycle();
                     }
                     Err(_) => {
                         warn!(
@@ -1371,7 +1375,7 @@ fn sync_with_push(
             Err(_) => {
                 if let Err(error) = repo.abort_rebase() {
                     warn!("sync: failed to abort conflicted rebase: {}", error);
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
                 let quick_session_resolutions =
                     match prepare_quick_session_resolutions(repo, &all_unpushed_before_rebase) {
@@ -1381,7 +1385,7 @@ fn sync_with_push(
                                 "sync: quick session conflict preserved for manual resolution: {}",
                                 error
                             );
-                            return SyncOutcome::Normal;
+                            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                         }
                     };
                 local_additions.retain(|path, _| !is_quick_session_path(path));
@@ -1416,7 +1420,7 @@ fn sync_with_push(
                          preserving local commit. Files: {:?}",
                         all_unpushed_before_rebase
                     );
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
 
                 // Rebase failed — use thread-aware + meta + board conflict resolution
@@ -1427,7 +1431,7 @@ fn sync_with_push(
                 {
                     let _ = repo.abort_rebase();
                     warn!("sync: rebase conflict with no resolvable changes, aborted");
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
 
                 let mut replay_rollback =
@@ -1436,7 +1440,7 @@ fn sync_with_push(
                 // SyncLoop manages git state; resolve_content does pure content transform
                 if let Err(e) = repo.discard_unpushed() {
                     warn!("sync: discard_unpushed failed: {}", e);
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
                 replay_rollback.arm();
 
@@ -1450,7 +1454,7 @@ fn sync_with_push(
                                 let abs_path = repo.root().join(&resolved.path);
                                 if let Err(e) = std::fs::write(&abs_path, &resolved.content) {
                                     warn!("sync: failed to write resolved file: {}", e);
-                                    return SyncOutcome::Normal;
+                                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                                 }
                                 modified_paths
                                     .push(resolved.path.to_str().unwrap_or("").to_string());
@@ -1459,7 +1463,7 @@ fn sync_with_push(
                         }
                         Err(e) => {
                             warn!("sync: conflict resolution failed: {}", e);
-                            return SyncOutcome::Normal;
+                            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                         }
                     }
                 } else {
@@ -1475,12 +1479,12 @@ fn sync_with_push(
                                 parent.display(),
                                 e
                             );
-                            return SyncOutcome::Normal;
+                            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                         }
                     }
                     if let Err(e) = std::fs::write(&abs_path, local_content) {
                         warn!("sync: failed to write back local board: {}", e);
-                        return SyncOutcome::Normal;
+                        return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                     }
                     modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
                 }
@@ -1498,7 +1502,7 @@ fn sync_with_push(
                                     rel_path.display(),
                                     e
                                 );
-                                return SyncOutcome::Normal;
+                                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                             }
                         };
                         let local_meta: gitim_core::types::ChannelMeta =
@@ -1510,7 +1514,7 @@ fn sync_with_push(
                                         rel_path.display(),
                                         e
                                     );
-                                    return SyncOutcome::Normal;
+                                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                                 }
                             };
                         let remote_meta: gitim_core::types::ChannelMeta =
@@ -1522,7 +1526,7 @@ fn sync_with_push(
                                         rel_path.display(),
                                         e
                                     );
-                                    return SyncOutcome::Normal;
+                                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                                 }
                             };
                         let merged = conflict::merge_channel_meta(&local_meta, &remote_meta);
@@ -1530,19 +1534,19 @@ fn sync_with_push(
                             Ok(yaml) => {
                                 if let Err(e) = std::fs::write(&abs_path, &yaml) {
                                     warn!("sync: failed to write merged meta: {}", e);
-                                    return SyncOutcome::Normal;
+                                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                                 }
                             }
                             Err(e) => {
                                 warn!("sync: failed to serialize merged meta: {}", e);
-                                return SyncOutcome::Normal;
+                                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                             }
                         }
                     } else {
                         // User meta or other: write local content back as-is
                         if let Err(e) = std::fs::write(&abs_path, local_content) {
                             warn!("sync: failed to write back local meta: {}", e);
-                            return SyncOutcome::Normal;
+                            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                         }
                     }
                     modified_paths.push(rel_path.to_str().unwrap_or("").to_string());
@@ -1561,7 +1565,7 @@ fn sync_with_push(
                                 rel_path.display(),
                                 e
                             );
-                            return SyncOutcome::Normal;
+                            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                         }
                         modified_paths.push(rel_path.to_string_lossy().to_string());
                         if let Some(parent) = abs_path.parent() {
@@ -1578,7 +1582,7 @@ fn sync_with_push(
                                 parent.display(),
                                 e
                             );
-                            return SyncOutcome::Normal;
+                            return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                         }
                     }
                     if let Err(e) = std::fs::write(&abs_path, content) {
@@ -1587,14 +1591,14 @@ fn sync_with_push(
                             rel_path.display(),
                             e
                         );
-                        return SyncOutcome::Normal;
+                        return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                     }
                     modified_paths.push(rel_path.to_string_lossy().to_string());
                 }
 
                 if modified_paths.is_empty() {
                     warn!("sync: conflict replay produced no modified paths");
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
 
                 // Commit resolved content
@@ -1624,7 +1628,7 @@ fn sync_with_push(
                 };
                 if let Err(e) = commit_result {
                     warn!("sync: commit after conflict resolution failed: {}", e);
-                    return SyncOutcome::Normal;
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
                 replay_rollback.disarm();
 
@@ -1651,7 +1655,7 @@ fn sync_with_push(
                             Ok(head) => head,
                             Err(error) => {
                                 warn!("sync: failed to resolve pushed upstream HEAD: {}", error);
-                                return SyncOutcome::Normal;
+                                return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                             }
                         };
                         on_pushed(
@@ -1664,14 +1668,14 @@ fn sync_with_push(
                             "sync: push complete after conflict resolution (attempt {})",
                             attempt
                         );
-                        return SyncOutcome::Normal;
+                        return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                     }
                     Err(GitError::RateLimited) => {
                         warn!(
                             "sync: push rate limited after conflict resolution (attempt {})",
                             attempt
                         );
-                        return SyncOutcome::RateLimited;
+                        return CacheAwareCycleResult::regular(SyncOutcome::RateLimited);
                     }
                     Err(GitError::AuthFailed(_)) => {
                         warn!(
@@ -1679,12 +1683,12 @@ fn sync_with_push(
                             attempt
                         );
                         if circuit.is_tripped() {
-                            return SyncOutcome::AuthCircuitOpen;
+                            return CacheAwareCycleResult::regular(SyncOutcome::AuthCircuitOpen);
                         }
-                        return SyncOutcome::Normal;
+                        return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                     }
                     Err(e) if skip_for_remote_slot(&e, "push after conflict resolution") => {
-                        return SyncOutcome::Normal;
+                        return remote_slot_skip_cycle();
                     }
                     Err(_) => {
                         warn!(
@@ -1704,7 +1708,7 @@ fn sync_with_push(
         "sync: push failed after {} retries, giving up",
         MAX_SYNC_RETRIES
     );
-    SyncOutcome::Normal
+    CacheAwareCycleResult::regular(SyncOutcome::Normal)
 }
 
 /// Pull-only path: fetch remote changes, then fast-forward via rebase.
@@ -1741,7 +1745,7 @@ fn sync_pull_only(
                     return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
                 Err(e) if skip_for_remote_slot(&e, "pull-only fetch") => {
-                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
+                    return remote_slot_skip_cycle();
                 }
                 Err(e) => {
                     warn!("sync: fetch failed: {}", e);
@@ -2134,6 +2138,47 @@ mod tests {
             Some(CacheNeutralHint::PreserveSchedule)
         );
         assert_eq!(circuit.consecutive_failures(), 1);
+    }
+
+    #[test]
+    fn remote_slot_busy_unpushed_half_open_preserves_probe_eligibility() {
+        let fixture = CacheLoopFixture::new();
+        commit_file(
+            &fixture.clone_root,
+            "local.txt",
+            "unpushed\n",
+            "local change",
+        );
+        let repo = fixture.storage();
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(fixture.remote_git_lock_path())
+            .expect("open remote git lock");
+        lock_file.lock_exclusive().expect("hold remote git lock");
+        let mut circuit = auth_circuit();
+        for attempt in 0..AUTH_FAILURE_TRIP_THRESHOLD {
+            circuit.record(&Err(GitError::AuthFailed(format!("failure {attempt}"))));
+        }
+        let original_probe_time = Instant::now() - AUTH_PROBE_INTERVAL - Duration::from_secs(1);
+        circuit.tripped_at = Some(original_probe_time);
+        let failures_before = circuit.consecutive_failures();
+        assert!(circuit.should_attempt_probe(Instant::now()));
+        let mut progress = SyncCacheProgress::new(30);
+
+        let result = cache_cycle_result(&repo, &mut circuit, &Mutex::new(()), &mut progress);
+
+        assert!(matches!(result.outcome, SyncOutcome::Normal));
+        assert_eq!(
+            result.cache_neutral,
+            Some(CacheNeutralHint::PreserveSchedule)
+        );
+        assert_eq!(circuit.tripped_at, Some(original_probe_time));
+        assert_eq!(circuit.consecutive_failures(), failures_before);
+        assert!(circuit.should_attempt_probe(Instant::now()));
+        assert!(repo.has_unpushed_commits().expect("local commit remains"));
     }
 
     #[test]

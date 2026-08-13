@@ -73,7 +73,7 @@ at the lock site).
 
 | Caller | Behavior |
 | --- | --- |
-| `sync_loop` push / pull-direct fetch | Skip this cycle (`SyncOutcome::Normal`). Next interval retries. |
+| `sync_loop` push / pull-direct fetch | Neutral skip (`PreserveSchedule`). Next interval retries; half-open auth probe eligibility is restored. |
 | `sync_loop` post-rebase / post-conflict push | Same skip; do not consume `MAX_SYNC_RETRIES`. |
 | fetch-cache leader (`fetch_cache_shadow`) | `NeutralSkip(PreserveSchedule)`. Do not latch cache `disabled`. |
 | fetch-cache `direct_fallback` | Same skip; do not latch cache `disabled`. |
@@ -102,7 +102,8 @@ Do not classify either slot error as auth, rate-limit, or timeout.
 - `push_tag` is gated the same way as `push` / `fetch`.
 - `sync_loop` / fetch-cache map both slot errors to skip and leave cache
   enabled. Post-rebase / post-conflict push skip the cycle instead of
-  consuming `MAX_SYNC_RETRIES`.
+  consuming `MAX_SYNC_RETRIES`. Unpushed slot skip restores half-open auth
+  probe eligibility (does not consume `AUTH_PROBE_INTERVAL`).
 - Direct `fetch`/`push` still succeed when the lock is free (existing git
   tests keep covering the happy path).
 
