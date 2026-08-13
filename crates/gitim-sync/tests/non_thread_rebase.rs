@@ -538,3 +538,118 @@ fn remote_only_quick_sessions_do_not_classify_as_local_conflict_work() {
     assert!(merged.contains("remote append"));
     assert!(merged.contains("local append"));
 }
+
+fn card_meta_yaml(title: &str, status: &str) -> String {
+    format!(
+        "title: '{title}'\n\
+         channel: general\n\
+         status: {status}\n\
+         created_by: bob\n\
+         created_at: 20260812T152917Z\n\
+         updated_at: 20260812T155054Z\n"
+    )
+}
+
+/// Concurrent thread append + local card.meta.yaml must still replay.
+///
+/// Card yaml lives under `channels/<ch>/cards/` and has `title`, not
+/// `display_name`. Classifying it as ChannelMeta aborts the whole replay
+/// and restores pre-rebase HEAD — the room-cfo 9-hour stall.
+#[test]
+fn card_meta_change_does_not_abort_thread_conflict_replay() {
+    let (bare, clone_a, clone_b) = setup_two_clones();
+    let repo_a = GitStorage::new(clone_a.path());
+    let repo_b = GitStorage::new(clone_b.path());
+
+    let thread_rel = "channels/general.thread";
+    let existing_card = "channels/general/cards/20260812-152917-529/card.meta.yaml";
+    let new_card = "channels/general/cards/20260812-165314-055/card.meta.yaml";
+
+    let base_thread = "[L000001][P000000][@alice][20260812T150000Z] base\n";
+    std::fs::create_dir_all(
+        clone_a
+            .path()
+            .join("channels/general/cards/20260812-152917-529"),
+    )
+    .unwrap();
+    std::fs::write(clone_a.path().join(thread_rel), base_thread).unwrap();
+    std::fs::write(
+        clone_a.path().join(existing_card),
+        card_meta_yaml("review card", "doing"),
+    )
+    .unwrap();
+    repo_a
+        .add_and_commit(&[thread_rel, existing_card], "base thread + card")
+        .unwrap();
+    repo_a.push().unwrap();
+    repo_b.fetch().unwrap();
+    repo_b.rebase_onto_origin().unwrap();
+
+    let a_thread =
+        format!("{base_thread}[L000002][P000000][@alice][20260812T165223Z] alice append\n");
+    std::fs::write(clone_a.path().join(thread_rel), &a_thread).unwrap();
+    repo_a
+        .add_and_commit(&[thread_rel], "thread: alice append")
+        .unwrap();
+    repo_a.push().unwrap();
+
+    let b_thread = format!("{base_thread}[L000002][P000000][@bob][20260812T155111Z] bob append\n");
+    std::fs::write(clone_b.path().join(thread_rel), b_thread).unwrap();
+    std::fs::write(
+        clone_b.path().join(existing_card),
+        card_meta_yaml("review card", "done"),
+    )
+    .unwrap();
+    std::fs::create_dir_all(
+        clone_b
+            .path()
+            .join("channels/general/cards/20260812-165314-055"),
+    )
+    .unwrap();
+    std::fs::write(
+        clone_b.path().join(new_card),
+        card_meta_yaml("new card", "todo"),
+    )
+    .unwrap();
+    repo_b
+        .add_and_commit(
+            &[thread_rel, existing_card, new_card],
+            "thread append + card update + new card",
+        )
+        .unwrap();
+
+    assert!(
+        drive_one_cycle(&repo_b),
+        "card.meta.yaml must not abort conflict replay; B should push"
+    );
+    assert!(!repo_b.has_stale_rebase_state());
+
+    let verify = TempDir::new().unwrap();
+    run_git(
+        verify.path().parent().unwrap(),
+        &[
+            "clone",
+            bare.path().to_str().unwrap(),
+            verify.path().to_str().unwrap(),
+        ],
+    );
+    let merged = std::fs::read_to_string(verify.path().join(thread_rel)).unwrap();
+    assert!(
+        merged.contains("alice append"),
+        "remote message must survive"
+    );
+    assert!(
+        merged.contains("bob append"),
+        "local message must be replayed"
+    );
+    let existing = std::fs::read_to_string(verify.path().join(existing_card)).unwrap();
+    assert!(
+        existing.contains("status: done"),
+        "local card status update must be replayed"
+    );
+    let created = std::fs::read_to_string(verify.path().join(new_card)).unwrap();
+    assert!(
+        created.contains("title: 'new card'"),
+        "new local card.meta.yaml must be replayed onto origin"
+    );
+}

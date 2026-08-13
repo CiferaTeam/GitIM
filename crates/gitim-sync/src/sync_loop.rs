@@ -643,6 +643,15 @@ fn is_quick_session_path(path: &Path) -> bool {
     path.starts_with("quick-sessions/") || path.starts_with("archive/quick-sessions/")
 }
 
+/// `channels/<slug>.meta.yaml` only. Nested files under `channels/` such as
+/// `channels/<ch>/cards/<id>/card.meta.yaml` are card metas.
+fn is_channel_meta_path(rel_path: &Path) -> bool {
+    let Some(name) = rel_path.to_str().and_then(|s| s.strip_prefix("channels/")) else {
+        return false;
+    };
+    !name.contains('/') && name.ends_with(".meta.yaml") && name.len() > ".meta.yaml".len()
+}
+
 fn complete_quick_session_pair(
     meta: Option<String>,
     thread: Option<String>,
@@ -1492,7 +1501,7 @@ fn sync_with_push(
                 // Meta resolution
                 for (rel_path, local_content) in &local_metas {
                     let abs_path = repo.root().join(rel_path);
-                    if rel_path.starts_with("channels/") {
+                    if is_channel_meta_path(rel_path) {
                         // Channel meta: merge members as union, scalars take remote
                         let remote_content = match std::fs::read_to_string(&abs_path) {
                             Ok(c) => c,
@@ -1543,7 +1552,17 @@ fn sync_with_push(
                             }
                         }
                     } else {
-                        // User meta or other: write local content back as-is
+                        // User / project / card meta: last-writer-wins.
+                        if let Some(parent) = abs_path.parent() {
+                            if let Err(e) = std::fs::create_dir_all(parent) {
+                                warn!(
+                                    "sync: failed to create meta dir {}: {}",
+                                    parent.display(),
+                                    e
+                                );
+                                return SyncOutcome::Normal;
+                            }
+                        }
                         if let Err(e) = std::fs::write(&abs_path, local_content) {
                             warn!("sync: failed to write back local meta: {}", e);
                             return CacheAwareCycleResult::regular(SyncOutcome::Normal);
@@ -1801,6 +1820,27 @@ mod tests {
     const CACHE_CONFIG_REMOTE: &str = "https://github.com/CiferaTeam/GitIM";
     const CACHE_RAW_ORIGIN: &str =
         "https://x-access-token:test-pat-123@github.com/CiferaTeam/GitIM.git";
+
+    #[test]
+    fn channel_meta_path_is_flat_channels_yaml_only() {
+        assert!(is_channel_meta_path(Path::new(
+            "channels/general.meta.yaml"
+        )));
+        assert!(is_channel_meta_path(Path::new(
+            "channels/awesome-agents-team-0519.meta.yaml"
+        )));
+        assert!(!is_channel_meta_path(Path::new(
+            "channels/general/cards/20260812-152917-529/card.meta.yaml"
+        )));
+        assert!(!is_channel_meta_path(Path::new("users/alice.meta.yaml")));
+        assert!(!is_channel_meta_path(Path::new(
+            "projects/sprint.meta.yaml"
+        )));
+        assert!(!is_channel_meta_path(Path::new(
+            "archive/channels/general.meta.yaml"
+        )));
+        assert!(!is_channel_meta_path(Path::new("channels/.meta.yaml")));
+    }
 
     struct CacheLoopFixture {
         _root: tempfile::TempDir,
