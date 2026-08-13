@@ -91,6 +91,14 @@ pub enum GitError {
     /// Disk-full condition detected in git output (ENOSPC / No space left on device).
     #[error("disk full: {0}")]
     DiskFull(String),
+    /// Another daemon in this Runtime workspace already holds the remote git
+    /// slot. Callers should skip this cycle and retry later.
+    #[error("remote git slot busy")]
+    RemoteSlotBusy,
+    /// The workspace remote-git lock could not be opened or acquired due to
+    /// a filesystem or permission fault, not contention.
+    #[error("remote git slot unavailable: {0}")]
+    RemoteSlotUnavailable(String),
 }
 
 /// Run a git subprocess with a process-level timeout.
@@ -485,6 +493,10 @@ impl GitStorage {
         Ok(())
     }
 
+    fn with_remote_slot<T>(&self, op: impl FnOnce() -> Result<T, GitError>) -> Result<T, GitError> {
+        crate::remote_slot::with_remote_slot(&self.root, op)
+    }
+
     pub fn add_and_commit(&self, paths: &[&str], message: &str) -> Result<(), GitError> {
         self.add_and_commit_as(paths, message, None)
     }
@@ -537,23 +549,25 @@ impl GitStorage {
     }
 
     pub fn push(&self) -> Result<(), GitError> {
-        let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0],
-            GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2],
-            GIT_HTTP_TIMEOUT_ARGS[3],
-            "push",
-            "-u",
-            "origin",
-            "HEAD",
-        ];
-        let output = run_git_command(&args, &self.root)?;
-        if !output.status.success() {
-            return Err(classify_remote_error(&String::from_utf8_lossy(
-                &output.stderr,
-            )));
-        }
-        Ok(())
+        self.with_remote_slot(|| {
+            let args = [
+                GIT_HTTP_TIMEOUT_ARGS[0],
+                GIT_HTTP_TIMEOUT_ARGS[1],
+                GIT_HTTP_TIMEOUT_ARGS[2],
+                GIT_HTTP_TIMEOUT_ARGS[3],
+                "push",
+                "-u",
+                "origin",
+                "HEAD",
+            ];
+            let output = run_git_command(&args, &self.root)?;
+            if !output.status.success() {
+                return Err(classify_remote_error(&String::from_utf8_lossy(
+                    &output.stderr,
+                )));
+            }
+            Ok(())
+        })
     }
 
     pub fn has_remote(&self) -> bool {
@@ -632,45 +646,49 @@ impl GitStorage {
     }
 
     pub fn fetch(&self) -> Result<(), GitError> {
-        let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0],
-            GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2],
-            GIT_HTTP_TIMEOUT_ARGS[3],
-            "fetch",
-            "origin",
-        ];
-        let output = run_git_command(&args, &self.root)?;
-        if !output.status.success() {
-            return Err(classify_remote_error(&String::from_utf8_lossy(
-                &output.stderr,
-            )));
-        }
-        Ok(())
+        self.with_remote_slot(|| {
+            let args = [
+                GIT_HTTP_TIMEOUT_ARGS[0],
+                GIT_HTTP_TIMEOUT_ARGS[1],
+                GIT_HTTP_TIMEOUT_ARGS[2],
+                GIT_HTTP_TIMEOUT_ARGS[3],
+                "fetch",
+                "origin",
+            ];
+            let output = run_git_command(&args, &self.root)?;
+            if !output.status.success() {
+                return Err(classify_remote_error(&String::from_utf8_lossy(
+                    &output.stderr,
+                )));
+            }
+            Ok(())
+        })
     }
 
     #[allow(dead_code)]
     pub(crate) fn fetch_cache_shadow(&self) -> Result<(), GitError> {
-        let refspec = format!("+refs/heads/*:{CACHE_REMOTE_HEADS}/*");
-        let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0],
-            GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2],
-            GIT_HTTP_TIMEOUT_ARGS[3],
-            "fetch",
-            "--atomic",
-            "--no-tags",
-            "--prune",
-            "origin",
-            &refspec,
-        ];
-        let output = run_git_command(&args, &self.root)?;
-        if !output.status.success() {
-            return Err(classify_remote_error(&String::from_utf8_lossy(
-                &output.stderr,
-            )));
-        }
-        Ok(())
+        self.with_remote_slot(|| {
+            let refspec = format!("+refs/heads/*:{CACHE_REMOTE_HEADS}/*");
+            let args = [
+                GIT_HTTP_TIMEOUT_ARGS[0],
+                GIT_HTTP_TIMEOUT_ARGS[1],
+                GIT_HTTP_TIMEOUT_ARGS[2],
+                GIT_HTTP_TIMEOUT_ARGS[3],
+                "fetch",
+                "--atomic",
+                "--no-tags",
+                "--prune",
+                "origin",
+                &refspec,
+            ];
+            let output = run_git_command(&args, &self.root)?;
+            if !output.status.success() {
+                return Err(classify_remote_error(&String::from_utf8_lossy(
+                    &output.stderr,
+                )));
+            }
+            Ok(())
+        })
     }
 
     #[allow(dead_code)]
@@ -1347,26 +1365,28 @@ impl GitStorage {
     /// be redacted before entering the error value): non-fast-forward →
     /// `PushConflict`, the caller's "lost the rotation race" signal.
     pub fn atomic_push_two_refs(&self, old_branch: &str, new_branch: &str) -> Result<(), GitError> {
-        let new_spec = format!("{new_branch}:refs/heads/{new_branch}");
-        let old_spec = format!("{old_branch}:refs/heads/{old_branch}");
-        let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0],
-            GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2],
-            GIT_HTTP_TIMEOUT_ARGS[3],
-            "push",
-            "--atomic",
-            "origin",
-            &new_spec,
-            &old_spec,
-        ];
-        let output = run_git_command(&args, &self.root)?;
-        if !output.status.success() {
-            return Err(classify_remote_error(&String::from_utf8_lossy(
-                &output.stderr,
-            )));
-        }
-        Ok(())
+        self.with_remote_slot(|| {
+            let new_spec = format!("{new_branch}:refs/heads/{new_branch}");
+            let old_spec = format!("{old_branch}:refs/heads/{old_branch}");
+            let args = [
+                GIT_HTTP_TIMEOUT_ARGS[0],
+                GIT_HTTP_TIMEOUT_ARGS[1],
+                GIT_HTTP_TIMEOUT_ARGS[2],
+                GIT_HTTP_TIMEOUT_ARGS[3],
+                "push",
+                "--atomic",
+                "origin",
+                &new_spec,
+                &old_spec,
+            ];
+            let output = run_git_command(&args, &self.root)?;
+            if !output.status.success() {
+                return Err(classify_remote_error(&String::from_utf8_lossy(
+                    &output.stderr,
+                )));
+            }
+            Ok(())
+        })
     }
 
     /// `git rebase --onto <new_base> <old_base>` — transplant the commits in
@@ -1421,22 +1441,24 @@ impl GitStorage {
     /// `classify_remote_error` (credential-redacting); an already-existing
     /// tag rejects as `PushConflict`.
     pub fn push_tag(&self, tag: &str) -> Result<(), GitError> {
-        let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0],
-            GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2],
-            GIT_HTTP_TIMEOUT_ARGS[3],
-            "push",
-            "origin",
-            tag,
-        ];
-        let output = run_git_command(&args, &self.root)?;
-        if !output.status.success() {
-            return Err(classify_remote_error(&String::from_utf8_lossy(
-                &output.stderr,
-            )));
-        }
-        Ok(())
+        self.with_remote_slot(|| {
+            let args = [
+                GIT_HTTP_TIMEOUT_ARGS[0],
+                GIT_HTTP_TIMEOUT_ARGS[1],
+                GIT_HTTP_TIMEOUT_ARGS[2],
+                GIT_HTTP_TIMEOUT_ARGS[3],
+                "push",
+                "origin",
+                tag,
+            ];
+            let output = run_git_command(&args, &self.root)?;
+            if !output.status.success() {
+                return Err(classify_remote_error(&String::from_utf8_lossy(
+                    &output.stderr,
+                )));
+            }
+            Ok(())
+        })
     }
 
     pub fn bundle_to_path(&self, path: &Path, reference: &str) -> Result<(), GitError> {
@@ -3054,5 +3076,150 @@ mod tests {
             repo.divergence_from_upstream(),
             Err(GitError::DetachedHead)
         ));
+    }
+
+    fn runtime_workspace_clone() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::TempDir::new().unwrap();
+        let workspace = root.path().join("workspace");
+        let runtime_dir = workspace.join(".gitim-runtime");
+        let clone = workspace.join("agent");
+        std::fs::create_dir_all(&runtime_dir).unwrap();
+        std::fs::create_dir_all(&clone).unwrap();
+        std::fs::write(runtime_dir.join("config.json"), "{}").unwrap();
+        git_test_ok(&clone, &["init", "--quiet", "-b", "main"]);
+        (root, runtime_dir, clone)
+    }
+
+    fn hold_exclusive(path: &Path) -> std::fs::File {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(path)
+            .unwrap();
+        fs2::FileExt::lock_exclusive(&file).unwrap();
+        file
+    }
+
+    #[test]
+    fn fetch_returns_remote_slot_busy_when_workspace_lock_held() {
+        let (_root, runtime_dir, clone) = runtime_workspace_clone();
+        let _lock = hold_exclusive(&runtime_dir.join("remote-git.lock"));
+        let started = std::time::Instant::now();
+
+        let err = GitStorage::new(&clone).fetch().unwrap_err();
+
+        assert!(
+            matches!(err, GitError::RemoteSlotBusy),
+            "expected RemoteSlotBusy, got {err:?}"
+        );
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(900),
+            "busy return before the bounded wait: {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_secs(3),
+            "busy return exceeded the bounded wait: {waited:?}"
+        );
+    }
+
+    #[test]
+    fn push_returns_remote_slot_busy_when_workspace_lock_held() {
+        let (_root, runtime_dir, clone) = runtime_workspace_clone();
+        let _lock = hold_exclusive(&runtime_dir.join("remote-git.lock"));
+
+        let err = GitStorage::new(&clone).push().unwrap_err();
+
+        assert!(
+            matches!(err, GitError::RemoteSlotBusy),
+            "expected RemoteSlotBusy, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_cache_shadow_returns_remote_slot_busy_when_workspace_lock_held() {
+        let (_root, runtime_dir, clone) = runtime_workspace_clone();
+        let _lock = hold_exclusive(&runtime_dir.join("remote-git.lock"));
+
+        let err = GitStorage::new(&clone).fetch_cache_shadow().unwrap_err();
+
+        assert!(
+            matches!(err, GitError::RemoteSlotBusy),
+            "expected RemoteSlotBusy, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn atomic_push_returns_remote_slot_busy_when_workspace_lock_held() {
+        let (_root, runtime_dir, clone) = runtime_workspace_clone();
+        let _lock = hold_exclusive(&runtime_dir.join("remote-git.lock"));
+
+        let err = GitStorage::new(&clone)
+            .atomic_push_two_refs("main", "main-epoch-2")
+            .unwrap_err();
+
+        assert!(
+            matches!(err, GitError::RemoteSlotBusy),
+            "expected RemoteSlotBusy, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_is_ungated_without_runtime_workspace() {
+        let (_bare, clone) = seed_bare_with_clone("A", "a@test.com");
+
+        GitStorage::new(clone.path())
+            .fetch()
+            .expect("standalone clone fetch should not take a remote slot");
+    }
+
+    #[test]
+    fn fetch_runs_git_when_runtime_lock_is_free() {
+        let (_root, _runtime_dir, clone) = runtime_workspace_clone();
+
+        let err = GitStorage::new(&clone).fetch().unwrap_err();
+
+        assert!(
+            !matches!(
+                err,
+                GitError::RemoteSlotBusy | GitError::RemoteSlotUnavailable(_)
+            ),
+            "free slot should reach git, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn push_tag_returns_remote_slot_busy_when_workspace_lock_held() {
+        let (_root, runtime_dir, clone) = runtime_workspace_clone();
+        let _lock = hold_exclusive(&runtime_dir.join("remote-git.lock"));
+
+        let err = GitStorage::new(&clone)
+            .push_tag("archive/epoch-1/abc1234")
+            .unwrap_err();
+
+        assert!(
+            matches!(err, GitError::RemoteSlotBusy),
+            "expected RemoteSlotBusy, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_returns_unavailable_when_lock_path_is_not_a_file() {
+        let (_root, runtime_dir, clone) = runtime_workspace_clone();
+        std::fs::create_dir(runtime_dir.join("remote-git.lock")).unwrap();
+        let started = std::time::Instant::now();
+
+        let err = GitStorage::new(&clone).fetch().unwrap_err();
+
+        assert!(
+            matches!(err, GitError::RemoteSlotUnavailable(_)),
+            "expected RemoteSlotUnavailable, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "lock I/O failure should not wait out the poll budget"
+        );
     }
 }

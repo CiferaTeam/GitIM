@@ -677,6 +677,9 @@ fn direct_fallback(
             }
             PullFetchResult::Ready
         }
+        Err(GitError::RemoteSlotBusy | GitError::RemoteSlotUnavailable(_)) => {
+            PullFetchResult::NeutralSkip(CacheNeutralHint::PreserveSchedule)
+        }
         Err(error) => PullFetchResult::RemoteError(error),
     }
 }
@@ -706,6 +709,21 @@ where
         .filter(|_| !repair_incomplete_cache)
         .map(|state| state.generation);
     if let Err(error) = repo.fetch_cache_shadow() {
+        if matches!(
+            error,
+            GitError::RemoteSlotBusy | GitError::RemoteSlotUnavailable(_)
+        ) {
+            log_cache_outcome(
+                context,
+                match error {
+                    GitError::RemoteSlotUnavailable(_) => "remote_slot_unavailable",
+                    _ => "remote_slot_busy",
+                },
+                previous.map(|state| state.generation),
+            );
+            progress.reset_contention_retries();
+            return PullFetchResult::NeutralSkip(CacheNeutralHint::PreserveSchedule);
+        }
         let completed_at = clock();
         if let Err(persist_error) = publish_failure(
             context,
@@ -2888,6 +2906,51 @@ mod tests {
             assert!(
                 waited < Duration::from_secs(3),
                 "contention exceeded the bounded wait: {waited:?}"
+            );
+            assert_eq!(progress.applied_generation, None);
+            assert!(!progress.disabled);
+        }
+
+        #[test]
+        fn orchestration_remote_slot_busy_is_neutral_and_keeps_cache_enabled() {
+            let fixture = OrchestrationFixture::new();
+            let repo = fixture.storage();
+            let context = fixture.context();
+            let lock_path = context.runtime_dir.join("remote-git.lock");
+            let held_lock = std::fs::OpenOptions::new()
+                .create(true)
+                .read(true)
+                .write(true)
+                .truncate(false)
+                .open(&lock_path)
+                .expect("open remote git lock");
+            held_lock.lock_exclusive().expect("hold remote git lock");
+            std::fs::rename(
+                &fixture.origin,
+                fixture.workspace.root.path().join("origin-offline.git"),
+            )
+            .expect("make remote transport unavailable");
+            let mut progress = SyncCacheProgress::new(30);
+            let started = Instant::now();
+
+            assert!(matches!(
+                fetch_for_pull_at(
+                    &repo,
+                    &mut progress,
+                    UNIX_EPOCH + Duration::from_secs(10_000),
+                    PublicationHooks::default(),
+                ),
+                PullFetchResult::NeutralSkip(CacheNeutralHint::PreserveSchedule)
+            ));
+
+            let waited = started.elapsed();
+            assert!(
+                waited >= Duration::from_millis(900),
+                "busy return before the bounded wait: {waited:?}"
+            );
+            assert!(
+                waited < Duration::from_secs(3),
+                "busy return exceeded the bounded wait: {waited:?}"
             );
             assert_eq!(progress.applied_generation, None);
             assert!(!progress.disabled);
