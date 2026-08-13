@@ -14,6 +14,7 @@ export interface PartitionInput {
   fleetSnapshots: Array<{ agent: { id: string; handler?: string } }>;
   query: string;
   statusFilter: string | null;
+  currentUser?: string | null;
 }
 
 export interface PartitionResult {
@@ -59,7 +60,10 @@ export function partitionAgentsRoster(input: PartitionInput): PartitionResult {
   const humans: RosterUser[] = [];
   const outside: RosterUser[] = [];
   for (const info of input.userInfos) {
-    const kind = normalizeUserKind(info.kind);
+    let kind = normalizeUserKind(info.kind);
+    if (kind === "unknown" && info.handler === input.currentUser) {
+      kind = "human";
+    }
     const row: RosterUser = {
       handler: info.handler,
       displayName: info.display_name,

@@ -4,6 +4,7 @@ import { useAgentStore } from "@/hooks/use-agent-store";
 import { useChatStore } from "@/hooks/use-chat-store";
 import { fleetActivityKey, useFleetStore } from "@/hooks/use-fleet-store";
 import { useWorkspaceStore } from "@/hooks/use-workspace-store";
+import { aggregateWorkspaceUsage } from "@/hooks/use-workspace-usage";
 import {
   presenceMatchesFilter,
   summarizeAgentWorkload,
@@ -14,6 +15,7 @@ import {
   partitionAgentsRoster,
   type RosterUser,
 } from "@/lib/agents-roster";
+import { formatTokens } from "@/lib/format-tokens";
 import type { Agent, FleetAgentSnapshot, FleetNodeStatus } from "@/lib/types";
 import type { ArchivedUserEntry } from "@/lib/client";
 import { AddAgentDialog } from "./add-agent-dialog";
@@ -24,6 +26,8 @@ import {
   Archive,
   Bot,
   ChevronDown,
+  Eye,
+  EyeOff,
   Search,
   Server,
   SlidersHorizontal,
@@ -91,8 +95,9 @@ export function AgentList() {
         fleetSnapshots: remoteSnapshots,
         query,
         statusFilter,
+        currentUser,
       }),
-    [agents, query, remoteSnapshots, statusFilter, userInfos],
+    [agents, currentUser, query, remoteSnapshots, statusFilter, userInfos],
   );
   const outsideLabel = formatOutsideSummary(
     roster.outsideAgentCount,
@@ -492,61 +497,100 @@ function AgentNodeSection({
   showUsage = false,
   children,
 }: AgentNodeSectionProps) {
-  const [usageExpanded, setUsageExpanded] = useState(false);
-  const hasUsageData = agents.some((agent) => agent.usageSummary);
-  const canShowUsage = showUsage && hasUsageData;
-  const usageToggleLabel = `${usageExpanded ? "Hide" : "Show"} ${title} usage details`;
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const [membersOpen, setMembersOpen] = useState(true);
+  const usage = useMemo(() => aggregateWorkspaceUsage(agents), [agents]);
+  const canShowUsage = showUsage && usage.hasData;
+  const detailsLabel = `${detailsOpen ? "Hide" : "Show"} ${title} usage details`;
+  const membersLabel = `${membersOpen ? "Collapse" : "Expand"} ${title} members`;
 
   return (
-    <section className="mb-6">
-      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex min-w-0 items-center gap-3">
+    <section
+      data-testid="agent-node-section"
+      data-node-title={title}
+      className="mb-6"
+    >
+      <div className="rounded-lg border border-border-soft bg-card/40 px-4 py-3">
+        <div className="flex items-start gap-3">
           <div className="flex size-9 shrink-0 items-center justify-center rounded-lg border border-border bg-surface">
             <Server className="size-4 text-text-secondary" />
           </div>
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
               <h2 className="truncate text-base font-semibold">{title}</h2>
               <Badge variant="outline" className="border-border-strong text-text-secondary">
                 {agents.length}
               </Badge>
               {status && nodeStatusBadge(status)}
-              {canShowUsage && (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="icon-xs"
-                  aria-label={usageToggleLabel}
-                  aria-expanded={usageExpanded}
-                  title={usageToggleLabel}
-                  onClick={() => setUsageExpanded((expanded) => !expanded)}
-                  className="border-border-strong text-text-secondary hover:bg-surface-hover"
-                >
-                  <ChevronDown
-                    className={`size-3 transition-transform ${
-                      usageExpanded ? "rotate-180" : ""
-                    }`}
-                  />
-                </Button>
-              )}
             </div>
             <p className="truncate text-xs text-text-muted">{subtitle}</p>
           </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="icon-xs"
+            aria-label={membersLabel}
+            aria-expanded={membersOpen}
+            title={membersLabel}
+            onClick={() => setMembersOpen((open) => !open)}
+            className="mt-1 border-border-strong text-text-secondary hover:bg-surface-hover"
+          >
+            <ChevronDown
+              className={`size-3 transition-transform ${
+                membersOpen ? "rotate-180" : ""
+              }`}
+            />
+          </Button>
         </div>
+        {canShowUsage && (
+          <div className="mt-3 flex flex-col gap-2 border-t border-border-soft/80 pt-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+                <span className="text-xs uppercase tracking-wide text-primary">
+                  近日
+                </span>
+                <span className="text-xl font-mono text-foreground">
+                  今日 {formatTokens(usage.todayTokens)}
+                </span>
+                <span className="text-sm text-text-secondary">
+                  {usage.today.turns} turns
+                </span>
+              </div>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-xs"
+                aria-label={detailsLabel}
+                aria-expanded={detailsOpen}
+                title={detailsLabel}
+                onClick={() => setDetailsOpen((open) => !open)}
+                className="text-text-secondary hover:bg-surface-hover"
+              >
+                {detailsOpen ? (
+                  <EyeOff className="size-3" />
+                ) : (
+                  <Eye className="size-3" />
+                )}
+              </Button>
+            </div>
+            {detailsOpen && (
+              <WorkspaceUsageHeader
+                agents={agents}
+                embedded
+                className="mb-0"
+              />
+            )}
+          </div>
+        )}
       </div>
-      {canShowUsage && usageExpanded && (
-        <WorkspaceUsageHeader
-          agents={agents}
-          label={`${title} Usage`}
-          className="mb-3"
-        />
+      {membersOpen && (
+        <div
+          data-testid="agent-node-grid"
+          className="mt-3 grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3"
+        >
+          {children}
+        </div>
       )}
-      <div
-        data-testid="agent-node-grid"
-        className="grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3"
-      >
-        {children}
-      </div>
     </section>
   );
 }

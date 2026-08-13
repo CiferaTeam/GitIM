@@ -50,6 +50,21 @@ describe("partitionAgentsRoster", () => {
     expect(r.humans.map((h) => h.handler)).toEqual(["alice"]);
     expect(r.outside).toEqual([]);
   });
+
+  it("treats the signed-in user as human when kind is missing", () => {
+    const r = partitionAgentsRoster({
+      ...base,
+      userInfos: [{ handler: "flame4", display_name: "lewis" }],
+      localAgents: [],
+      fleetSnapshots: [],
+      currentUser: "flame4",
+    });
+    expect(r.humans).toEqual([
+      { handler: "flame4", displayName: "lewis", kind: "human" },
+    ]);
+    expect(r.outside).toEqual([]);
+    expect(r.outsideUnknownCount).toBe(0);
+  });
 });
 
 describe("formatOutsideSummary", () => {

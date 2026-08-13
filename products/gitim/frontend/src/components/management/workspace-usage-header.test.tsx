@@ -184,4 +184,25 @@ describe("WorkspaceUsageHeader", () => {
     expect(workload?.textContent ?? "").toContain("Working 2/3");
     expect(container.querySelector('[data-testid="workspace-usage-today"]')).toBeNull();
   });
+
+  it("omits the card headline when embedded inside a node board", () => {
+    act(() => {
+      root?.render(
+        <WorkspaceUsageHeader
+          embedded
+          label="Local Usage"
+          agents={[
+            agent("alice", "codex", summary(bucket(100, 0, 3), bucket(40, 0, 1))),
+          ]}
+        />,
+      );
+    });
+
+    const text = container.textContent ?? "";
+    expect(text).not.toContain("Local Usage");
+    expect(text).not.toContain("近日");
+    expect(text).toContain("codex");
+    expect(text).toContain("累计 100");
+    expect(container.querySelector('[data-testid="workspace-usage-today"]')).not.toBeNull();
+  });
 });

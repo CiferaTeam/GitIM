@@ -26,6 +26,9 @@ interface WorkspaceUsageHeaderProps {
   workload?: AgentWorkloadSummary;
   label?: string;
   className?: string;
+  /** Drop the card chrome and headline so the breakdown can sit inside a
+   *  parent node board that already shows identity + today's totals. */
+  embedded?: boolean;
 }
 
 /** Header strip rendered above the agents grid on the management page.
@@ -46,6 +49,7 @@ export function WorkspaceUsageHeader({
   workload,
   label = "Workspace Usage",
   className = "mb-4",
+  embedded = false,
 }: WorkspaceUsageHeaderProps) {
   const storeUsage = useWorkspaceUsage();
   const propUsage = useMemo(
@@ -138,43 +142,54 @@ export function WorkspaceUsageHeader({
     if (workspaceKey) writeUiState(workspaceKey, { usageBreakdown: next });
   }
 
+  const Wrapper = embedded ? "div" : "section";
+
   return (
-    <section
-      className={`${className} rounded-lg border border-border-soft bg-card/40 px-4 py-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between`}
+    <Wrapper
+      className={cn(
+        "flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between",
+        !embedded &&
+          "rounded-lg border border-border-soft bg-card/40 px-4 py-3",
+        className,
+      )}
     >
       <div className="flex min-w-0 flex-1 flex-col gap-2">
-        <div className="text-xs uppercase tracking-wide text-text-muted">
-          {label}
-        </div>
-        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
-          {normalizedWorkload && (
-            <span
-              data-testid="workspace-workload"
-              aria-label={`${normalizedWorkload.working} of ${normalizedWorkload.total} agents working`}
-              className="inline-flex items-baseline gap-1"
-            >
-              <span className="text-xs uppercase tracking-wide text-info">
-                Working{" "}
-              </span>
-              <span className="text-xl font-mono text-foreground">
-                {normalizedWorkload.working}/{normalizedWorkload.total}
-              </span>
-            </span>
-          )}
-          {usage.hasData && (
-            <>
-              <span className="text-xs uppercase tracking-wide text-primary">
-                近日
-              </span>
-              <span className="text-xl font-mono text-foreground">
-                今日 {formatTokens(todayTokens)}
-              </span>
-              <span className="text-sm text-text-secondary">
-                {usage.today.turns} turns
-              </span>
-            </>
-          )}
-        </div>
+        {!embedded && (
+          <>
+            <div className="text-xs uppercase tracking-wide text-text-muted">
+              {label}
+            </div>
+            <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+              {normalizedWorkload && (
+                <span
+                  data-testid="workspace-workload"
+                  aria-label={`${normalizedWorkload.working} of ${normalizedWorkload.total} agents working`}
+                  className="inline-flex items-baseline gap-1"
+                >
+                  <span className="text-xs uppercase tracking-wide text-info">
+                    Working{" "}
+                  </span>
+                  <span className="text-xl font-mono text-foreground">
+                    {normalizedWorkload.working}/{normalizedWorkload.total}
+                  </span>
+                </span>
+              )}
+              {usage.hasData && (
+                <>
+                  <span className="text-xs uppercase tracking-wide text-primary">
+                    近日
+                  </span>
+                  <span className="text-xl font-mono text-foreground">
+                    今日 {formatTokens(todayTokens)}
+                  </span>
+                  <span className="text-sm text-text-secondary">
+                    {usage.today.turns} turns
+                  </span>
+                </>
+              )}
+            </div>
+          </>
+        )}
         {usage.hasData && (
           <div
             data-testid="workspace-usage-today"
@@ -286,7 +301,7 @@ export function WorkspaceUsageHeader({
           )}
         </div>
       )}
-    </section>
+    </Wrapper>
   );
 }
 

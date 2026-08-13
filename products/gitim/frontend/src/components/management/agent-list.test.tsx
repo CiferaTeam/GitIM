@@ -60,6 +60,10 @@ function usageSummary(tokens = 100): UsageSummary {
   };
 }
 
+function nodeSection(container: HTMLElement, title: string): HTMLElement | null {
+  return container.querySelector(`[data-testid="agent-node-section"][data-node-title="${title}"]`);
+}
+
 function agent(id: string, provider = "codex", usage?: UsageSummary): Agent {
   return {
     id,
@@ -212,7 +216,7 @@ describe("AgentList fleet grouping", () => {
     expect(text).not.toContain("Local Usage");
   });
 
-  it("collapses per-node usage details until the node toggle is opened", () => {
+  it("shows a per-node usage summary and keeps rich details collapsed", () => {
     useAgentStore.setState({
       agents: [agent("local-cfo", "codex", usageSummary(100))],
       selectedAgentId: null,
@@ -251,27 +255,93 @@ describe("AgentList fleet grouping", () => {
       );
     });
 
-    const localToggle = container.querySelector<HTMLButtonElement>(
+    const local = nodeSection(container, "Local");
+    const remote = nodeSection(container, "mac-mini");
+    const localEye = local?.querySelector<HTMLButtonElement>(
       'button[aria-label="Show Local usage details"]',
     );
-    const remoteToggle = container.querySelector<HTMLButtonElement>(
+    const remoteEye = remote?.querySelector<HTMLButtonElement>(
       'button[aria-label="Show mac-mini usage details"]',
     );
-    expect(localToggle).not.toBeNull();
-    expect(remoteToggle).not.toBeNull();
-    expect(localToggle?.getAttribute("aria-expanded")).toBe("false");
-    expect(remoteToggle?.getAttribute("aria-expanded")).toBe("false");
+
     expect(container.textContent ?? "").toContain("Fleet Usage");
+    expect(local?.textContent ?? "").toContain("今日 100");
+    expect(local?.textContent ?? "").toContain("1 turns");
+    expect(remote?.textContent ?? "").toContain("今日 50");
+    expect(localEye).not.toBeNull();
+    expect(remoteEye).not.toBeNull();
+    expect(localEye?.getAttribute("aria-expanded")).toBe("false");
+    expect(remoteEye?.getAttribute("aria-expanded")).toBe("false");
+    expect(local?.querySelector('[data-testid="workspace-usage-today"]')).toBeNull();
+    expect(remote?.querySelector('[data-testid="workspace-usage-today"]')).toBeNull();
     expect(container.textContent ?? "").not.toContain("Local Usage");
     expect(container.textContent ?? "").not.toContain("mac-mini Usage");
 
     act(() => {
-      localToggle?.click();
+      localEye?.click();
     });
 
-    expect(localToggle?.getAttribute("aria-expanded")).toBe("true");
-    expect(container.textContent ?? "").toContain("Local Usage");
-    expect(container.textContent ?? "").not.toContain("mac-mini Usage");
+    expect(localEye?.getAttribute("aria-expanded")).toBe("true");
+    expect(local?.querySelector('[data-testid="workspace-usage-today"]')).not.toBeNull();
+    expect(remote?.querySelector('[data-testid="workspace-usage-today"]')).toBeNull();
+  });
+
+  it("uses the node chevron to collapse members without hiding the usage summary", () => {
+    useAgentStore.setState({
+      agents: [agent("local-cfo", "codex", usageSummary(100))],
+      selectedAgentId: null,
+    });
+    useFleetStore.setState({
+      agents: [
+        {
+          nodeId: "node-a",
+          nodeName: "mac-mini",
+          nodeIp: "100.64.0.10",
+          workspaceId: "room",
+          remoteWorkspaceId: "remote-room",
+          workspaceIdentity: "github.com/org/repo",
+          agent: agent("remote-cfo", "claude", usageSummary(50)),
+        },
+      ],
+      statuses: [
+        {
+          nodeId: "node-a",
+          nodeName: "mac-mini",
+          nodeIp: "100.64.0.10",
+          workspaceId: "room",
+          remoteWorkspaceId: "remote-room",
+          workspaceIdentity: "github.com/org/repo",
+          status: "connected",
+          retryCount: 0,
+        },
+      ],
+    });
+
+    act(() => {
+      root?.render(
+        <MemoryRouter>
+          <AgentList />
+        </MemoryRouter>,
+      );
+    });
+
+    const local = nodeSection(container, "Local");
+    const collapse = local?.querySelector<HTMLButtonElement>(
+      'button[aria-label="Collapse Local members"]',
+    );
+    expect(collapse).not.toBeNull();
+    expect(collapse?.getAttribute("aria-expanded")).toBe("true");
+    expect(local?.querySelector('[data-testid="agent-node-grid"]')).not.toBeNull();
+    expect(local?.textContent ?? "").toContain("local-cfo");
+
+    act(() => {
+      collapse?.click();
+    });
+
+    expect(collapse?.getAttribute("aria-expanded")).toBe("false");
+    expect(local?.querySelector('[data-testid="agent-node-grid"]')).toBeNull();
+    expect(local?.textContent ?? "").toContain("今日 100");
+    expect(local?.textContent ?? "").not.toContain("local-cfo");
   });
 
   it("renders an always-expanded Humans section above local agents", () => {
