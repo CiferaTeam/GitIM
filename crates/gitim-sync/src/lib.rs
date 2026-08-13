@@ -5,6 +5,8 @@ pub mod conflict;
 mod fetch_cache;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod git;
+#[cfg(not(target_arch = "wasm32"))]
+mod remote_slot;
 pub mod renumber;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod rotate;

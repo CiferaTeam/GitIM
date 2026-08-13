@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::conflict::{self, build_rebase_commit_msg};
 use crate::fetch_cache::{fetch_for_pull, CacheNeutralHint, PullFetchResult, SyncCacheProgress};
@@ -1184,6 +1184,10 @@ fn sync_with_push(
             Err(GitError::PushConflict) => {
                 // Remote has diverged, need to sync
             }
+            Err(GitError::RemoteSlotBusy) => {
+                debug!("sync: remote git slot busy, skipping push");
+                return SyncOutcome::Normal;
+            }
             Err(e) => {
                 warn!("sync: push failed (non-conflict): {}", e);
                 return SyncOutcome::Normal;
@@ -1203,6 +1207,10 @@ fn sync_with_push(
                 if circuit.is_tripped() {
                     return SyncOutcome::AuthCircuitOpen;
                 }
+                return SyncOutcome::Normal;
+            }
+            Err(GitError::RemoteSlotBusy) => {
+                debug!("sync: remote git slot busy, skipping fetch");
                 return SyncOutcome::Normal;
             }
             Err(e) => {
@@ -1714,6 +1722,10 @@ fn sync_pull_only(
                     }
                     return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
+                Err(GitError::RemoteSlotBusy) => {
+                    debug!("sync: remote git slot busy, skipping pull-only fetch");
+                    return CacheAwareCycleResult::regular(SyncOutcome::Normal);
+                }
                 Err(e) => {
                     warn!("sync: fetch failed: {}", e);
                     return CacheAwareCycleResult::regular(SyncOutcome::Normal);
@@ -1914,6 +1926,12 @@ mod tests {
                 .join(".gitim-runtime")
                 .join("fetch-cache-state.json")
         }
+
+        fn remote_git_lock_path(&self) -> PathBuf {
+            self.workspace
+                .join(".gitim-runtime")
+                .join("remote-git.lock")
+        }
     }
 
     fn configure_cache_origin(clone_root: &Path, origin: &Path) {
@@ -2063,6 +2081,42 @@ mod tests {
         assert_eq!(circuit.consecutive_failures(), 1);
         assert_eq!(synced.get(), 1);
         assert_eq!(cycle_done.get(), 1);
+    }
+
+    #[test]
+    fn remote_slot_busy_skips_pull_cycle_without_auth_or_disable() {
+        let fixture = CacheLoopFixture::new();
+        let repo = fixture.storage();
+        let lock_file = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(fixture.remote_git_lock_path())
+            .expect("open remote git lock");
+        lock_file.lock_exclusive().expect("hold remote git lock");
+        let mut circuit = auth_circuit();
+        circuit.record(&Err(GitError::AuthFailed("first failure".to_string())));
+        let mut progress = SyncCacheProgress::new(30);
+
+        let result = run_sync_cycle_with_cache(
+            &repo,
+            &mut circuit,
+            &Mutex::new(()),
+            &|_, _| {},
+            &|_, _, _| {},
+            &|_| {},
+            &|| {},
+            None,
+            Some(&mut progress),
+        );
+
+        assert!(matches!(result.outcome, SyncOutcome::Normal));
+        assert_eq!(
+            result.cache_neutral,
+            Some(CacheNeutralHint::PreserveSchedule)
+        );
+        assert_eq!(circuit.consecutive_failures(), 1);
     }
 
     #[test]
