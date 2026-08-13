@@ -158,6 +158,7 @@ describe("CardReferenceLink", () => {
       root.unmount();
     });
     container.remove();
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -448,6 +449,110 @@ describe("CardReferenceLink", () => {
     });
     expect(onOpen).toHaveBeenCalledTimes(1);
     expect(onOpen).toHaveBeenCalledWith();
+  });
+
+  it("stays open after Show more even if the pointer leaves the flipped card", async () => {
+    const longReply = [
+      "first recent reply",
+      "context line two",
+      "context line three",
+      "context line four",
+      "context line five",
+      "context line six",
+    ].join("\n");
+    vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockImplementation(
+      function clientHeight(this: HTMLElement) {
+        return this.textContent === longReply ? 72 : 18;
+      },
+    );
+    vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockImplementation(
+      function scrollHeight(this: HTMLElement) {
+        return this.textContent === longReply ? 144 : 18;
+      },
+    );
+    api.readCard.mockResolvedValue({
+      ok: true,
+      data: {
+        meta: {
+          card_id: "20260812-165314-055",
+          channel: "awesome-agents-team-0519",
+          title: "Evaluate/add candidate: OpenMausBot",
+          status: "done",
+          labels: [],
+          assignee: "kimi-cli-macmini",
+          created_by: "cfo",
+          created_at: "20260812T165314Z",
+          updated_at: "20260813T051334Z",
+        },
+        entries: [
+          {
+            line_number: 11,
+            point_to: 0,
+            author: "cfo",
+            timestamp: "20260813T051400Z",
+            body: longReply,
+          },
+        ],
+        archived: false,
+      },
+    });
+
+    await act(async () => {
+      root.render(
+        <CardReferenceLink
+          reference={{
+            channel: "awesome-agents-team-0519",
+            cardId: "20260812-165314-055",
+            line: 11,
+          }}
+          latestReplyCount={1}
+          previewStartLine={11}
+          onOpen={vi.fn()}
+        />,
+      );
+      await Promise.resolve();
+    });
+
+    const hoverTarget = container.querySelector(".inline-flex.max-w-full");
+    expect(hoverTarget).not.toBeNull();
+    await act(async () => {
+      hoverTarget?.dispatchEvent(
+        new PointerEvent("pointerover", { bubbles: true, composed: true }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain("first recent reply");
+      });
+    });
+
+    const expand = Array.from(document.body.querySelectorAll("button")).find(
+      (button) => button.textContent?.trim() === "Show more",
+    );
+    expect(expand).toBeDefined();
+    await act(async () => {
+      expand?.click();
+    });
+    expect(expand?.textContent?.trim()).toBe("Show less");
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    vi.useFakeTimers();
+    await act(async () => {
+      dialog?.dispatchEvent(
+        new PointerEvent("pointerout", { bubbles: true, composed: true }),
+      );
+      hoverTarget?.dispatchEvent(
+        new PointerEvent("pointerout", { bubbles: true, composed: true }),
+      );
+      vi.advanceTimersByTime(250);
+    });
+
+    expect(container.querySelector("[data-popover-open]")?.getAttribute("data-popover-open")).toBe(
+      "true",
+    );
+    expect(document.body.textContent).toContain("Show less");
   });
 
   it("fetches the full merged range and displays its latest replies", async () => {

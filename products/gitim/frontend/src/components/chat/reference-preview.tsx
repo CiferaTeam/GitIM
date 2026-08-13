@@ -133,11 +133,13 @@ function MessagePreviewRow({
   targetLine,
   collapseLongBody,
   onMessageOpen,
+  onExpandToggle,
 }: {
   message: Message;
   targetLine?: number;
   collapseLongBody: boolean;
   onMessageOpen?: (line: number) => void;
+  onExpandToggle?: () => void;
 }) {
   const timezone = useTimezoneStore((s) => s.timezone);
   const bodyId = useId();
@@ -238,6 +240,7 @@ function MessagePreviewRow({
           className="mt-1 rounded-sm text-[11px] font-medium text-primary/80 outline-none transition-colors hover:text-primary hover:underline focus-visible:ring-2 focus-visible:ring-primary/30"
           onClick={(event) => {
             event.stopPropagation();
+            onExpandToggle?.();
             setExpanded((current) => !current);
           }}
         >
@@ -253,11 +256,13 @@ function MessageRows({
   targetLine,
   collapseLongBodies = false,
   onMessageOpen,
+  onExpandToggle,
 }: {
   messages: Message[];
   targetLine?: number;
   collapseLongBodies?: boolean;
   onMessageOpen?: (line: number) => void;
+  onExpandToggle?: () => void;
 }) {
   if (messages.length === 0) {
     return <div className="py-3 text-xs text-text-muted">No messages.</div>;
@@ -271,6 +276,7 @@ function MessageRows({
           targetLine={targetLine}
           collapseLongBody={collapseLongBodies}
           onMessageOpen={onMessageOpen}
+          onExpandToggle={onExpandToggle}
         />
       ))}
     </div>
@@ -310,6 +316,11 @@ export function CardReferenceLink({
   const [hoverOpen, setHoverOpen] = useState(false);
   const replyPopover = usePopoverPin();
   const open = isLatestRepliesPreview ? replyPopover.open : hoverOpen;
+  const previewContentRef = useRef<HTMLDivElement>(null);
+  const frozenSideRef = useRef<"top" | "bottom" | "left" | "right" | undefined>(undefined);
+  const [frozenSide, setFrozenSide] = useState<
+    "top" | "bottom" | "left" | "right" | undefined
+  >();
   const [status, setStatus] = useState<LoadStatus>("idle");
   const [error, setError] = useState<string | null>(null);
   const [loadedCard, setLoadedCard] = useState<Card | null>(null);
@@ -339,6 +350,13 @@ export function CardReferenceLink({
       reference.line,
     ],
   );
+
+  useEffect(() => {
+    if (replyPopover.open) return;
+    frozenSideRef.current = undefined;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFrozenSide(undefined);
+  }, [replyPopover.open]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -429,7 +447,7 @@ export function CardReferenceLink({
     className,
   );
   const previewPanel = (
-    <div className="p-3">
+    <div className="flex min-h-0 flex-1 flex-col p-3">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="truncate text-sm font-semibold text-foreground">
@@ -462,7 +480,7 @@ export function CardReferenceLink({
         </div>
       ) : null}
 
-      <div className="mt-3 border-t border-border pt-3">
+      <div className="mt-3 flex min-h-0 flex-1 flex-col border-t border-border pt-3">
         <div className="mb-2 flex items-center justify-between gap-3 text-[11px]">
           <span className="font-medium text-text-secondary">
             {isLatestRepliesPreview ? "Recent discussion" : "Discussion"}
@@ -484,7 +502,7 @@ export function CardReferenceLink({
           <div
             role="region"
             aria-label="Recent card discussion"
-            className="max-h-[min(420px,60vh)] overflow-y-auto overscroll-contain rounded-md pr-1 outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            className="min-h-0 max-h-[min(420px,60vh)] flex-1 overflow-y-auto overscroll-contain rounded-md pr-1 outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
             tabIndex={isLatestRepliesPreview ? 0 : undefined}
             onWheel={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
@@ -495,6 +513,9 @@ export function CardReferenceLink({
               targetLine={reference.line}
               collapseLongBodies={isLatestRepliesPreview}
               onMessageOpen={isLatestRepliesPreview ? onOpen : undefined}
+              onExpandToggle={
+                isLatestRepliesPreview ? replyPopover.pinFromInteraction : undefined
+              }
             />
           </div>
         )}
@@ -528,9 +549,25 @@ export function CardReferenceLink({
           </PopoverTrigger>
         </div>
         <PopoverContent
+          ref={previewContentRef}
           align="start"
+          side={frozenSide ?? "bottom"}
+          avoidCollisions={frozenSide == null}
           aria-label={`Replies for ${display}`}
-          className="w-[460px] max-w-[calc(100vw-24px)] p-0"
+          className="flex w-[460px] max-h-[var(--radix-popper-available-height)] max-w-[calc(100vw-24px)] flex-col overflow-hidden p-0"
+          onPlaced={() => {
+            if (frozenSideRef.current) return;
+            const placed = previewContentRef.current?.getAttribute("data-side");
+            if (
+              placed === "top" ||
+              placed === "bottom" ||
+              placed === "left" ||
+              placed === "right"
+            ) {
+              frozenSideRef.current = placed;
+              setFrozenSide(placed);
+            }
+          }}
           onOpenAutoFocus={replyPopover.handleOpenAutoFocus}
           onCloseAutoFocus={replyPopover.handleCloseAutoFocus}
           onPointerEnter={replyPopover.clearCloseTimer}

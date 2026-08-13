@@ -21,6 +21,11 @@ export interface PopoverPin {
   openFromFocus: () => void;
   /** Schedule a delayed close on pointer-leave unless pinned. */
   scheduleHoverClose: () => void;
+  /**
+   * Pin from a click inside the open content (e.g. Show more). Keeps the
+   * popover open if layout then moves the pointer off the content.
+   */
+  pinFromInteraction: () => void;
   /** Radix onOpenChange funnel; programmatic closes also unpin. */
   handleOpenChange: (next: boolean) => void;
   /** Trigger click toggles the pin: pinning opens, unpinning closes. */
@@ -41,6 +46,9 @@ export interface PopoverPin {
  * Semantics:
  * - Hover/focus opens cancel any pending hover close.
  * - Hover-leave while unpinned schedules a close after the delay.
+ * - A click inside the content (pinFromInteraction) pins, so a later
+ *   hover-leave — including one caused by the content flipping sides —
+ *   does not close the popover.
  * - Radix outside-dismiss routes through handleOpenChange; a close with no
  *   recorded source is stamped "dismiss" so focus restore behaves like Escape.
  * - Focus restore on close is suppressed only for hover closes; keyboard
@@ -89,6 +97,14 @@ export function usePopoverPin(
       setOpen(false);
     }, hoverCloseDelayMs);
   }, [clearCloseTimer, pinned, hoverCloseDelayMs]);
+
+  const pinFromInteraction = useCallback(() => {
+    clearCloseTimer();
+    closeSource.current = null;
+    openSource.current = "click";
+    setPinned(true);
+    setOpen(true);
+  }, [clearCloseTimer]);
 
   useEffect(() => () => clearCloseTimer(), [clearCloseTimer]);
 
@@ -156,6 +172,7 @@ export function usePopoverPin(
     openFromHover,
     openFromFocus,
     scheduleHoverClose,
+    pinFromInteraction,
     handleOpenChange,
     handleTriggerClick,
     handleOpenAutoFocus,
