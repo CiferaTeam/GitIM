@@ -677,7 +677,7 @@ fn direct_fallback(
             }
             PullFetchResult::Ready
         }
-        Err(GitError::RemoteSlotBusy) => {
+        Err(GitError::RemoteSlotBusy | GitError::RemoteSlotUnavailable(_)) => {
             PullFetchResult::NeutralSkip(CacheNeutralHint::PreserveSchedule)
         }
         Err(error) => PullFetchResult::RemoteError(error),
@@ -709,10 +709,16 @@ where
         .filter(|_| !repair_incomplete_cache)
         .map(|state| state.generation);
     if let Err(error) = repo.fetch_cache_shadow() {
-        if matches!(error, GitError::RemoteSlotBusy) {
+        if matches!(
+            error,
+            GitError::RemoteSlotBusy | GitError::RemoteSlotUnavailable(_)
+        ) {
             log_cache_outcome(
                 context,
-                "remote_slot_busy",
+                match error {
+                    GitError::RemoteSlotUnavailable(_) => "remote_slot_unavailable",
+                    _ => "remote_slot_busy",
+                },
                 previous.map(|state| state.generation),
             );
             progress.reset_contention_retries();

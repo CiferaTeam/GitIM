@@ -23,7 +23,7 @@ arbitrate this lock.
 - Runtime-managed clones that can see a canonical `.gitim-runtime/` ancestor
   (human + agents under one workspace).
 - Direct remote git: `GitStorage::push`, `fetch`, `fetch_cache_shadow`,
-  `atomic_push_two_refs`.
+  `atomic_push_two_refs`, `push_tag`.
 - Existing shared fetch cache, send-local-then-push, auth circuit, and 120s
   process timeout stay as they are.
 
@@ -54,33 +54,37 @@ If discovery succeeds:
    fetch-cache lock).
 2. On acquire: run the git remote command (still subject to the existing 120s
    kill timeout), then drop the lock.
-3. On wait timeout or lock I/O failure: return `GitError::RemoteSlotBusy`
-   without starting git.
+3. On wait timeout: return `GitError::RemoteSlotBusy` without starting git.
+   On lock open/acquire I/O failure: warn and return
+   `GitError::RemoteSlotUnavailable`, also without starting git.
 
 Follower import from `fetch-cache.git` is a local filesystem fetch and does
 not take this lock. Cache leader shadow fetch does.
 
 Lock order is acyclic: cache path takes `fetch-cache.lock` first, then the
-remote slot inside `fetch_cache_shadow`. Push / direct fetch / atomic push
-take only the remote slot.
+remote slot inside `fetch_cache_shadow`. Push / direct fetch / atomic push /
+tag push take only the remote slot.
 
 ## Caller mapping
 
-`RemoteSlotBusy` is a skip, not a protocol failure.
+`RemoteSlotBusy` and `RemoteSlotUnavailable` are skips, not protocol failures.
+Busy is contention; Unavailable is a lock filesystem/permission fault (warned
+at the lock site).
 
 | Caller | Behavior |
 | --- | --- |
 | `sync_loop` push / pull-direct fetch | Skip this cycle (`SyncOutcome::Normal`). Next interval retries. |
+| `sync_loop` post-rebase / post-conflict push | Same skip; do not consume `MAX_SYNC_RETRIES`. |
 | fetch-cache leader (`fetch_cache_shadow`) | `NeutralSkip(PreserveSchedule)`. Do not latch cache `disabled`. |
 | fetch-cache `direct_fallback` | Same skip; do not latch cache `disabled`. |
 | Handler `push_with_retry` | Existing "local commit durable, push failed" path. Client sees a transient push error; `sync_loop` retries. |
-| Epoch `atomic_push_two_refs` / rotation fetch | Existing fail / `NotReady` paths; next fire retries. |
+| Epoch `atomic_push_two_refs` / `push_tag` / rotation fetch | Existing fail / `NotReady` / best-effort archive paths; next fire retries. |
 
-Do not classify `RemoteSlotBusy` as auth, rate-limit, or timeout.
+Do not classify either slot error as auth, rate-limit, or timeout.
 
 ## Invariants
 
-1. At most one of `{push, fetch, fetch_cache_shadow, atomic_push_two_refs}`
+1. At most one of `{push, fetch, fetch_cache_shadow, atomic_push_two_refs, push_tag}`
    is in the 120s git wait on a given workspace at a time.
 2. A daemon that does not get the slot within 1s does not spawn git.
 3. Idle pull-only freshness still goes through shared fetch cache; this lock
@@ -93,8 +97,12 @@ Do not classify `RemoteSlotBusy` as auth, rate-limit, or timeout.
 
 - Gate unit: held lock → second acquire returns `RemoteSlotBusy` within ~1s.
 - Discovery miss → remote call is not wrapped.
-- `sync_loop` / fetch-cache map `RemoteSlotBusy` to skip and leave cache
-  enabled.
+- Lock path that is not a file → `RemoteSlotUnavailable` without waiting out
+  the 1s poll budget.
+- `push_tag` is gated the same way as `push` / `fetch`.
+- `sync_loop` / fetch-cache map both slot errors to skip and leave cache
+  enabled. Post-rebase / post-conflict push skip the cycle instead of
+  consuming `MAX_SYNC_RETRIES`.
 - Direct `fetch`/`push` still succeed when the lock is free (existing git
   tests keep covering the happy path).
 

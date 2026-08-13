@@ -95,6 +95,10 @@ pub enum GitError {
     /// slot. Callers should skip this cycle and retry later.
     #[error("remote git slot busy")]
     RemoteSlotBusy,
+    /// The workspace remote-git lock could not be opened or acquired due to
+    /// a filesystem or permission fault, not contention.
+    #[error("remote git slot unavailable: {0}")]
+    RemoteSlotUnavailable(String),
 }
 
 /// Run a git subprocess with a process-level timeout.
@@ -1437,22 +1441,24 @@ impl GitStorage {
     /// `classify_remote_error` (credential-redacting); an already-existing
     /// tag rejects as `PushConflict`.
     pub fn push_tag(&self, tag: &str) -> Result<(), GitError> {
-        let args = [
-            GIT_HTTP_TIMEOUT_ARGS[0],
-            GIT_HTTP_TIMEOUT_ARGS[1],
-            GIT_HTTP_TIMEOUT_ARGS[2],
-            GIT_HTTP_TIMEOUT_ARGS[3],
-            "push",
-            "origin",
-            tag,
-        ];
-        let output = run_git_command(&args, &self.root)?;
-        if !output.status.success() {
-            return Err(classify_remote_error(&String::from_utf8_lossy(
-                &output.stderr,
-            )));
-        }
-        Ok(())
+        self.with_remote_slot(|| {
+            let args = [
+                GIT_HTTP_TIMEOUT_ARGS[0],
+                GIT_HTTP_TIMEOUT_ARGS[1],
+                GIT_HTTP_TIMEOUT_ARGS[2],
+                GIT_HTTP_TIMEOUT_ARGS[3],
+                "push",
+                "origin",
+                tag,
+            ];
+            let output = run_git_command(&args, &self.root)?;
+            if !output.status.success() {
+                return Err(classify_remote_error(&String::from_utf8_lossy(
+                    &output.stderr,
+                )));
+            }
+            Ok(())
+        })
     }
 
     pub fn bundle_to_path(&self, path: &Path, reference: &str) -> Result<(), GitError> {
@@ -3176,13 +3182,31 @@ mod tests {
         let err = GitStorage::new(&clone).fetch().unwrap_err();
 
         assert!(
-            !matches!(err, GitError::RemoteSlotBusy),
+            !matches!(
+                err,
+                GitError::RemoteSlotBusy | GitError::RemoteSlotUnavailable(_)
+            ),
             "free slot should reach git, got {err:?}"
         );
     }
 
     #[test]
-    fn fetch_returns_remote_slot_busy_when_lock_path_is_not_a_file() {
+    fn push_tag_returns_remote_slot_busy_when_workspace_lock_held() {
+        let (_root, runtime_dir, clone) = runtime_workspace_clone();
+        let _lock = hold_exclusive(&runtime_dir.join("remote-git.lock"));
+
+        let err = GitStorage::new(&clone)
+            .push_tag("archive/epoch-1/abc1234")
+            .unwrap_err();
+
+        assert!(
+            matches!(err, GitError::RemoteSlotBusy),
+            "expected RemoteSlotBusy, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn fetch_returns_unavailable_when_lock_path_is_not_a_file() {
         let (_root, runtime_dir, clone) = runtime_workspace_clone();
         std::fs::create_dir(runtime_dir.join("remote-git.lock")).unwrap();
         let started = std::time::Instant::now();
@@ -3190,8 +3214,8 @@ mod tests {
         let err = GitStorage::new(&clone).fetch().unwrap_err();
 
         assert!(
-            matches!(err, GitError::RemoteSlotBusy),
-            "expected RemoteSlotBusy, got {err:?}"
+            matches!(err, GitError::RemoteSlotUnavailable(_)),
+            "expected RemoteSlotUnavailable, got {err:?}"
         );
         assert!(
             started.elapsed() < Duration::from_millis(500),

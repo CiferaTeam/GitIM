@@ -938,6 +938,20 @@ fn enforce_divergence_threshold(
     true
 }
 
+fn skip_for_remote_slot(error: &GitError, what: &str) -> bool {
+    match error {
+        GitError::RemoteSlotBusy => {
+            debug!("sync: remote git slot busy, skipping {what}");
+            true
+        }
+        GitError::RemoteSlotUnavailable(reason) => {
+            warn!("sync: remote git slot unavailable, skipping {what}: {reason}");
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Every remote operation in the sync loop funnels its result through this helper
 /// so the auth circuit observes every push/fetch. Callers check the returned flag
 /// once and trip-log if it transitioned.
@@ -1184,8 +1198,7 @@ fn sync_with_push(
             Err(GitError::PushConflict) => {
                 // Remote has diverged, need to sync
             }
-            Err(GitError::RemoteSlotBusy) => {
-                debug!("sync: remote git slot busy, skipping push");
+            Err(e) if skip_for_remote_slot(&e, "push") => {
                 return SyncOutcome::Normal;
             }
             Err(e) => {
@@ -1209,8 +1222,7 @@ fn sync_with_push(
                 }
                 return SyncOutcome::Normal;
             }
-            Err(GitError::RemoteSlotBusy) => {
-                debug!("sync: remote git slot busy, skipping fetch");
+            Err(e) if skip_for_remote_slot(&e, "fetch") => {
                 return SyncOutcome::Normal;
             }
             Err(e) => {
@@ -1340,6 +1352,9 @@ fn sync_with_push(
                         if circuit.is_tripped() {
                             return SyncOutcome::AuthCircuitOpen;
                         }
+                        return SyncOutcome::Normal;
+                    }
+                    Err(e) if skip_for_remote_slot(&e, "push after rebase") => {
                         return SyncOutcome::Normal;
                     }
                     Err(_) => {
@@ -1668,6 +1683,9 @@ fn sync_with_push(
                         }
                         return SyncOutcome::Normal;
                     }
+                    Err(e) if skip_for_remote_slot(&e, "push after conflict resolution") => {
+                        return SyncOutcome::Normal;
+                    }
                     Err(_) => {
                         warn!(
                             "sync: push failed after conflict resolution (attempt {}), retrying",
@@ -1722,8 +1740,7 @@ fn sync_pull_only(
                     }
                     return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
-                Err(GitError::RemoteSlotBusy) => {
-                    debug!("sync: remote git slot busy, skipping pull-only fetch");
+                Err(e) if skip_for_remote_slot(&e, "pull-only fetch") => {
                     return CacheAwareCycleResult::regular(SyncOutcome::Normal);
                 }
                 Err(e) => {

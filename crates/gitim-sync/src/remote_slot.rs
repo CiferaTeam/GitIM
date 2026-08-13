@@ -2,6 +2,7 @@ use crate::git::GitError;
 use fs2::FileExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use tracing::warn;
 
 const LOCK_FILE: &str = "remote-git.lock";
 const LOCK_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
@@ -20,6 +21,7 @@ impl Drop for RemoteSlotLock {
 enum LockAttempt {
     Acquired(RemoteSlotLock),
     Busy,
+    Failed(std::io::Error),
 }
 
 pub(crate) fn with_remote_slot<T>(
@@ -32,6 +34,14 @@ pub(crate) fn with_remote_slot<T>(
     let _lock = match acquire_lock(&lock_path) {
         LockAttempt::Acquired(lock) => lock,
         LockAttempt::Busy => return Err(GitError::RemoteSlotBusy),
+        LockAttempt::Failed(error) => {
+            warn!(
+                path = %lock_path.display(),
+                error = %error,
+                "remote git slot lock failed"
+            );
+            return Err(GitError::RemoteSlotUnavailable(error.to_string()));
+        }
     };
     op()
 }
@@ -63,7 +73,7 @@ fn acquire_lock(path: &Path) -> LockAttempt {
     }
     let file = match options.open(path) {
         Ok(file) => file,
-        Err(_) => return LockAttempt::Busy,
+        Err(error) => return LockAttempt::Failed(error),
     };
     let started = Instant::now();
     loop {
@@ -79,7 +89,7 @@ fn acquire_lock(path: &Path) -> LockAttempt {
                 }
                 std::thread::sleep(LOCK_POLL_INTERVAL.min(LOCK_WAIT_TIMEOUT - elapsed));
             }
-            Err(_) => return LockAttempt::Busy,
+            Err(error) => return LockAttempt::Failed(error),
         }
     }
 }
