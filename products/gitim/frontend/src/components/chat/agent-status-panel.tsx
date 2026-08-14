@@ -66,13 +66,24 @@ function usageFillValue(agent: Agent): string | null {
   return `${Number.isInteger(percent) ? percent.toFixed(0) : percent.toFixed(1)}%`;
 }
 
+function workRank(
+  agent: Agent,
+  event: AgentActivityEvent | undefined,
+): number {
+  return agentWorkState(agent, event) === "working" ? 1 : 0;
+}
+
 function compareRowsByActivity(
   activities: Record<string, AgentActivityEvent[]>,
 ): (a: AgentStatusRow, b: AgentStatusRow) => number {
   return (a, b) => {
-    const byActivity =
-      activityTime(latestActivity(b.activityKey, activities)) -
-      activityTime(latestActivity(a.activityKey, activities));
+    const aLatest = latestActivity(a.activityKey, activities);
+    const bLatest = latestActivity(b.activityKey, activities);
+
+    const byWork = workRank(b.agent, bLatest) - workRank(a.agent, aLatest);
+    if (byWork !== 0) return byWork;
+
+    const byActivity = activityTime(bLatest) - activityTime(aLatest);
     if (byActivity !== 0) return byActivity;
 
     const byStatus =

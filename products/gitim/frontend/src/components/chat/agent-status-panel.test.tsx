@@ -45,15 +45,24 @@ import { AgentStatusPanel } from "./agent-status-panel";
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
-function agentWithUsage(usedPercent: number): Agent {
+function runningAgent(
+  id: string,
+  extras: Partial<Agent> = {},
+): Agent {
   return {
-    id: "cfo",
-    handler: "cfo",
-    name: "cfo",
+    id,
+    handler: id,
+    name: id,
     status: "running",
     systemPrompt: "",
-    repoPath: "/tmp/cfo",
+    repoPath: `/tmp/${id}`,
     messagesProcessed: 0,
+    ...extras,
+  };
+}
+
+function agentWithUsage(usedPercent: number): Agent {
+  return runningAgent("cfo", {
     sessionUsage: {
       sessionId: "019e0bd5",
       inputTokens: 50_000,
@@ -63,7 +72,7 @@ function agentWithUsage(usedPercent: number): Agent {
       source: "provider_reported",
       updatedAt: "2026-05-09T10:00:00Z",
     },
-  };
+  });
 }
 
 describe("AgentStatusPanel", () => {
@@ -187,5 +196,43 @@ describe("AgentStatusPanel", () => {
     expect(container.textContent).toContain("glm51op");
     expect(container.textContent).toContain("lewismac-mini");
     expect(container.textContent).toContain("done (18.5s)");
+  });
+
+  it("keeps working agents above recently finished ones", async () => {
+    useAgentStore.setState({
+      agents: [runningAgent("alpha"), runningAgent("zeta")],
+      selectedAgentId: null,
+    });
+    useAgentActivityStore.getState().push({
+      agent_id: "zeta",
+      workspace_id: "room",
+      event_type: "thinking",
+      detail: "thinking...",
+      timestamp: "2026-05-18T11:19:00Z",
+    });
+    useAgentActivityStore.getState().push({
+      agent_id: "alpha",
+      workspace_id: "room",
+      event_type: "done",
+      detail: "done (6.3s)",
+      timestamp: "2026-05-18T11:20:00Z",
+    });
+
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    root = createRoot(container);
+
+    await act(async () => {
+      root?.render(<AgentStatusPanel />);
+      await Promise.resolve();
+    });
+
+    const preview = [
+      ...container.querySelectorAll('[data-testid="agent-preview-row"]'),
+    ];
+    expect(preview.map((el) => el.textContent ?? "")).toEqual([
+      expect.stringContaining("zeta"),
+      expect.stringContaining("alpha"),
+    ]);
   });
 });
