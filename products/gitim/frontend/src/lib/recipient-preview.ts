@@ -15,6 +15,12 @@ function addParentChainRecipients(
 ) {
   if (!replyTo || replyTo.line_number <= 0) return;
 
+  // Parent recipients are daemon-computed over the full thread. Union them
+  // so the preview still matches when older ancestors are not loaded.
+  for (const handler of replyTo.recipients ?? []) {
+    addRecipient(recipients, handler);
+  }
+
   const byLine = new Map<number, Message>();
   for (const message of messages) {
     if (message.line_number > 0) byLine.set(message.line_number, message);
@@ -28,6 +34,7 @@ function addParentChainRecipients(
     const message = byLine.get(cursor);
     if (!message) break;
     addRecipient(recipients, message.author);
+    addMentionRecipients(recipients, message.body);
     cursor = message.point_to;
   }
 }
@@ -70,6 +77,15 @@ export function computeDraftRecipients({
         excludeSelf: self,
       }),
     );
+    // Channel @ of a non-member is rewritten to a profile link `<~handler>`
+    // on send, so they cannot be woken. Keep the preview on people who can
+    // actually receive: members plus the channel creator.
+    const deliverable = new Set<string>();
+    addRecipient(deliverable, channel.created_by);
+    for (const member of channel.members) addRecipient(deliverable, member);
+    for (const handler of [...recipients]) {
+      if (!deliverable.has(handler)) recipients.delete(handler);
+    }
   }
 
   if (self) recipients.delete(self);

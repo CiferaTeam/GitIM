@@ -99,6 +99,144 @@ describe("computeDraftRecipients", () => {
 
     expect(recipients).toEqual(["alice"]);
   });
+
+  it("inherits ancestor mentions along the parent chain", () => {
+    const root: Message = {
+      line_number: 1,
+      point_to: 0,
+      author: "flame4",
+      timestamp: "20260520T120000Z",
+      body: "hello <@bob> <@charlie>",
+    };
+
+    const recipients = computeDraftRecipients({
+      body: "replying",
+      channel: {
+        ...baseChannel,
+        members: ["lewis", "flame4", "bob", "charlie"],
+      },
+      replyTo: root,
+      messages: [root],
+    });
+
+    expect(recipients).toEqual(["bob", "cfo", "charlie", "flame4"]);
+  });
+
+  it("inherits mentions through a multi-hop parent chain", () => {
+    const root: Message = {
+      line_number: 1,
+      point_to: 0,
+      author: "alice",
+      timestamp: "20260520T120000Z",
+      body: "start <@reviewer>",
+    };
+    const mid: Message = {
+      line_number: 2,
+      point_to: 1,
+      author: "bob",
+      timestamp: "20260520T120100Z",
+      body: "middle <@tester>",
+    };
+
+    const recipients = computeDraftRecipients({
+      body: "deep reply",
+      channel: {
+        ...baseChannel,
+        members: ["lewis", "alice", "bob", "reviewer", "tester"],
+      },
+      replyTo: mid,
+      messages: [root, mid],
+    });
+
+    expect(recipients).toEqual(["alice", "bob", "cfo", "reviewer", "tester"]);
+  });
+
+  it("keeps parent-message recipients when ancestors are not loaded", () => {
+    const lewis: Message = {
+      line_number: 40,
+      point_to: 12,
+      author: "flame4",
+      timestamp: "20260520T084400Z",
+      body: "现在开发部有几个人了？",
+      recipients: ["cfo", "mishu-lao-k", "mishu-wangjie", "mishu-xiaoqian"],
+    };
+
+    const recipients = computeDraftRecipients({
+      body: "是",
+      channel: {
+        ...baseChannel,
+        members: [
+          "lewis",
+          "flame4",
+          "mishu-lao-k",
+          "mishu-wangjie",
+          "mishu-xiaoqian",
+        ],
+      },
+      replyTo: lewis,
+      messages: [lewis],
+      excludeSelf: "flame4",
+    });
+
+    expect(recipients).toEqual([
+      "cfo",
+      "mishu-lao-k",
+      "mishu-wangjie",
+      "mishu-xiaoqian",
+    ]);
+  });
+
+  it("does not preview ancestor mentions of handlers outside the channel", () => {
+    const root: Message = {
+      line_number: 1,
+      point_to: 0,
+      author: "flame4",
+      timestamp: "20260520T120000Z",
+      body: "hello <@mishu-xiaoqian> <@dev-yun-long>",
+    };
+
+    const recipients = computeDraftRecipients({
+      body: "replying",
+      channel: {
+        ...baseChannel,
+        members: ["lewis", "flame4", "mishu-xiaoqian"],
+      },
+      replyTo: root,
+      messages: [root],
+    });
+
+    expect(recipients).toEqual(["cfo", "flame4", "mishu-xiaoqian"]);
+  });
+
+  it("does not preview parent recipients who are not channel members", () => {
+    const lewis: Message = {
+      line_number: 40,
+      point_to: 12,
+      author: "flame4",
+      timestamp: "20260520T084400Z",
+      body: "现在开发部有几个人了？",
+      recipients: [
+        "cfo",
+        "dev-yun-long",
+        "luna",
+        "mishu-xiaoqian",
+        "opencode-dsflash-paid",
+      ],
+    };
+
+    const recipients = computeDraftRecipients({
+      body: "是",
+      channel: {
+        ...baseChannel,
+        members: ["lewis", "flame4", "mishu-xiaoqian"],
+      },
+      replyTo: lewis,
+      messages: [lewis],
+      excludeSelf: "flame4",
+    });
+
+    expect(recipients).toEqual(["cfo", "mishu-xiaoqian"]);
+  });
 });
 
 describe("computeCardDraftRecipients", () => {
