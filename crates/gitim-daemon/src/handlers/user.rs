@@ -1,5 +1,5 @@
 use crate::api::{Event, Response};
-use crate::handlers::ensure_author_not_departed;
+use crate::handlers::{ensure_author_not_departed, ensure_skill_ownership_transfer};
 use crate::state::SharedState;
 use gitim_core::types::{Handler, UserKind, UserMeta, MAX_INTRODUCTION_LEN};
 use gitim_sync::git::GitError;
@@ -254,6 +254,10 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
         return Response::error(format!("user @{} not found", handler));
     }
 
+    if let Err(response) = ensure_skill_ownership_transfer(&state, &handler) {
+        return response;
+    }
+
     // 5. Ensure archive/users/ directory exists.
     if let Err(e) = std::fs::create_dir_all(&archive_dir) {
         return Response::error(format!("failed to create archive/users dir: {}", e));
@@ -266,6 +270,10 @@ pub async fn handle_archive_user(state: SharedState, handler: String, author: St
     // section is all blocking subprocess calls; std::sync::Mutex guard
     // must not cross any `.await`.
     let _commit_guard = state.commit_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+    if let Err(response) = ensure_skill_ownership_transfer(&state, &handler) {
+        return response;
+    }
 
     // 6. git mv users/<h>.meta.yaml → archive/users/<h>.meta.yaml
     let from_rel = format!("users/{}.meta.yaml", handler);

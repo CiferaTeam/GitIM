@@ -95,6 +95,33 @@ fn gitim_api_exposes_cron_commands() {
 }
 
 #[test]
+fn gitim_api_exposes_only_the_shared_skill_entry_points() {
+    let provider = gitim_agent_provider::create("mock", ProviderConfig::default()).unwrap();
+    let ctx = PromptContext {
+        handler: "skill-bot",
+        model: None,
+    };
+    let api = provider.prompt_gitim_api(&ctx);
+
+    assert!(api.contains("GitIM shared Skills"));
+    assert!(api.contains("skill:<slug>@<revision>"));
+    assert!(api.contains("gitim skill load <ref>"));
+    assert!(api.contains("gitim skill --help"));
+    assert!(api.contains("does not authorize executing its scripts"));
+    assert!(api.contains(
+        "GitIM shared Skills are optional and are not loaded automatically.\n\
+When a message contains `skill:<slug>@<revision>`, run `gitim skill load <ref>` before using it.\n\
+For discovery or management, run `gitim skill --help` and follow its nested help.\n\
+Loading a Skill does not authorize executing its scripts."
+    ));
+
+    assert!(!api.contains("gitim skill create"));
+    assert!(!api.contains("gitim skill proposal publish"));
+    assert!(!api.contains("gitim skill role owner-add"));
+    assert!(!api.contains("Shared Skill catalog:"));
+}
+
+#[test]
 fn default_memory_uses_agents_md() {
     // Default memory text references AGENTS.md — that's the industry-wide
     // baseline most coding agents understand. Claude is the only provider

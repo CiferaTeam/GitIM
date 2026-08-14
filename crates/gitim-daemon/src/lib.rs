@@ -16,5 +16,7 @@ pub mod onboard;
 pub mod quick_session_handlers;
 pub mod reconcile;
 pub mod server;
+pub mod skill_handlers;
+pub mod skill_store;
 pub mod state;
 pub mod thread_io;
