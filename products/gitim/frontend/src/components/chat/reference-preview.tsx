@@ -359,6 +359,38 @@ export function CardReferenceLink({
   }, [replyPopover.open]);
 
   useEffect(() => {
+    if (!replyPopover.open) return;
+    const content = previewContentRef.current;
+    if (!content) return;
+
+    const freezePlacedSide = () => {
+      if (frozenSideRef.current) return;
+      const placed = content.getAttribute("data-side");
+      if (
+        placed === "top" ||
+        placed === "bottom" ||
+        placed === "left" ||
+        placed === "right"
+      ) {
+        frozenSideRef.current = placed;
+        setFrozenSide(placed);
+      }
+    };
+
+    const observer = new MutationObserver(freezePlacedSide);
+    observer.observe(content, {
+      attributes: true,
+      attributeFilter: ["data-side"],
+    });
+    const animationFrame = requestAnimationFrame(freezePlacedSide);
+
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      observer.disconnect();
+    };
+  }, [replyPopover.open]);
+
+  useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus("idle");
     setError(null);
@@ -555,19 +587,6 @@ export function CardReferenceLink({
           avoidCollisions={frozenSide == null}
           aria-label={`Replies for ${display}`}
           className="flex w-[460px] max-h-[var(--radix-popper-available-height)] max-w-[calc(100vw-24px)] flex-col overflow-hidden p-0"
-          onPlaced={() => {
-            if (frozenSideRef.current) return;
-            const placed = previewContentRef.current?.getAttribute("data-side");
-            if (
-              placed === "top" ||
-              placed === "bottom" ||
-              placed === "left" ||
-              placed === "right"
-            ) {
-              frozenSideRef.current = placed;
-              setFrozenSide(placed);
-            }
-          }}
           onOpenAutoFocus={replyPopover.handleOpenAutoFocus}
           onCloseAutoFocus={replyPopover.handleCloseAutoFocus}
           onPointerEnter={replyPopover.clearCloseTimer}

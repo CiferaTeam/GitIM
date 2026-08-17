@@ -101,11 +101,17 @@ vi.mock("@/components/ui/popover", async () => {
     ),
     PopoverContent: ({
       children,
+      ref,
+      side,
+      avoidCollisions,
       onPointerEnter,
       onPointerLeave,
       "aria-label": ariaLabel,
     }: {
       children?: React.ReactNode;
+      ref?: React.Ref<HTMLDivElement>;
+      side?: "top" | "bottom" | "left" | "right";
+      avoidCollisions?: boolean;
       onPointerEnter?: React.PointerEventHandler<HTMLDivElement>;
       onPointerLeave?: React.PointerEventHandler<HTMLDivElement>;
       "aria-label"?: string;
@@ -114,8 +120,11 @@ vi.mock("@/components/ui/popover", async () => {
       if (!isOpen) return null;
       return (
         <div
+          ref={ref}
           role="dialog"
           aria-label={ariaLabel}
+          data-side={side}
+          data-avoid-collisions={String(avoidCollisions)}
           onPointerEnter={onPointerEnter}
           onPointerLeave={onPointerLeave}
         >
@@ -538,6 +547,14 @@ describe("CardReferenceLink", () => {
 
     const dialog = document.body.querySelector('[role="dialog"]');
     expect(dialog).not.toBeNull();
+    expect(dialog?.getAttribute("data-avoid-collisions")).toBe("true");
+    await act(async () => {
+      dialog?.setAttribute("data-side", "top");
+      await Promise.resolve();
+    });
+    expect(dialog?.getAttribute("data-side")).toBe("top");
+    expect(dialog?.getAttribute("data-avoid-collisions")).toBe("false");
+
     vi.useFakeTimers();
     await act(async () => {
       dialog?.dispatchEvent(
