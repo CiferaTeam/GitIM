@@ -969,6 +969,17 @@ async fn test_create_channel_basic() {
     assert_eq!(members.len(), 1);
     assert_eq!(members[0], "alice");
 
+    let list_resp = handle_request(Request::ListChannels, state.clone()).await;
+    assert!(list_resp.ok, "list_channels failed: {:?}", list_resp.error);
+    let listed_channel = list_resp.data.unwrap()["channels"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|channel| channel["name"] == "random")
+        .cloned()
+        .expect("created channel must appear in list_channels");
+    assert_eq!(listed_channel["display_name"], "Random");
+
     // Verify .thread exists with a join event
     let thread = std::fs::read_to_string(state.repo_root.join("channels/random.thread")).unwrap();
     assert!(thread.contains("[E:join]"), "thread missing join event");

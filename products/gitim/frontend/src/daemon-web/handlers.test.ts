@@ -696,6 +696,7 @@ describe("daemon-web handlers", () => {
     expect(res.data?.channels).toEqual([
       {
         name: "general",
+        display_name: "General",
         kind: "channel",
         unreadCount: 0,
         members: ["alice", "lewis"],
@@ -889,6 +890,7 @@ describe("daemon-web handlers", () => {
     expect(archived.data?.channels).toEqual([
       {
         name: "general",
+        display_name: "General",
         kind: "archived_channel",
         members: ["alice", "lewis"],
       },
@@ -926,13 +928,15 @@ describe("daemon-web handlers", () => {
 
     expect(first.data).toEqual({
       channels: [
-        { name: "alpha", kind: "archived_channel", members: ["lewis"] },
-        { name: "beta", kind: "archived_channel", members: ["lewis"] },
+        { name: "alpha", display_name: "Test", kind: "archived_channel", members: ["lewis"] },
+        { name: "beta", display_name: "Test", kind: "archived_channel", members: ["lewis"] },
       ],
       has_more: true,
     });
     expect(second.data).toEqual({
-      channels: [{ name: "gamma", kind: "archived_channel", members: ["lewis"] }],
+      channels: [
+        { name: "gamma", display_name: "Test", kind: "archived_channel", members: ["lewis"] },
+      ],
       has_more: false,
     });
   });
@@ -984,6 +988,7 @@ describe("daemon-web handlers", () => {
     expect(active.data?.channels).toEqual([
       {
         name: "general",
+        display_name: "General",
         kind: "channel",
         unreadCount: 0,
         members: ["alice", "lewis"],

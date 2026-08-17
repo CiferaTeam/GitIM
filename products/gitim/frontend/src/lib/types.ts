@@ -156,6 +156,8 @@ export interface Message {
 
 export interface Channel {
   name: string;
+  /** Human-readable channel label. Older daemons and DM rows omit it. */
+  display_name?: string;
   kind: "channel" | "dm";
   unreadCount: number;
   hasMention: boolean;

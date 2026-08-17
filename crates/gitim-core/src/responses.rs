@@ -85,6 +85,9 @@ pub struct ReadResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChannelSummary {
     pub name: String,
+    /// Human-readable label from `ChannelMeta`; absent for DMs or unreadable metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
     /// Currently `"channel"`, `"dm"`, or `"archived_channel"`.
     pub kind: String,
     pub members: Vec<String>,
@@ -933,6 +936,7 @@ mod tests {
         let r = ListChannelsResponse {
             channels: vec![ChannelSummary {
                 name: "general".to_string(),
+                display_name: Some("General".to_string()),
                 kind: "channel".to_string(),
                 members: vec!["alice".to_string(), "bob".to_string()],
                 created_by: Some("alice".to_string()),
@@ -943,6 +947,10 @@ mod tests {
         let arr = v.get("channels").unwrap().as_array().unwrap();
         let first = arr[0].as_object().unwrap();
         assert_eq!(first.get("name").and_then(|v| v.as_str()), Some("general"));
+        assert_eq!(
+            first.get("display_name").and_then(|v| v.as_str()),
+            Some("General"),
+        );
         assert_eq!(first.get("kind").and_then(|v| v.as_str()), Some("channel"));
         assert_eq!(
             first.get("created_by").and_then(|v| v.as_str()),
@@ -968,6 +976,7 @@ mod tests {
         let r = ListChannelsResponse {
             channels: vec![ChannelSummary {
                 name: "random".to_string(),
+                display_name: Some("Random".to_string()),
                 kind: "channel".to_string(),
                 members: vec!["bob".to_string()],
                 created_by: Some("bob".to_string()),

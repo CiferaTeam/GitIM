@@ -78,8 +78,9 @@ export async function channels(): Promise<ApiResponse> {
   return {
     ok: true,
     data: {
-      channels: channelList.map(({ name, kind, members }) => ({
+      channels: channelList.map(({ name, display_name, kind, members }) => ({
         name,
+        ...(display_name ? { display_name } : {}),
         kind,
         members,
       })),
@@ -96,11 +97,10 @@ export function addChannel(channel: Channel): void {
 
 export async function createChannel(
   name: string,
-  _displayName?: string,
+  displayName?: string,
   _introduction?: string,
 ): Promise<ApiResponse> {
   await delay();
-  void _displayName;
   void _introduction;
   if (!name || !/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/.test(name) || name.length > 32 || name.includes("--")) {
     return { ok: false, error: "invalid channel name" };
@@ -110,6 +110,7 @@ export async function createChannel(
   }
   const channel: Channel = {
     name,
+    display_name: displayName || name,
     kind: "channel",
     unreadCount: 0,
     hasMention: false,

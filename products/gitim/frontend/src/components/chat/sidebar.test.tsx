@@ -202,6 +202,35 @@ describe("Sidebar channel ordering", () => {
     ]);
   });
 
+  it("renders the channel display name while preserving the canonical name for selection", () => {
+    const onChannelSelect = vi.fn();
+    useChatStore.setState({
+      channels: [
+        {
+          ...channel("write-blog-00"),
+          display_name: "文章写作",
+        },
+      ],
+      currentChannel: "write-blog-00",
+    });
+
+    act(() => {
+      root?.render(
+        <Sidebar onChannelSelect={onChannelSelect} onStartDm={vi.fn()} />,
+      );
+    });
+
+    expect(visibleChannelNames(container)).toEqual(["文章写作"]);
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="sidebar-channel-item"] button',
+        )
+        ?.click();
+    });
+    expect(onChannelSelect).toHaveBeenCalledWith("write-blog-00");
+  });
+
   it("performs one archived-channel fetch for each open-view invalidation", async () => {
     const listArchivedChannels = vi.mocked(client.listArchivedChannels);
     listArchivedChannels.mockResolvedValue({

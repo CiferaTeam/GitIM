@@ -131,9 +131,11 @@ pub async fn handle_list_channels(state: SharedState) -> Response {
                         .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok());
                     let members = meta.as_ref().map(|m| m.members.clone()).unwrap_or_default();
                     let created_by = meta.as_ref().map(|m| m.created_by.clone());
+                    let display_name = meta.as_ref().map(|m| m.display_name.clone());
                     let project = meta.and_then(|m| m.project);
                     channels.push(ChannelSummary {
                         name,
+                        display_name,
                         kind: "channel".to_string(),
                         members,
                         created_by,
@@ -155,6 +157,7 @@ pub async fn handle_list_channels(state: SharedState) -> Response {
                     let members: Vec<String> = name.split("--").map(|s| s.to_string()).collect();
                     channels.push(ChannelSummary {
                         name,
+                        display_name: None,
                         kind: "dm".to_string(),
                         members,
                         created_by: None,
@@ -202,9 +205,11 @@ pub async fn handle_list_archived_channels(
                         .and_then(|c| serde_yaml::from_str::<ChannelMeta>(&c).ok());
                     let members = meta.as_ref().map(|m| m.members.clone()).unwrap_or_default();
                     let created_by = meta.as_ref().map(|m| m.created_by.clone());
+                    let display_name = meta.as_ref().map(|m| m.display_name.clone());
                     let project = meta.and_then(|m| m.project);
                     channels.push(ChannelSummary {
                         name,
+                        display_name,
                         kind: "archived_channel".to_string(),
                         members,
                         created_by,

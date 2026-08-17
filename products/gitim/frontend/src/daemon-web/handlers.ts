@@ -524,6 +524,7 @@ export async function channels(): Promise<ApiResponse> {
 
   const channelList: Array<{
     name: string;
+    display_name?: string;
     kind: string;
     unreadCount: number;
     members: string[];
@@ -540,6 +541,7 @@ export async function channels(): Promise<ApiResponse> {
 
     channelList.push({
       name,
+      ...(isDm ? {} : { display_name: meta.display_name }),
       kind: isDm ? "dm" : "channel",
       unreadCount: 0,
       members: meta.members,
@@ -1075,6 +1077,7 @@ export async function listArchivedChannels(opts?: {
     const items = await readdir(archiveChannelsDir);
     const archivedChannels: Array<{
       name: string;
+      display_name: string;
       kind: string;
       members: string[];
     }> = [];
@@ -1101,6 +1104,7 @@ export async function listArchivedChannels(opts?: {
 
       archivedChannels.push({
         name: channelName,
+        display_name: meta.display_name,
         kind: "archived_channel",
         members,
       });

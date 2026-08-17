@@ -54,6 +54,10 @@ const ARCHIVED_DMS_PREFIX_DEBOUNCE_MS = 300;
 const ARCHIVED_CHANNELS_PAGE_SIZE = 10;
 const ARCHIVED_CHANNELS_PREFIX_DEBOUNCE_MS = 300;
 
+function channelLabel(channel: Channel): string {
+  return channel.display_name || channel.name;
+}
+
 interface PinnedConversations {
   channels: Set<string>;
   dms: Set<string>;
@@ -560,7 +564,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
   const channelQueryNeedle = channelQuery.trim().toLowerCase();
   const matchesChannelQuery = (c: Channel) =>
-    !channelQueryNeedle || c.name.toLowerCase().includes(channelQueryNeedle);
+    !channelQueryNeedle ||
+    c.name.toLowerCase().includes(channelQueryNeedle) ||
+    channelLabel(c).toLowerCase().includes(channelQueryNeedle);
   const filteredFoldedChannels = foldedRegularChannels.filter(matchesChannelQuery);
   // With tree rendering: "any visible channel" means any node in sidebarTree
   // passes the current search query (channel matches directly, or project has
@@ -1011,7 +1017,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 <ChannelItem
                   key={ch.name}
                   icon={<Hash className="size-3.5 text-text-muted" />}
-                  label={ch.name}
+                  label={channelLabel(ch)}
                   unread={ch.unreadCount}
                   hasMention={ch.hasMention}
                   active={currentChannel === ch.name}
@@ -1087,7 +1093,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                     <ChannelItem
                       key={ch.name}
                       icon={<Hash className="size-3.5 text-text-muted" />}
-                      label={ch.name}
+                      label={channelLabel(ch)}
                       unread={0}
                       hasMention={false}
                       active={currentChannel === ch.name}
@@ -1284,7 +1290,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                       onClick={() => onChannelSelect(ch.name)}
                     >
                       <Hash className="size-3 text-text-faint shrink-0" />
-                      <span className="truncate flex-1">{ch.name}</span>
+                      <span className="truncate flex-1">{channelLabel(ch)}</span>
                       <Button
                         variant="ghost"
                         size="icon-xs"
@@ -1844,7 +1850,7 @@ function ProjectItem({
             <ChannelItem
               key={ch.name}
               icon={<Hash className="size-3.5 text-text-muted" />}
-              label={ch.name}
+              label={channelLabel(ch)}
               unread={ch.unreadCount}
               hasMention={ch.hasMention}
               active={currentChannel === ch.name}
