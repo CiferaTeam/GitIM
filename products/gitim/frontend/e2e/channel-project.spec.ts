@@ -52,6 +52,32 @@ async function stubRuntime(page: Page) {
     { port: runtimePort, activeSlug: slug },
   );
 
+  const channels = [
+    {
+      name: "dev",
+      kind: "channel",
+      members: ["lewis"],
+      project: "design" as string | null,
+    },
+    {
+      name: "random",
+      kind: "channel",
+      members: ["lewis"],
+      project: null as string | null,
+    },
+  ];
+  const projects = [
+    {
+      slug: "design",
+      meta: {
+        display_name: "Design",
+        created_by: "lewis",
+        created_at: "2026-01-01T00:00:00Z",
+        introduction: "Design project",
+      },
+    },
+  ];
+
   await page.route("**/*", async (route) => {
     const url = new URL(route.request().url());
 
@@ -94,53 +120,66 @@ async function stubRuntime(page: Page) {
       return;
     }
     if (url.pathname === `/workspaces/${slug}/im/channels`) {
-      // Two channels:
-      //   - "dev"    → assigned to project "design"
-      //   - "random" → unassigned (no project)
       await route.fulfill({
         json: {
           ok: true,
-          data: {
-            channels: [
-              {
-                name: "dev",
-                kind: "channel",
-                members: ["lewis"],
-                project: "design",
-              },
-              {
-                name: "random",
-                kind: "channel",
-                members: ["lewis"],
-              },
-            ],
-          },
+          data: { channels },
         },
       });
       return;
     }
     if (url.pathname === `/workspaces/${slug}/im/projects`) {
-      // One project: "design" with display_name "Design", channel_count 1.
-      // Wire shape: { ok: true, data: { projects: [...] } }
+      if (route.request().method() === "POST") {
+        const body = route.request().postDataJSON() as {
+          slug: string;
+          display_name: string;
+          introduction: string;
+        };
+        projects.push({
+          slug: body.slug,
+          meta: {
+            display_name: body.display_name,
+            created_by: "lewis",
+            created_at: "2026-08-28T00:00:00Z",
+            introduction: body.introduction,
+          },
+        });
+        await route.fulfill({ json: { ok: true, data: { slug: body.slug } } });
+        return;
+      }
       await route.fulfill({
         json: {
           ok: true,
           data: {
-            projects: [
-              {
-                slug: "design",
-                meta: {
-                  display_name: "Design",
-                  created_by: "lewis",
-                  created_at: "2026-01-01T00:00:00Z",
-                  introduction: "Design project",
-                },
-                channel_count: 1,
-              },
-            ],
+            projects: projects.map((project) => ({
+              ...project,
+              channel_count: channels.filter(
+                (channel) => channel.project === project.slug,
+              ).length,
+            })),
           },
         },
       });
+      return;
+    }
+    const projectAssignment = url.pathname.match(
+      new RegExp(`^/workspaces/${slug}/im/channels/([^/]+)/project$`),
+    );
+    if (projectAssignment && route.request().method() === "PATCH") {
+      const channelName = decodeURIComponent(projectAssignment[1]);
+      const body = route.request().postDataJSON() as {
+        project: string | null;
+      };
+      const channel = channels.find((item) => item.name === channelName);
+      if (!channel) {
+        await route.fulfill({
+          status: 404,
+          json: { ok: false, error: "channel_not_found" },
+        });
+        return;
+      }
+      channel.project = body.project;
+      await route.fulfill({ json: { ok: true, data: {} } });
       return;
     }
     if (url.pathname === `/workspaces/${slug}/im/users`) {
@@ -304,4 +343,63 @@ test("pin project persists through reload", async ({ page }) => {
   await expect(
     page.getByTestId("sidebar-project-channel-item").filter({ hasText: "dev" }),
   ).toBeVisible();
+});
+
+test("create, assign, fold, unfold, and unassign a channel project", async ({
+  page,
+}) => {
+  await stubRuntime(page);
+  await page.goto("/chat");
+
+  await page.getByRole("button", { name: "Create project" }).click();
+  await page.getByLabel("Slug").fill("launch");
+  await page.getByLabel("Name").fill("Launch");
+  await page.getByLabel("Introduction").fill("Launch coordination");
+  await page.getByTestId("create-project-submit").click();
+
+  await expect(
+    page.getByRole("button", { name: "Project Launch", exact: true }),
+  ).toBeVisible();
+
+  const randomRow = page
+    .getByTestId("sidebar-channel-item")
+    .filter({ hasText: "random" });
+  await randomRow.hover();
+  await page.getByTestId("channel-project-trigger-random").click();
+  await page.getByTestId("channel-project-option-launch").click();
+
+  await expect(
+    page.getByRole("button", { name: "Project Launch", exact: true }),
+  ).toBeVisible();
+  const launchChild = page
+    .getByTestId("sidebar-project-channel-item")
+    .filter({ hasText: "random" });
+  await expect(launchChild).toBeVisible();
+
+  await launchChild.hover();
+  await page.getByRole("button", { name: "Hide #random" }).click();
+  await expect(launchChild).toHaveCount(0);
+  await page.getByTestId("sidebar-folded-section-toggle").click();
+  const foldedRandom = page
+    .getByTestId("sidebar-folded-channel-item")
+    .filter({ hasText: "random" });
+  await expect(foldedRandom).toBeVisible();
+
+  await foldedRandom.hover();
+  await page.getByRole("button", { name: "Show #random" }).click();
+  await expect(
+    page
+      .getByTestId("sidebar-project-channel-item")
+      .filter({ hasText: "random" }),
+  ).toBeVisible();
+
+  await page.getByTestId("channel-project-trigger-random").click();
+  await page.getByTestId("channel-project-option-unassigned").click();
+  await expect(
+    page.getByTestId("sidebar-channel-item").filter({ hasText: "random" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Project Launch", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByTestId("sidebar-project-channel-item")).toHaveCount(0);
 });

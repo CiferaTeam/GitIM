@@ -1128,6 +1128,54 @@ export function validateChannelName(name: string): string | null {
   return null;
 }
 
+const RESERVED_PROJECT_SLUGS = new Set([
+  "archive",
+  "channels",
+  "projects",
+  "users",
+  "dms",
+  "cards",
+  "flows",
+  "system",
+]);
+
+/** Validate a project slug. Returns error message or null if valid. */
+export function validateProjectSlug(slug: string): string | null {
+  if (!slug) return "Project slug is required";
+  if (slug.length > 32) return "Project slug must be 32 characters or less";
+  if (!/^[a-z0-9-]+$/.test(slug)) {
+    return "Only lowercase letters, numbers, and hyphens";
+  }
+  if (slug.startsWith("-") || slug.endsWith("-")) {
+    return "Cannot start or end with a hyphen";
+  }
+  if (slug.includes("--")) return "Cannot contain consecutive hyphens";
+  if (RESERVED_PROJECT_SLUGS.has(slug)) return `"${slug}" is reserved`;
+  return null;
+}
+
+function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).length;
+}
+
+export function validateProjectName(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return "Project name is required";
+  if (utf8ByteLength(trimmed) > 64) {
+    return "Project name must be at most 64 UTF-8 bytes";
+  }
+  return null;
+}
+
+export function validateProjectIntroduction(value: string): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return "Introduction is required";
+  if (utf8ByteLength(trimmed) > 500) {
+    return "Introduction must be at most 500 UTF-8 bytes";
+  }
+  return null;
+}
+
 /** Sanitize a raw string into a valid workspace slug (a-z, 0-9, hyphens, ≤32). */
 export function toSlug(raw: string): string {
   return raw
@@ -1642,7 +1690,9 @@ export async function listProjects(workspaceSlug: string): Promise<Project[]> {
   }
   const res = await localNetworkFetch(`${wsBase(workspaceSlug)}/im/projects`);
   const body = (await res.json()) as ApiResponse<{ projects: Project[] }>;
-  if (!body.ok) return [];
+  if (!body.ok) {
+    throw new Error(body.error ?? "Failed to list projects");
+  }
   return body.data?.projects ?? [];
 }
 

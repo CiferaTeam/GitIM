@@ -54,9 +54,11 @@ vi.mock("../../lib/client", async () => {
     archiveDm: vi.fn(),
     channels: vi.fn(),
     createChannel: vi.fn(),
+    createProject: vi.fn(),
     listArchivedChannels: vi.fn(),
     listArchivedDms: vi.fn(),
     listProjects: vi.fn().mockResolvedValue([]),
+    setChannelProject: vi.fn(),
     unarchiveChannel: vi.fn(),
     unarchiveDm: vi.fn(),
   };
@@ -123,6 +125,16 @@ async function flushPromises(times = 4) {
   for (let i = 0; i < times; i += 1) {
     await Promise.resolve();
   }
+}
+
+function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  const prototype =
+    input instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+  setter?.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 describe("Sidebar channel ordering", () => {
@@ -466,10 +478,43 @@ describe("Sidebar with projects", () => {
     ).toBe(2);
   });
 
-  it("hides empty project (no channels assigned)", () => {
+  it("renders a folded project channel only in the bottom Folded section", () => {
+    setup(
+      [channel("dev", 0, false, "design"), channel("random")],
+      [project("design")],
+    );
+    testEnv.localStorage.setItem(
+      "gitim-folded-channels:runtime:room",
+      JSON.stringify(["dev"]),
+    );
+    testEnv.localStorage.setItem(
+      "gitim-expanded-projects:runtime:room",
+      JSON.stringify(["design"]),
+    );
+
+    act(() => {
+      root?.render(<Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />);
+    });
+
+    expect(
+      container.querySelector('[data-testid="sidebar-project-channel-item"]'),
+    ).toBeNull();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="sidebar-folded-section-toggle"]',
+        )
+        ?.click();
+    });
+    expect(
+      container.querySelector('[data-testid="sidebar-folded-channel-item"]'),
+    ).not.toBeNull();
+  });
+
+  it("renders an empty project folder", () => {
     setup(
       [channel("general")],
-      [project("design")], // design has no channels → hidden
+      [project("design")],
     );
 
     act(() => {
@@ -478,7 +523,7 @@ describe("Sidebar with projects", () => {
 
     expect(
       container.querySelectorAll('[data-testid="sidebar-project-item"]').length,
-    ).toBe(0);
+    ).toBe(1);
     // The unassigned channel is still visible
     expect(
       container.querySelectorAll('[data-testid="sidebar-channel-item"]').length,
@@ -508,6 +553,177 @@ describe("Sidebar with projects", () => {
     expect(stored).not.toBeNull();
     const parsed = JSON.parse(stored!) as { projects?: string[] };
     expect(parsed.projects).toContain("design");
+  });
+
+  it("creates a project through the sidebar dialog", async () => {
+    setup([channel("general")], []);
+    vi.mocked(client.createProject).mockResolvedValue({ ok: true });
+    vi.mocked(client.listProjects).mockRejectedValue(new Error("refresh failed"));
+
+    await act(async () => {
+      root?.render(<Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />);
+      await flushPromises();
+    });
+    act(() => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="sidebar-create-project"]')
+        ?.click();
+    });
+
+    const slug = document.querySelector<HTMLInputElement>("#project-slug");
+    const name = document.querySelector<HTMLInputElement>("#project-name");
+    const intro = document.querySelector<HTMLTextAreaElement>("#project-introduction");
+    expect(slug).not.toBeNull();
+    expect(name).not.toBeNull();
+    expect(intro).not.toBeNull();
+    act(() => {
+      setInputValue(slug!, "design");
+      setInputValue(name!, "Design");
+      setInputValue(intro!, "Design work");
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="create-project-submit"]')
+        ?.click();
+      await flushPromises();
+    });
+
+    expect(client.createProject).toHaveBeenCalledWith(
+      "room",
+      "design",
+      "Design",
+      "Design work",
+    );
+    expect(client.listProjects).toHaveBeenCalledWith("room");
+    expect(
+      container.querySelector('[data-testid="sidebar-project-item"]'),
+    ).not.toBeNull();
+  });
+
+  it("assigns and clears a channel project through the channel menu", async () => {
+    setup([channel("general")], [project("design")]);
+    vi.mocked(client.setChannelProject).mockResolvedValue({ ok: true });
+    vi.mocked(client.channels)
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { channels: [channel("general", 0, false, "design")] },
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        data: { channels: [channel("general")] },
+      });
+
+    await act(async () => {
+      root?.render(<Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />);
+      await flushPromises();
+    });
+    act(() => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-trigger-general"]')
+        ?.click();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-option-design"]')
+        ?.click();
+      await flushPromises();
+    });
+    expect(client.setChannelProject).toHaveBeenNthCalledWith(
+      1,
+      "room",
+      "general",
+      "design",
+    );
+
+    act(() => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-trigger-general"]')
+        ?.click();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-option-unassigned"]')
+        ?.click();
+      await flushPromises();
+    });
+    expect(client.setChannelProject).toHaveBeenNthCalledWith(
+      2,
+      "room",
+      "general",
+      null,
+    );
+  });
+
+  it("keeps a successful project assignment visible when channel refresh fails", async () => {
+    setup([channel("general")], [project("design")]);
+    vi.mocked(client.listProjects).mockResolvedValue([project("design")]);
+    vi.mocked(client.setChannelProject).mockResolvedValue({ ok: true });
+    vi.mocked(client.channels).mockResolvedValue({
+      ok: false,
+      error: "refresh failed",
+    });
+
+    await act(async () => {
+      root?.render(<Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />);
+      await flushPromises();
+    });
+    act(() => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-trigger-general"]')
+        ?.click();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-option-design"]')
+        ?.click();
+      await flushPromises();
+    });
+
+    expect(useChatStore.getState().channels[0]?.project).toBe("design");
+  });
+
+  it("keeps a successful project assignment visible when channel refresh is stale", async () => {
+    setup([channel("general")], [project("design")]);
+    vi.mocked(client.listProjects).mockResolvedValue([project("design")]);
+    vi.mocked(client.setChannelProject).mockResolvedValue({ ok: true });
+    vi.mocked(client.channels).mockResolvedValue({
+      ok: true,
+      data: { channels: [channel("general")] },
+    });
+
+    await act(async () => {
+      root?.render(<Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />);
+      await flushPromises();
+    });
+    act(() => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-trigger-general"]')
+        ?.click();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-option-design"]')
+        ?.click();
+      await flushPromises();
+    });
+
+    expect(useChatStore.getState().channels[0]?.project).toBe("design");
+  });
+
+  it("hides project mutation controls in browser-local mode", () => {
+    setup([channel("general")], [project("design")]);
+    useConnectionStore.setState({ mode: "local", status: "ready" });
+
+    act(() => {
+      root?.render(<Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />);
+    });
+
+    expect(
+      document.querySelector('[data-testid="sidebar-create-project"]'),
+    ).toBeNull();
+    expect(
+      document.querySelector('[data-testid="channel-project-trigger-general"]'),
+    ).toBeNull();
   });
 
   it("backward-compat: old pinned schema without projects key does not crash", () => {

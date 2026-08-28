@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Hash, Archive, ArchiveRestore, CheckCheck, ChevronRight, Eye, EyeOff, Folder, Pin, Plus, Search } from "lucide-react";
+import { Hash, Archive, ArchiveRestore, CheckCheck, ChevronRight, Eye, EyeOff, Folder, FolderPlus, Pin, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { useAgentStore } from "../../hooks/use-agent-store";
 import { useChatStore } from "../../hooks/use-chat-store";
@@ -29,6 +29,10 @@ import {
 import { Input } from "../ui/input";
 import { Popover, PopoverTrigger, PopoverContent } from "../ui/popover";
 import { MemberPicker } from "./member-picker";
+import {
+  ChannelProjectMenu,
+  CreateProjectDialog,
+} from "./channel-project-controls";
 
 interface SidebarProps {
   onChannelSelect: (name: string) => void;
@@ -259,6 +263,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const users = useChatStore((s) => s.users);
   const directory = useDirectory();
   const setChannels = useChatStore((s) => s.setChannels);
+  const setChannelProjectOptimistic = useChatStore(
+    (s) => s.setChannelProjectOptimistic,
+  );
   const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
   const markDmArchived = useChatStore((s) => s.markDmArchived);
   const markDmUnarchived = useChatStore((s) => s.markDmUnarchived);
@@ -311,6 +318,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const [createInvitees, setCreateInvitees] = useState<string[]>([]);
   const [createError, setCreateError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [createProjectOpen, setCreateProjectOpen] = useState(false);
+  const [projectMutationChannel, setProjectMutationChannel] = useState<
+    string | null
+  >(null);
+  const projectMutationInFlightRef = useRef(false);
 
   function resetCreateForm() {
     setCreateName("");
@@ -388,14 +400,102 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       return;
     }
     try {
+      const channelSnapshotRevision =
+        useChatStore.getState().channelProjectRevision;
       const chRes = await client.channels(activeSlug);
       if (chRes.ok && chRes.data) {
-        setChannels(chRes.data.channels as Channel[]);
+        setChannels(chRes.data.channels as Channel[], channelSnapshotRevision);
       }
     } catch { /* refresh failure is non-fatal */ }
     resetCreateForm();
     setCreateOpen(false);
     onChannelSelect(name);
+  }
+
+  async function handleCreateProject(
+    slug: string,
+    displayName: string,
+    introduction: string,
+  ): Promise<string | null> {
+    if (!activeSlug) return "No workspace selected";
+    try {
+      const response = await client.createProject(
+        activeSlug,
+        slug,
+        displayName,
+        introduction,
+      );
+      if (!response.ok) return response.error ?? "Failed to create project";
+      const currentProjects = useProjectStore.getState().projects;
+      if (!currentProjects.some((project) => project.slug === slug)) {
+        useProjectStore.getState().setProjects([
+          ...currentProjects,
+          {
+            slug,
+            meta: {
+              display_name: displayName,
+              introduction,
+              created_by: currentUser,
+              created_at: new Date().toISOString(),
+            },
+            channel_count: 0,
+          },
+        ]);
+      }
+      await fetchProjects(activeSlug);
+      toast.success(`Created project ${displayName}`);
+      return null;
+    } catch {
+      return "Network error — is the server running?";
+    }
+  }
+
+  async function handleSetChannelProject(
+    channel: Channel,
+    project: string | null,
+  ) {
+    if (!activeSlug || projectMutationInFlightRef.current) return;
+    projectMutationInFlightRef.current = true;
+    setProjectMutationChannel(channel.name);
+    try {
+      const response = await client.setChannelProject(
+        activeSlug,
+        channel.name,
+        project,
+      );
+      if (!response.ok) {
+        toast.error(response.error ?? "Failed to move channel");
+        return;
+      }
+      setChannelProjectOptimistic(channel.name, project);
+      await fetchProjects(activeSlug);
+      if (project) {
+        setExpandedProjects((previous) => new Set(previous).add(project));
+      }
+      toast.success(
+        project
+          ? `Moved #${channel.name} to project`
+          : `Removed #${channel.name} from project`,
+      );
+    } catch {
+      toast.error("Network error — is the server running?");
+    } finally {
+      projectMutationInFlightRef.current = false;
+      setProjectMutationChannel(null);
+    }
+  }
+
+  function projectAction(channel: Channel) {
+    if (mode === "local") return null;
+    return (
+      <ChannelProjectMenu
+        channel={channel.name}
+        projects={projects}
+        currentProject={channel.project ?? null}
+        busy={projectMutationChannel !== null}
+        onAssign={(project) => handleSetChannelProject(channel, project)}
+      />
+    );
   }
 
   useEffect(() => {
@@ -415,6 +515,12 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const foldedRegularChannels = allRegularChannels.filter(
     (c) => !pinnedConversations.channels.has(c.name) && foldedChannels.has(c.name),
   );
+  const visibleRegularChannels = useMemo(
+    () => allRegularChannels.filter(
+      (c) => pinnedConversations.channels.has(c.name) || !foldedChannels.has(c.name),
+    ),
+    [allRegularChannels, foldedChannels, pinnedConversations.channels],
+  );
 
   // Build the combined pin key Set used by buildSidebarTree.
   // Computed from stable inputs (pinnedConversations is replaced on every
@@ -428,8 +534,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
 
   // Build the mixed sidebar tree (projects as folders + standalone channels).
   const sidebarTree = useMemo(
-    () => buildSidebarTree(allRegularChannels, projects, pinnedKeys),
-    [allRegularChannels, projects, pinnedKeys],
+    () => buildSidebarTree(visibleRegularChannels, projects, pinnedKeys),
+    [visibleRegularChannels, projects, pinnedKeys],
   );
   const liveAgentIds = useMemo(
     () => new Set(agents.map((agent) => agent.id)),
@@ -642,9 +748,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     // Refresh channel list so the restored channel picks up full metadata
     // (kind, members) in the active `channels` store.
     try {
+      const channelSnapshotRevision =
+        useChatStore.getState().channelProjectRevision;
       const chRes = await client.channels(activeSlug);
       if (chRes.ok && chRes.data) {
-        setChannels(chRes.data.channels as Channel[]);
+        setChannels(chRes.data.channels as Channel[], channelSnapshotRevision);
       }
     } catch {
       /* refresh is best-effort; markChannelUnarchived already seeded the entry */
@@ -831,9 +939,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     // Refresh channels list so the restored DM picks up authoritative metadata
     // (members) the same way channel unarchive does.
     try {
+      const channelSnapshotRevision =
+        useChatStore.getState().channelProjectRevision;
       const chRes = await client.channels(activeSlug);
       if (chRes.ok && chRes.data) {
-        setChannels(chRes.data.channels as Channel[]);
+        setChannels(chRes.data.channels as Channel[], channelSnapshotRevision);
       }
     } catch {
       /* best-effort refresh */
@@ -851,15 +961,31 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           <p className="text-xs font-semibold uppercase text-text-secondary tracking-wider">
             Channels
           </p>
-          <Button
-            variant="ghost"
-            size="icon-xs"
-            title="Create channel"
-            className="text-muted-foreground hover:text-foreground"
-            onClick={() => setCreateOpen(true)}
-          >
-            <Plus className="size-3.5" />
-          </Button>
+          <div className="flex items-center">
+            {mode === "remote" && (
+              <Button
+                variant="ghost"
+                size="icon-xs"
+                title="Create project"
+                aria-label="Create project"
+                data-testid="sidebar-create-project"
+                className="text-muted-foreground hover:text-foreground"
+                onClick={() => setCreateProjectOpen(true)}
+              >
+                <FolderPlus className="size-3.5" />
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+              size="icon-xs"
+              title="Create channel"
+              aria-label="Create channel"
+              className="text-muted-foreground hover:text-foreground"
+              onClick={() => setCreateOpen(true)}
+            >
+              <Plus className="size-3.5" />
+            </Button>
+          </div>
         </div>
 
         {/* Channel search */}
@@ -899,6 +1025,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                   onClick={() => onChannelSelect(ch.name)}
                   onTogglePin={() => handleTogglePinnedConversation(ch)}
                   onToggleFold={() => handleToggleFoldedChannel(ch)}
+                  projectAction={projectAction(ch)}
                 />
               );
             }
@@ -927,6 +1054,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                 onToggleFoldChannel={handleToggleFoldedChannel}
                 pinnedChannels={pinnedConversations.channels}
                 foldedChannels={foldedChannels}
+                renderProjectAction={projectAction}
               />
             );
           })}
@@ -973,6 +1101,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
                       onClick={() => onChannelSelect(ch.name)}
                       onTogglePin={() => handleTogglePinnedConversation(ch)}
                       onToggleFold={() => handleToggleFoldedChannel(ch)}
+                      projectAction={projectAction(ch)}
                     />
                   ))}
                 </div>
@@ -1045,6 +1174,12 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
           </form>
         </DialogContent>
       </Dialog>
+
+      <CreateProjectDialog
+        open={createProjectOpen}
+        onOpenChange={setCreateProjectOpen}
+        onCreate={handleCreateProject}
+      />
 
       {/* Archived channels section — collapsed by default; lazy-loaded on expand. */}
       <div className="px-3 py-2 border-t border-border/60 shrink-0">
@@ -1508,6 +1643,7 @@ interface ChannelItemProps {
    *  has its own dedicated UI in the archived section. */
   archiveLabel?: string;
   onArchive?: () => void;
+  projectAction?: React.ReactNode;
 }
 
 function ChannelItem({
@@ -1529,6 +1665,7 @@ function ChannelItem({
   onToggleFold,
   archiveLabel,
   onArchive,
+  projectAction,
 }: ChannelItemProps) {
   const pinButtonLabel = pinned ? unpinLabel : pinLabel;
   const foldButtonLabel = folded ? unfoldLabel : foldLabel;
@@ -1562,6 +1699,7 @@ function ChannelItem({
           </Badge>
         )}
       </button>
+      {projectAction}
       <Button
         type="button"
         variant="ghost"
@@ -1633,6 +1771,7 @@ interface ProjectItemProps {
   onToggleFoldChannel(ch: Channel): void;
   pinnedChannels: Set<string>;
   foldedChannels: Set<string>;
+  renderProjectAction(channel: Channel): React.ReactNode;
 }
 
 function ProjectItem({
@@ -1648,6 +1787,7 @@ function ProjectItem({
   onToggleFoldChannel,
   pinnedChannels,
   foldedChannels,
+  renderProjectAction,
 }: ProjectItemProps) {
   const pinButtonLabel = pinned ? `Unpin project ${project.meta.display_name}` : `Pin project ${project.meta.display_name}`;
   return (
@@ -1718,6 +1858,7 @@ function ProjectItem({
               onClick={() => onChannelSelect(ch.name)}
               onTogglePin={() => onTogglePinnedChannel(ch)}
               onToggleFold={() => onToggleFoldChannel(ch)}
+              projectAction={renderProjectAction(ch)}
             />
           ))}
         </div>

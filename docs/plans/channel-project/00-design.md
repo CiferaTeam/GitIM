@@ -1,4 +1,4 @@
-# Channel Project Grouping (v1) — Design
+# Channel Project Grouping — Design
 
 Status: draft, ready for plan-eng-review
 Slug: `channel-project`
@@ -127,11 +127,11 @@ v1 **不做**:
 - 📁 folder = project
 - Channel 和 project 在同一层 mixed sort (用户的核心偏好)
 - Project 文件夹 collapsible,展开后是它的成员 channel
-- **空 project (无成员 channel) 隐式不显示** —— 渲染时 reduce `channels.filter(c => c.project === slug).length > 0`
+- 空 project 继续显示,让 WebUI 创建操作立即产生可见结果
 
 ### 6.2 排序
 
-- 平级排序:每一项要么是 unassigned channel,要么是 non-empty project
+- 平级排序:每一项要么是 unassigned channel,要么是 project
 - 默认排序:`pinned 在前(localStorage)` → 字典序
 - Project 折叠状态 by default = collapsed (减少视觉噪音);用户展开后 localStorage 持久化
 
@@ -192,6 +192,7 @@ v1 **不做**:
 - `GET /im/projects` → 同 ListProjects
 - `POST /im/projects` → 同 CreateProject
 - `PATCH /im/channels/{ch}/project` body `{ project: Option<String> }` → 同 SetChannelProject
+- 远端 WebUI 通过这三个端点列出/创建 project,并 assign / clear channel 归属
 
 ### 9.4 SSE / push events(实测后定稿,2026-06-11)
 
@@ -253,7 +254,7 @@ v1 决策:
 
 ### 11.5 `gitim-frontend`
 - Sidebar 平级 sort 算法 (mixed channel + project) —— unit test
-- 空 project 隐式不显示 —— unit test
+- 空 project 正常显示 —— unit test
 - Pin/unpin project (localStorage) —— unit test
 - Cards filter bar project dropdown —— unit test
 - URL param `project=` round-trip —— unit test
@@ -303,7 +304,7 @@ v1 决策:
 | ProjectMeta 字段 | display_name / created_by / created_at / introduction | 对齐 ChannelMeta 心智;color/icon/members YAGNI |
 | Mutation v1 | create project + set channel.project | 锁到"用户最低能用起来"的 set |
 | Permission | workspace-flat (任何 member) | 跟现有 channel mutation 一致;trust boundary 是 workspace |
-| Sidebar | 平级 mixed sort,空 project 隐式不显示 | 用户偏好;符合"project 跟 channel 平级"的心智 |
+| Sidebar | 平级 mixed sort,空 project 正常显示 | 创建后立即可见;符合"project 跟 channel 平级"的心智 |
 | Pinned | 沿用现有 localStorage | 对齐现有 channel pin,personal preference 不入 git |
 | Cards 视图 | filter bar 加 project filter | 最小复用现有 kanban,YAGNI |
 | Routing | project 不影响 recipients | project 是管理层,不动行为 |

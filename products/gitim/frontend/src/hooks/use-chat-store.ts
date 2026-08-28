@@ -245,6 +245,8 @@ interface ChatState {
    *  so existing handler-list consumers are untouched. */
   userInfos: UserInfo[];
   channels: Channel[];
+  channelProjectRevision: number;
+  channelProjectGuards: Record<string, { revision: number }>;
   /** Back-compat snapshot for callers that still need the current archived
    *  channel page. New UI should use `archivedChannelsView` so archive
    *  browsing stays lazy + paginated. */
@@ -277,7 +279,11 @@ interface ChatState {
   setIsGuest: (v: boolean) => void;
   setUsers: (u: string[]) => void;
   setUserInfos: (u: UserInfo[]) => void;
-  setChannels: (c: Channel[]) => void;
+  setChannels: (c: Channel[], snapshotRevision?: number) => void;
+  setChannelProjectOptimistic: (
+    channel: string,
+    project: string | null,
+  ) => void;
   setArchivedChannels: (c: Channel[]) => void;
   resetArchivedChannelsView: (query: string) => void;
   appendArchivedChannelsPage: (page: {
@@ -408,6 +414,8 @@ export const useChatStore = create<ChatState>((set) => ({
   users: [],
   userInfos: [],
   channels: [],
+  channelProjectRevision: 0,
+  channelProjectGuards: {},
   archivedChannels: [],
   archivedChannelsView: null,
   archivedDmsView: null,
@@ -427,7 +435,7 @@ export const useChatStore = create<ChatState>((set) => ({
   setIsGuest: (v) => set({ isGuest: v }),
   setUsers: (u) => set({ users: u }),
   setUserInfos: (u) => set({ userInfos: u }),
-  setChannels: (newChannels) =>
+  setChannels: (newChannels, snapshotRevision) =>
     set((state) => {
       const prevMap = new Map(
         state.channels.map((c) => [c.name, c])
@@ -435,12 +443,33 @@ export const useChatStore = create<ChatState>((set) => ({
       return {
         channels: newChannels.map((c) => {
           const prev = prevMap.get(c.name);
+          const projectGuard = state.channelProjectGuards[c.name];
+          const preserveProject =
+            projectGuard !== undefined &&
+            (snapshotRevision === undefined ||
+              snapshotRevision < projectGuard.revision);
           return {
             ...c,
+            project: preserveProject && prev ? prev.project : c.project,
             unreadCount: prev?.unreadCount ?? c.unreadCount ?? 0,
             hasMention: prev?.hasMention ?? c.hasMention ?? false,
           };
         }),
+      };
+    }),
+
+  setChannelProjectOptimistic: (channel, project) =>
+    set((state) => {
+      const revision = state.channelProjectRevision + 1;
+      return {
+        channelProjectRevision: revision,
+        channelProjectGuards: {
+          ...state.channelProjectGuards,
+          [channel]: { revision },
+        },
+        channels: state.channels.map((item) =>
+          item.name === channel ? { ...item, project } : item,
+        ),
       };
     }),
 
@@ -817,6 +846,8 @@ export const useChatStore = create<ChatState>((set) => ({
       users: [],
       userInfos: [],
       channels: [],
+      channelProjectRevision: 0,
+      channelProjectGuards: {},
       archivedChannels: [],
       archivedChannelsView: null,
       archivedDmsView: null,
