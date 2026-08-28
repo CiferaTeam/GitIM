@@ -43,10 +43,11 @@ describe("buildSidebarTree", () => {
     }
   });
 
-  it("hides empty project", () => {
+  it("renders empty projects", () => {
     const tree = buildSidebarTree([ch("random")], [pr("design")], new Set());
-    expect(tree).toHaveLength(1);
-    expect(tree[0]).toMatchObject({ kind: "channel" });
+    expect(tree).toHaveLength(2);
+    expect(tree[0]).toMatchObject({ kind: "project", children: [] });
+    expect(tree[1]).toMatchObject({ kind: "channel" });
   });
 
   it("pinned items float to top", () => {

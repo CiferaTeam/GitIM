@@ -357,6 +357,10 @@ test("create, assign, fold, unfold, and unassign a channel project", async ({
   await page.getByLabel("Introduction").fill("Launch coordination");
   await page.getByTestId("create-project-submit").click();
 
+  await expect(
+    page.getByRole("button", { name: "Project Launch", exact: true }),
+  ).toBeVisible();
+
   const randomRow = page
     .getByTestId("sidebar-channel-item")
     .filter({ hasText: "random" });
@@ -396,5 +400,6 @@ test("create, assign, fold, unfold, and unassign a channel project", async ({
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "Project Launch", exact: true }),
-  ).toHaveCount(0);
+  ).toBeVisible();
+  await expect(page.getByTestId("sidebar-project-channel-item")).toHaveCount(0);
 });

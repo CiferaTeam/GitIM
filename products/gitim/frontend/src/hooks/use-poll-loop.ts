@@ -263,6 +263,8 @@ export function usePollLoop(): void {
       slug === activeSlugRef.current &&
       workspaceKey === workspaceRef.current;
     const previousChannel = useChatStore.getState().currentChannel;
+    const channelSnapshotRevision =
+      useChatStore.getState().channelProjectRevision;
 
     // Archived channels / DMs are *not* fetched here — they're lazy-loaded
     // by the sidebar on first expand (and paginated + prefix-filtered server
@@ -420,7 +422,9 @@ export function usePollLoop(): void {
     if (meRes.ok && meRes.data) {
       chatStore.setCurrentUser(meRes.data.handler as string);
     }
-    if (channelsRes.ok && channelsRes.data) chatStore.setChannels(nextChannels);
+    if (channelsRes.ok && channelsRes.data) {
+      chatStore.setChannels(nextChannels, channelSnapshotRevision);
+    }
     if (usersRes.ok && usersRes.data) {
       chatStore.setUsers(usersRes.data.users as string[]);
       chatStore.setUserInfos(
@@ -762,6 +766,8 @@ export function usePollLoop(): void {
       }
 
       if (needChannelRefresh) {
+        const channelSnapshotRevision =
+          useChatStore.getState().channelProjectRevision;
         const chRes = await client.channels(slug);
         if (!isCurrentPollTarget()) return;
         if (chRes.ok && chRes.data) {
@@ -772,6 +778,7 @@ export function usePollLoop(): void {
                 requestWorkspaceKey,
                 chRes.data.channels as Channel[],
               ),
+              channelSnapshotRevision,
             );
         }
       }

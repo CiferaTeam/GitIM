@@ -127,11 +127,12 @@ async function flushPromises(times = 4) {
   }
 }
 
-function setInputValue(input: HTMLInputElement, value: string) {
-  const setter = Object.getOwnPropertyDescriptor(
-    HTMLInputElement.prototype,
-    "value",
-  )?.set;
+function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  const prototype =
+    input instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
   setter?.call(input, value);
   input.dispatchEvent(new Event("input", { bubbles: true }));
 }
@@ -510,10 +511,10 @@ describe("Sidebar with projects", () => {
     ).not.toBeNull();
   });
 
-  it("hides empty project (no channels assigned)", () => {
+  it("renders an empty project folder", () => {
     setup(
       [channel("general")],
-      [project("design")], // design has no channels → hidden
+      [project("design")],
     );
 
     act(() => {
@@ -522,7 +523,7 @@ describe("Sidebar with projects", () => {
 
     expect(
       container.querySelectorAll('[data-testid="sidebar-project-item"]').length,
-    ).toBe(0);
+    ).toBe(1);
     // The unassigned channel is still visible
     expect(
       container.querySelectorAll('[data-testid="sidebar-channel-item"]').length,
@@ -557,7 +558,7 @@ describe("Sidebar with projects", () => {
   it("creates a project through the sidebar dialog", async () => {
     setup([channel("general")], []);
     vi.mocked(client.createProject).mockResolvedValue({ ok: true });
-    vi.mocked(client.listProjects).mockResolvedValue([project("design")]);
+    vi.mocked(client.listProjects).mockRejectedValue(new Error("refresh failed"));
 
     await act(async () => {
       root?.render(<Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />);
@@ -571,7 +572,7 @@ describe("Sidebar with projects", () => {
 
     const slug = document.querySelector<HTMLInputElement>("#project-slug");
     const name = document.querySelector<HTMLInputElement>("#project-name");
-    const intro = document.querySelector<HTMLInputElement>("#project-introduction");
+    const intro = document.querySelector<HTMLTextAreaElement>("#project-introduction");
     expect(slug).not.toBeNull();
     expect(name).not.toBeNull();
     expect(intro).not.toBeNull();
@@ -594,6 +595,9 @@ describe("Sidebar with projects", () => {
       "Design work",
     );
     expect(client.listProjects).toHaveBeenCalledWith("room");
+    expect(
+      container.querySelector('[data-testid="sidebar-project-item"]'),
+    ).not.toBeNull();
   });
 
   it("assigns and clears a channel project through the channel menu", async () => {
@@ -657,6 +661,34 @@ describe("Sidebar with projects", () => {
     vi.mocked(client.channels).mockResolvedValue({
       ok: false,
       error: "refresh failed",
+    });
+
+    await act(async () => {
+      root?.render(<Sidebar onChannelSelect={vi.fn()} onStartDm={vi.fn()} />);
+      await flushPromises();
+    });
+    act(() => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-trigger-general"]')
+        ?.click();
+    });
+    await act(async () => {
+      document
+        .querySelector<HTMLButtonElement>('[data-testid="channel-project-option-design"]')
+        ?.click();
+      await flushPromises();
+    });
+
+    expect(useChatStore.getState().channels[0]?.project).toBe("design");
+  });
+
+  it("keeps a successful project assignment visible when channel refresh is stale", async () => {
+    setup([channel("general")], [project("design")]);
+    vi.mocked(client.listProjects).mockResolvedValue([project("design")]);
+    vi.mocked(client.setChannelProject).mockResolvedValue({ ok: true });
+    vi.mocked(client.channels).mockResolvedValue({
+      ok: true,
+      data: { channels: [channel("general")] },
     });
 
     await act(async () => {

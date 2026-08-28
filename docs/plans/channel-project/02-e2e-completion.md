@@ -12,9 +12,11 @@
 
 - Follow `DESIGN.md` tokens and existing sidebar interaction patterns.
 - Project assignment remains Git-backed through the existing runtime APIs.
+- Project creation is visible immediately, including before any channel is assigned.
 - Folded channels render only in the bottom Folded section and retain their project metadata.
 - Browser-local mode keeps project mutations unavailable.
 - Validation uses the existing project slug contract: lowercase `a-z`, `0-9`, hyphen, 1-32 characters.
+- Project names and introductions enforce the daemon UTF-8 byte limits.
 
 ---
 

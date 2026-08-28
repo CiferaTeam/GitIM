@@ -259,10 +259,12 @@ export function useChannelOperations(): ChannelOperations {
     const res = await client.joinChannel(requestSlug, requestChannel);
     if (!isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey)) return;
     if (!res.ok) return;
+    const channelSnapshotRevision =
+      useChatStore.getState().channelProjectRevision;
     const chRes = await client.channels(requestSlug);
     if (!isCurrentWorkspaceRequest(requestSlug, requestWorkspaceKey)) return;
     if (chRes.ok && chRes.data) {
-      setChannels(chRes.data.channels as Channel[]);
+      setChannels(chRes.data.channels as Channel[], channelSnapshotRevision);
     }
     const apiChannel = toApiChannel(requestChannel);
     const readRes = await client.read(

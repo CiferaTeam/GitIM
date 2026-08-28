@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use `superpowers:subagent-driven-development` (recommended) or `superpowers:executing-plans` to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking. **Spec:** `docs/plans/channel-project/00-design.md`.
 
-**Goal:** 在 channel 上加一层 project grouping,channel.meta 加 optional `project: <slug>` 字段 + `projects/<slug>.meta.yaml` 独立。Sidebar 平级混排 channel ⭐ 和 project 📁,空 project 隐藏。增量,可有可无。
+**Goal:** 在 channel 上加一层 project grouping,channel.meta 加 optional `project: <slug>` 字段 + `projects/<slug>.meta.yaml` 独立。Sidebar 平级混排 channel ⭐ 和 project 📁,并提供远端 WebUI 创建与归属操作。增量,可有可无。
 
 **Architecture:** 数据层 → daemon handler → IPC + HTTP → CLI + frontend。Project 是 workspace-scoped 一等公民但只承担 grouping 语义,不参与 routing / permission gating / search / cards lifecycle。文件 layout 扁平 (`projects/<slug>.meta.yaml`) 对齐 `channels/<n>.meta.yaml`。
 
@@ -2145,8 +2145,7 @@ export type SidebarNode =
 /**
  * 平级 mixed sort:
  * - 无 project 的 channel → 直接 SidebarNode.channel
- * - 有成员 channel 的 project → SidebarNode.project,内含成员
- * - 空 project (无成员 channel) → 隐藏
+ * - project → SidebarNode.project,内含成员 channel
  * - 排序: pinned 在前(由 caller 传 pinnedKeys),其后 slug 字典序
  *
  * 顶层 keys (供 pin 用):
@@ -2181,10 +2180,9 @@ export function buildSidebarTree(
 
   const nodes: SidebarNode[] = [];
 
-  // 只加非空 project (review: 空 project 隐式不显示)
+  // project 创建后立即显示
   for (const proj of projects) {
     const children = childrenByProject.get(proj.slug) ?? [];
-    if (children.length === 0) continue;
     nodes.push({ kind: 'project', project: proj, children });
   }
 
@@ -2257,10 +2255,11 @@ describe('buildSidebarTree', () => {
     expect(tree[1]).toMatchObject({ kind: 'channel' });
   });
 
-  it('hides empty project', () => {
+  it('renders empty project', () => {
     const tree = buildSidebarTree([ch('random')], [pr('design')], new Set());
-    expect(tree).toHaveLength(1);
-    expect(tree[0]).toMatchObject({ kind: 'channel' });
+    expect(tree).toHaveLength(2);
+    expect(tree[0]).toMatchObject({ kind: 'project', children: [] });
+    expect(tree[1]).toMatchObject({ kind: 'channel' });
   });
 
   it('pinned items float to top', () => {
@@ -2562,9 +2561,9 @@ describe('Sidebar with projects', () => {
     // expect channel visible
   });
 
-  it('hides empty projects', () => {
+  it('renders empty projects', () => {
     // projects=[design] but no channel has project=design
-    // expect project not rendered
+    // expect project rendered with zero children
   });
 
   it('pinning a project moves it to top', () => {
@@ -2901,7 +2900,7 @@ Expected: all green。
 - [ ] **Step 1: 在 Current Orientation "Where we are" 段尾追加一句**
 
 ```markdown
-**Channel-project grouping v1** 已落地:`channels/<n>.meta.yaml` 加 optional `project: <slug>` 字段 + `projects/<slug>.meta.yaml` 独立 (扁平 layout 跟现有 channel meta 对齐)。Mutation = create project + set channel.project (None/Some 三态同接口);workspace-flat permission 不 gate;archived channel 拒 `SetChannelProject` (`channel_archived`),project meta corrupted 区分 (`project_meta_corrupted`)。Sidebar 平级混排 channel ⭐ 和 project 📁,空 project 隐式不显示;pinned 沿用 `gitim-pinned-conversations:<workspace>` localStorage 加 `projects` 数组,跟 channel pin 同套 mechanism。Cards 视图加 project filter (单选,URL `project=` round-trip,`__unassigned__` magic value)。Routing v1 recipients / archive / flows / gitim-index / agent provision 全不动。spec 见 `docs/plans/channel-project/00-design.md`,plan 见 `docs/plans/channel-project/01-implementation.md`。
+**Channel-project grouping** 已落地:`channels/<n>.meta.yaml` 加 optional `project: <slug>` 字段 + `projects/<slug>.meta.yaml` 独立 (扁平 layout 跟现有 channel meta 对齐)。Mutation = create project + set channel.project (None/Some 三态同接口);workspace-flat permission 不 gate;archived channel 拒 `SetChannelProject` (`channel_archived`),project meta corrupted 区分 (`project_meta_corrupted`)。远端 WebUI 可创建 project 和 assign / clear channel 归属;Sidebar 平级混排 channel ⭐ 和 project 📁,空 project 正常显示;pinned 沿用 `gitim-pinned-conversations:<workspace>` localStorage 加 `projects` 数组,跟 channel pin 同套 mechanism。Cards 视图加 project filter (单选,URL `project=` round-trip,`__unassigned__` magic value)。Routing v1 recipients / archive / flows / gitim-index / agent provision 全不动。spec 见 `docs/plans/channel-project/00-design.md`,plan 见 `docs/plans/channel-project/01-implementation.md`。
 ```
 
 - [ ] **Step 2: Commit**

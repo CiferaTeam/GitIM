@@ -54,9 +54,11 @@ export function ChatHeader({ onStartDm, onOpenCards, children }: ChatHeaderProps
 
   async function refreshChannels() {
     if (!activeSlug) return;
+    const channelSnapshotRevision =
+      useChatStore.getState().channelProjectRevision;
     const chRes = await client.channels(activeSlug);
     if (chRes.ok && chRes.data) {
-      setChannels(chRes.data.channels as Channel[]);
+      setChannels(chRes.data.channels as Channel[], channelSnapshotRevision);
     }
   }
 

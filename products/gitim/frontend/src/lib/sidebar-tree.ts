@@ -13,8 +13,7 @@ export type SidebarNode =
  *
  * Rules:
  * - Channel with no project (or orphan project ref) → top-level SidebarNode.channel
- * - Project with at least one assigned channel → SidebarNode.project containing its channels
- * - Empty project (zero assigned channels) → hidden (not emitted)
+ * - Every project → SidebarNode.project containing its assigned channels
  * - Top-level sort: pinned items first, then lexicographic by label
  *   (channel: channel.name; project: project.slug)
  * - Children inside a project node: sorted by channel.name lexicographically
@@ -54,11 +53,13 @@ export function buildSidebarTree(
 
   const nodes: SidebarNode[] = [];
 
-  // Emit only non-empty projects (in projects array order)
+  // Emit projects in projects array order, including newly created empty ones.
   for (const proj of projects) {
-    const children = childrenByProject.get(proj.slug);
-    if (!children || children.length === 0) continue;
-    nodes.push({ kind: "project", project: proj, children });
+    nodes.push({
+      kind: "project",
+      project: proj,
+      children: childrenByProject.get(proj.slug) ?? [],
+    });
   }
 
   // Emit unassigned channels

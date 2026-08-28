@@ -283,6 +283,23 @@ describe("useChatStore unread channel merge", () => {
       }),
     ]);
   });
+
+  it("protects an optimistic project assignment from older channel snapshots", () => {
+    useChatStore.getState().setChannels([channel("general")]);
+    const staleRevision = useChatStore.getState().channelProjectRevision;
+
+    useChatStore.getState().setChannelProjectOptimistic("general", "design");
+    const currentRevision = useChatStore.getState().channelProjectRevision;
+    useChatStore.getState().setChannels(
+      [{ ...channel("general"), project: "design" }],
+      currentRevision,
+    );
+    useChatStore
+      .getState()
+      .setChannels([channel("general")], staleRevision);
+
+    expect(useChatStore.getState().channels[0]?.project).toBe("design");
+  });
 });
 
 describe("useChatStore archivedChannelsView", () => {

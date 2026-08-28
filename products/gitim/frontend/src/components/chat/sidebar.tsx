@@ -263,6 +263,9 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const users = useChatStore((s) => s.users);
   const directory = useDirectory();
   const setChannels = useChatStore((s) => s.setChannels);
+  const setChannelProjectOptimistic = useChatStore(
+    (s) => s.setChannelProjectOptimistic,
+  );
   const markChannelUnarchived = useChatStore((s) => s.markChannelUnarchived);
   const markDmArchived = useChatStore((s) => s.markDmArchived);
   const markDmUnarchived = useChatStore((s) => s.markDmUnarchived);
@@ -319,6 +322,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
   const [projectMutationChannel, setProjectMutationChannel] = useState<
     string | null
   >(null);
+  const projectMutationInFlightRef = useRef(false);
 
   function resetCreateForm() {
     setCreateName("");
@@ -396,9 +400,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
       return;
     }
     try {
+      const channelSnapshotRevision =
+        useChatStore.getState().channelProjectRevision;
       const chRes = await client.channels(activeSlug);
       if (chRes.ok && chRes.data) {
-        setChannels(chRes.data.channels as Channel[]);
+        setChannels(chRes.data.channels as Channel[], channelSnapshotRevision);
       }
     } catch { /* refresh failure is non-fatal */ }
     resetCreateForm();
@@ -420,6 +426,22 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         introduction,
       );
       if (!response.ok) return response.error ?? "Failed to create project";
+      const currentProjects = useProjectStore.getState().projects;
+      if (!currentProjects.some((project) => project.slug === slug)) {
+        useProjectStore.getState().setProjects([
+          ...currentProjects,
+          {
+            slug,
+            meta: {
+              display_name: displayName,
+              introduction,
+              created_by: currentUser,
+              created_at: new Date().toISOString(),
+            },
+            channel_count: 0,
+          },
+        ]);
+      }
       await fetchProjects(activeSlug);
       toast.success(`Created project ${displayName}`);
       return null;
@@ -432,7 +454,8 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     channel: Channel,
     project: string | null,
   ) {
-    if (!activeSlug) return;
+    if (!activeSlug || projectMutationInFlightRef.current) return;
+    projectMutationInFlightRef.current = true;
     setProjectMutationChannel(channel.name);
     try {
       const response = await client.setChannelProject(
@@ -444,15 +467,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
         toast.error(response.error ?? "Failed to move channel");
         return;
       }
-      setChannels(
-        useChatStore.getState().channels.map((item) =>
-          item.name === channel.name ? { ...item, project } : item,
-        ),
-      );
-      const channelsResponse = await client.channels(activeSlug);
-      if (channelsResponse.ok && channelsResponse.data) {
-        setChannels(channelsResponse.data.channels as Channel[]);
-      }
+      setChannelProjectOptimistic(channel.name, project);
       await fetchProjects(activeSlug);
       if (project) {
         setExpandedProjects((previous) => new Set(previous).add(project));
@@ -465,6 +480,7 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     } catch {
       toast.error("Network error — is the server running?");
     } finally {
+      projectMutationInFlightRef.current = false;
       setProjectMutationChannel(null);
     }
   }
@@ -732,9 +748,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     // Refresh channel list so the restored channel picks up full metadata
     // (kind, members) in the active `channels` store.
     try {
+      const channelSnapshotRevision =
+        useChatStore.getState().channelProjectRevision;
       const chRes = await client.channels(activeSlug);
       if (chRes.ok && chRes.data) {
-        setChannels(chRes.data.channels as Channel[]);
+        setChannels(chRes.data.channels as Channel[], channelSnapshotRevision);
       }
     } catch {
       /* refresh is best-effort; markChannelUnarchived already seeded the entry */
@@ -921,9 +939,11 @@ export function Sidebar({ onChannelSelect, onStartDm }: SidebarProps) {
     // Refresh channels list so the restored DM picks up authoritative metadata
     // (members) the same way channel unarchive does.
     try {
+      const channelSnapshotRevision =
+        useChatStore.getState().channelProjectRevision;
       const chRes = await client.channels(activeSlug);
       if (chRes.ok && chRes.data) {
-        setChannels(chRes.data.channels as Channel[]);
+        setChannels(chRes.data.channels as Channel[], channelSnapshotRevision);
       }
     } catch {
       /* best-effort refresh */

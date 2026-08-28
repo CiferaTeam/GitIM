@@ -1,7 +1,11 @@
 import { useState } from "react";
 import { Check, FolderInput } from "lucide-react";
 import type { Project } from "../../lib/types";
-import { validateProjectSlug } from "../../lib/client";
+import {
+  validateProjectIntroduction,
+  validateProjectName,
+  validateProjectSlug,
+} from "../../lib/client";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -13,6 +17,7 @@ import {
 } from "../ui/dialog";
 import { Input } from "../ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "../ui/popover";
+import { Textarea } from "../ui/textarea";
 
 interface CreateProjectDialogProps {
   open: boolean;
@@ -55,12 +60,14 @@ export function CreateProjectDialog({
       setError(validation);
       return;
     }
-    if (!displayName.trim()) {
-      setError("Project name is required");
+    const nameValidation = validateProjectName(displayName);
+    if (nameValidation) {
+      setError(nameValidation);
       return;
     }
-    if (!introduction.trim()) {
-      setError("Introduction is required");
+    const introductionValidation = validateProjectIntroduction(introduction);
+    if (introductionValidation) {
+      setError(introductionValidation);
       return;
     }
 
@@ -120,7 +127,11 @@ export function CreateProjectDialog({
               value={displayName}
               onChange={(event) => setDisplayName(event.target.value)}
               placeholder="e.g. Product Launch"
+              maxLength={64}
             />
+            <p className="text-[11px] text-muted-foreground">
+              Maximum 64 UTF-8 bytes.
+            </p>
           </div>
           <div className="grid gap-1.5">
             <label
@@ -129,12 +140,16 @@ export function CreateProjectDialog({
             >
               Introduction
             </label>
-            <Input
+            <Textarea
               id="project-introduction"
               value={introduction}
               onChange={(event) => setIntroduction(event.target.value)}
               placeholder="What channels belong in this project?"
+              maxLength={500}
             />
+            <p className="text-[11px] text-muted-foreground">
+              Maximum 500 UTF-8 bytes.
+            </p>
           </div>
           {error && <p className="text-sm text-destructive">{error}</p>}
           <DialogFooter>
@@ -175,6 +190,7 @@ export function ChannelProjectMenu({
   const [open, setOpen] = useState(false);
 
   function select(project: string | null) {
+    if (busy) return;
     setOpen(false);
     if (project !== currentProject) void onAssign(project);
   }
@@ -190,7 +206,7 @@ export function ChannelProjectMenu({
           title={`Move #${channel} to project`}
           disabled={busy}
           data-testid={`channel-project-trigger-${channel}`}
-          className="mr-1 text-text-faint opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
+          className="mr-1 text-text-faint opacity-0 transition-opacity hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
         >
           <FolderInput className="size-3" />
         </Button>
@@ -201,6 +217,7 @@ export function ChannelProjectMenu({
         </p>
         <ProjectOption
           active={currentProject === null}
+          disabled={busy}
           testId="channel-project-option-unassigned"
           onSelect={() => select(null)}
         >
@@ -210,6 +227,7 @@ export function ChannelProjectMenu({
           <ProjectOption
             key={project.slug}
             active={currentProject === project.slug}
+            disabled={busy}
             testId={`channel-project-option-${project.slug}`}
             onSelect={() => select(project.slug)}
           >
@@ -228,11 +246,13 @@ export function ChannelProjectMenu({
 
 function ProjectOption({
   active,
+  disabled,
   children,
   testId,
   onSelect,
 }: {
   active: boolean;
+  disabled: boolean;
   children: React.ReactNode;
   testId: string;
   onSelect(): void;
@@ -242,6 +262,7 @@ function ProjectOption({
       type="button"
       className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
       data-testid={testId}
+      disabled={disabled}
       onClick={onSelect}
     >
       <Check
