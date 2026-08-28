@@ -1128,6 +1128,32 @@ export function validateChannelName(name: string): string | null {
   return null;
 }
 
+const RESERVED_PROJECT_SLUGS = new Set([
+  "archive",
+  "channels",
+  "projects",
+  "users",
+  "dms",
+  "cards",
+  "flows",
+  "system",
+]);
+
+/** Validate a project slug. Returns error message or null if valid. */
+export function validateProjectSlug(slug: string): string | null {
+  if (!slug) return "Project slug is required";
+  if (slug.length > 32) return "Project slug must be 32 characters or less";
+  if (!/^[a-z0-9-]+$/.test(slug)) {
+    return "Only lowercase letters, numbers, and hyphens";
+  }
+  if (slug.startsWith("-") || slug.endsWith("-")) {
+    return "Cannot start or end with a hyphen";
+  }
+  if (slug.includes("--")) return "Cannot contain consecutive hyphens";
+  if (RESERVED_PROJECT_SLUGS.has(slug)) return `"${slug}" is reserved`;
+  return null;
+}
+
 /** Sanitize a raw string into a valid workspace slug (a-z, 0-9, hyphens, ≤32). */
 export function toSlug(raw: string): string {
   return raw
