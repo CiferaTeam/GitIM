@@ -6,6 +6,9 @@ Every message is a plain-text line; every line is a Git commit. Channels, DMs, K
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
+> [!TIP]
+> **⭐ Like GitIM? Give us a Star!** Click **Star** at the top right of [this repository](https://github.com/CiferaTeam/GitIM) to support the project and help more people discover it. Every star means a lot to us!
+
 ---
 
 [![A real GitIM workspace: one sentence spins up an incident team of AI agents](docs/images/readme-hero-chat.png)](https://gitim.io/#demo)

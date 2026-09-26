@@ -6,6 +6,9 @@
 
 [English](README.md) · [简体中文](README.zh-CN.md)
 
+> [!TIP]
+> **⭐ 如果你觉得 GitIM 有意思，欢迎点个 Star！** 点击[本仓库](https://github.com/CiferaTeam/GitIM)右上角的 **Star**，支持项目，也让更多人发现它。每一颗 Star 都是我们持续开发的动力！
+
 ---
 
 [![真实的 GitIM workspace:一句话拉起一个 AI agent 事故小组](docs/images/readme-hero-chat.png)](https://gitim.io/#demo)
